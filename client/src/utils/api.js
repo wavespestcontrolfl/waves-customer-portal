@@ -1,0 +1,172 @@
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+
+class ApiClient {
+  constructor() {
+    this.token = localStorage.getItem('waves_token');
+    this.refreshToken = localStorage.getItem('waves_refresh_token');
+  }
+
+  setTokens(token, refreshToken) {
+    this.token = token;
+    this.refreshToken = refreshToken;
+    localStorage.setItem('waves_token', token);
+    if (refreshToken) localStorage.setItem('waves_refresh_token', refreshToken);
+  }
+
+  clearTokens() {
+    this.token = null;
+    this.refreshToken = null;
+    localStorage.removeItem('waves_token');
+    localStorage.removeItem('waves_refresh_token');
+  }
+
+  async request(path, options = {}) {
+    const url = `${API_BASE}${path}`;
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(this.token && { Authorization: `Bearer ${this.token}` }),
+      ...options.headers,
+    };
+
+    const response = await fetch(url, { ...options, headers });
+
+    // Handle token expiry — attempt refresh
+    if (response.status === 401 && this.refreshToken) {
+      const refreshed = await this.attemptRefresh();
+      if (refreshed) {
+        headers.Authorization = `Bearer ${this.token}`;
+        return fetch(url, { ...options, headers });
+      }
+      // Refresh failed — force logout
+      this.clearTokens();
+      window.location.href = '/login';
+      return;
+    }
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Request failed' }));
+      throw new Error(error.error || `HTTP ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  async attemptRefresh() {
+    try {
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: this.refreshToken }),
+      });
+
+      if (!res.ok) return false;
+
+      const data = await res.json();
+      this.setTokens(data.token, this.refreshToken);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ---- Auth ----
+  sendCode(phone) {
+    return this.request('/auth/send-code', {
+      method: 'POST',
+      body: JSON.stringify({ phone }),
+    });
+  }
+
+  verifyCode(phone, code) {
+    return this.request('/auth/verify-code', {
+      method: 'POST',
+      body: JSON.stringify({ phone, code }),
+    });
+  }
+
+  getMe() {
+    return this.request('/auth/me');
+  }
+
+  // ---- Services ----
+  getServices(params = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request(`/services?${query}`);
+  }
+
+  getService(id) {
+    return this.request(`/services/${id}`);
+  }
+
+  getServiceStats() {
+    return this.request('/services/stats/summary');
+  }
+
+  // ---- Schedule ----
+  getSchedule(days = 90) {
+    return this.request(`/schedule?days=${days}`);
+  }
+
+  getNextService() {
+    return this.request('/schedule/next');
+  }
+
+  confirmAppointment(id) {
+    return this.request(`/schedule/${id}/confirm`, { method: 'POST' });
+  }
+
+  rescheduleAppointment(id, data) {
+    return this.request(`/schedule/${id}/reschedule`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // ---- Billing ----
+  getPayments(limit = 20) {
+    return this.request(`/billing?limit=${limit}`);
+  }
+
+  getBalance() {
+    return this.request('/billing/balance');
+  }
+
+  getCards() {
+    return this.request('/billing/cards');
+  }
+
+  addCard(cardNonce) {
+    return this.request('/billing/cards', {
+      method: 'POST',
+      body: JSON.stringify({ cardNonce }),
+    });
+  }
+
+  removeCard(cardId) {
+    return this.request(`/billing/cards/${cardId}`, { method: 'DELETE' });
+  }
+
+  setDefaultCard(cardId) {
+    return this.request(`/billing/cards/${cardId}/default`, { method: 'PUT' });
+  }
+
+  // ---- Notifications ----
+  getNotificationPrefs() {
+    return this.request('/notifications/preferences');
+  }
+
+  updateNotificationPrefs(prefs) {
+    return this.request('/notifications/preferences', {
+      method: 'PUT',
+      body: JSON.stringify(prefs),
+    });
+  }
+
+  // ---- Health ----
+  healthCheck() {
+    return this.request('/health');
+  }
+}
+
+export const api = new ApiClient();
+export default api;
