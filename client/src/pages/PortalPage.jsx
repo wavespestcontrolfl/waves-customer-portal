@@ -1404,50 +1404,140 @@ function ServicesTab() {
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading service history...</div>;
 
+  const thSt = { padding: '8px 10px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: B.grayMid, textAlign: 'left', borderBottom: `1px solid ${B.grayLight}` };
+  const tdSt = { padding: '8px 10px', fontSize: 12, color: B.navy, borderBottom: `1px solid ${B.offWhite}`, verticalAlign: 'top' };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <SectionHeading>Service History</SectionHeading>
+      <SectionHeading>Service Inspection Reports</SectionHeading>
+      <div style={{ fontSize: 13, color: B.grayDark }}>Detailed reports from every visit including products applied, technician observations, and conditions.</div>
+
       {services.map(s => (
         <div key={s.id} style={{
           background: B.white, borderRadius: 14, overflow: 'hidden',
           border: `1px solid ${expanded === s.id ? B.wavesBlue + '44' : B.grayLight}`,
           transition: 'all 0.3s ease',
         }}>
+          {/* Header — always visible */}
           <div onClick={() => setExpanded(expanded === s.id ? null : s.id)}
             style={{ padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{s.type}</div>
-              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-                {parseDate(s.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} · {s.technician}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{
+                width: 40, height: 40, borderRadius: 10,
+                background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: '#fff', fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading,
+                flexShrink: 0,
+              }}>{(s.technician || 'W')[0]}</div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{s.type}</div>
+                <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
+                  {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })} · {s.technician}
+                </div>
               </div>
             </div>
-            <span style={{
-              fontSize: 18, color: B.grayMid, transition: 'transform 0.3s',
-              transform: expanded === s.id ? 'rotate(180deg)' : 'rotate(0)',
-            }}>▾</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 11, padding: '3px 10px', borderRadius: 6, background: '#E8F5E9', color: B.green, fontWeight: 700 }}>Completed</span>
+              <span style={{ fontSize: 18, color: B.grayMid, transition: 'transform 0.3s', transform: expanded === s.id ? 'rotate(180deg)' : 'rotate(0)' }}>{'▾'}</span>
+            </div>
           </div>
+
+          {/* Expanded detail — full service inspection report */}
           {expanded === s.id && (
-            <div style={{ padding: '0 18px 18px', borderTop: `1px solid ${B.grayLight}` }}>
-              <div style={{ marginTop: 14, fontSize: 13, color: B.grayDark, lineHeight: 1.7 }}>
-                <strong style={{ color: B.wavesBlue }}>Technician Notes:</strong><br/>{s.notes}
-              </div>
-              {s.soilTemp && <div style={{ fontSize: 12, color: B.grayMid, marginTop: 8 }}>Soil Temp: {s.soilTemp}°F</div>}
-              {s.thatchMeasurement && <div style={{ fontSize: 12, color: B.grayMid }}>Thatch: {s.thatchMeasurement}"</div>}
-              {s.soilPh && <div style={{ fontSize: 12, color: B.grayMid }}>Soil pH: {s.soilPh}</div>}
-              <div style={{ marginTop: 14, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.grayMid }}>Products Applied</div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-                {s.products.map((p, i) => (
-                  <span key={i} style={{
-                    padding: '4px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
-                    background: `${B.wavesBlue}12`, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}22`,
-                  }}>{p.product_name}</span>
+            <div style={{ borderTop: `1px solid ${B.grayLight}` }}>
+
+              {/* Service Info Bar */}
+              <div style={{ display: 'flex', gap: 0, borderBottom: `1px solid ${B.grayLight}`, background: B.offWhite }}>
+                {[
+                  { label: 'Date', value: parseDate(s.date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }) },
+                  { label: 'Technician', value: s.technician },
+                  { label: 'Duration', value: s.serviceTimeMinutes ? `${s.serviceTimeMinutes} min` : '—' },
+                  { label: 'Status', value: 'Completed' },
+                ].map((item, i) => (
+                  <div key={i} style={{ flex: 1, padding: '10px 14px', borderRight: i < 3 ? `1px solid ${B.grayLight}` : 'none' }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid }}>{item.label}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 2 }}>{item.value}</div>
+                  </div>
                 ))}
               </div>
-              {s.hasPhotos && (
-                <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: B.bluePale, fontSize: 12, color: B.wavesBlue, fontWeight: 600 }}>
-                  📷 {s.photoCount} photo{s.photoCount > 1 ? 's' : ''} attached — tap to view
+
+              {/* Conditions */}
+              {(s.soilTemp || s.soilPh || s.thatchMeasurement || s.soilMoisture) && (
+                <div style={{ padding: '12px 18px', background: B.blueSurface, borderBottom: `1px solid ${B.grayLight}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 6 }}>Conditions & Measurements</div>
+                  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                    {s.soilTemp && <div style={{ fontSize: 12, color: B.navy }}>{'🌡️'} Soil Temp: <strong>{s.soilTemp}°F</strong></div>}
+                    {s.soilPh && <div style={{ fontSize: 12, color: B.navy }}>{'⚗️'} pH: <strong>{s.soilPh}</strong></div>}
+                    {s.thatchMeasurement && <div style={{ fontSize: 12, color: B.navy }}>{'📏'} Thatch: <strong>{s.thatchMeasurement}"</strong></div>}
+                    {s.soilMoisture && <div style={{ fontSize: 12, color: B.navy }}>{'💧'} Moisture: <strong>{s.soilMoisture}</strong></div>}
+                  </div>
                 </div>
               )}
+
+              {/* Products Applied — full table */}
+              {s.products?.length > 0 && (
+                <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 10 }}>Products Applied</div>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr>
+                          <th style={thSt}>Product</th>
+                          <th style={thSt}>Active Ingredient</th>
+                          <th style={thSt}>Rate</th>
+                          <th style={thSt}>Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {s.products.map((p, i) => (
+                          <tr key={i}>
+                            <td style={{ ...tdSt, fontWeight: 600 }}>
+                              {p.product_name}
+                              {p.product_category && <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'capitalize', marginTop: 1 }}>{p.product_category}</div>}
+                            </td>
+                            <td style={{ ...tdSt, fontSize: 11, color: B.grayDark }}>
+                              {p.active_ingredient || '—'}
+                              {p.moa_group && <div style={{ fontSize: 10, color: B.grayMid }}>{p.moa_group}</div>}
+                            </td>
+                            <td style={{ ...tdSt, fontSize: 11 }}>{p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—'}</td>
+                            <td style={{ ...tdSt, fontSize: 11 }}>{p.total_amount ? `${p.total_amount} ${p.amount_unit || ''}` : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Technician Notes */}
+              {s.notes && (
+                <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 8 }}>Technician Comments</div>
+                  <div style={{ fontSize: 13, color: B.navy, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
+                </div>
+              )}
+
+              {/* Photos */}
+              {s.hasPhotos && (
+                <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
+                  <div style={{ padding: '10px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}`, fontSize: 12, color: B.wavesBlue, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {'📷'} {s.photoCount} photo{s.photoCount > 1 ? 's' : ''} attached — tap to view
+                  </div>
+                </div>
+              )}
+
+              {/* Precautions */}
+              <div style={{ padding: '12px 18px', background: '#FFF8E1', borderBottom: `1px solid ${B.grayLight}` }}>
+                <div style={{ fontSize: 11, color: '#F57F17', lineHeight: 1.5 }}>
+                  {'⚠️'} Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 318-7612.
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div style={{ padding: '12px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: 10, color: B.grayMid }}>Report generated automatically from service data</div>
+                <div style={{ fontSize: 10, color: B.grayMid }}>Waves Pest Control · (941) 318-7612</div>
+              </div>
             </div>
           )}
         </div>
