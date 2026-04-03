@@ -16,6 +16,44 @@ const serviceRoutes = require('./routes/services');
 const scheduleRoutes = require('./routes/schedule');
 const billingRoutes = require('./routes/billing');
 const notificationRoutes = require('./routes/notifications');
+const requestRoutes = require('./routes/requests');
+const bouncieRoutes = require('./routes/bouncie');
+const lawnHealthRoutes = require('./routes/lawn-health');
+const feedRoutes = require('./routes/feed');
+const satisfactionRoutes = require('./routes/satisfaction');
+const propertyRoutes = require('./routes/property');
+const referralRoutes = require('./routes/referrals');
+const promotionRoutes = require('./routes/promotions');
+const documentRoutes = require('./routes/documents');
+const badgeRoutes = require('./routes/badges');
+const trackingRoutes = require('./routes/tracking');
+const onboardingRoutes = require('./routes/onboarding');
+const adminAuthRoutes = require('./routes/admin-auth');
+const adminCustomerRoutes = require('./routes/admin-customers');
+const adminDashboardRoutes = require('./routes/admin-dashboard');
+const adminEstimateRoutes = require('./routes/admin-estimates');
+const adminPropertyLookupRoutes = require('./routes/admin-property-lookup');
+const estimatePublicRoutes = require('./routes/estimate-public');
+const adminReviewRoutes = require('./routes/admin-reviews');
+const reviewsPublicRoutes = require('./routes/reviews-public');
+const adminDispatchRoutes = require('./routes/admin-dispatch');
+const adminCommsRoutes = require('./routes/admin-communications');
+const twilioWebhookRoutes = require('./routes/twilio-webhook');
+const reportsPublicRoutes = require('./routes/reports-public');
+const adminInventoryRoutes = require('./routes/admin-inventory');
+const adminComplianceRoutes = require('./routes/admin-compliance');
+const adminWorkflowRoutes = require('./routes/admin-workflows');
+const adminAdsRoutes = require('./routes/admin-ads');
+const adminSeoRoutes = require('./routes/admin-seo');
+const adminContentRoutes = require('./routes/admin-content');
+const adminKnowledgeRoutes = require('./routes/admin-knowledge');
+const adminCsrRoutes = require('./routes/admin-csr');
+const adminCustomerIntelRoutes = require('./routes/admin-customer-intel');
+const techKnowledgeRoutes = require('./routes/tech-knowledge');
+const dispatchRoutes = require('./routes/dispatch');
+const dispatchKnowledgeRoutes = require('./routes/knowledge');
+const aiAssistantRoutes = require('./routes/ai-assistant');
+const twilioVoiceWebhookRoutes = require('./routes/twilio-voice-webhook');
 
 const app = express();
 
@@ -73,14 +111,60 @@ app.use('/api/services', serviceRoutes);
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/requests', requestRoutes);
+app.use('/api/bouncie', bouncieRoutes);
+app.use('/api/lawn-health', lawnHealthRoutes);
+app.use('/api/feed', feedRoutes);
+app.use('/api/satisfaction', satisfactionRoutes);
+app.use('/api/property', propertyRoutes);
+app.use('/api/referrals', referralRoutes);
+app.use('/api/promotions', promotionRoutes);
+app.use('/api/documents', documentRoutes);
+app.use('/api/badges', badgeRoutes);
+app.use('/api/tracking', trackingRoutes);
+app.use('/api/onboarding', onboardingRoutes);
+app.use('/api/admin/auth', adminAuthRoutes);
+app.use('/api/admin/customers', adminCustomerRoutes);
+app.use('/api/admin/dashboard', adminDashboardRoutes);
+app.use('/api/admin/estimates', adminEstimateRoutes);
+app.use('/api/admin/lookup', adminPropertyLookupRoutes);
+app.use('/api/estimates', estimatePublicRoutes);
+app.use('/api/admin/reviews', adminReviewRoutes);
+app.use('/api/reviews', reviewsPublicRoutes);
+app.use('/api/admin/dispatch', adminDispatchRoutes);
+app.use('/api/admin/communications', adminCommsRoutes);
+app.use('/api/webhooks/twilio', twilioWebhookRoutes);
+app.use('/api/webhooks/lead', require('./routes/lead-webhook'));
+app.use('/api/reports', reportsPublicRoutes);
+app.use('/api/admin/inventory', adminInventoryRoutes);
+app.use('/api/admin/compliance', adminComplianceRoutes);
+app.use('/api/admin/workflows', adminWorkflowRoutes);
+app.use('/api/admin/ads', adminAdsRoutes);
+app.use('/api/admin/seo', adminSeoRoutes);
+app.use('/api/admin/content', adminContentRoutes);
+app.use('/api/admin/knowledge', adminKnowledgeRoutes);
+app.use('/api/admin/csr', adminCsrRoutes);
+app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
+app.use('/api/tech/knowledge', techKnowledgeRoutes);
+app.use('/api/dispatch', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, dispatchRoutes);
+app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, dispatchKnowledgeRoutes);
+app.use('/api/ai', aiAssistantRoutes);
+app.use('/api/webhooks/twilio', twilioVoiceWebhookRoutes);
+app.use('/api/webhooks/square', require('./routes/square-webhook'));
+app.use('/api/admin/protocols', require('./routes/admin-protocols'));
+app.use('/api/admin/revenue', require('./routes/admin-revenue'));
+app.use('/api/admin/schedule', require('./routes/admin-schedule'));
+app.use('/api/admin/drafts', require('./routes/admin-drafts'));
 
 // Health check
 app.get('/api/health', (req, res) => {
+  const { gates } = require('./config/feature-gates');
   res.json({
     status: 'ok',
     service: 'waves-customer-portal',
     timestamp: new Date().toISOString(),
     environment: config.nodeEnv,
+    gates,
   });
 });
 

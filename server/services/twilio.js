@@ -3,8 +3,19 @@ const config = require('../config');
 const db = require('../models/db');
 const logger = require('./logger');
 
-// Initialize Twilio client
-const client = twilio(config.twilio.accountSid, config.twilio.authToken);
+// Lazy-initialize Twilio client — don't crash if creds are missing
+let _client;
+function getClient() {
+  if (_client) return _client;
+  if (!config.twilio.accountSid || !config.twilio.authToken) {
+    logger.warn('[twilio] TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN not set — SMS/voice disabled');
+    return null;
+  }
+  _client = twilio(config.twilio.accountSid, config.twilio.authToken);
+  return _client;
+}
+// Keep backward-compatible reference for any code that reads `client` directly
+const client = null;
 
 const TwilioService = {
   // =========================================================================
@@ -16,7 +27,9 @@ const TwilioService = {
    */
   async sendVerificationCode(phone) {
     try {
-      const verification = await client.verify.v2
+      const c = getClient();
+      if (!c) throw new Error('Twilio not configured');
+      const verification = await c.verify.v2
         .services(config.twilio.verifyServiceSid)
         .verifications.create({ to: phone, channel: 'sms' });
 
@@ -33,7 +46,9 @@ const TwilioService = {
    */
   async checkVerificationCode(phone, code) {
     try {
-      const check = await client.verify.v2
+      const c = getClient();
+      if (!c) throw new Error('Twilio not configured');
+      const check = await c.verify.v2
         .services(config.twilio.verifyServiceSid)
         .verificationChecks.create({ to: phone, code });
 
@@ -50,17 +65,65 @@ const TwilioService = {
   // =========================================================================
 
   /**
-   * Send a single SMS message
+   * Send a single SMS message — routes through the customer's location number
+   * options: { customerId, customerLocationId, fromNumber, messageType, adminUserId }
    */
-  async sendSMS(to, body) {
+  async sendSMS(to, body, options = {}) {
     try {
-      const message = await client.messages.create({
-        body,
-        from: config.twilio.phoneNumber,
-        to,
-      });
-      logger.info(`SMS sent to ${to}: ${message.sid}`);
-      return { success: true, sid: message.sid };
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('twilioSms')) {
+        logger.info(`[GATE BLOCKED] SMS to ${to}: "${body.substring(0, 60)}..." (gate: twilioSms)`);
+        return { success: true, sid: 'gate-blocked', gateBlocked: true };
+      }
+
+      const TWILIO_NUMBERS = require('../config/twilio-numbers');
+      const { resolveLocation } = require('../config/locations');
+
+      // Determine FROM number — always the customer's location number
+      let fromNumber = options.fromNumber;
+
+      if (!fromNumber) {
+        let locationId = options.customerLocationId;
+
+        if (!locationId && options.customerId) {
+          try {
+            const customer = await db('customers').where({ id: options.customerId }).first();
+            if (customer) {
+              const loc = resolveLocation(customer.city);
+              locationId = loc.id;
+            }
+          } catch {}
+        }
+
+        fromNumber = TWILIO_NUMBERS.getOutboundNumber(locationId || 'lakewood-ranch');
+      }
+
+      const c = getClient();
+      if (!c) {
+        logger.warn(`[twilio] Cannot send SMS — client not initialized. To: ${to}`);
+        return { success: false, sid: null, error: 'Twilio not configured' };
+      }
+      const message = await c.messages.create({ body, from: fromNumber, to });
+      logger.info(`SMS sent to ${to} from ${fromNumber}: ${message.sid}`);
+
+      // Log to sms_log
+      try {
+        await db('sms_log').insert({
+          customer_id: options.customerId || null,
+          direction: 'outbound',
+          from_phone: fromNumber,
+          to_phone: to,
+          message_body: body,
+          twilio_sid: message.sid,
+          status: 'sent',
+          message_type: options.messageType || 'manual',
+          admin_user_id: options.adminUserId || null,
+        });
+      } catch (logErr) {
+        logger.error(`SMS log failed: ${logErr.message}`);
+      }
+
+      return { success: true, sid: message.sid, fromNumber };
     } catch (err) {
       logger.error(`SMS send failed to ${to}: ${err.message}`);
       throw new Error('Failed to send SMS');

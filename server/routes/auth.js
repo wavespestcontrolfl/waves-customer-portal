@@ -142,6 +142,7 @@ router.get('/me', authenticate, async (req, res) => {
     tier: customer.waveguard_tier,
     monthlyRate: parseFloat(customer.monthly_rate),
     memberSince: customer.member_since,
+    referralCode: customer.referral_code,
     notificationPrefs: prefs ? {
       serviceReminder24h: prefs.service_reminder_24h,
       techEnRoute: prefs.tech_en_route,

@@ -1,0 +1,393 @@
+const express = require('express');
+const router = express.Router();
+const db = require('../models/db');
+const TwilioService = require('../services/twilio');
+const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const logger = require('../services/logger');
+
+router.use(adminAuthenticate, requireTechOrAdmin);
+
+function getZone(city, zip) {
+  const c = (city || '').toLowerCase();
+  const z = zip || '';
+  if (['parrish', 'ellenton'].includes(c) || z === '34219') return 'parrish';
+  if (c === 'palmetto') return 'palmetto';
+  if (c.includes('lakewood') || ['34202', '34211', '34212'].includes(z)) return 'lakewood_ranch';
+  if (c.includes('bradenton')) return 'bradenton_north';
+  if (c === 'sarasota') return 'sarasota';
+  if (['venice', 'nokomis', 'north port'].includes(c)) return 'venice_north_port';
+  return 'lakewood_ranch';
+}
+
+const ZONE_COLORS = {
+  parrish: '#10b981', palmetto: '#34d399', lakewood_ranch: '#0ea5e9',
+  bradenton_north: '#6366f1', bradenton_south: '#8b5cf6',
+  sarasota: '#f59e0b', venice_north_port: '#ef4444', ellenton: '#14b8a6',
+};
+
+const ZONE_LABELS = {
+  parrish: 'Parrish', palmetto: 'Palmetto', lakewood_ranch: 'Lakewood Ranch',
+  bradenton_north: 'Bradenton N', bradenton_south: 'Bradenton S',
+  sarasota: 'Sarasota', venice_north_port: 'Venice/N.Port', ellenton: 'Ellenton',
+};
+
+// GET /api/admin/schedule — day view (board + dispatch)
+router.get('/', async (req, res, next) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+
+    const services = await db('scheduled_services')
+      .where({ 'scheduled_services.scheduled_date': date })
+      .whereNotIn('scheduled_services.status', ['cancelled'])
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .select(
+        'scheduled_services.*',
+        'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
+        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
+        'customers.property_sqft', 'customers.lot_sqft', 'customers.lead_score',
+        'technicians.name as tech_name'
+      )
+      .orderByRaw('COALESCE(route_order, 999), window_start');
+
+    // Enrich with property prefs and last service
+    const enriched = await Promise.all(services.map(async (s) => {
+      const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
+      const lastService = await db('service_records')
+        .where({ customer_id: s.customer_id, status: 'completed' })
+        .orderBy('service_date', 'desc').first();
+
+      const alerts = [];
+      if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
+      if (prefs?.property_gate_code) alerts.push({ type: 'gate', text: `Yard: ${prefs.property_gate_code}` });
+      if (prefs?.pet_count > 0) alerts.push({ type: 'pet', text: prefs.pet_details || `${prefs.pet_count} pet(s)` });
+      if (prefs?.pets_secured_plan) alerts.push({ type: 'pet_plan', text: prefs.pets_secured_plan });
+      if (prefs?.chemical_sensitivities) alerts.push({ type: 'chemical', text: prefs.chemical_sensitivity_details || 'Chemical sensitivity' });
+      if (prefs?.access_notes) alerts.push({ type: 'access', text: prefs.access_notes });
+      if (s.notes) alerts.push({ type: 'note', text: s.notes });
+
+      const zone = s.zone || getZone(s.city, s.zip);
+
+      return {
+        id: s.id, routeOrder: s.route_order,
+        customerName: `${s.first_name} ${s.last_name}`,
+        customerId: s.customer_id, customerPhone: s.customer_phone,
+        address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
+        city: s.city, serviceType: s.service_type,
+        windowStart: s.window_start, windowEnd: s.window_end,
+        windowDisplay: s.window_display || (s.window_start ? `${fmtTime(s.window_start)}–${fmtTime(s.window_end)}` : 'Flexible'),
+        status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
+        customerConfirmed: s.customer_confirmed,
+        waveguardTier: s.waveguard_tier, monthlyRate: parseFloat(s.monthly_rate || 0),
+        leadScore: s.lead_score, lawnType: s.lawn_type,
+        propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
+        zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
+        estimatedDuration: s.estimated_duration_minutes || estimateDuration(s.service_type, s.property_sqft, s.lot_sqft),
+        materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
+        materialsLoaded: s.materials_loaded_confirmed,
+        propertyAlerts: alerts,
+        lastServiceDate: lastService?.service_date,
+        lastServiceType: lastService?.service_type,
+        lastServiceNotes: lastService?.technician_notes?.slice(0, 200),
+        checkInTime: s.check_in_time, checkOutTime: s.check_out_time,
+        actualDuration: s.actual_duration_minutes,
+        weatherAdvisory: s.weather_advisory,
+        isRecurring: s.is_recurring,
+      };
+    }));
+
+    // Group by technician
+    const byTech = {};
+    const unassigned = [];
+    enriched.forEach(s => {
+      if (!s.technicianId) { unassigned.push(s); return; }
+      const key = s.technicianId;
+      if (!byTech[key]) {
+        byTech[key] = {
+          technicianId: key, technicianName: s.technicianName,
+          initials: s.technicianName?.split(' ').map(n => n[0]).join('') || '?',
+          services: [], zones: {},
+        };
+      }
+      byTech[key].services.push(s);
+      byTech[key].zones[s.zone] = (byTech[key].zones[s.zone] || 0) + 1;
+    });
+
+    // Calculate tech summaries
+    Object.values(byTech).forEach(tech => {
+      tech.totalServices = tech.services.length;
+      tech.completedServices = tech.services.filter(s => s.status === 'completed').length;
+      tech.estimatedServiceMinutes = tech.services.reduce((sum, s) => sum + (s.estimatedDuration || 30), 0);
+      tech.estimatedDriveMinutes = tech.services.length * 8;
+      // Aggregate materials
+      const materials = {};
+      tech.services.forEach(s => {
+        (s.materialsNeeded || []).forEach(m => {
+          materials[m.product || m] = true;
+        });
+      });
+      tech.loadList = Object.keys(materials);
+    });
+
+    res.json({
+      date, services: enriched,
+      techSummary: Object.values(byTech),
+      unassigned,
+      zoneColors: ZONE_COLORS, zoneLabels: ZONE_LABELS,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/week
+router.get('/week', async (req, res, next) => {
+  try {
+    const startDate = req.query.start || new Date().toISOString().split('T')[0];
+    const start = new Date(startDate + 'T12:00:00');
+    const days = [];
+
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      const dateStr = d.toISOString().split('T')[0];
+
+      const services = await db('scheduled_services')
+        .where({ scheduled_date: dateStr })
+        .whereNotIn('status', ['cancelled'])
+        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+        .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .select('scheduled_services.id', 'scheduled_services.service_type', 'scheduled_services.status',
+          'scheduled_services.window_start', 'scheduled_services.zone', 'scheduled_services.route_order',
+          'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
+          'technicians.name as tech_name')
+        .orderByRaw('COALESCE(route_order, 999)');
+
+      const zones = {};
+      services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
+
+      days.push({
+        date: dateStr,
+        dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short' }),
+        dayNum: d.getDate(),
+        services: services.map(s => ({
+          id: s.id, customerName: `${s.first_name} ${s.last_name}`,
+          serviceType: s.service_type, status: s.status,
+          techName: s.tech_name, zone: s.zone,
+          tier: s.waveguard_tier,
+        })),
+        count: services.length,
+        zones,
+      });
+    }
+
+    res.json({ startDate, days });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule — create new service
+router.post('/', async (req, res, next) => {
+  try {
+    const { customerId, technicianId, scheduledDate, windowStart, windowEnd, serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, sendConfirmation } = req.body;
+
+    if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
+
+    const customer = await db('customers').where({ id: customerId }).first();
+    const zone = getZone(customer?.city, customer?.zip);
+    const duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
+
+    const [svc] = await db('scheduled_services').insert({
+      customer_id: customerId, technician_id: technicianId || null,
+      scheduled_date: scheduledDate, window_start: windowStart, window_end: windowEnd,
+      service_type: serviceType, status: 'pending',
+      time_window: timeWindow, zone, estimated_duration_minutes: duration,
+      notes, is_recurring: isRecurring || false, recurring_pattern: recurringPattern,
+    }).returning('*');
+
+    // Create recurring instances
+    if (isRecurring && recurringPattern && recurringCount > 1) {
+      const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+      const interval = intervals[recurringPattern] || 91;
+
+      for (let i = 1; i < (recurringCount || 4); i++) {
+        const nextDate = new Date(scheduledDate + 'T12:00:00');
+        nextDate.setDate(nextDate.getDate() + interval * i);
+        await db('scheduled_services').insert({
+          customer_id: customerId, technician_id: technicianId,
+          scheduled_date: nextDate.toISOString().split('T')[0],
+          window_start: windowStart, window_end: windowEnd,
+          service_type: serviceType, status: 'pending',
+          time_window: timeWindow, zone, estimated_duration_minutes: duration,
+          is_recurring: true, recurring_pattern: recurringPattern,
+          recurring_parent_id: svc.id,
+        });
+      }
+    }
+
+    // Send confirmation SMS
+    if (sendConfirmation && customer?.phone) {
+      const datePretty = new Date(scheduledDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      await TwilioService.sendSMS(customer.phone,
+        `Hi ${customer.first_name}! Your ${serviceType} with Waves is scheduled for ${datePretty}${windowStart ? ` between ${fmtTime(windowStart)}-${fmtTime(windowEnd)}` : ''}. Reply YES to confirm or let us know if you need to adjust. — Waves 🌊`,
+        { customerId, messageType: 'confirmation' }
+      );
+    }
+
+    // Trigger appointment type automations
+    try {
+      const AppointmentTagger = require('../services/appointment-tagger');
+      await AppointmentTagger.onServiceScheduled(svc.id);
+    } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
+
+    res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/schedule/:id/status — change status with automations
+router.put('/:id/status', async (req, res, next) => {
+  try {
+    const { status, notes } = req.body;
+    const svc = await db('scheduled_services').where({ id: req.params.id })
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .select('scheduled_services.*', 'customers.first_name', 'customers.phone as cust_phone',
+        'customers.city', 'technicians.name as tech_name')
+      .first();
+
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const updates = { status };
+
+    if (status === 'confirmed') {
+      updates.customer_confirmed = true;
+      updates.customer_confirmed_at = db.fn.now();
+    } else if (status === 'en_route') {
+      // Send en-route SMS
+      const driveMins = svc.distance_from_previous_miles ? Math.round(svc.distance_from_previous_miles * 2) : 15;
+      try {
+        await TwilioService.sendSMS(svc.cust_phone,
+          `🌊 Your Waves tech is on the way! ETA: ~${driveMins} minutes. Please ensure gates are unlocked and pets are secured.`,
+          { customerId: svc.customer_id, messageType: 'en_route' }
+        );
+      } catch (e) { logger.error(`En route SMS failed: ${e.message}`); }
+    } else if (status === 'on_site') {
+      updates.check_in_time = db.fn.now();
+    } else if (status === 'completed') {
+      updates.check_out_time = db.fn.now();
+      if (svc.check_in_time) {
+        updates.actual_duration_minutes = Math.round((Date.now() - new Date(svc.check_in_time)) / 60000);
+      }
+    }
+
+    await db('scheduled_services').where({ id: req.params.id }).update(updates);
+
+    await db('service_status_log').insert({
+      scheduled_service_id: svc.id, status, changed_by: req.technicianId, notes,
+    });
+
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/optimize — route optimization
+router.post('/optimize', async (req, res, next) => {
+  try {
+    const { date, technicianId } = req.body;
+    const dateStr = date || new Date().toISOString().split('T')[0];
+
+    const services = await db('scheduled_services')
+      .where({ scheduled_date: dateStr })
+      .where(function () {
+        if (technicianId) this.where({ technician_id: technicianId });
+      })
+      .whereNotIn('status', ['cancelled', 'completed'])
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select('scheduled_services.id', 'scheduled_services.time_window',
+        'customers.lat', 'customers.lng', 'customers.city');
+
+    // Simple nearest-neighbor from HQ
+    const HQ = { lat: 27.3946, lng: -82.3984 };
+    const ordered = [];
+    const remaining = [...services];
+    let current = HQ;
+
+    while (remaining.length) {
+      let nearest = remaining[0];
+      let nearestDist = Infinity;
+
+      for (const svc of remaining) {
+        if (!svc.lat || !svc.lng) continue;
+        const dist = haversine(current.lat, current.lng, parseFloat(svc.lat), parseFloat(svc.lng));
+        if (dist < nearestDist) { nearestDist = dist; nearest = svc; }
+      }
+
+      ordered.push(nearest);
+      remaining.splice(remaining.indexOf(nearest), 1);
+      current = { lat: parseFloat(nearest.lat) || HQ.lat, lng: parseFloat(nearest.lng) || HQ.lng };
+    }
+
+    for (let i = 0; i < ordered.length; i++) {
+      await db('scheduled_services').where({ id: ordered[i].id }).update({ route_order: i + 1 });
+    }
+
+    res.json({ success: true, order: ordered.map((s, i) => ({ id: s.id, routeOrder: i + 1 })) });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/zone-density
+router.get('/zone-density', async (req, res, next) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const density = await db('scheduled_services')
+      .where({ scheduled_date: date }).whereNotIn('status', ['cancelled'])
+      .select('zone').count('* as count').groupBy('zone');
+    res.json({ date, zones: Object.fromEntries(density.map(d => [d.zone, parseInt(d.count)])) });
+  } catch (err) { next(err); }
+});
+
+function fmtTime(t) {
+  if (!t) return '';
+  const [h, m] = t.split(':').map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+function estimateDuration(serviceType, propertySqft, lotSqft) {
+  const s = (serviceType || '').toLowerCase();
+  if (s.includes('lawn')) return Math.round(8 + (lotSqft || 5000) / 1000 * 1.75);
+  if (s.includes('pest') && s.includes('interior')) return Math.round(20 + (propertySqft || 1800) / 1000 * 5);
+  if (s.includes('pest')) return Math.round(25 + (propertySqft || 1800) / 1000 * 3);
+  if (s.includes('mosquito')) return Math.round(15 + (lotSqft || 5000) / 1000 * 2);
+  if (s.includes('tree') || s.includes('shrub')) return Math.round(25 + (lotSqft || 5000) / 1000 * 2);
+  if (s.includes('termite')) return 20;
+  if (s.includes('rodent')) return 25;
+  return 30;
+}
+
+function haversine(lat1, lng1, lat2, lng2) {
+  const R = 3959;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// GET /api/admin/schedule/:id/wdo-brief
+router.get('/:id/wdo-brief', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.id }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (!svc.pre_service_brief) return res.json({ brief: null });
+    res.json({ brief: typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/regenerate-brief
+router.post('/:id/regenerate-brief', async (req, res, next) => {
+  try {
+    const AppointmentTagger = require('../services/appointment-tagger');
+    await AppointmentTagger.onServiceScheduled(req.params.id);
+    const svc = await db('scheduled_services').where({ id: req.params.id }).first();
+    res.json({ success: true, brief: svc.pre_service_brief ? JSON.parse(svc.pre_service_brief) : null });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;

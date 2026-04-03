@@ -1,0 +1,231 @@
+const express = require('express');
+const router = express.Router();
+const db = require('../models/db');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const TwilioService = require('../services/twilio');
+const logger = require('../services/logger');
+
+const WAVES_ADMIN_PHONE = '+19413187612';
+
+// POST /api/webhooks/twilio/sms — inbound SMS webhook
+router.post('/sms', async (req, res) => {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('webhooks')) {
+      logger.info(`[GATE BLOCKED] Inbound SMS webhook from ${req.body.From} (gate: webhooks)`);
+      return res.type('text/xml').send('<Response></Response>');
+    }
+
+    const { From, To, Body, MessageSid } = req.body;
+    const numberConfig = TWILIO_NUMBERS.findByNumber(To);
+
+    if (!numberConfig) {
+      logger.info(`Inbound SMS to unmanaged number ${To} — ignoring`);
+      return res.type('text/xml').send('<Response></Response>');
+    }
+
+    // Try to match sender to a customer
+    const customer = await db('customers').where({ phone: From }).first();
+
+    // Check for pending reschedule reply FIRST
+    if (customer && numberConfig.type === 'location') {
+      try {
+        const RescheduleSMS = require('../services/reschedule-sms');
+        const rescheduleResult = await RescheduleSMS.handleRescheduleReply(customer.id, Body);
+        if (rescheduleResult?.handled) {
+          logger.info(`Reschedule reply handled for ${customer.first_name}: ${rescheduleResult.action}`);
+          // Still log the inbound message
+          await db('sms_log').insert({
+            customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
+            message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'reschedule_reply',
+          }).catch(() => {});
+          return res.type('text/xml').send('<Response></Response>');
+        }
+      } catch (e) { logger.error(`Reschedule reply check failed: ${e.message}`); }
+    }
+
+    // DOMAIN TRACKING — new lead from a domain-specific number
+    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {
+      const leadSource = TWILIO_NUMBERS.getLeadSourceFromNumber(To);
+      const { resolveLocation } = require('../config/locations');
+      const loc = resolveLocation(numberConfig.area || leadSource.area || '');
+      const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+
+      try {
+        const [newCust] = await db('customers').insert({
+          first_name: 'Unknown', last_name: '',
+          phone: From, address_line1: '', city: numberConfig.area || '', state: 'FL', zip: '',
+          referral_code: code, lead_source: leadSource.source,
+          lead_source_detail: numberConfig.domain || leadSource.domain || 'Van wrap',
+          lead_source_area: numberConfig.area || '', lead_source_channel: 'organic',
+          nearest_location_id: numberConfig.location || loc.id,
+          pipeline_stage: 'new_lead', pipeline_stage_changed_at: new Date(),
+          last_contact_date: new Date(), last_contact_type: Body ? 'sms_inbound' : 'call_inbound',
+          member_since: new Date().toISOString().split('T')[0], waveguard_tier: 'Bronze',
+          crm_notes: `Inbound ${Body ? 'SMS' : 'call'} from ${numberConfig.domain || 'van wrap'}. ${Body ? 'Message: ' + Body : ''}`,
+        }).returning('*');
+
+        await db('property_preferences').insert({ customer_id: newCust.id });
+        await db('notification_prefs').insert({ customer_id: newCust.id });
+
+        try {
+          await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+            `🔔 New lead from ${numberConfig.domain || 'van wrap'}!\n📞 ${From}\n💬 "${Body || 'Phone call'}"\nArea: ${numberConfig.area || 'Unknown'}`,
+            { messageType: 'internal_alert' }
+          );
+        } catch (e) { logger.error(`Domain lead alert failed: ${e.message}`); }
+
+        // Auto-reply from the location number (not the domain number)
+        try {
+          await TwilioService.sendSMS(From,
+            "Thanks for reaching out to Waves Pest Control! We'll get back to you shortly. For immediate help, call (941) 318-7612. 🌊",
+            { customerId: newCust.id, fromNumber: TWILIO_NUMBERS.getOutboundNumber(numberConfig.location || 'lakewood-ranch'), messageType: 'auto_reply' }
+          );
+        } catch (e) { logger.error(`Domain lead auto-reply failed: ${e.message}`); }
+
+        await db('activity_log').insert({
+          customer_id: newCust.id, action: 'customer_created',
+          description: `New lead from ${numberConfig.domain || 'van wrap'}: ${From}`,
+        });
+      } catch (e) { logger.error(`Domain lead creation failed: ${e.message}`); }
+    }
+
+    // Log inbound message
+    const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
+      : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
+
+    await db('sms_log').insert({
+      customer_id: customer?.id || null,
+      direction: 'inbound', from_phone: From, to_phone: To,
+      message_body: Body, twilio_sid: MessageSid, status: 'received',
+      message_type: messageType,
+      metadata: JSON.stringify({ locationId: numberConfig.locationId, source: numberConfig.type, domain: numberConfig.domain }),
+    });
+
+    await db('activity_log').insert({
+      customer_id: customer?.id || null,
+      action: messageType === 'inbound' ? 'sms_received' : 'lead_received',
+      description: numberConfig.type === 'domain_tracking'
+        ? `🌐 Lead from ${numberConfig.domain}: ${From} — "${(Body || '').slice(0, 80)}"`
+        : numberConfig.type === 'van_tracking'
+          ? `🚛 Lead from van wrap: ${From} — "${(Body || '').slice(0, 80)}"`
+          : `📱 SMS from ${customer ? `${customer.first_name} ${customer.last_name}` : From}: "${(Body || '').slice(0, 80)}"`,
+      metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
+    });
+
+    // Van wrap tracking — new lead flow
+    if (numberConfig.type === 'tracking') {
+      // Auto-reply from the van wrap number
+      try {
+        await TwilioService.sendSMS(From,
+          "Thanks for reaching out to Waves Pest Control! We'll get back to you shortly. For immediate help, call (941) 318-7612. 🌊",
+          { fromNumber: To, messageType: 'auto_reply' }
+        );
+      } catch (e) { logger.error(`Van wrap auto-reply failed: ${e.message}`); }
+
+      // Notify Adam
+      try {
+        await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+          `📱 New lead from van wrap number:\nFrom: ${From}\nMessage: "${Body || '(no text)'}"\n\nReply from the portal.`,
+          { fromNumber: TWILIO_NUMBERS.locations['lakewood-ranch'].number, messageType: 'internal_alert' }
+        );
+      } catch (e) { logger.error(`Van wrap admin alert failed: ${e.message}`); }
+    }
+
+    // WAVES AI ASSISTANT — route through conversational AI engine
+    if (Body && (customer || numberConfig.type === 'location') && isEnabled('aiAssistantAutoReply')) {
+      try {
+        const WavesAssistant = require('../services/ai-assistant/assistant');
+        const aiResult = await WavesAssistant.processMessage({
+          message: Body,
+          channel: 'sms',
+          channelIdentifier: From,
+          customerId: customer?.id || null,
+          customerPhone: From,
+        });
+
+        // If AI generated a reply (not escalated), send it automatically
+        if (aiResult.reply && !aiResult.escalated) {
+          try {
+            await TwilioService.sendSMS(From, aiResult.reply, {
+              customerId: customer?.id, fromNumber: To, messageType: 'ai_assistant',
+            });
+          } catch (e) { logger.error(`AI reply SMS failed: ${e.message}`); }
+        }
+
+        logger.info(`AI Assistant processed: ${From} escalated=${aiResult.escalated} conv=${aiResult.conversationId}`);
+      } catch (e) { logger.error(`AI Assistant failed: ${e.message}`); }
+    }
+
+    // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
+    if (customer && numberConfig.type === 'location' && Body) {
+      try {
+        const ContextAggregator = require('../services/context-aggregator');
+        const ResponseDrafter = require('../services/response-drafter');
+
+        const context = await ContextAggregator.getFullCustomerContext(From);
+
+        // Simple intent classification
+        const intentMap = [
+          { pattern: /when|next|schedule|appointment/i, intent: 'SCHEDULE_INQUIRY' },
+          { pattern: /cancel|stop|pause|quit/i, intent: 'CANCEL_REQUEST' },
+          { pattern: /bug|ant|roach|spider|pest|rat|mouse|termite|mosquito/i, intent: 'PEST_REPORT' },
+          { pattern: /bill|pay|charge|invoice|balance/i, intent: 'BILLING_INQUIRY' },
+          { pattern: /complain|unhappy|frustrated|not working|still seeing/i, intent: 'COMPLAINT' },
+          { pattern: /thank|great|awesome|perfect|love|excellent/i, intent: 'POSITIVE_FEEDBACK' },
+          { pattern: /yes|confirm|ok|sounds good/i, intent: 'CONFIRMATION' },
+        ];
+        const matched = intentMap.find(m => m.pattern.test(Body));
+        const intent = { intent: matched?.intent || 'GENERAL', confidence: matched ? 0.85 : 0.5 };
+
+        const draft = await ResponseDrafter.draftResponse(Body, context, intent);
+
+        // Store draft for approval — DO NOT send
+        await db('message_drafts').insert({
+          sms_log_id: null, // could link to sms_log entry
+          customer_id: customer.id,
+          inbound_message: Body,
+          draft_response: draft.draft,
+          intent: intent.intent,
+          intent_confidence: intent.confidence,
+          context_summary: context.summary,
+          flags: JSON.stringify(context.flags),
+          status: 'pending',
+        });
+
+        // Notify Adam for high-urgency
+        if (['COMPLAINT', 'CANCEL_REQUEST'].includes(intent.intent)) {
+          try {
+            await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+              `📱 ${customer.first_name}: "${Body.slice(0, 80)}"\n🤖 Draft: "${draft.draft.slice(0, 80)}..."\nApprove: ${process.env.CLIENT_URL || 'http://localhost:5173'}/admin/communications`,
+              { messageType: 'internal_alert' }
+            );
+          } catch (e) { logger.error(`Draft alert failed: ${e.message}`); }
+        }
+
+        logger.info(`AI draft created for ${customer.first_name}: ${intent.intent}`);
+      } catch (e) { logger.error(`AI draft pipeline failed: ${e.message}`); }
+    }
+
+    // Return empty TwiML — Adam approves drafts before sending
+    res.type('text/xml').send('<Response></Response>');
+  } catch (err) {
+    logger.error(`Webhook error: ${err.message}`);
+    res.type('text/xml').send('<Response></Response>');
+  }
+});
+
+// POST /api/webhooks/twilio/status — delivery status callback
+router.post('/status', async (req, res) => {
+  try {
+    const { MessageSid, MessageStatus } = req.body;
+    if (MessageSid && MessageStatus) {
+      await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
+    }
+  } catch (err) {
+    logger.error(`Status webhook error: ${err.message}`);
+  }
+  res.sendStatus(200);
+});
+
+module.exports = router;

@@ -4,18 +4,22 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { v4: uuidv4 } = require('uuid');
 
-// Initialize Square client
-const squareClient = new Client({
-  accessToken: config.square.accessToken,
-  environment: config.square.environment === 'production'
-    ? Environment.Production
-    : Environment.Sandbox,
-});
-
-const paymentsApi = squareClient.paymentsApi;
-const customersApi = squareClient.customersApi;
-const cardsApi = squareClient.cardsApi;
-const invoicesApi = squareClient.invoicesApi;
+// Initialize Square client — lazy to avoid crash if creds missing
+let squareClient, paymentsApi, customersApi, cardsApi, invoicesApi;
+if (config.square.accessToken) {
+  squareClient = new Client({
+    accessToken: config.square.accessToken,
+    environment: config.square.environment === 'production'
+      ? Environment.Production
+      : Environment.Sandbox,
+  });
+  paymentsApi = squareClient.paymentsApi;
+  customersApi = squareClient.customersApi;
+  cardsApi = squareClient.cardsApi;
+  invoicesApi = squareClient.invoicesApi;
+} else {
+  logger.warn('[square] SQUARE_ACCESS_TOKEN not set — payment features disabled');
+}
 
 const SquareService = {
   // =========================================================================
@@ -268,7 +272,7 @@ const SquareService = {
    */
   async getPaymentHistory(customerId, limit = 20) {
     return db('payments')
-      .where({ customer_id: customerId })
+      .where({ 'payments.customer_id': customerId })
       .leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id')
       .select(
         'payments.*',

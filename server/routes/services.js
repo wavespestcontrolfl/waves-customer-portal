@@ -56,6 +56,10 @@ router.get('/', async (req, res, next) => {
         products,
         hasPhotos: parseInt(photoCount.count) > 0,
         photoCount: parseInt(photoCount.count),
+        reportUrl: svc.report_view_token ? `/api/reports/${svc.report_view_token}` : null,
+        reportToken: svc.report_view_token,
+        reportGeneratedAt: svc.report_generated_at,
+        reportViewedAt: svc.report_viewed_at,
       };
     }));
 

@@ -1,4 +1,5 @@
-require('dotenv').config({ path: '../.env' });
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
 module.exports = {
   port: process.env.PORT || 3001,
@@ -32,6 +33,18 @@ module.exports = {
     environment: process.env.SQUARE_ENVIRONMENT || 'sandbox',
   },
 
+  bouncie: {
+    clientId: process.env.BOUNCIE_CLIENT_ID,
+    clientSecret: process.env.BOUNCIE_CLIENT_SECRET,
+    apiKey: process.env.BOUNCIE_API_KEY,
+    accessToken: process.env.BOUNCIE_ACCESS_TOKEN,
+    refreshToken: process.env.BOUNCIE_REFRESH_TOKEN,
+    vehicleImei: process.env.BOUNCIE_VEHICLE_IMEI,
+    redirectUri: process.env.BOUNCIE_REDIRECT_URI,
+    apiBase: 'https://api.bouncie.dev/v1',
+    authBase: 'https://auth.bouncie.com',
+  },
+
   s3: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
@@ -42,6 +55,6 @@ module.exports = {
 
   rateLimit: {
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500,
   },
 };

@@ -162,6 +162,167 @@ class ApiClient {
     });
   }
 
+  // ---- Requests ----
+  createRequest(data) {
+    return this.request('/requests', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  getRequests() {
+    return this.request('/requests');
+  }
+
+  // ---- Lawn Health ----
+  getLawnHealth(customerId) {
+    return this.request(`/lawn-health/${customerId}`);
+  }
+
+  getLawnHealthHistory(customerId) {
+    return this.request(`/lawn-health/${customerId}/history`);
+  }
+
+  // ---- Feed / Weather ----
+  getBlogPosts() {
+    return this.request('/feed/blog');
+  }
+
+  getNewsletterPosts() {
+    return this.request('/feed/newsletter');
+  }
+
+  getWeather() {
+    return this.request('/feed/weather');
+  }
+
+  getAlerts() {
+    return this.request('/feed/alerts');
+  }
+
+  getExpertPosts() {
+    return this.request('/feed/experts');
+  }
+
+  getLocalNews() {
+    return this.request('/feed/local');
+  }
+
+  getFaq() {
+    return this.request('/feed/faq');
+  }
+
+  getMonthlyTip() {
+    return this.request('/feed/monthly-tip');
+  }
+
+  // ---- Satisfaction ----
+  getPendingSatisfaction() {
+    return this.request('/satisfaction/pending');
+  }
+
+  submitSatisfaction(data) {
+    return this.request('/satisfaction', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // ---- Property Preferences ----
+  getPropertyPreferences() {
+    return this.request('/property/preferences');
+  }
+
+  updatePropertyPreferences(data) {
+    return this.request('/property/preferences', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // ---- Referrals ----
+  getReferrals() {
+    return this.request('/referrals');
+  }
+
+  getReferralStats() {
+    return this.request('/referrals/stats');
+  }
+
+  submitReferral(data) {
+    return this.request('/referrals', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // ---- Promotions ----
+  getRelevantPromotions() {
+    return this.request('/promotions/relevant');
+  }
+
+  expressPromoInterest(promoId, data) {
+    return this.request(`/promotions/${promoId}/interest`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  dismissPromotion(promoId) {
+    return this.request(`/promotions/${promoId}/dismiss`, { method: 'POST' });
+  }
+
+  // ---- Documents ----
+  getDocuments() {
+    return this.request('/documents');
+  }
+
+  getServiceReportUrl(serviceRecordId) {
+    return `${API_BASE}/documents/service-report/${serviceRecordId}`;
+  }
+
+  shareDocument(docId) {
+    return this.request(`/documents/share/${docId}`, { method: 'POST' });
+  }
+
+  // ---- Badges ----
+  getBadges() {
+    return this.request('/badges');
+  }
+
+  notifyBadge(badgeType) {
+    return this.request(`/badges/${badgeType}/notify`, { method: 'POST' });
+  }
+
+  // ---- Service Tracking ----
+  getActiveTracker() {
+    return this.request('/tracking/active');
+  }
+
+  getTodayTracker() {
+    return this.request('/tracking/today');
+  }
+
+  advanceTrackerDemo() {
+    return this.request('/tracking/demo/advance', { method: 'POST' });
+  }
+
+  addTrackerNote(trackerId, note) {
+    return this.request(`/tracking/${trackerId}/note`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    });
+  }
+
+  // ---- Bouncie GPS ----
+  getVehicles() {
+    return this.request('/bouncie/vehicles');
+  }
+
+  getVehicleLocation(imei) {
+    return this.request(`/bouncie/location${imei ? `?imei=${imei}` : ''}`);
+  }
+
   // ---- Health ----
   healthCheck() {
     return this.request('/health');

@@ -5,6 +5,13 @@ const SquareService = require('./square');
 const logger = require('./logger');
 
 function initScheduledJobs() {
+  const { isEnabled, logGateStatus } = require('../config/feature-gates');
+  logGateStatus();
+
+  if (!isEnabled('cronJobs')) {
+    logger.info('[feature-gates] Cron jobs DISABLED — skipping all scheduled tasks');
+    return;
+  }
   // =========================================================================
   // DAILY 8AM — Send service reminders for tomorrow's appointments
   // =========================================================================
@@ -91,6 +98,197 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Billing reminder job failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 2 HOURS — Adjust ad budgets based on capacity
+  // =========================================================================
+  cron.schedule('0 */2 * * *', async () => {
+    logger.info('Running: ad budget adjustment');
+    try {
+      const BudgetManager = require('./ads/budget-manager');
+      await BudgetManager.adjustBudgets();
+    } catch (err) {
+      logger.error(`Ad budget adjustment failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // NIGHTLY 3AM — Customer Intelligence Pipeline
+  // =========================================================================
+  cron.schedule('0 3 * * *', async () => {
+    logger.info('Running: customer intelligence pipeline');
+    try {
+      const SignalDetector = require('./customer-intelligence/signal-detector');
+      const HealthScorer = require('./customer-intelligence/health-scorer');
+      const RetentionEngine = require('./customer-intelligence/retention-engine');
+
+      // Step 1: Detect signals
+      const signalResult = await SignalDetector.detectAllSignals();
+      logger.info(`Signals: ${signalResult.newSignals} new from ${signalResult.customersScanned} customers`);
+
+      // Step 2: Score health
+      const healthResult = await HealthScorer.calculateAllHealthScores();
+      logger.info(`Health: ${healthResult.atRisk} at-risk, ${healthResult.critical} critical`);
+
+      // Step 3: Generate retention outreach for at-risk customers
+      const today = new Date().toISOString().split('T')[0];
+      const atRisk = await db('customer_health_scores')
+        .where('score_date', today)
+        .whereIn('churn_risk_level', ['at_risk', 'critical'])
+        .select('customer_id');
+
+      let outreachGenerated = 0;
+      for (const c of atRisk) {
+        const result = await RetentionEngine.generateRetentionOutreach(c.customer_id);
+        if (result) outreachGenerated++;
+      }
+
+      logger.info(`Customer intelligence complete: ${outreachGenerated} outreach generated`);
+    } catch (err) {
+      logger.error(`Customer intelligence pipeline failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // HOURLY — Verify CSR follow-up tasks
+  // =========================================================================
+  cron.schedule('30 * * * *', async () => {
+    logger.info('Running: follow-up task verification');
+    try {
+      const CSRCoach = require('./csr/csr-coach');
+      await CSRCoach.verifyFollowUps();
+    } catch (err) {
+      logger.error(`Follow-up verification failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // FRIDAY 8AM — Weekly CSR team recommendation
+  // =========================================================================
+  cron.schedule('0 8 * * 5', async () => {
+    logger.info('Running: weekly CSR recommendation');
+    try {
+      const CSRCoach = require('./csr/csr-coach');
+      const rec = await CSRCoach.generateWeeklyTeamRecommendation();
+      if (rec.recommendation && TwilioService && process.env.ADAM_PHONE) {
+        await TwilioService.sendSMS(process.env.ADAM_PHONE,
+          `📊 Weekly CSR Tip:\n\n${rec.recommendation}\n\n${rec.dataPoint}\n${rec.estimatedImpact}`,
+          { messageType: 'internal_alert' }
+        );
+      }
+    } catch (err) {
+      logger.error(`Weekly CSR rec failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4AM — Sync WordPress posts
+  // =========================================================================
+  cron.schedule('0 4 * * *', async () => {
+    logger.info('Running: WordPress sync');
+    try {
+      const WordPressSync = require('./content/wordpress-sync');
+      await WordPressSync.syncAllPosts();
+    } catch (err) {
+      logger.error(`WordPress sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 5AM — Auto-generate next blog post content
+  // =========================================================================
+  cron.schedule('0 5 * * *', async () => {
+    logger.info('Running: blog post auto-generation');
+    try {
+      const BlogWriter = require('./content/blog-writer');
+      const nextPost = await db('blog_posts')
+        .where('status', 'queued')
+        .whereNull('content')
+        .orderBy('publish_date', 'asc')
+        .first();
+
+      if (nextPost) {
+        await BlogWriter.generatePost(nextPost.id);
+        logger.info(`Blog auto-generated: "${nextPost.title}"`);
+      }
+    } catch (err) {
+      logger.error(`Blog auto-generation failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUNDAY 6AM — Full blog content audit
+  // =========================================================================
+  cron.schedule('0 6 * * 0', async () => {
+    logger.info('Running: blog content audit');
+    try {
+      const BlogAuditor = require('./content/blog-auditor');
+      const audit = await BlogAuditor.runFullAudit();
+      await db('ai_audits').insert({
+        audit_type: 'blog_content',
+        audit_date: new Date(),
+        report_data: JSON.stringify(audit),
+        recommendation_count: audit.recommendations?.length || 0,
+        critical_issues: audit.duplicates?.length || 0,
+        status: 'completed',
+      });
+    } catch (err) {
+      logger.error(`Blog audit failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // MONTHLY 1ST 6AM — Generate 20 new blog post ideas
+  // =========================================================================
+  cron.schedule('0 6 1 * *', async () => {
+    logger.info('Running: blog idea generation');
+    try {
+      const BlogWriter = require('./content/blog-writer');
+      const ideas = await BlogWriter.generateNewIdeas(20);
+      logger.info(`Generated ${ideas.length} new blog post ideas`);
+    } catch (err) {
+      logger.error(`Blog idea generation failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 6AM — Sync Google Search Console data
+  // =========================================================================
+  cron.schedule('0 6 * * *', async () => {
+    logger.info('Running: GSC data sync');
+    try {
+      const SearchConsole = require('./seo/search-console');
+      await SearchConsole.syncDailyData(3);
+    } catch (err) {
+      logger.error(`GSC sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 8AM — AI Campaign Advisor (includes paid + organic)
+  // =========================================================================
+  cron.schedule('0 8 * * *', async () => {
+    logger.info('Running: AI campaign advisor');
+    try {
+      const CampaignAdvisor = require('./ads/campaign-advisor');
+      await CampaignAdvisor.generateDailyAdvice();
+    } catch (err) {
+      logger.error(`AI campaign advisor failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY MONDAY 7AM — SEO Advisor (deep GSC + GBP analysis)
+  // =========================================================================
+  cron.schedule('0 7 * * 1', async () => {
+    logger.info('Running: Weekly SEO Advisor');
+    try {
+      const SEOAdvisor = require('./seo/seo-advisor');
+      await SEOAdvisor.generateWeeklyReport();
+    } catch (err) {
+      logger.error(`SEO Advisor failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -1,0 +1,114 @@
+const express = require('express');
+const router = express.Router();
+const db = require('../models/db');
+const { authenticate } = require('../middleware/auth');
+
+router.use(authenticate);
+
+const ALLOWED_FIELDS = [
+  'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
+  'parking_notes', 'pet_count', 'pet_details', 'pets_secured_plan',
+  'preferred_day', 'preferred_time', 'contact_preference',
+  'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
+  'irrigation_schedule_notes', 'hoa_name', 'hoa_restrictions',
+  'access_notes', 'special_instructions',
+];
+
+function camelToSnake(str) {
+  return str.replace(/[A-Z]/g, l => `_${l.toLowerCase()}`);
+}
+
+function snakeToCamel(str) {
+  return str.replace(/_([a-z])/g, (_, l) => l.toUpperCase());
+}
+
+function transformKeys(obj, fn) {
+  const result = {};
+  for (const [k, v] of Object.entries(obj)) {
+    result[fn(k)] = v;
+  }
+  return result;
+}
+
+// =========================================================================
+// GET /api/property/preferences
+// =========================================================================
+router.get('/preferences', async (req, res, next) => {
+  try {
+    let prefs = await db('property_preferences')
+      .where({ customer_id: req.customerId })
+      .first();
+
+    if (!prefs) {
+      // Return empty defaults
+      return res.json({
+        preferences: {
+          neighborhoodGateCode: '', propertyGateCode: '', garageCode: '', lockboxCode: '',
+          parkingNotes: '', petCount: 0, petDetails: '', petSecuredPlan: '',
+          preferredDay: 'no_preference', preferredTime: 'no_preference', contactPreference: 'text',
+          irrigationSystem: false, irrigationControllerLocation: '', irrigationZones: null,
+          irrigationScheduleNotes: '', hoaName: '', hoaRestrictions: '',
+          accessNotes: '', specialInstructions: '',
+          updatedAt: null,
+        },
+      });
+    }
+
+    // Convert snake_case DB columns to camelCase for frontend
+    const { id, customer_id, created_at, ...fields } = prefs;
+    const camelFields = transformKeys(fields, snakeToCamel);
+
+    res.json({ preferences: camelFields });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// PUT /api/property/preferences — partial update
+// =========================================================================
+router.put('/preferences', async (req, res, next) => {
+  try {
+    // Convert camelCase input to snake_case, filter to allowed fields only
+    const snakeBody = transformKeys(req.body, camelToSnake);
+    const updates = {};
+    for (const field of ALLOWED_FIELDS) {
+      if (field in snakeBody) {
+        updates[field] = snakeBody[field];
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    const existing = await db('property_preferences')
+      .where({ customer_id: req.customerId })
+      .first();
+
+    if (existing) {
+      await db('property_preferences')
+        .where({ customer_id: req.customerId })
+        .update({ ...updates, updated_at: db.fn.now() });
+    } else {
+      await db('property_preferences').insert({
+        customer_id: req.customerId,
+        ...updates,
+      });
+    }
+
+    // Return the full updated record
+    const prefs = await db('property_preferences')
+      .where({ customer_id: req.customerId })
+      .first();
+
+    const { id, customer_id, created_at, ...fields } = prefs;
+    const camelFields = transformKeys(fields, snakeToCamel);
+
+    res.json({ preferences: camelFields, saved: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;
