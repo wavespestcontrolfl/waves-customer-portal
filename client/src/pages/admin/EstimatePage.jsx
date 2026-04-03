@@ -79,7 +79,7 @@ function EstimateToolView() {
   const autocompleteRef = useRef(null);
 
   useEffect(() => {
-    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
     if (!apiKey) return;
     if (window.google && window.google.maps) {
       initAutocomplete();
@@ -303,14 +303,26 @@ function EstimateToolView() {
     if (!estimate) return;
     setSaving(true);
     try {
+      const E = estimate;
       const r = await fetch('/api/admin/estimates', {
         method: 'POST', headers: authHeaders,
-        body: JSON.stringify({ address: form.address, inputs: form, estimate }),
+        body: JSON.stringify({
+          address: form.address,
+          customerName: customerSearch || form.customerName || '',
+          customerPhone: form.customerPhone || '',
+          customerEmail: form.customerEmail || '',
+          estimateData: { inputs: form, result: E },
+          monthlyTotal: E.recurring?.grandTotal || 0,
+          annualTotal: (E.recurring?.grandTotal || 0) * 12,
+          onetimeTotal: E.oneTime?.total || 0,
+          waveguardTier: E.recurring?.tier || 'Bronze',
+          notes: form.notes || '',
+          satelliteUrl: satelliteData?.imageUrl || null,
+        }),
       });
       if (!r.ok) throw new Error('Save failed: ' + r.status);
       const d = await r.json();
       setSavedId(d.id || d.estimateId);
-      alert('Estimate saved!');
     } catch (e) { alert(e.message); }
     setSaving(false);
   }
@@ -395,9 +407,14 @@ function EstimateToolView() {
             )}
           </div>
 
-          {/* Property Lookup */}
+          {/* Customer & Property */}
           <div style={sPanel}>
-            <div style={sPanelTitle}>Property Lookup</div>
+            <div style={sPanelTitle}>Customer & Property</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+              <Field label="Customer Name"><input type="text" value={form.customerName || ''} onChange={e => set('customerName', e.target.value)} placeholder="Full name" style={sInput} /></Field>
+              <Field label="Phone"><input type="tel" value={form.customerPhone || ''} onChange={e => set('customerPhone', e.target.value)} placeholder="(941) 555-1234" style={sInput} /></Field>
+            </div>
+            <Field label="Email (optional)"><input type="email" value={form.customerEmail || ''} onChange={e => set('customerEmail', e.target.value)} placeholder="email@example.com" style={sInput} /></Field>
             <Field label="Address">
               <input ref={addressRef} type="text" value={form.address} onChange={e => set('address', e.target.value)} placeholder="Start typing an address..." style={sInput} />
             </Field>
@@ -578,12 +595,18 @@ function EstimateToolView() {
           </div>
 
           {/* Action buttons */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
-            <button style={{ ...sBtn(C.teal, C.dark), fontSize: 18, padding: '16px 28px' }} onClick={doGenerate}>GENERATE ESTIMATE</button>
-            {estimate && <button style={{ ...sBtn(C.green, 'white'), fontSize: 16, padding: '16px 28px' }} onClick={doSave} disabled={saving}>{saving ? 'Saving...' : 'SAVE ESTIMATE'}</button>}
+          <div style={{ display: 'grid', gridTemplateColumns: estimate ? '1fr 1fr 1fr' : '1fr', gap: 12, marginBottom: 18 }}>
+            <button style={{ ...sBtn(C.teal, C.dark), fontSize: 16, padding: '16px 28px' }} onClick={doGenerate}>GENERATE ESTIMATE</button>
+            {estimate && <button style={{ ...sBtn(C.green, 'white'), fontSize: 16, padding: '16px 28px' }} onClick={doSave} disabled={saving}>{saving ? 'Saving...' : savedId ? '✓ SAVED' : 'SAVE ESTIMATE'}</button>}
+            {estimate && (
+              <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 16, padding: '16px 28px' }} onClick={async () => {
+                if (!savedId) { await doSave(); }
+                setTimeout(() => doSend(), 500);
+              }} disabled={sending}>{sending ? 'Sending...' : '📤 SEND ESTIMATE'}</button>
+            )}
           </div>
           {savedId && (
-            <button style={{ ...sBtn(C.blue, 'white'), marginBottom: 18 }} onClick={doSend} disabled={sending}>{sending ? 'Sending...' : 'SEND ESTIMATE'}</button>
+            <div style={{ fontSize: 12, color: C.green, marginBottom: 12 }}>{'✓'} Saved — ID #{savedId}. Customer will receive SMS with estimate link at /estimate/{savedId}</div>
           )}
         </div>
 
