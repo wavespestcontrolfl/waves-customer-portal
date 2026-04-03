@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+const RevenuePage = lazy(() => import('./RevenuePage'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
@@ -50,6 +51,7 @@ const STATUS_COLORS = {
 };
 
 export default function DashboardPage() {
+  const [dashTab, setDashTab] = useState('overview');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -59,6 +61,18 @@ export default function DashboardPage() {
 
   if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center', fontSize: 15 }}>Loading dashboard...</div>;
   if (!data) return <div style={{ color: D.red, padding: 60, textAlign: 'center' }}>Failed to load dashboard</div>;
+
+  if (dashTab === 'revenue') {
+    return (
+      <div>
+        <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+          <button onClick={() => setDashTab('overview')} style={{ padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, background: 'transparent', color: D.muted }}>Overview</button>
+          <button style={{ padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, background: D.teal, color: D.white }}>Revenue</button>
+        </div>
+        <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading revenue...</div>}><RevenuePage /></Suspense>
+      </div>
+    );
+  }
 
   const k = data.kpis;
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
@@ -74,6 +88,12 @@ export default function DashboardPage() {
 
   return (
     <div>
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+        <button style={{ padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, background: D.teal, color: D.white }}>Overview</button>
+        <button onClick={() => setDashTab('revenue')} style={{ padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, background: 'transparent', color: D.muted }}>Revenue</button>
+      </div>
+
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
         <div>

@@ -85,14 +85,14 @@ export default function App() {
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
             <Route path="schedule" element={<AdminSchedulePage />} />
             <Route path="dispatch" element={<Navigate to="/admin/schedule" replace />} />
-            <Route path="revenue" element={<AdminRevenuePage />} />
+            <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
             <Route path="communications" element={<AdminCommunicationsPage />} />
             <Route path="reviews" element={<AdminReviewsPage />} />
             <Route path="ads" element={<Navigate to="/admin/ppc" replace />} />
             <Route path="ppc" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading PPC...</div>}><AdminAdsPage /></Suspense>} />
             <Route path="seo" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading SEO...</div>}><AdminSEOPage /></Suspense>} />
             <Route path="voice-agent" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading voice agent...</div>}><AdminVoiceAgentPage /></Suspense>} />
-            <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />
+            <Route path="blog" element={<Navigate to="/admin/seo" replace />} />
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
             <Route path="referrals" element={<div style={{color:'#e2e8f0',padding:40,fontSize:16}}>🎁 Referrals — Coming Soon</div>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
