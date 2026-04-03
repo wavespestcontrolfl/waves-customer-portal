@@ -197,33 +197,30 @@ app.use(errorHandler);
 
 const PORT = config.port;
 
-// Run migrations before starting the server
-async function start() {
-  // Log database connection info for debugging
+// Start listening FIRST (so Railway health check passes), then run migrations
+app.listen(PORT, () => {
+  logger.info(`🌊 Waves Customer Portal API running on port ${PORT}`);
+  logger.info(`   Environment: ${config.nodeEnv}`);
+  logger.info(`   Client URL: ${config.clientUrl}`);
+
+  // Run migrations in the background after the server is accepting requests
   const dbUrl = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL || process.env.POSTGRES_URL;
-  logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET — will fail'}`);
+  logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET'}`);
 
-  try {
-    const knex = require('./models/db');
-    logger.info('Running database migrations...');
-    await knex.migrate.latest({ directory: path.join(__dirname, 'models', 'migrations') });
-    logger.info('Migrations complete');
-  } catch (err) {
-    logger.error(`Migration failed: ${err.message}`);
-    // Don't crash — the app can still serve with existing schema
-  }
-
-  app.listen(PORT, () => {
-    logger.info(`🌊 Waves Customer Portal API running on port ${PORT}`);
-    logger.info(`   Environment: ${config.nodeEnv}`);
-    logger.info(`   Client URL: ${config.clientUrl}`);
+  (async () => {
+    try {
+      const knex = require('./models/db');
+      logger.info('Running database migrations...');
+      await knex.migrate.latest({ directory: path.join(__dirname, 'models', 'migrations') });
+      logger.info('Migrations complete');
+    } catch (err) {
+      logger.error(`Migration failed: ${err.message}`);
+    }
 
     if (config.nodeEnv !== 'test') {
       initScheduledJobs();
     }
-  });
-}
-
-start();
+  })();
+});
 
 module.exports = app;
