@@ -123,6 +123,30 @@ router.post('/', async (req, res) => {
       );
     } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
 
+    // Create estimate/quote record so it appears in Pipeline → Quotes tab
+    try {
+      const serviceInterest = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
+      const crypto = require('crypto');
+      const estimateToken = crypto.randomBytes(16).toString('hex');
+
+      await db('estimates').insert({
+        customer_id: customer.id,
+        customer_name: `${firstName} ${lastName}`,
+        customer_phone: phoneFormatted,
+        customer_email: email || null,
+        address: address || '',
+        status: 'new',
+        source: 'lead_webhook',
+        service_interest: serviceInterest || null,
+        lead_source: leadSource.source,
+        lead_source_detail: leadSource.detail,
+        token: estimateToken,
+        notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}.`,
+      });
+    } catch (estErr) {
+      logger.error(`Lead estimate creation failed: ${estErr.message}`);
+    }
+
     await db('activity_log').insert({
       customer_id: customer.id, action: 'customer_created',
       description: `New lead: ${firstName} ${lastName} from ${leadSource.detail || leadSource.source}`,

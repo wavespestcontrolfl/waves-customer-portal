@@ -52,13 +52,17 @@ router.post('/:id/send', async (req, res, next) => {
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {
   try {
-    const { status, search, page = 1, limit = 20 } = req.query;
+    const { status, search, source, page = 1, limit = 50 } = req.query;
     let query = db('estimates')
       .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
       .select('estimates.*', 'technicians.name as created_by_name')
       .orderBy('estimates.created_at', 'desc');
 
     if (status) query = query.where('estimates.status', status);
+    if (source) {
+      const sources = source.split(',');
+      query = query.whereIn('estimates.source', sources);
+    }
     if (search) {
       const s = `%${search}%`;
       query = query.where(function () {
@@ -77,6 +81,12 @@ router.get('/', async (req, res, next) => {
         tier: e.waveguard_tier, createdBy: e.created_by_name,
         sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,
         createdAt: e.created_at,
+        source: e.source || 'manual',
+        serviceInterest: e.service_interest,
+        leadSource: e.lead_source,
+        leadSourceDetail: e.lead_source_detail,
+        isPriority: e.is_priority,
+        description: e.service_interest || e.notes,
       })),
     });
   } catch (err) { next(err); }

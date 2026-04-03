@@ -1277,9 +1277,9 @@ export default function EstimatePage() {
         <div style={{ fontSize: 28, fontWeight: 700, color: C.white }}>Pipeline</div>
         <div style={{ display: 'flex', gap: 4, background: C.card, borderRadius: 10, padding: 4 }}>
           {[
-            { id: 'pipeline', label: '📋 All Estimates' },
-            { id: 'quotes', label: '🌐 Website Quotes' },
-            { id: 'new', label: '⚡ New Estimate' },
+            { id: 'pipeline', label: '📋 Estimates' },
+            { id: 'quotes', label: '🌐 Quotes' },
+            { id: 'new', label: '⚡ Create Estimate' },
           ].map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
               padding: '8px 16px', borderRadius: 8, border: 'none', cursor: 'pointer',
