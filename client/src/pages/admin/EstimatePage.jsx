@@ -1146,6 +1146,126 @@ function EstimatePipelineView() {
 }
 
 // =========================================================================
+// =========================================================================
+// WEBSITE QUOTES VIEW — leads from website forms, voice agent, referrals
+// =========================================================================
+function WebsiteQuotesView() {
+  const [leads, setLeads] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    adminFetch('/admin/estimates?source=website,voice_agent,lead_webhook,referral')
+      .then(d => { setLeads(d.estimates || []); setLoading(false); })
+      .catch(() => {
+        // Fallback — get all estimates and filter client-side
+        adminFetch('/admin/estimates').then(d => {
+          const webLeads = (d.estimates || []).filter(e =>
+            ['new', 'draft'].includes(e.status) || e.source === 'voice_agent' || e.source === 'lead_webhook'
+          );
+          setLeads(webLeads.length > 0 ? webLeads : d.estimates || []);
+          setLoading(false);
+        }).catch(() => setLoading(false));
+      });
+  }, []);
+
+  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: C.gray }}>Loading quotes...</div>;
+
+  const newLeads = leads.filter(e => e.status === 'new' || e.status === 'draft');
+  const inProgress = leads.filter(e => e.status === 'sent' || e.status === 'viewed');
+  const resolved = leads.filter(e => ['accepted', 'declined', 'expired'].includes(e.status));
+
+  const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
+
+  const sourceIcon = (src) => {
+    const icons = { voice_agent: '🎙️', lead_webhook: '🌐', website: '🌐', referral: '🤝', manual: '✏️' };
+    return icons[src] || '📋';
+  };
+
+  const LeadCard = ({ e }) => {
+    const sc = STATUS_CONFIG[e.status] || STATUS_CONFIG.draft;
+    return (
+      <div style={{
+        background: C.card, borderRadius: 10, padding: '14px 18px',
+        border: `1px solid ${C.border}`, marginBottom: 8,
+        borderLeft: `3px solid ${e.status === 'new' ? C.amber : sc.color}`,
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: C.white }}>{e.customerName || 'Unknown'}</span>
+              <span style={{ fontSize: 16 }}>{sourceIcon(e.source)}</span>
+              <span style={{
+                padding: '2px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700,
+                background: sc.bg, color: sc.color, textTransform: 'uppercase',
+              }}>{sc.label}</span>
+              {e.isPriority && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: C.red + '22', color: C.red, fontWeight: 700 }}>PRIORITY</span>}
+            </div>
+            <div style={{ fontSize: 12, color: C.gray }}>{e.address || '—'}</div>
+            {e.serviceType && <div style={{ fontSize: 11, color: C.teal, marginTop: 2 }}>{e.serviceType?.replace(/_/g, ' ')}</div>}
+            {e.description && <div style={{ fontSize: 11, color: C.gray, marginTop: 2, fontStyle: 'italic' }}>"{(e.description || '').substring(0, 80)}"</div>}
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            {e.monthlyTotal > 0 && <div style={{ fontSize: 16, fontWeight: 700, color: C.green, fontFamily: "'JetBrains Mono', monospace" }}>${e.monthlyTotal?.toFixed(0)}/mo</div>}
+            <div style={{ fontSize: 10, color: C.gray, marginTop: 2 }}>{fmtDate(e.createdAt)}</div>
+            {e.source && <div style={{ fontSize: 10, color: C.gray }}>{e.source?.replace(/_/g, ' ')}</div>}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      {/* Summary */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 120px', background: C.card, borderRadius: 10, padding: '14px 16px', border: `1px solid ${C.border}`, textAlign: 'center' }}>
+          <div style={{ fontSize: 10, color: C.gray, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>New Leads</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: C.amber, fontFamily: "'JetBrains Mono', monospace" }}>{newLeads.length}</div>
+        </div>
+        <div style={{ flex: '1 1 120px', background: C.card, borderRadius: 10, padding: '14px 16px', border: `1px solid ${C.border}`, textAlign: 'center' }}>
+          <div style={{ fontSize: 10, color: C.gray, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>In Progress</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: C.teal, fontFamily: "'JetBrains Mono', monospace" }}>{inProgress.length}</div>
+        </div>
+        <div style={{ flex: '1 1 120px', background: C.card, borderRadius: 10, padding: '14px 16px', border: `1px solid ${C.border}`, textAlign: 'center' }}>
+          <div style={{ fontSize: 10, color: C.gray, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Resolved</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: C.green, fontFamily: "'JetBrains Mono', monospace" }}>{resolved.length}</div>
+        </div>
+      </div>
+
+      {/* New leads section */}
+      {newLeads.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: C.amber, marginBottom: 8 }}>{'🔔'} New — Needs Estimate ({newLeads.length})</div>
+          {newLeads.map(e => <LeadCard key={e.id} e={e} />)}
+        </div>
+      )}
+
+      {/* In progress */}
+      {inProgress.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: C.teal, marginBottom: 8 }}>Sent / Viewed ({inProgress.length})</div>
+          {inProgress.map(e => <LeadCard key={e.id} e={e} />)}
+        </div>
+      )}
+
+      {/* Resolved */}
+      {resolved.length > 0 && (
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: C.gray, marginBottom: 8 }}>Resolved ({resolved.length})</div>
+          {resolved.map(e => <LeadCard key={e.id} e={e} />)}
+        </div>
+      )}
+
+      {leads.length === 0 && (
+        <div style={{ padding: 40, textAlign: 'center', color: C.gray }}>
+          No website quotes yet. Leads from your website forms, voice agent, and referrals will appear here.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =========================================================================
 // WRAPPER — tabs between Pipeline view and New Estimate tool
 // =========================================================================
 export default function EstimatePage() {
@@ -1154,10 +1274,11 @@ export default function EstimatePage() {
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: C.white }}>Estimates</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: C.white }}>Pipeline</div>
         <div style={{ display: 'flex', gap: 4, background: C.card, borderRadius: 10, padding: 4 }}>
           {[
-            { id: 'pipeline', label: '📋 Pipeline' },
+            { id: 'pipeline', label: '📋 All Estimates' },
+            { id: 'quotes', label: '🌐 Website Quotes' },
             { id: 'new', label: '⚡ New Estimate' },
           ].map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
@@ -1172,6 +1293,7 @@ export default function EstimatePage() {
       </div>
 
       {activeTab === 'pipeline' && <EstimatePipelineView />}
+      {activeTab === 'quotes' && <WebsiteQuotesView />}
       {activeTab === 'new' && <EstimateToolView />}
     </div>
   );

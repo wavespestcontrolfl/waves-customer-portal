@@ -7,7 +7,7 @@ const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', 
 const NAV_ITEMS = [
   { path: '/admin/dashboard', icon: '📊', label: 'Dashboard' },
   { path: '/admin/customers', icon: '👥', label: 'Customers' },
-  { path: '/admin/estimates', icon: '📋', label: 'Estimates' },
+  { path: '/admin/estimates', icon: '📋', label: 'Pipeline' },
   { path: '/admin/schedule', icon: '📅', label: 'Schedule & Dispatch' },
   { path: '/admin/revenue', icon: '💰', label: 'Revenue' },
   { path: '/admin/communications', icon: '📱', label: 'Communications' },
