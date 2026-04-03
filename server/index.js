@@ -199,6 +199,10 @@ const PORT = config.port;
 
 // Run migrations before starting the server
 async function start() {
+  // Log database connection info for debugging
+  const dbUrl = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL || process.env.POSTGRES_URL;
+  logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET — will fail'}`);
+
   try {
     const knex = require('./models/db');
     logger.info('Running database migrations...');
