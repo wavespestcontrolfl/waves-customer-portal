@@ -197,15 +197,29 @@ app.use(errorHandler);
 
 const PORT = config.port;
 
-app.listen(PORT, () => {
-  logger.info(`🌊 Waves Customer Portal API running on port ${PORT}`);
-  logger.info(`   Environment: ${config.nodeEnv}`);
-  logger.info(`   Client URL: ${config.clientUrl}`);
-
-  // Initialize cron jobs (service reminders, billing, etc.)
-  if (config.nodeEnv !== 'test') {
-    initScheduledJobs();
+// Run migrations before starting the server
+async function start() {
+  try {
+    const knex = require('./models/db');
+    logger.info('Running database migrations...');
+    await knex.migrate.latest({ directory: path.join(__dirname, 'models', 'migrations') });
+    logger.info('Migrations complete');
+  } catch (err) {
+    logger.error(`Migration failed: ${err.message}`);
+    // Don't crash — the app can still serve with existing schema
   }
-});
+
+  app.listen(PORT, () => {
+    logger.info(`🌊 Waves Customer Portal API running on port ${PORT}`);
+    logger.info(`   Environment: ${config.nodeEnv}`);
+    logger.info(`   Client URL: ${config.clientUrl}`);
+
+    if (config.nodeEnv !== 'test') {
+      initScheduledJobs();
+    }
+  });
+}
+
+start();
 
 module.exports = app;
