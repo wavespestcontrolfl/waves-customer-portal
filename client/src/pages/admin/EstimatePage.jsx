@@ -1049,7 +1049,7 @@ function EstimatePipelineView() {
 
       {/* Filter */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
-        {['all', 'draft', 'sent', 'viewed', 'accepted', 'declined', 'expired'].map(f => (
+        {['all', 'new', 'draft', 'sent', 'viewed', 'accepted', 'declined', 'expired'].map(f => (
           <button key={f} onClick={() => setFilter(f)} style={{
             padding: '6px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
             background: filter === f ? C.teal : C.card,
@@ -1082,9 +1082,14 @@ function EstimatePipelineView() {
 
                 {/* Customer info */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: C.white }}>{e.customerName || 'Unknown'}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: C.white }}>{e.customerName || 'Unknown'}</span>
+                    {e.source === 'lead_webhook' && <span title="Website lead" style={{ fontSize: 14 }}>{'🌐'}</span>}
+                    {e.source === 'voice_agent' && <span title="Voice agent lead" style={{ fontSize: 14 }}>{'🎙️'}</span>}
+                    {e.isPriority && <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 3, background: C.red + '22', color: C.red, fontWeight: 700 }}>PRIORITY</span>}
+                  </div>
                   <div style={{ fontSize: 12, color: C.gray, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {e.address || '—'}
+                    {e.address || '—'}{e.serviceInterest ? ` · ${e.serviceInterest}` : ''}
                   </div>
                 </div>
 
@@ -1275,25 +1280,16 @@ export default function EstimatePage() {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div style={{ fontSize: 28, fontWeight: 700, color: C.white }}>Pipeline</div>
-        <div style={{ display: 'flex', gap: 4, background: C.card, borderRadius: 10, padding: 4 }}>
-          {[
-            { id: 'pipeline', label: '📋 Estimates' },
-            { id: 'quotes', label: '🌐 Quotes' },
-            { id: 'new', label: '⚡ Create Estimate' },
-          ].map(tab => (
-            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
-              padding: '8px 16px', borderRadius: 8, border: 'none', cursor: 'pointer',
-              fontSize: 13, fontWeight: 600,
-              background: activeTab === tab.id ? C.teal : 'transparent',
-              color: activeTab === tab.id ? C.dark : C.gray,
-              transition: 'all 0.15s',
-            }}>{tab.label}</button>
-          ))}
-        </div>
+        <button onClick={() => setActiveTab(activeTab === 'new' ? 'pipeline' : 'new')} style={{
+          padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer',
+          fontSize: 13, fontWeight: 600,
+          background: activeTab === 'new' ? C.card : C.teal,
+          color: activeTab === 'new' ? C.gray : C.dark,
+          transition: 'all 0.15s',
+        }}>{activeTab === 'new' ? '← Back to Pipeline' : '⚡ Create Estimate'}</button>
       </div>
 
       {activeTab === 'pipeline' && <EstimatePipelineView />}
-      {activeTab === 'quotes' && <WebsiteQuotesView />}
       {activeTab === 'new' && <EstimateToolView />}
     </div>
   );
