@@ -42,6 +42,9 @@ const gates = {
   // Webhooks — process inbound Twilio/Square/Lead webhooks
   webhooks: isProd ? process.env.GATE_WEBHOOKS === 'true' : true,
 
+  // SEO Intelligence — DataForSEO API calls, rank tracking, backlink scans
+  seoIntelligence: isProd ? process.env.GATE_SEO_INTELLIGENCE === 'true' : true,
+
   // WordPress — publish blog posts to live site
   wordpressPublish: isProd ? process.env.GATE_WORDPRESS_PUBLISH === 'true' : true,
 };

@@ -264,4 +264,161 @@ router.get('/opportunities', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// SEO COMMAND CENTER — Rank Tracking, SERP, Backlinks, QA, Decay, Citations
+// All gated behind GATE_SEO_INTELLIGENCE
+// =========================================================================
+
+const RankTracker = require('../services/seo/rank-tracker');
+const SERPAnalyzer = require('../services/seo/serp-analyzer');
+const BacklinkMonitor = require('../services/seo/backlink-monitor');
+const AIOverviewTracker = require('../services/seo/ai-overview-tracker');
+const ContentQA = require('../services/seo/content-qa');
+const CannibalizationDetector = require('../services/seo/cannibalization');
+const ContentDecayDetector = require('../services/seo/content-decay');
+const CitationAuditor = require('../services/seo/citation-auditor');
+const ConversionFunnel = require('../services/seo/conversion-funnel');
+
+// Rankings
+router.get('/rankings', async (req, res, next) => {
+  try {
+    const data = await RankTracker.getDashboard(parseInt(req.query.days || 7));
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+router.post('/rankings/track', async (req, res, next) => {
+  try {
+    const result = await RankTracker.trackRanks(req.body.priority || null);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// SERP Analysis
+router.get('/serp/:keywordId', async (req, res, next) => {
+  try {
+    const analysis = await db('seo_serp_analyses').where('keyword_id', req.params.keywordId).orderBy('analysis_date', 'desc').first();
+    res.json({ analysis });
+  } catch (err) { next(err); }
+});
+
+router.post('/serp/analyze', async (req, res, next) => {
+  try {
+    const result = await SERPAnalyzer.analyzeKeyword(req.body.keywordId);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// Backlinks
+router.get('/backlinks', async (req, res, next) => {
+  try {
+    const data = await BacklinkMonitor.getDashboard();
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+router.post('/backlinks/scan', async (req, res, next) => {
+  try {
+    const result = await BacklinkMonitor.scan();
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.post('/backlinks/disavow', async (req, res, next) => {
+  try {
+    const result = await BacklinkMonitor.generateDisavow();
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// AI Overview
+router.get('/ai-overview', async (req, res, next) => {
+  try {
+    const data = await AIOverviewTracker.getDashboard();
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// Content QA
+router.get('/qa', async (req, res, next) => {
+  try {
+    const data = await ContentQA.getDashboard();
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+router.post('/qa/:blogPostId/score', async (req, res, next) => {
+  try {
+    const result = await ContentQA.scoreContent(req.params.blogPostId);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.post('/qa/batch', async (req, res, next) => {
+  try {
+    const results = await ContentQA.batchScore(parseInt(req.body.limit || 50));
+    res.json({ results });
+  } catch (err) { next(err); }
+});
+
+// Cannibalization
+router.get('/cannibalization', async (req, res, next) => {
+  try {
+    const data = await CannibalizationDetector.getDashboard();
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// Content Decay
+router.get('/decay', async (req, res, next) => {
+  try {
+    const data = await ContentDecayDetector.getDashboard();
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// Citations
+router.get('/citations', async (req, res, next) => {
+  try {
+    const data = await CitationAuditor.getDashboard();
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+router.put('/citations/:id', async (req, res, next) => {
+  try {
+    await CitationAuditor.updateCitation(req.params.id, req.body);
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// Conversion Funnel
+router.get('/funnel', async (req, res, next) => {
+  try {
+    const data = await ConversionFunnel.getDashboard(parseInt(req.query.days || 30));
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// Competitors
+router.get('/competitors', async (req, res, next) => {
+  try {
+    const competitors = await db('seo_competitors').where('active', true);
+    res.json({ competitors });
+  } catch (err) { next(err); }
+});
+
+// Keywords list
+router.get('/keywords', async (req, res, next) => {
+  try {
+    const { priority, city, service } = req.query;
+    let query = db('seo_target_keywords');
+    if (priority) query = query.where('priority', parseInt(priority));
+    if (city) query = query.where('primary_city', city);
+    if (service) query = query.where('service_category', service);
+    const keywords = await query.orderBy('priority').orderBy('keyword');
+    res.json({ keywords, total: keywords.length });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

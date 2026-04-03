@@ -28,6 +28,12 @@ const TABS = [
   { key: 'capacity', label: 'Capacity', icon: '📊' },
   { key: 'seo', label: 'SEO Dashboard', icon: '🔍' },
   { key: 'seo-advisor', label: 'SEO Advisor', icon: '🧠' },
+  { key: 'rankings', label: 'Rankings', icon: '📊' },
+  { key: 'backlinks', label: 'Backlinks', icon: '🔗' },
+  { key: 'content-qa', label: 'Content QA', icon: '✅' },
+  { key: 'ai-overview', label: 'AI Overview', icon: '🤖' },
+  { key: 'seo-funnel', label: 'Funnel', icon: '📈' },
+  { key: 'citations', label: 'Citations', icon: '📍' },
 ];
 
 const thStyle = { padding: '10px 14px', textAlign: 'left', fontSize: 12, fontWeight: 600, color: D.muted, borderBottom: `1px solid ${D.border}`, textTransform: 'uppercase', letterSpacing: '0.5px' };
@@ -1101,6 +1107,300 @@ function SEOAdvisorTab() {
 // =========================================================================
 // MAIN PAGE
 // =========================================================================
+// =========================================================================
+// SEO COMMAND CENTER TABS
+// =========================================================================
+
+function RankingsTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState(7);
+  useEffect(() => { setLoading(true); adminFetch(`/admin/seo/rankings?days=${days}`).then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, [days]);
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading rankings...</div>;
+  if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No ranking data yet. Configure DataForSEO credentials and enable GATE_SEO_INTELLIGENCE.</div></Card>;
+
+  const s = data.summary || {};
+  const posColor = (p) => !p ? D.muted : p <= 3 ? D.green : p <= 10 ? D.teal : p <= 20 ? D.amber : D.red;
+  const deltaColor = (d) => d > 0 ? D.green : d < 0 ? D.red : D.muted;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <KpiCard label="Improving" value={s.improving || 0} color={D.green} />
+          <KpiCard label="Declining" value={s.declining || 0} color={D.red} />
+          <KpiCard label="Stable" value={s.stable || 0} />
+          <KpiCard label="In Map Pack" value={s.inMapPack || 0} color={D.teal} />
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[7, 30, 90].map(d => (
+            <button key={d} onClick={() => setDays(d)} style={{ padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, background: days === d ? D.teal : D.bg, color: days === d ? D.white : D.muted }}>{d}d</button>
+          ))}
+        </div>
+      </div>
+      <Card>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr>
+              <th style={thStyle}>Keyword</th><th style={thStyle}>City</th>
+              <th style={thR}>Position</th><th style={thR}>Map Pack</th><th style={thR}>Change</th>
+              <th style={thStyle}>AIO</th><th style={thStyle}>Features</th>
+            </tr></thead>
+            <tbody>
+              {(data.rankings || []).map((r, i) => (
+                <tr key={i}>
+                  <td style={{ ...tdStyle, fontFamily: 'inherit', fontWeight: 500 }}>{r.keyword}</td>
+                  <td style={{ ...tdStyle, fontFamily: 'inherit', fontSize: 12, color: D.muted }}>{r.primary_city || '—'}</td>
+                  <td style={{ ...tdR, color: posColor(r.currentPosition) }}>{r.currentPosition || '—'}</td>
+                  <td style={{ ...tdR, color: r.mapPackPosition ? D.green : D.muted }}>{r.mapPackPosition || '—'}</td>
+                  <td style={{ ...tdR, color: deltaColor(r.delta) }}>{r.delta > 0 ? `+${r.delta}` : r.delta || '—'}</td>
+                  <td style={{ ...tdStyle, textAlign: 'center' }}>{r.aiOverviewCited ? '✅' : '—'}</td>
+                  <td style={{ ...tdStyle, fontSize: 11, color: D.muted }}>{r.serpFeatures ? Object.entries(typeof r.serpFeatures === 'string' ? JSON.parse(r.serpFeatures) : r.serpFeatures).filter(([,v]) => v).map(([k]) => k).join(', ') : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function BacklinksTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { adminFetch('/admin/seo/backlinks').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, []);
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading backlinks...</div>;
+  if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No backlink data yet.</div></Card>;
+
+  const sevColor = { critical: D.red, warning: D.amber, watch: D.muted, clean: D.green };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <KpiCard label="Total Links" value={data.total || 0} />
+        <KpiCard label="Critical" value={data.critical || 0} color={D.red} />
+        <KpiCard label="Warning" value={data.warning || 0} color={D.amber} />
+        <KpiCard label="Clean" value={data.clean || 0} color={D.green} />
+      </div>
+      {data.anchorDistribution && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Anchor Text Distribution</div>
+          {Object.entries(data.anchorDistribution).map(([type, count]) => (
+            <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+              <div style={{ width: 100, fontSize: 12, color: D.text, textAlign: 'right', textTransform: 'capitalize' }}>{type.replace('_', ' ')}</div>
+              <div style={{ flex: 1, height: 14, background: D.bg, borderRadius: 3 }}>
+                <div style={{ height: '100%', borderRadius: 3, background: type === 'branded' ? D.green : type === 'keyword_rich' ? D.amber : D.teal, width: `${Math.min(100, (count / Math.max(data.total, 1)) * 100)}%` }} />
+              </div>
+              <div style={{ width: 30, fontSize: 12, color: D.muted, fontFamily: MONO }}>{count}</div>
+            </div>
+          ))}
+        </Card>
+      )}
+      {(data.recentToxic || []).length > 0 && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.red, marginBottom: 12 }}>Toxic Links</div>
+          {data.recentToxic.map((l, i) => (
+            <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, borderLeft: `3px solid ${sevColor[l.severity]}` }}>
+              <div style={{ fontSize: 12, color: D.white }}>{l.source_domain}</div>
+              <div style={{ fontSize: 11, color: D.muted }}>Anchor: "{l.anchor_text}" · Toxicity: {l.toxicity_score}/100</div>
+            </div>
+          ))}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function ContentQATab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { adminFetch('/admin/seo/qa').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, []);
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading QA scores...</div>;
+  if (!data || data.total === 0) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No QA scores yet. Run a batch score from the API.</div></Card>;
+
+  const gradeColor = { A: D.green, B: D.teal, C: D.amber, D: D.orange, F: D.red };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', gap: 12 }}>
+        {Object.entries(data.gradeDistribution || {}).map(([grade, count]) => (
+          <KpiCard key={grade} label={`Grade ${grade}`} value={count} color={gradeColor[grade]} />
+        ))}
+      </div>
+      {(data.fixFirst || []).length > 0 && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.amber, marginBottom: 12 }}>Fix These First</div>
+          {data.fixFirst.map((s, i) => (
+            <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 12, color: D.text }}>{s.url || `Post ${s.blog_post_id}`}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: gradeColor[s.grade], fontFamily: MONO }}>{s.grade} ({s.total_score}/50)</span>
+            </div>
+          ))}
+        </Card>
+      )}
+      <Card>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>All Scores</div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr><th style={thStyle}>URL</th><th style={thR}>Grade</th><th style={thR}>Tech</th><th style={thR}>OnPage</th><th style={thR}>E-E-A-T</th><th style={thR}>Local</th><th style={thR}>Brand</th><th style={thR}>Total</th></tr></thead>
+            <tbody>
+              {(data.scores || []).slice(0, 30).map((s, i) => (
+                <tr key={i}>
+                  <td style={{ ...tdStyle, fontFamily: 'inherit', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.url || `Post ${s.blog_post_id}`}</td>
+                  <td style={{ ...tdR, color: gradeColor[s.grade], fontWeight: 700 }}>{s.grade}</td>
+                  <td style={tdR}>{s.technical_score}/12</td>
+                  <td style={tdR}>{s.onpage_score}/10</td>
+                  <td style={tdR}>{s.eeat_score}/8</td>
+                  <td style={tdR}>{s.local_score}/10</td>
+                  <td style={tdR}>{s.brand_score}/10</td>
+                  <td style={{ ...tdR, fontWeight: 700 }}>{s.total_score}/50</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function AIOverviewTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { adminFetch('/admin/seo/ai-overview').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, []);
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading AI Overview data...</div>;
+  if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No AI Overview data yet.</div></Card>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <KpiCard label="Keywords Tracked" value={data.total || 0} />
+        <KpiCard label="With AI Overview" value={data.withAIO || 0} color={D.purple} />
+        <KpiCard label="Waves Cited" value={data.wavesCited || 0} color={D.green} />
+        <KpiCard label="GEO Score" value={`${data.geoScore || 0}%`} color={data.geoScore >= 30 ? D.green : D.amber} />
+      </div>
+      {(data.quickWins || []).length > 0 && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.amber, marginBottom: 12 }}>Quick Wins — AIO exists but Waves not cited</div>
+          {data.quickWins.map((r, i) => (
+            <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4 }}>
+              <div style={{ fontSize: 13, color: D.white }}>"{r.keyword}" <span style={{ color: D.muted, fontSize: 11 }}>({r.city})</span></div>
+              <div style={{ fontSize: 11, color: D.muted }}>Currently cited: {r.sources.map(s => s.domain).join(', ') || 'unknown'}</div>
+            </div>
+          ))}
+        </Card>
+      )}
+      <Card>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>All Keywords</div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr><th style={thStyle}>Keyword</th><th style={thStyle}>City</th><th style={thR}>AIO?</th><th style={thR}>Cited?</th><th style={thStyle}>Sources</th></tr></thead>
+            <tbody>
+              {(data.results || []).map((r, i) => (
+                <tr key={i}>
+                  <td style={{ ...tdStyle, fontFamily: 'inherit' }}>{r.keyword}</td>
+                  <td style={{ ...tdStyle, fontFamily: 'inherit', color: D.muted }}>{r.city}</td>
+                  <td style={{ ...tdR }}>{r.aioPresent ? '✅' : '—'}</td>
+                  <td style={{ ...tdR, color: r.wavesCited ? D.green : D.muted }}>{r.wavesCited ? '✅' : '—'}</td>
+                  <td style={{ ...tdStyle, fontSize: 11, color: D.muted }}>{r.sources.map(s => s.domain).join(', ') || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function SEOFunnelTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState(30);
+  useEffect(() => { setLoading(true); adminFetch(`/admin/seo/funnel?days=${days}`).then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, [days]);
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading funnel data...</div>;
+  if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No funnel data yet.</div></Card>;
+
+  const o = data.organic || {};
+  const e = data.estimates || {};
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4 }}>
+        {[7, 30, 90].map(d => (
+          <button key={d} onClick={() => setDays(d)} style={{ padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, background: days === d ? D.teal : D.bg, color: days === d ? D.white : D.muted }}>{d}d</button>
+        ))}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+        <KpiCard label="Impressions" value={(o.impressions || 0).toLocaleString()} />
+        <KpiCard label="Clicks" value={(o.clicks || 0).toLocaleString()} sub={{ text: `${o.ctr || 0}% CTR` }} />
+        <KpiCard label="Estimates" value={e.total || 0} />
+        <KpiCard label="Booked" value={e.booked || 0} color={D.green} sub={{ text: `${e.conversionRate || 0}% rate` }} />
+        <KpiCard label="Revenue" value={fmt(data.revenue || 0)} color={D.green} />
+      </div>
+      <Card>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Top Landing Pages</div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr><th style={thStyle}>Page</th><th style={thR}>Impr</th><th style={thR}>Clicks</th><th style={thR}>CTR</th><th style={thStyle}>Keyword</th></tr></thead>
+            <tbody>
+              {(data.funnelByPage || []).slice(0, 20).map((f, i) => (
+                <tr key={i}>
+                  <td style={{ ...tdStyle, fontFamily: 'inherit', maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(f.landingPage || '').replace(/https?:\/\/[^/]+/, '')}</td>
+                  <td style={tdR}>{f.impressions.toLocaleString()}</td>
+                  <td style={tdR}>{f.clicks}</td>
+                  <td style={tdR}>{f.ctr}%</td>
+                  <td style={{ ...tdStyle, fontFamily: 'inherit', fontSize: 11, color: D.muted }}>{f.keyword || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function CitationsTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { adminFetch('/admin/seo/citations').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, []);
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading citations...</div>;
+  if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No citation data.</div></Card>;
+
+  const statusColor = { active: D.green, inconsistent: D.red, missing: D.amber, claimed: D.teal, unchecked: D.muted };
+  const bs = data.byStatus || {};
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+        <KpiCard label="Active" value={bs.active || 0} color={D.green} />
+        <KpiCard label="Inconsistent" value={bs.inconsistent || 0} color={D.red} />
+        <KpiCard label="Missing" value={bs.missing || 0} color={D.amber} />
+        <KpiCard label="Claimed" value={bs.claimed || 0} color={D.teal} />
+        <KpiCard label="Unchecked" value={bs.unchecked || 0} />
+      </div>
+      {data.canonicalNAP && (
+        <Card style={{ padding: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 6 }}>Canonical NAP</div>
+          <div style={{ fontSize: 12, color: D.text }}>{data.canonicalNAP.name} · {data.canonicalNAP.phone} · {data.canonicalNAP.website}</div>
+        </Card>
+      )}
+      <Card>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Directory Listings</div>
+        {(data.citations || []).map((c, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${D.border}` }}>
+            <div style={{ width: 8, height: 8, borderRadius: 4, background: statusColor[c.status] || D.muted, flexShrink: 0 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: D.white }}>{c.directory_name}</div>
+              {c.listing_url && <div style={{ fontSize: 11, color: D.muted }}>{c.listing_url}</div>}
+            </div>
+            <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: (statusColor[c.status] || D.muted) + '22', color: statusColor[c.status] || D.muted, textTransform: 'uppercase', fontWeight: 700 }}>{c.status}</span>
+            <span style={{ fontSize: 10, color: D.muted }}>{c.priority}</span>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
 export default function AdsPage() {
   const [tab, setTab] = useState('overview');
 
@@ -1130,6 +1430,12 @@ export default function AdsPage() {
       {tab === 'capacity' && <CapacityTab />}
       {tab === 'seo' && <SEODashboardTab />}
       {tab === 'seo-advisor' && <SEOAdvisorTab />}
+      {tab === 'rankings' && <RankingsTab />}
+      {tab === 'backlinks' && <BacklinksTab />}
+      {tab === 'content-qa' && <ContentQATab />}
+      {tab === 'ai-overview' && <AIOverviewTab />}
+      {tab === 'seo-funnel' && <SEOFunnelTab />}
+      {tab === 'citations' && <CitationsTab />}
     </div>
   );
 }

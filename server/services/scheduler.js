@@ -13,6 +13,52 @@ function initScheduledJobs() {
     return;
   }
   // =========================================================================
+  // SEO COMMAND CENTER CRONS (gated behind GATE_SEO_INTELLIGENCE)
+  // =========================================================================
+
+  // DAILY 2AM — Rank tracking (priority 1 daily, all on Sunday)
+  cron.schedule('0 2 * * *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: SEO rank tracking');
+    try {
+      const RankTracker = require('./seo/rank-tracker');
+      await RankTracker.trackRanks();
+    } catch (err) { logger.error(`Rank tracking failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 2:30AM — AI Overview check (top 20 keywords)
+  cron.schedule('30 2 * * *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: AI Overview tracking');
+    try {
+      const AIOverviewTracker = require('./seo/ai-overview-tracker');
+      await AIOverviewTracker.trackDaily();
+    } catch (err) { logger.error(`AI Overview tracking failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY SUNDAY 3:30AM — Backlink scan
+  cron.schedule('30 3 * * 0', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: Backlink scan');
+    try {
+      const BacklinkMonitor = require('./seo/backlink-monitor');
+      await BacklinkMonitor.scan();
+    } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY MONDAY 5:30AM — Content decay check
+  cron.schedule('30 5 * * 1', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: Content decay detection');
+    try {
+      const ContentDecay = require('./seo/content-decay');
+      await ContentDecay.detect();
+      const Cannibalization = require('./seo/cannibalization');
+      await Cannibalization.detect();
+    } catch (err) { logger.error(`Content decay/cannibalization failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 8AM — Send service reminders for tomorrow's appointments
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {
