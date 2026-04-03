@@ -230,6 +230,54 @@ function EstimateToolView() {
     }
   }
 
+  /* ── Satellite AI analysis (Claude + Gemini dual vision) ──── */
+  const [satelliteStatus, setSatelliteStatus] = useState({ type: '', msg: '' });
+  const [satelliteData, setSatelliteData] = useState(null);
+
+  async function doSatelliteAnalysis() {
+    const address = form.address.trim();
+    if (!address) { setSatelliteStatus({ type: 'err', msg: 'Enter an address first' }); return; }
+    setSatelliteStatus({ type: 'loading', msg: 'Analyzing satellite imagery with AI...' });
+    setSatelliteData(null);
+    try {
+      const r = await fetch('/api/admin/lookup/satellite-ai', {
+        method: 'POST', headers: authHeaders,
+        body: JSON.stringify({ address }),
+      });
+      const data = await r.json();
+      if (data.error) { setSatelliteStatus({ type: 'err', msg: data.error }); return; }
+
+      setSatelliteData(data);
+
+      // Auto-fill form fields from AI analysis
+      const upd = {};
+      if (data.lot_sqft) upd.lotSqFt = String(Math.round(data.lot_sqft));
+      if (data.bed_area_sqft) upd.bedArea = String(Math.round(data.bed_area_sqft));
+      if (data.palm_count) upd.palmCount = String(data.palm_count);
+      if (data.tree_count) upd.treeCount = String(data.tree_count);
+      if (data.shrub_density) upd.shrubDensity = data.shrub_density;
+      if (data.tree_density) upd.treeDensity = data.tree_density;
+      if (data.landscape_complexity) upd.landscapeComplexity = data.landscape_complexity;
+      if (data.has_pool) upd.hasPool = 'YES';
+      if (data.has_pool_cage) upd.hasPoolCage = 'YES';
+      if (data.has_large_driveway) upd.hasLargeDriveway = 'YES';
+      if (data.near_water) upd.nearWater = 'YES';
+      if (data.property_type) upd.propertyType = data.property_type;
+      if (data.perimeter_linear_ft) upd.boracareSqft = String(Math.round(data.perimeter_linear_ft));
+
+      setForm(f => ({ ...f, ...upd }));
+
+      const verify = (data.fieldVerify || []).length;
+      const conf = data.confidence === 'high' ? '🟢 HIGH' : data.confidence === 'medium' ? '🟡 MEDIUM' : '🔴 LOW';
+      setSatelliteStatus({
+        type: 'ok',
+        msg: `AI Analysis complete — Confidence: ${conf} (${data.agreementPct || '?'}% model agreement)${verify > 0 ? ` · ${verify} field(s) flagged for field verification` : ''}`,
+      });
+    } catch (e) {
+      setSatelliteStatus({ type: 'err', msg: e.message });
+    }
+  }
+
   /* ── generate estimate ────────────────────────────────────── */
   function doGenerate() {
     const yesNo = v => v === 'YES' || v === true;
@@ -354,10 +402,25 @@ function EstimateToolView() {
               <input ref={addressRef} type="text" value={form.address} onChange={e => set('address', e.target.value)} placeholder="Start typing an address..." style={sInput} />
             </Field>
             {lookupStatus.type && <div style={statusStyle(lookupStatus.type)}>{lookupStatus.msg}</div>}
-            <div style={{ ...sRow, marginBottom: 16 }}>
+            <div style={{ ...sRow, marginBottom: 8 }}>
               <button style={sBtnSm(C.blue, 'white')} onClick={doLookup}>RentCast Lookup</button>
-              <button style={sBtnSm('transparent', C.gray)} onClick={() => { setForm(f => ({ ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family', hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE', nearWater: 'NO' })); setLookupStatus({ type: '', msg: '' }); setEstimate(null); }}>Clear All</button>
+              <button style={{ ...sBtnSm('#10b981', 'white'), display: 'flex', alignItems: 'center', gap: 6 }} onClick={doSatelliteAnalysis}>{'🛰️'} AI Satellite Analysis</button>
+              <button style={sBtnSm('transparent', C.gray)} onClick={() => { setForm(f => ({ ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family', hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE', nearWater: 'NO', bedArea: '', palmCount: '', treeCount: '' })); setLookupStatus({ type: '', msg: '' }); setSatelliteStatus({ type: '', msg: '' }); setSatelliteData(null); setEstimate(null); }}>Clear All</button>
             </div>
+            {satelliteStatus.type && <div style={statusStyle(satelliteStatus.type)}>{satelliteStatus.msg}</div>}
+            {satelliteData && satelliteData.imageUrl && (
+              <div style={{ marginBottom: 12 }}>
+                <img src={satelliteData.imageUrl} alt="Satellite view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.grayLight}`, marginBottom: 8 }} />
+                {satelliteData.fieldVerify?.length > 0 && (
+                  <div style={{ fontSize: 12, color: C.red, fontWeight: 600, padding: '6px 10px', background: '#FFF3E0', borderRadius: 6 }}>
+                    {'⚠️'} Field verify: {satelliteData.fieldVerify.map(f => f.replace(/_/g, ' ')).join(', ')}
+                  </div>
+                )}
+                {satelliteData.notes && (
+                  <div style={{ fontSize: 11, color: C.gray, marginTop: 4, fontStyle: 'italic' }}>{satelliteData.notes}</div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Property Data */}

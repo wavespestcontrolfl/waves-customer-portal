@@ -46,21 +46,19 @@ router.get('/property', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/lookup/satellite-ai — proxy to Zapier for AI analysis
+// POST /api/admin/lookup/satellite-ai — dual-vision satellite analysis (Claude + Gemini)
 router.post('/satellite-ai', async (req, res, next) => {
   try {
-    const { satelliteImageUrl, address } = req.body;
-    const resp = await fetch(SATELLITE_WEBHOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ satellite_image_url: satelliteImageUrl, address }),
-    });
+    const { address, lat, lng } = req.body;
+    if (!address && !lat) return res.status(400).json({ error: 'Address or coordinates required' });
 
-    if (!resp.ok) throw new Error(`Webhook HTTP ${resp.status}`);
-    const data = await resp.json();
-    res.json(data);
+    const SatelliteAnalyzer = require('../services/satellite-analyzer');
+    const result = await SatelliteAnalyzer.analyze(address, lat ? parseFloat(lat) : null, lng ? parseFloat(lng) : null);
+
+    res.json(result);
   } catch (err) {
-    res.json({ status: 'ERROR', message: err.message });
+    logger.error(`Satellite AI failed: ${err.message}`);
+    res.json({ error: err.message });
   }
 });
 
