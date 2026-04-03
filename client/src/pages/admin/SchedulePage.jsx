@@ -970,6 +970,133 @@ const subLabelStyle = { fontSize: 11, color: D.muted, marginBottom: 4 };
 const inputStyle = { width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: '10px 12px', fontSize: 13, boxSizing: 'border-box', marginBottom: 8 };
 const checkboxRow = { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: D.text, cursor: 'pointer', marginBottom: 8 };
 
+/* ── Protocol Reference Tab ────────────────────────────── */
+
+function ProtocolReferenceTab() {
+  const [programs, setPrograms] = useState(null);
+  const [selectedTrack, setSelectedTrack] = useState(null);
+  const [trackData, setTrackData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    adminFetch('/admin/protocols/programs').then(d => { setPrograms(d); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  const loadTrack = async (key) => {
+    setSelectedTrack(key);
+    setTrackData(null);
+    const param = key === 'tree_shrub' ? 'program=tree_shrub' : `track=${key}`;
+    const d = await adminFetch(`/admin/protocols/programs?${param}`);
+    setTrackData(d.track || d.program);
+  };
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading protocols...</div>;
+
+  const thSt = { padding: '8px 10px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, textAlign: 'left', borderBottom: `1px solid ${D.border}` };
+  const tdSt = { padding: '8px 10px', fontSize: 12, color: D.text, borderBottom: `1px solid ${D.border}22`, verticalAlign: 'top', lineHeight: 1.5 };
+
+  const tierBadge = (active, label) => (
+    <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: active ? D.green + '22' : D.border + '44', color: active ? D.green : D.muted, fontWeight: 700, marginRight: 3 }}>{label}</span>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ fontSize: 14, color: D.muted }}>WaveGuard service protocols — visit-by-visit products, rates, costs, and SOPs for techs.</div>
+
+      {/* Track selector */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {programs?.lawn?.tracks?.map(t => (
+          <button key={t.key} onClick={() => loadTrack(t.key)} style={{
+            padding: '10px 16px', borderRadius: 10, cursor: 'pointer', border: 'none',
+            background: selectedTrack === t.key ? D.teal : D.card,
+            color: selectedTrack === t.key ? D.white : D.text,
+            fontSize: 13, fontWeight: 600, transition: 'all 0.15s',
+            borderLeft: `3px solid ${selectedTrack === t.key ? D.teal : D.green}`,
+          }}>
+            {'🌿'} {t.name?.substring(0, 35) || t.key}
+            <div style={{ fontSize: 10, color: selectedTrack === t.key ? D.white + 'cc' : D.muted, marginTop: 2 }}>{t.visits} visits/year</div>
+          </button>
+        ))}
+        <button onClick={() => loadTrack('tree_shrub')} style={{
+          padding: '10px 16px', borderRadius: 10, cursor: 'pointer', border: 'none',
+          background: selectedTrack === 'tree_shrub' ? D.teal : D.card,
+          color: selectedTrack === 'tree_shrub' ? D.white : D.text,
+          fontSize: 13, fontWeight: 600, transition: 'all 0.15s',
+          borderLeft: `3px solid ${selectedTrack === 'tree_shrub' ? D.teal : D.amber}`,
+        }}>
+          {'🌳'} Tree & Shrub v3
+          <div style={{ fontSize: 10, color: selectedTrack === 'tree_shrub' ? D.white + 'cc' : D.muted, marginTop: 2 }}>12 visits/year</div>
+        </button>
+      </div>
+
+      {/* Track detail */}
+      {trackData && (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' }}>
+          {/* Header */}
+          <div style={{ padding: '16px 20px', borderBottom: `1px solid ${D.border}`, background: D.bg }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>{trackData.name}</div>
+          </div>
+
+          {/* Notes/warnings */}
+          {trackData.notes?.length > 0 && (
+            <div style={{ padding: '12px 20px', borderBottom: `1px solid ${D.border}`, background: '#1a1a0a' }}>
+              {trackData.notes.map((n, i) => (
+                <div key={i} style={{ fontSize: 12, color: n.startsWith('⚠') ? D.amber : D.green, marginBottom: 4, lineHeight: 1.5 }}>{n}</div>
+              ))}
+            </div>
+          )}
+
+          {/* Visits table */}
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  <th style={thSt}>#</th>
+                  <th style={thSt}>Month</th>
+                  <th style={{ ...thSt, minWidth: 250 }}>Primary Applications</th>
+                  <th style={{ ...thSt, minWidth: 200 }}>Secondary / Conditional</th>
+                  <th style={thSt}>Mat$</th>
+                  <th style={thSt}>Lab$</th>
+                  <th style={thSt}>Tiers</th>
+                  <th style={{ ...thSt, minWidth: 200 }}>Notes / SOP</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trackData.visits?.map((v, i) => (
+                  <tr key={i} style={{ background: i % 2 === 0 ? 'transparent' : D.bg + '44' }}>
+                    <td style={{ ...tdSt, fontWeight: 700, color: D.teal, textAlign: 'center' }}>{v.visit}</td>
+                    <td style={{ ...tdSt, fontWeight: 600, color: D.white, whiteSpace: 'nowrap' }}>{v.month}</td>
+                    <td style={{ ...tdSt, whiteSpace: 'pre-wrap' }}>{v.primary}</td>
+                    <td style={{ ...tdSt, whiteSpace: 'pre-wrap', color: D.muted }}>{v.secondary || '—'}</td>
+                    <td style={{ ...tdSt, fontFamily: "'JetBrains Mono', monospace", color: D.amber, whiteSpace: 'nowrap' }}>{v.material_cost ? `$${v.material_cost}` : '—'}</td>
+                    <td style={{ ...tdSt, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'nowrap' }}>{v.labor_cost ? `$${v.labor_cost}` : '—'}</td>
+                    <td style={tdSt}>
+                      {v.tiers ? (
+                        <>{tierBadge(v.tiers.bronze, 'B')}{tierBadge(v.tiers.silver, 'S')}{tierBadge(v.tiers.enhanced, 'E')}{tierBadge(v.tiers.premium, 'P')}</>
+                      ) : (
+                        <>{tierBadge(v.tier_4x, '4x')}{tierBadge(v.tier_6x, '6x')}</>
+                      )}
+                    </td>
+                    <td style={{ ...tdSt, fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap' }}>{v.notes || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {!selectedTrack && (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 40, textAlign: 'center' }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>{'📋'}</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 4 }}>Select a program above</div>
+          <div style={{ fontSize: 13, color: D.muted }}>View the full visit-by-visit protocol with products, rates, costs, and tier requirements.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Main Schedule Page ───────────────────────────────── */
 
 export default function SchedulePage() {
@@ -1101,6 +1228,7 @@ export default function SchedulePage() {
 
   const SCHEDULE_TABS = [
     { id: 'board', label: 'Board' },
+    { id: 'protocols', label: 'Protocols' },
     { id: 'routes', label: 'AI Routes' },
     { id: 'match', label: 'Tech Match' },
     { id: 'csr', label: 'CSR Booking' },
@@ -1186,6 +1314,9 @@ export default function SchedulePage() {
           </button>
         ))}
       </div>
+
+      {/* ── Protocol Reference ── */}
+      {activeTab === 'protocols' && <ProtocolReferenceTab />}
 
       {/* ── AI Dispatch Panels ── */}
       {activeTab === 'routes' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><RoutePanel date={date} /></Suspense>}

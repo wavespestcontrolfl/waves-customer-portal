@@ -110,4 +110,49 @@ router.get('/product-label/:productId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/protocols/programs — WaveGuard lawn + T&S protocols
+router.get('/programs', async (req, res, next) => {
+  try {
+    const protocols = require('../config/protocols.json');
+    const { track, program } = req.query;
+
+    if (program === 'tree_shrub') {
+      return res.json({ program: protocols.tree_shrub });
+    }
+
+    if (track && protocols.lawn[track]) {
+      return res.json({ track: protocols.lawn[track] });
+    }
+
+    // Return summary of all tracks
+    const summary = Object.entries(protocols.lawn).map(([key, t]) => ({
+      key, name: t.name, visits: t.visits.length, notes: t.notes.length,
+    }));
+
+    res.json({
+      lawn: { tracks: summary },
+      tree_shrub: { name: protocols.tree_shrub.name, visits: protocols.tree_shrub.visits.length },
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/protocols/programs/:track/visit/:num
+router.get('/programs/:track/visit/:num', async (req, res, next) => {
+  try {
+    const protocols = require('../config/protocols.json');
+    const { track, num } = req.params;
+
+    if (track === 'tree_shrub') {
+      const visit = protocols.tree_shrub.visits.find(v => v.visit === parseInt(num));
+      return res.json({ visit, notes: protocols.tree_shrub.notes });
+    }
+
+    const trackData = protocols.lawn[track];
+    if (!trackData) return res.status(404).json({ error: 'Track not found' });
+
+    const visit = trackData.visits.find(v => v.visit === parseInt(num));
+    res.json({ visit, trackName: trackData.name, notes: trackData.notes });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
