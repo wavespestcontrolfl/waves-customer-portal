@@ -12,11 +12,14 @@
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
     "build": "cd client && npm run build",
-    "start": "cd server && npm start",
+    "start": "node server/index.js",
     "db:migrate": "cd server && npx knex migrate:latest",
     "db:rollback": "cd server && npx knex migrate:rollback",
     "db:seed": "cd server && npx knex seed:run",
     "test": "cd server && npm test"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
