@@ -61,9 +61,20 @@ const app = express();
 // MIDDLEWARE
 // =========================================================================
 
-// Security headers
+// Security headers — CSP allows Google Fonts, APIs, and inline styles
 app.use(helmet({
-  contentSecurityPolicy: config.nodeEnv === 'production' ? undefined : false,
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
+      imgSrc: ["'self'", "https:", "data:", "blob:"],
+      connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://api.rentcast.io", "https://generativelanguage.googleapis.com", "https://www.googleapis.com"],
+      frameSrc: ["'self'", "https://www.google.com"],
+      mediaSrc: ["'self'", "https:"],
+    },
+  },
 }));
 
 // CORS — allow frontend dev server and production domain
