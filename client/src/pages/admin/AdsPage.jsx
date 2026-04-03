@@ -34,6 +34,7 @@ const TABS = [
   { key: 'ai-overview', label: 'AI Overview', icon: '🤖' },
   { key: 'seo-funnel', label: 'Funnel', icon: '📈' },
   { key: 'citations', label: 'Citations', icon: '📍' },
+  { key: 'site-audit', label: 'Site Health', icon: '🩺' },
 ];
 
 const thStyle = { padding: '10px 14px', textAlign: 'left', fontSize: 12, fontWeight: 600, color: D.muted, borderBottom: `1px solid ${D.border}`, textTransform: 'uppercase', letterSpacing: '0.5px' };
@@ -1401,6 +1402,127 @@ function CitationsTab() {
   );
 }
 
+function SiteAuditTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+
+  useEffect(() => { adminFetch('/admin/seo/audit').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, []);
+
+  const runAudit = async () => {
+    setRunning(true);
+    await adminPost('/admin/seo/audit/run', {});
+    const d = await adminFetch('/admin/seo/audit');
+    setData(d);
+    setRunning(false);
+  };
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading site audit...</div>;
+  if (!data?.hasData) return (
+    <Card style={{ textAlign: 'center', padding: 60 }}>
+      <div style={{ fontSize: 48, marginBottom: 16 }}>{'🩺'}</div>
+      <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No Audit Data Yet</div>
+      <div style={{ fontSize: 14, color: D.muted, marginBottom: 20 }}>Run a site-wide technical audit to check all pages.</div>
+      <button onClick={runAudit} disabled={running} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Auditing...' : 'Run Site Audit'}</button>
+    </Card>
+  );
+
+  const run = data.latestRun || {};
+  const scoreColor = (s) => s >= 80 ? D.green : s >= 50 ? D.amber : D.red;
+  const sevColor = { critical: D.red, warning: D.amber, info: D.muted };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: 13, color: D.muted }}>Last audit: {run.run_date ? new Date(run.run_date).toLocaleDateString() : '—'} ({run.duration_seconds}s)</div>
+        </div>
+        <button onClick={runAudit} disabled={running} style={{ padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 12, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Running...' : 'Re-run Audit'}</button>
+      </div>
+
+      {/* Score + summary */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <Card style={{ padding: 16, textAlign: 'center' }}>
+          <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Site Health</div>
+          <div style={{ fontSize: 32, fontWeight: 800, color: scoreColor(parseFloat(run.avg_health_score || 0)), fontFamily: MONO }}>{Math.round(run.avg_health_score || 0)}</div>
+          {run.score_delta != null && <div style={{ fontSize: 11, color: parseFloat(run.score_delta) >= 0 ? D.green : D.red }}>{parseFloat(run.score_delta) >= 0 ? '+' : ''}{parseFloat(run.score_delta).toFixed(1)} vs last</div>}
+        </Card>
+        <KpiCard label="Healthy (80+)" value={run.pages_healthy || 0} color={D.green} />
+        <KpiCard label="Warning (50-79)" value={run.pages_warning || 0} color={D.amber} />
+        <KpiCard label="Critical (<50)" value={run.pages_critical || 0} color={D.red} />
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <KpiCard label="Broken Links" value={run.pages_with_broken_links || 0} color={run.pages_with_broken_links > 0 ? D.red : D.green} />
+        <KpiCard label="Missing Schema" value={run.pages_missing_schema || 0} color={run.pages_missing_schema > 0 ? D.amber : D.green} />
+        <KpiCard label="Thin Content" value={run.pages_thin_content || 0} color={run.pages_thin_content > 0 ? D.amber : D.green} />
+        <KpiCard label="Failing CWV" value={run.pages_failing_cwv || 0} color={run.pages_failing_cwv > 0 ? D.red : D.green} />
+      </div>
+
+      {/* Issues by category */}
+      {(data.issues || []).length > 0 && (
+        <Card>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Issues ({data.issues.length})</div>
+          {data.issues.map((issue, i) => (
+            <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, borderLeft: `3px solid ${sevColor[issue.severity] || D.muted}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: 12, color: D.white }}><span style={{ color: D.muted, textTransform: 'uppercase', fontSize: 10, marginRight: 8 }}>[{issue.issue_category}]</span>{issue.issue_type?.replace(/_/g, ' ')}</div>
+                <span style={{ fontSize: 11, color: D.muted }}>{issue.affected_count} page{issue.affected_count !== 1 ? 's' : ''}</span>
+              </div>
+              {issue.recommendation && <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>{issue.recommendation}</div>}
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {/* Page scores table */}
+      {(data.pages || []).length > 0 && (
+        <Card>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>All Pages ({data.pages.length})</div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead><tr>
+                <th style={thStyle}>URL</th><th style={thR}>Score</th><th style={thR}>Critical</th><th style={thR}>Warning</th><th style={thStyle}>Schema</th><th style={thStyle}>NAP</th>
+              </tr></thead>
+              <tbody>
+                {data.pages.slice(0, 30).map((p, i) => (
+                  <tr key={i}>
+                    <td style={{ ...tdStyle, fontFamily: 'inherit', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(p.url || '').replace(/https?:\/\/[^/]+/, '')}</td>
+                    <td style={{ ...tdR, color: scoreColor(p.technical_health_score), fontWeight: 700 }}>{p.technical_health_score}</td>
+                    <td style={{ ...tdR, color: p.issue_count_critical > 0 ? D.red : D.muted }}>{p.issue_count_critical}</td>
+                    <td style={{ ...tdR, color: p.issue_count_warning > 0 ? D.amber : D.muted }}>{p.issue_count_warning}</td>
+                    <td style={{ ...tdStyle, fontSize: 11 }}>{p.has_local_business_schema ? '✅' : '—'} {p.has_faq_schema ? 'FAQ' : ''}</td>
+                    <td style={{ ...tdStyle }}>{p.nap_present ? '✅' : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Score trend */}
+      {(data.history || []).length > 1 && (
+        <Card>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Health Score Trend</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', height: 80 }}>
+            {data.history.reverse().map((h, i) => {
+              const pct = (h.score || 0);
+              return (
+                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                  <div style={{ fontSize: 10, color: D.muted, fontFamily: MONO }}>{Math.round(pct)}</div>
+                  <div style={{ width: '100%', height: `${pct * 0.7}px`, background: scoreColor(pct), borderRadius: 3 }} />
+                  <div style={{ fontSize: 9, color: D.muted }}>{new Date(h.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 export default function AdsPage() {
   const [tab, setTab] = useState('overview');
 
@@ -1436,6 +1558,7 @@ export default function AdsPage() {
       {tab === 'ai-overview' && <AIOverviewTab />}
       {tab === 'seo-funnel' && <SEOFunnelTab />}
       {tab === 'citations' && <CitationsTab />}
+      {tab === 'site-audit' && <SiteAuditTab />}
     </div>
   );
 }

@@ -46,6 +46,16 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // WEEKLY MONDAY 1:30AM — Full site technical audit
+  cron.schedule('30 1 * * 1', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: Site-wide technical audit');
+    try {
+      const SiteAuditor = require('./seo/site-auditor');
+      await SiteAuditor.runSiteAudit();
+    } catch (err) { logger.error(`Site audit failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY MONDAY 5:30AM — Content decay check
   cron.schedule('30 5 * * 1', async () => {
     if (!isEnabled('seoIntelligence')) return;

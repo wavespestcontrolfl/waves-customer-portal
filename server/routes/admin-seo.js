@@ -421,4 +421,44 @@ router.get('/keywords', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// SITE AUDIT
+// =========================================================================
+const SiteAuditor = require('../services/seo/site-auditor');
+
+router.get('/audit', async (req, res, next) => {
+  try { res.json(await SiteAuditor.getDashboard()); } catch (err) { next(err); }
+});
+
+router.get('/audit/history', async (req, res, next) => {
+  try {
+    const runs = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').limit(20);
+    res.json({ runs });
+  } catch (err) { next(err); }
+});
+
+router.get('/audit/pages', async (req, res, next) => {
+  try {
+    const latest = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').first();
+    if (!latest) return res.json({ pages: [] });
+    const date = latest.run_date.toISOString?.().split('T')[0] || new Date().toISOString().split('T')[0];
+    const pages = await db('seo_page_audits').where('audit_date', date).orderBy('technical_health_score', 'asc');
+    res.json({ pages, auditDate: date });
+  } catch (err) { next(err); }
+});
+
+router.get('/audit/page-detail', async (req, res, next) => {
+  try {
+    const data = await SiteAuditor.getPageDetail(req.query.url);
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+router.post('/audit/run', async (req, res, next) => {
+  try {
+    const result = await SiteAuditor.runSiteAudit();
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
