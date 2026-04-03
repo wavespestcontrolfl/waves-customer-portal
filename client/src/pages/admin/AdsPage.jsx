@@ -26,15 +26,6 @@ const TABS = [
   { key: 'service-lines', label: 'Service Lines', icon: '🎯' },
   { key: 'advisor', label: 'AI Advisor', icon: '🤖' },
   { key: 'capacity', label: 'Capacity', icon: '📊' },
-  { key: 'seo', label: 'SEO Dashboard', icon: '🔍' },
-  { key: 'seo-advisor', label: 'SEO Advisor', icon: '🧠' },
-  { key: 'rankings', label: 'Rankings', icon: '📊' },
-  { key: 'backlinks', label: 'Backlinks', icon: '🔗' },
-  { key: 'content-qa', label: 'Content QA', icon: '✅' },
-  { key: 'ai-overview', label: 'AI Overview', icon: '🤖' },
-  { key: 'seo-funnel', label: 'Funnel', icon: '📈' },
-  { key: 'citations', label: 'Citations', icon: '📍' },
-  { key: 'site-audit', label: 'Site Health', icon: '🩺' },
 ];
 
 const thStyle = { padding: '10px 14px', textAlign: 'left', fontSize: 12, fontWeight: 600, color: D.muted, borderBottom: `1px solid ${D.border}`, textTransform: 'uppercase', letterSpacing: '0.5px' };
@@ -1529,7 +1520,7 @@ export default function AdsPage() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>Ads & Marketing</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>PPC</div>
       </div>
 
       {/* Tabs */}
@@ -1550,15 +1541,6 @@ export default function AdsPage() {
       {tab === 'service-lines' && <ServiceLinesTab />}
       {tab === 'advisor' && <AdvisorTab />}
       {tab === 'capacity' && <CapacityTab />}
-      {tab === 'seo' && <SEODashboardTab />}
-      {tab === 'seo-advisor' && <SEOAdvisorTab />}
-      {tab === 'rankings' && <RankingsTab />}
-      {tab === 'backlinks' && <BacklinksTab />}
-      {tab === 'content-qa' && <ContentQATab />}
-      {tab === 'ai-overview' && <AIOverviewTab />}
-      {tab === 'seo-funnel' && <SEOFunnelTab />}
-      {tab === 'citations' && <CitationsTab />}
-      {tab === 'site-audit' && <SiteAuditTab />}
     </div>
   );
 }
