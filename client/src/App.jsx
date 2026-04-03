@@ -24,7 +24,7 @@ const TechEstimatorPage = lazy(() => import('./pages/tech/TechEstimatorPage'));
 const AdminAdsPage = lazy(() => import('./pages/admin/AdsPage'));
 const AdminBlogPage = lazy(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazy(() => import('./pages/admin/KnowledgePage'));
-// DispatchPage merged into SchedulePage — /admin/dispatch redirects to /admin/schedule
+import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
@@ -70,6 +70,7 @@ export default function App() {
           <Route path="/onboard/:token" element={<OnboardingPage />} />
           <Route path="/estimate/:token" element={<EstimateViewPage />} />
           <Route path="/report/:token" element={<ReportViewPage />} />
+          <Route path="/book/:estimateToken" element={<BookingPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />
           <Route path="/tech" element={<TechLayout />}>
             <Route index element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading...</div>}><TechHomePage /></Suspense>} />

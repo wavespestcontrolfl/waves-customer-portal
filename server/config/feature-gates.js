@@ -45,6 +45,9 @@ const gates = {
   // SEO Intelligence — DataForSEO API calls, rank tracking, backlink scans
   seoIntelligence: isProd ? process.env.GATE_SEO_INTELLIGENCE === 'true' : true,
 
+  // Self-Booking — customer self-scheduling after estimate acceptance
+  selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
+
   // WordPress — publish blog posts to live site
   wordpressPublish: isProd ? process.env.GATE_WORDPRESS_PUBLISH === 'true' : true,
 };

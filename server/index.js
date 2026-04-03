@@ -148,6 +148,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/tech/knowledge', techKnowledgeRoutes);
 app.use('/api/dispatch', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, dispatchRoutes);
 app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, dispatchKnowledgeRoutes);
+app.use('/api/booking', require('./routes/booking'));
 app.use('/api/ai', aiAssistantRoutes);
 app.use('/api/webhooks/twilio', twilioVoiceWebhookRoutes);
 app.use('/api/webhooks/square', require('./routes/square-webhook'));
