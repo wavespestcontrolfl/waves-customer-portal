@@ -210,7 +210,15 @@ app.use(errorHandler);
 const PORT = config.port;
 
 // Start listening FIRST (so Railway health check passes), then run migrations
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
+  // Register voice agent routes (needs HTTP server for WebSocket)
+  try {
+    const voiceAgentRoutes = require('./routes/voice-agent');
+    voiceAgentRoutes(app, server);
+    logger.info('Voice Agent routes registered');
+  } catch (err) {
+    logger.warn(`Voice Agent setup skipped: ${err.message}`);
+  }
   logger.info(`🌊 Waves Customer Portal API running on port ${PORT}`);
   logger.info(`   Environment: ${config.nodeEnv}`);
   logger.info(`   Client URL: ${config.clientUrl}`);

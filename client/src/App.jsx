@@ -23,6 +23,7 @@ const TechHomePage = lazy(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazy(() => import('./pages/tech/TechEstimatorPage'));
 const AdminAdsPage = lazy(() => import('./pages/admin/AdsPage'));
 const AdminSEOPage = lazy(() => import('./pages/admin/SEOPage'));
+const AdminVoiceAgentPage = lazy(() => import('./pages/admin/VoiceAgentPage'));
 const AdminBlogPage = lazy(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazy(() => import('./pages/admin/KnowledgePage'));
 import BookingPage from './pages/BookingPage';
@@ -90,6 +91,7 @@ export default function App() {
             <Route path="ads" element={<Navigate to="/admin/ppc" replace />} />
             <Route path="ppc" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading PPC...</div>}><AdminAdsPage /></Suspense>} />
             <Route path="seo" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading SEO...</div>}><AdminSEOPage /></Suspense>} />
+            <Route path="voice-agent" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading voice agent...</div>}><AdminVoiceAgentPage /></Suspense>} />
             <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
             <Route path="referrals" element={<div style={{color:'#e2e8f0',padding:40,fontSize:16}}>🎁 Referrals — Coming Soon</div>} />

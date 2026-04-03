@@ -48,6 +48,9 @@ const gates = {
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
 
+  // Voice Agent — AI phone agent for missed/after-hours calls
+  voiceAgent: isProd ? process.env.GATE_VOICE_AGENT === 'true' : true,
+
   // WordPress — publish blog posts to live site
   wordpressPublish: isProd ? process.env.GATE_WORDPRESS_PUBLISH === 'true' : true,
 };
