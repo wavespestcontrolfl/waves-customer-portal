@@ -1,5 +1,5 @@
-const CACHE_NAME = 'waves-v1';
-const PRECACHE_URLS = ['/', '/offline.html'];
+const CACHE_NAME = 'waves-v2';
+const PRECACHE_URLS = ['/'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(PRECACHE_URLS)));
@@ -13,19 +13,17 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(
-      fetch(event.request).then(response => {
-        if (event.request.method === 'GET' && response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-        }
-        return response;
-      }).catch(() => caches.match(event.request))
-    );
-    return;
-  }
-  event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));
+
+  // Don't intercept external requests (fonts, APIs, etc.) — let the browser handle them directly
+  if (url.origin !== self.location.origin) return;
+
+  // Don't intercept API calls
+  if (url.pathname.startsWith('/api/')) return;
+
+  // For same-origin non-API requests: try cache first, fall back to network
+  event.respondWith(
+    caches.match(event.request).then(cached => cached || fetch(event.request))
+  );
 });
 
 self.addEventListener('push', event => {
