@@ -6,7 +6,7 @@ const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanel'));
 const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanel'));
 const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanel'));
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const D = {
   bg: '#0f1923', card: '#1e293b', border: '#334155', input: '#0f172a',

@@ -4,7 +4,7 @@ import { FONTS, BUTTON_BASE } from '../theme';
 
 const EstimatePage = lazy(() => import('./admin/EstimatePage'));
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', cardHover: '#253348', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', wavesRed: '#A83B34' };
 
 function adminFetch(path, opts = {}) {
