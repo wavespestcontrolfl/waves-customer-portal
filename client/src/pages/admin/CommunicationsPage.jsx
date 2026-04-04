@@ -131,6 +131,86 @@ function ChannelBar({ type, count, max }) {
 }
 
 // =========================================================================
+// =========================================================================
+// CALL LOG TAB
+// =========================================================================
+function CallLogTab() {
+  const [calls, setCalls] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    adminFetch('/ai/admin/calls?days=30').then(d => { setCalls(d.calls || []); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading call log...</div>;
+
+  const answered = calls.filter(c => c.answered_by === 'human').length;
+  const aiHandled = calls.filter(c => c.answered_by === 'voice_agent').length;
+  const voicemail = calls.filter(c => c.answered_by === 'voicemail').length;
+  const missed = calls.filter(c => !c.answered_by || c.answered_by === 'missed').length;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Stats */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {[
+          { label: 'Total', value: calls.length, color: D.white },
+          { label: 'Answered', value: answered, color: D.green },
+          { label: 'AI Agent', value: aiHandled, color: D.teal },
+          { label: 'Voicemail', value: voicemail, color: D.amber },
+          { label: 'Missed', value: missed, color: D.red },
+        ].map((s, i) => (
+          <div key={i} style={{ flex: '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center' }}>
+            <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Call list */}
+      <div style={{ background: D.card, borderRadius: 12, padding: '16px 20px', border: `1px solid ${D.border}` }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>Call Log</h2>
+          <a href="tel:+19413187612" style={{ padding: '6px 14px', borderRadius: 6, background: D.green, color: D.white, fontSize: 12, fontWeight: 600, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}>{'📞'} Call</a>
+        </div>
+
+        {calls.length === 0 ? (
+          <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No calls recorded yet.</div>
+        ) : (
+          <div style={{ maxHeight: 480, overflowY: 'auto' }}>
+            {calls.map(c => {
+              const answeredColor = c.answered_by === 'human' ? D.green : c.answered_by === 'voice_agent' ? D.teal : c.answered_by === 'voicemail' ? D.amber : D.red;
+              const answeredLabel = c.answered_by === 'human' ? 'Answered' : c.answered_by === 'voice_agent' ? 'AI Agent' : c.answered_by === 'voicemail' ? 'Voicemail' : 'Missed';
+              const dur = c.duration_seconds ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, '0')}` : '—';
+
+              return (
+                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
+                  <span style={{ fontSize: 16, width: 20, textAlign: 'center', color: c.direction === 'inbound' ? D.teal : D.green }}>{c.direction === 'inbound' ? '↓' : '↑'}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>
+                      {c.first_name ? `${c.first_name} ${c.last_name || ''}` : c.from_phone || 'Unknown'}
+                    </div>
+                    <div style={{ fontSize: 11, color: D.muted }}>
+                      {c.from_phone} · {dur} · {c.caller_city ? `${c.caller_city}, ${c.caller_state}` : ''}
+                    </div>
+                    {c.voice_agent_outcome && <div style={{ fontSize: 11, color: D.teal, marginTop: 2 }}>Outcome: {c.voice_agent_outcome?.replace(/_/g, ' ')}</div>}
+                    {c.transcription && <div style={{ fontSize: 11, color: D.muted, marginTop: 2, fontStyle: 'italic' }}>"{(c.transcription || '').substring(0, 80)}..."</div>}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: answeredColor + '22', color: answeredColor }}>{answeredLabel}</span>
+                    <span style={{ fontSize: 10, color: D.muted }}>{timeAgo(c.created_at)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =========================================================================
 // CSR COACH TAB
 // =========================================================================
 function CSRCoachTab() {
@@ -408,7 +488,7 @@ export default function CommunicationsPage() {
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
-        {[{ key: 'sms', label: '📱 SMS Log' }, { key: 'csr', label: '🎯 CSR Coach' }].map(t => (
+        {[{ key: 'sms', label: '📱 SMS' }, { key: 'calls', label: '📞 Call Log' }, { key: 'csr', label: '🎯 CSR Coach' }].map(t => (
           <button key={t.key} onClick={() => setCommsTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
@@ -418,7 +498,7 @@ export default function CommunicationsPage() {
         ))}
       </div>
 
-      {commsTab === 'csr' ? <CSRCoachTab /> : <>
+      {commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : <>
 
       {/* --- Phone Numbers Overview --- */}
       <div style={{ marginBottom: 28 }}>
@@ -443,7 +523,7 @@ export default function CommunicationsPage() {
           background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
           padding: 20, flex: '1 1 340px', minWidth: 300,
         }}>
-          <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, margin: '0 0 14px' }}>Send SMS</h2>
+          <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, margin: '0 0 14px' }}>SMS</h2>
 
           <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>To</label>
           <input
