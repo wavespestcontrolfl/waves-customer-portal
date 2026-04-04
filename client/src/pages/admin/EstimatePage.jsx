@@ -1072,7 +1072,7 @@ function EstimatePipelineView() {
 
       {/* Filter */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
-        {['all', 'new', 'draft', 'sent', 'viewed', 'accepted', 'declined', 'expired'].map(f => (
+        {['all', 'draft', 'sent', 'viewed', 'accepted', 'declined', 'expired'].map(f => (
           <button key={f} onClick={() => setFilter(f)} style={{
             padding: '6px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
             background: filter === f ? C.teal : C.card,

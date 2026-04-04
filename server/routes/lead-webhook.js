@@ -135,7 +135,7 @@ router.post('/', async (req, res) => {
         customer_phone: phoneFormatted,
         customer_email: email || null,
         address: address || '',
-        status: 'new',
+        status: 'draft',
         source: 'lead_webhook',
         service_interest: serviceInterest || null,
         lead_source: leadSource.source,
