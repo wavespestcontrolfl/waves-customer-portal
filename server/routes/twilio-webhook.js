@@ -113,6 +113,17 @@ router.post('/sms', async (req, res) => {
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
+    // Notify Adam of every inbound SMS
+    if (Body && process.env.ADAM_PHONE && From !== process.env.ADAM_PHONE) {
+      try {
+        const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+        await TwilioService.sendSMS(process.env.ADAM_PHONE,
+          `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`,
+          { messageType: 'internal_alert' }
+        );
+      } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
+    }
+
     // Van wrap tracking — new lead flow
     if (numberConfig.type === 'tracking') {
       // Auto-reply from the van wrap number
