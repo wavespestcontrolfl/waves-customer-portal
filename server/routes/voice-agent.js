@@ -11,14 +11,8 @@ const {
 } = require('../services/voice-agent/agent');
 
 function voiceAgentRoutes(app, httpServer) {
-  initVoiceAgent();
-
-  // WebSocket for Twilio ConversationRelay
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws/voice-agent' });
-  wss.on('connection', (ws, req) => {
-    console.log('[VoiceAgent] WebSocket connected');
-    handleVoiceWebSocket(ws, req);
-  });
+  // WebSocket is set up separately in index.js after app.listen()
+  // This function only registers Express routes
 
   // TwiML — voice agent picks up (after ring timeout or directly)
   app.all('/api/webhooks/twilio/voice-agent', (req, res) => {
