@@ -312,7 +312,7 @@ router.post('/serp/analyze', async (req, res, next) => {
 // Backlinks
 router.get('/backlinks', async (req, res, next) => {
   try {
-    const data = await BacklinkMonitor.getDashboard();
+    const data = await BacklinkMonitor.getFullDashboard();
     res.json(data);
   } catch (err) { next(err); }
 });
@@ -320,6 +320,7 @@ router.get('/backlinks', async (req, res, next) => {
 router.post('/backlinks/scan', async (req, res, next) => {
   try {
     const result = await BacklinkMonitor.scan();
+    await BacklinkMonitor.takeSnapshot();
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -328,6 +329,23 @@ router.post('/backlinks/disavow', async (req, res, next) => {
   try {
     const result = await BacklinkMonitor.generateDisavow();
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.post('/backlinks/competitor-gaps', async (req, res, next) => {
+  try {
+    const { domain } = req.body;
+    if (!domain) return res.status(400).json({ error: 'Competitor domain required' });
+    const result = await BacklinkMonitor.scanCompetitorGaps(domain);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.post('/backlinks/llm-mentions', async (req, res, next) => {
+  try {
+    await BacklinkMonitor.checkLLMMentions();
+    const mentions = await db('seo_llm_mentions').orderBy('check_date', 'desc').limit(20);
+    res.json({ mentions });
   } catch (err) { next(err); }
 });
 

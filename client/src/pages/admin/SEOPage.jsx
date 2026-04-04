@@ -41,11 +41,10 @@ const TABS = [
   { key: 'dashboard', label: 'Dashboard', icon: '🔍' },
   { key: 'advisor', label: 'SEO Advisor', icon: '🧠' },
   { key: 'rankings', label: 'Rankings', icon: '📊' },
-  { key: 'backlinks', label: 'Backlinks', icon: '🔗' },
+  { key: 'backlinks', label: 'Backlinks & Citations', icon: '🔗' },
   { key: 'content-qa', label: 'Content QA', icon: '✅' },
   { key: 'ai-overview', label: 'AI Overview', icon: '🤖' },
   { key: 'funnel', label: 'Funnel', icon: '📈' },
-  { key: 'citations', label: 'Citations', icon: '📍' },
   { key: 'site-audit', label: 'Site Health', icon: '🩺' },
   { key: 'blog', label: 'Blog Content', icon: '📝' },
 ];
@@ -208,17 +207,137 @@ function RankingsTab() {
 function BacklinksTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [scanning, setScanning] = useState(false);
+  const [subTab, setSubTab] = useState('overview');
+
   useEffect(() => { adminFetch('/admin/seo/backlinks').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, []);
+
+  const handleScan = async () => { setScanning(true); await adminPost('/admin/seo/backlinks/scan', {}); const d = await adminFetch('/admin/seo/backlinks'); setData(d); setScanning(false); };
+
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading backlinks...</div>;
-  if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No backlink data yet.</div></Card>;
+  if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No backlink data yet. Click "Scan" to pull from DataForSEO.</div></Card>;
+
+  const sevColor = { critical: D.red, warning: D.amber, watch: D.muted, clean: D.green };
+  const statusColor = { active: D.green, inconsistent: D.red, missing: D.amber, claimed: D.teal, unchecked: D.muted };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-        <KpiCard label="Total" value={data.total || 0} />
+      {/* Sub-tabs */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[{ key: 'overview', label: 'Overview' }, { key: 'citations', label: 'Citations' }, { key: 'gaps', label: 'Competitor Gaps' }, { key: 'llm', label: 'LLM Mentions' }].map(t => (
+            <button key={t.key} onClick={() => setSubTab(t.key)} style={{ padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, background: subTab === t.key ? D.teal : D.bg, color: subTab === t.key ? D.white : D.muted }}>{t.label}</button>
+          ))}
+        </div>
+        <button onClick={handleScan} disabled={scanning} style={{ padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 12, cursor: 'pointer', opacity: scanning ? 0.5 : 1 }}>{scanning ? 'Scanning...' : 'Scan Backlinks'}</button>
+      </div>
+
+      {/* Stats */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+        <KpiCard label="Total Links" value={data.total || 0} />
         <KpiCard label="Critical" value={data.critical || 0} color={D.red} />
         <KpiCard label="Warning" value={data.warning || 0} color={D.amber} />
         <KpiCard label="Clean" value={data.clean || 0} color={D.green} />
+        <KpiCard label="Citations" value={data.citationStats?.total || 0} sub={{ text: `${data.citationStats?.active || 0} active` }} />
       </div>
+
+      {/* Overview sub-tab */}
+      {subTab === 'overview' && (
+        <>
+          {data.anchorDistribution && (
+            <Card>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Anchor Text Distribution</div>
+              {Object.entries(data.anchorDistribution).map(([type, count]) => (
+                <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                  <div style={{ width: 100, fontSize: 12, color: D.text, textAlign: 'right', textTransform: 'capitalize' }}>{type.replace('_', ' ')}</div>
+                  <div style={{ flex: 1, height: 14, background: D.bg, borderRadius: 3 }}>
+                    <div style={{ height: '100%', borderRadius: 3, background: type === 'branded' ? D.green : type === 'keyword_rich' ? D.amber : D.teal, width: `${Math.min(100, (count / Math.max(data.total, 1)) * 100)}%` }} />
+                  </div>
+                  <div style={{ width: 30, fontSize: 12, color: D.muted, fontFamily: MONO }}>{count}</div>
+                </div>
+              ))}
+            </Card>
+          )}
+          {(data.recentToxic || []).length > 0 && (
+            <Card>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.red, marginBottom: 12 }}>Toxic Links</div>
+              {data.recentToxic.map((l, i) => (
+                <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, borderLeft: `3px solid ${sevColor[l.severity]}` }}>
+                  <div style={{ fontSize: 12, color: D.white }}>{l.source_domain}</div>
+                  <div style={{ fontSize: 11, color: D.muted }}>Anchor: "{l.anchor_text}" · Toxicity: {l.toxicity_score}/100</div>
+                </div>
+              ))}
+            </Card>
+          )}
+          {/* Trend */}
+          {(data.snapshots || []).length > 1 && (
+            <Card>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Backlink Trend</div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', height: 60 }}>
+                {(data.snapshots || []).reverse().map((s, i) => (
+                  <div key={i} style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{ fontSize: 10, color: D.muted, fontFamily: MONO }}>{s.total_backlinks}</div>
+                    <div style={{ height: `${Math.max(4, (s.total_backlinks || 0) / 2)}px`, background: D.teal, borderRadius: 2, marginTop: 2 }} />
+                    <div style={{ fontSize: 9, color: D.muted, marginTop: 2 }}>{new Date(s.snapshot_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+        </>
+      )}
+
+      {/* Citations sub-tab */}
+      {subTab === 'citations' && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Directory Citations ({data.citationStats?.total || 0})</div>
+          {(data.citations || []).map((c, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${D.border}` }}>
+              <div style={{ width: 8, height: 8, borderRadius: 4, background: statusColor[c.status] || D.muted, flexShrink: 0 }} />
+              <div style={{ flex: 1, fontSize: 13, color: D.white }}>{c.directory_name}</div>
+              {c.listing_url && <a href={c.listing_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, textDecoration: 'none' }}>View</a>}
+              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: (statusColor[c.status] || D.muted) + '22', color: statusColor[c.status] || D.muted, textTransform: 'uppercase', fontWeight: 700 }}>{c.status}</span>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {/* Competitor Gaps sub-tab */}
+      {subTab === 'gaps' && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.amber, marginBottom: 12 }}>Competitor Gap Opportunities ({(data.competitorGaps || []).length})</div>
+          <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>Domains linking to competitors but not to Waves</div>
+          {(data.competitorGaps || []).length === 0 ? (
+            <div style={{ fontSize: 13, color: D.muted, padding: 20, textAlign: 'center' }}>Run a competitor gap scan to find opportunities</div>
+          ) : (data.competitorGaps || []).map((g, i) => (
+            <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: 12, color: D.white, fontWeight: 500 }}>{g.source_domain}</div>
+                <span style={{ fontSize: 10, color: D.muted }}>DR: {g.source_domain_rating || '?'}</span>
+              </div>
+              <div style={{ fontSize: 11, color: D.muted }}>Links to: {g.competitor_domain} · Anchor: "{(g.anchor_text || '').substring(0, 40)}"</div>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {/* LLM Mentions sub-tab */}
+      {subTab === 'llm' && (
+        <Card>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>LLM Mentions ({data.llmStats?.wavesMentioned || 0}/{data.llmStats?.total || 0} mentioning Waves)</div>
+            <button onClick={() => adminPost('/admin/seo/backlinks/llm-mentions', {})} style={{ padding: '4px 10px', borderRadius: 4, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 11, cursor: 'pointer' }}>Check Now</button>
+          </div>
+          {(data.llmMentions || []).length === 0 ? (
+            <div style={{ fontSize: 13, color: D.muted, padding: 20, textAlign: 'center' }}>Click "Check Now" to scan LLM responses for Waves mentions</div>
+          ) : (data.llmMentions || []).map((m, i) => (
+            <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, borderLeft: `3px solid ${m.waves_mentioned ? D.green : D.muted}` }}>
+              <div style={{ fontSize: 12, color: D.white }}>"{m.query}"</div>
+              <div style={{ fontSize: 11, color: m.waves_mentioned ? D.green : D.muted }}>{m.waves_mentioned ? '✅ Waves mentioned' : '— Not mentioned'} · {m.llm_platform} · {m.check_date}</div>
+            </div>
+          ))}
+        </Card>
+      )}
     </div>
   );
 }
@@ -356,7 +475,6 @@ export default function SEOPage() {
       {tab === 'content-qa' && <ContentQATab />}
       {tab === 'ai-overview' && <AIOverviewTab />}
       {tab === 'funnel' && <FunnelTab />}
-      {tab === 'citations' && <CitationsTab />}
       {tab === 'site-audit' && <SiteAuditTab />}
       {tab === 'blog' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading blog...</div>}><BlogPage /></Suspense>}
     </div>
