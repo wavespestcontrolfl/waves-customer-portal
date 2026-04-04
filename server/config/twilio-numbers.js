@@ -51,6 +51,8 @@ const TWILIO_NUMBERS = {
     if (domain) return { ...domain, type: 'domain_tracking', locationId: domain.location };
     if (this.tracking.vanWrap.number === phoneNumber) return { ...this.tracking.vanWrap, type: 'van_tracking' };
     if (this.tollFree.number === phoneNumber) return { ...this.tollFree, type: 'tollFree' };
+    const reserve = this.reserve.find(r => r.number === phoneNumber);
+    if (reserve) return { ...reserve, type: 'location', locationId: 'lakewood-ranch' };
     return null;
   },
 
