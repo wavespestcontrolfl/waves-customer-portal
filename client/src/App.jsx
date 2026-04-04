@@ -26,6 +26,7 @@ const AdminSEOPage = lazy(() => import('./pages/admin/SEOPage'));
 const AdminVoiceAgentPage = lazy(() => import('./pages/admin/VoiceAgentPage'));
 const AdminBlogPage = lazy(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazy(() => import('./pages/admin/KnowledgePage'));
+const AdminSettingsPage = lazy(() => import('./pages/admin/SettingsPage'));
 import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
@@ -96,7 +97,7 @@ export default function App() {
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
             <Route path="referrals" element={<div style={{color:'#e2e8f0',padding:40,fontSize:16}}>🎁 Referrals — Coming Soon</div>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
-            <Route path="settings" element={<div style={{color:'#e2e8f0',padding:40,fontSize:16}}>⚙️ Settings — Coming Soon</div>} />
+            <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
           </Route>
           <Route
             path="/*"

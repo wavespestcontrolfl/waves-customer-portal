@@ -82,8 +82,16 @@ export default function AdminLayout() {
         </nav>
 
         <div style={{ paddingTop: 16, borderTop: `1px solid ${D.border}` }}>
-          <Link to="/" style={{ fontSize: 12, color: D.teal, textDecoration: 'none', display: 'block', padding: '8px 12px' }}>← Customer Portal</Link>
-          <div onClick={handleLogout} style={{ fontSize: 12, color: D.red, cursor: 'pointer', padding: '8px 12px' }}>Sign Out</div>
+          <Link to="/" style={{ fontSize: 12, color: D.teal, textDecoration: 'none', display: 'block', padding: '8px 12px' }}>{'←'} Customer Portal</Link>
+          <div onClick={handleLogout} style={{
+            fontSize: 13, color: D.red, cursor: 'pointer', padding: '10px 12px',
+            borderRadius: 8, marginTop: 4, fontWeight: 600,
+            display: 'flex', alignItems: 'center', gap: 8,
+            transition: 'background 0.15s',
+          }}
+            onMouseEnter={e => e.currentTarget.style.background = D.red + '15'}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+          >{'🚪'} Sign Out</div>
           <div style={{ fontSize: 10, color: D.border, padding: '4px 12px' }}>v2.0</div>
         </div>
       </div>
