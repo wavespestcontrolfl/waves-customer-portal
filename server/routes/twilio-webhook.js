@@ -113,8 +113,8 @@ router.post('/sms', async (req, res) => {
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
-    // Notify Adam of every inbound SMS
-    if (Body && process.env.ADAM_PHONE && From !== process.env.ADAM_PHONE) {
+    // Notify Adam of every inbound SMS (skip only if it would create a loop — same from AND to)
+    if (Body && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
