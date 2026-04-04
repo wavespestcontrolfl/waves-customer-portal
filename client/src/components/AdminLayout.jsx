@@ -31,6 +31,10 @@ export default function AdminLayout() {
     if (!token) { navigate('/admin/login', { replace: true }); return; }
     const u = localStorage.getItem('waves_admin_user');
     if (u) setUser(JSON.parse(u));
+    // Verify token is still valid
+    fetch('/api/admin/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => { if (r.status === 401) { localStorage.removeItem('waves_admin_token'); localStorage.removeItem('waves_admin_user'); navigate('/admin/login', { replace: true }); } })
+      .catch(() => {});
   }, [navigate]);
 
   const handleLogout = () => {

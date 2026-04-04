@@ -8,7 +8,10 @@ const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', 
 function adminFetch(path) {
   return fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
-  }).then(r => r.json());
+  }).then(r => {
+    if (r.status === 401) { window.location.href = '/admin/login'; throw new Error('Session expired'); }
+    return r.json();
+  });
 }
 
 function fmt(n) { return '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
@@ -60,7 +63,7 @@ export default function DashboardPage() {
   }, []);
 
   if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center', fontSize: 15 }}>Loading dashboard...</div>;
-  if (!data) return <div style={{ color: D.red, padding: 60, textAlign: 'center' }}>Failed to load dashboard</div>;
+  if (!data || data.error || !data.kpis) return <div style={{ color: D.red, padding: 60, textAlign: 'center' }}>Failed to load dashboard. <a href="/admin/login" style={{ color: D.teal }}>Try logging in again</a></div>;
 
   if (dashTab === 'revenue') {
     return (
