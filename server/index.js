@@ -186,7 +186,31 @@ app.get('/api/health', (req, res) => {
 
 if (config.nodeEnv === 'production') {
   const clientBuild = path.join(__dirname, '..', 'client', 'dist');
-  app.use(express.static(clientBuild));
+
+  // Never cache sw.js or index.html — ensures deploys are picked up immediately
+  app.get('/sw.js', (req, res) => {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Service-Worker-Allowed', '/');
+    res.sendFile(path.join(clientBuild, 'sw.js'));
+  });
+  app.get('/', (req, res, next) => {
+    if (req.accepts('html')) {
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      return res.sendFile(path.join(clientBuild, 'index.html'));
+    }
+    next();
+  });
+
+  app.use(express.static(clientBuild, {
+    maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year
+    immutable: true,
+    setHeaders: (res, filePath) => {
+      // But never cache index.html or sw.js
+      if (filePath.endsWith('.html') || filePath.endsWith('sw.js')) {
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      }
+    },
+  }));
 
   // SPA fallback — serve index.html for all non-API routes
   app.get('*', (req, res) => {
