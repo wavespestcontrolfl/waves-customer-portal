@@ -377,7 +377,7 @@ function BacklinkAgentPanel() {
   useEffect(() => { loadData(); }, []);
 
   const handleAddUrls = async () => {
-    const urls = urlInput.split('\n').map(u => u.trim()).filter(u => u && u.startsWith('http'));
+    const urls = urlInput.split('\n').map(u => u.trim()).filter(Boolean).map(u => u.startsWith('http') ? u : `https://${u}`);
     if (urls.length === 0) return;
     const result = await adminPost('/admin/backlink-agent/queue', { urls });
     setAddResult(result);
@@ -458,7 +458,7 @@ function BacklinkAgentPanel() {
               style={{ width: '100%', padding: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', resize: 'vertical', outline: 'none', boxSizing: 'border-box', marginBottom: 8 }}
             />
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, color: D.muted }}>{urlInput.split('\n').filter(u => u.trim().startsWith('http')).length} URLs detected</span>
+              <span style={{ fontSize: 12, color: D.muted }}>{urlInput.split('\n').filter(u => u.trim()).length} URLs detected</span>
               <button onClick={handleAddUrls} style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Add to Queue</button>
             </div>
             {addResult && (
