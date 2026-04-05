@@ -246,7 +246,7 @@ function CallLogTab() {
   const [callResult, setCallResult] = useState(null);
 
   const loadCalls = () => {
-    adminFetch('/ai/admin/calls?days=30').then(d => { setCalls(d.calls || []); setLoading(false); }).catch(() => setLoading(false));
+    adminFetch('/ai/admin/calls?days=365&limit=200').then(d => { setCalls(d.calls || []); setLoading(false); }).catch(() => setLoading(false));
   };
 
   useEffect(() => { loadCalls(); }, []);
