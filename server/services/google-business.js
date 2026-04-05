@@ -4,57 +4,59 @@ const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 
 /**
- * Google Business Profile service — multi-account support.
+ * Google Business Profile service — fully separate credentials per account.
  *
- * One OAuth2 Client ID + Secret (shared across all accounts).
- * Separate refresh token per Google account (each location is owned by a different account).
+ * Each location has its own Google Cloud project with its own OAuth2 Client ID,
+ * Secret, and Refresh Token:
  *
- * Env vars:
- *   GBP_CLIENT_ID            — OAuth2 client ID (one Google Cloud project)
- *   GBP_CLIENT_SECRET        — OAuth2 client secret
- *   GBP_REFRESH_TOKEN_LWR    — Refresh token for Lakewood Ranch account
- *   GBP_REFRESH_TOKEN_PARRISH — Refresh token for Parrish account
- *   GBP_REFRESH_TOKEN_SARASOTA — Refresh token for Sarasota account
- *   GBP_REFRESH_TOKEN_VENICE  — Refresh token for Venice account
- *
- * Legacy fallback: GOOGLE_BUSINESS_CLIENT_ID, GOOGLE_BUSINESS_CLIENT_SECRET,
- *   GOOGLE_BUSINESS_REFRESH_TOKEN (single-account mode)
+ *   GBP_CLIENT_ID_LWR / GBP_CLIENT_SECRET_LWR / GBP_REFRESH_TOKEN_LWR
+ *   GBP_CLIENT_ID_PARRISH / GBP_CLIENT_SECRET_PARRISH / GBP_REFRESH_TOKEN_PARRISH
+ *   GBP_CLIENT_ID_SARASOTA / GBP_CLIENT_SECRET_SARASOTA / GBP_REFRESH_TOKEN_SARASOTA
+ *   GBP_CLIENT_ID_VENICE / GBP_CLIENT_SECRET_VENICE / GBP_REFRESH_TOKEN_VENICE
  */
+
+const LOCATION_ENV_KEYS = {
+  'lakewood-ranch': 'LWR',
+  'parrish': 'PARRISH',
+  'sarasota': 'SARASOTA',
+  'venice': 'VENICE',
+};
+
 class GoogleBusinessService {
   constructor() {
-    this.clientId = process.env.GBP_CLIENT_ID || process.env.GOOGLE_BUSINESS_CLIENT_ID;
-    this.clientSecret = process.env.GBP_CLIENT_SECRET || process.env.GOOGLE_BUSINESS_CLIENT_SECRET;
-    this.redirectUri = process.env.GBP_REDIRECT_URI || process.env.GOOGLE_BUSINESS_REDIRECT_URI || 'https://portal.wavespestcontrol.com/api/admin/settings/google/callback';
+    // Check if any location has credentials
+    this.configured = Object.values(LOCATION_ENV_KEYS).some(key =>
+      process.env[`GBP_CLIENT_ID_${key}`] && process.env[`GBP_REFRESH_TOKEN_${key}`]
+    );
 
-    this.configured = !!(this.clientId && this.clientSecret);
+    this.redirectUri = process.env.GBP_REDIRECT_URI || 'https://portal.wavespestcontrol.com/api/admin/settings/google/callback';
 
     // Cache of OAuth2 clients per location
     this._clients = {};
 
     if (!this.configured) {
-      logger.warn('[gbp] GBP_CLIENT_ID or GBP_CLIENT_SECRET not set — Google Business Profile disabled');
+      logger.warn('[gbp] No GBP credentials found for any location — Google Business Profile disabled');
     }
   }
 
   /**
    * Get an OAuth2 client for a specific location.
-   * Each location may use a different Google account (different refresh token).
+   * Each location has its own Client ID, Secret, and Refresh Token.
    */
   _getClient(locationId) {
     if (this._clients[locationId]) return this._clients[locationId];
 
-    const loc = WAVES_LOCATIONS.find(l => l.id === locationId);
-    const tokenEnvKey = loc?.googleRefreshTokenEnv;
-    const refreshToken = tokenEnvKey ? process.env[tokenEnvKey] : null;
+    const envKey = LOCATION_ENV_KEYS[locationId];
+    if (!envKey) return null;
 
-    // Legacy fallback: single token for all
-    const fallbackToken = process.env.GOOGLE_BUSINESS_REFRESH_TOKEN;
-    const token = refreshToken || fallbackToken;
+    const clientId = process.env[`GBP_CLIENT_ID_${envKey}`];
+    const clientSecret = process.env[`GBP_CLIENT_SECRET_${envKey}`];
+    const refreshToken = process.env[`GBP_REFRESH_TOKEN_${envKey}`];
 
-    if (!token || !this.configured) return null;
+    if (!clientId || !clientSecret || !refreshToken) return null;
 
-    const client = new google.auth.OAuth2(this.clientId, this.clientSecret, this.redirectUri);
-    client.setCredentials({ refresh_token: token });
+    const client = new google.auth.OAuth2(clientId, clientSecret, this.redirectUri);
+    client.setCredentials({ refresh_token: refreshToken });
     this._clients[locationId] = client;
     return client;
   }
@@ -70,12 +72,12 @@ class GoogleBusinessService {
   }
 
   /**
-   * Check which locations have tokens configured.
+   * Check which locations have credentials configured.
    */
   getConfiguredLocations() {
     return WAVES_LOCATIONS.filter(loc => {
-      const tokenEnvKey = loc.googleRefreshTokenEnv;
-      return (tokenEnvKey && process.env[tokenEnvKey]) || process.env.GOOGLE_BUSINESS_REFRESH_TOKEN;
+      const envKey = LOCATION_ENV_KEYS[loc.id];
+      return envKey && process.env[`GBP_CLIENT_ID_${envKey}`] && process.env[`GBP_REFRESH_TOKEN_${envKey}`];
     });
   }
 
@@ -179,11 +181,10 @@ class GoogleBusinessService {
     for (const loc of WAVES_LOCATIONS) {
       if (!loc.googleLocationResourceName) continue;
 
-      // Check if this location has a token
-      const tokenEnvKey = loc.googleRefreshTokenEnv;
-      const hasToken = (tokenEnvKey && process.env[tokenEnvKey]) || process.env.GOOGLE_BUSINESS_REFRESH_TOKEN;
-      if (!hasToken) {
-        errors.push({ location: loc.name, error: 'No refresh token configured' });
+      // Check if this location has credentials
+      const envKey = LOCATION_ENV_KEYS[loc.id];
+      if (!envKey || !process.env[`GBP_CLIENT_ID_${envKey}`] || !process.env[`GBP_REFRESH_TOKEN_${envKey}`]) {
+        errors.push({ location: loc.name, error: 'No credentials configured' });
         continue;
       }
 
@@ -252,17 +253,24 @@ class GoogleBusinessService {
   // OAUTH HELPERS — for initial token setup
   // =========================================================================
   getAuthUrl(locationId) {
-    if (!this.configured) throw new Error('OAuth not configured — set GBP_CLIENT_ID and GBP_CLIENT_SECRET');
-    const client = new google.auth.OAuth2(this.clientId, this.clientSecret, this.redirectUri);
+    const envKey = LOCATION_ENV_KEYS[locationId];
+    if (!envKey) throw new Error(`Unknown location: ${locationId}`);
+    const clientId = process.env[`GBP_CLIENT_ID_${envKey}`];
+    const clientSecret = process.env[`GBP_CLIENT_SECRET_${envKey}`];
+    if (!clientId || !clientSecret) throw new Error(`GBP_CLIENT_ID_${envKey} and GBP_CLIENT_SECRET_${envKey} must be set first`);
+    const client = new google.auth.OAuth2(clientId, clientSecret, this.redirectUri);
     return client.generateAuthUrl({
       access_type: 'offline', prompt: 'consent',
       scope: ['https://www.googleapis.com/auth/business.manage'],
-      state: locationId || '', // Pass location ID through OAuth flow
+      state: locationId,
     });
   }
 
-  async handleCallback(code) {
-    const client = new google.auth.OAuth2(this.clientId, this.clientSecret, this.redirectUri);
+  async handleCallback(code, locationId) {
+    const envKey = LOCATION_ENV_KEYS[locationId];
+    const clientId = process.env[`GBP_CLIENT_ID_${envKey}`];
+    const clientSecret = process.env[`GBP_CLIENT_SECRET_${envKey}`];
+    const client = new google.auth.OAuth2(clientId, clientSecret, this.redirectUri);
     const { tokens } = await client.getToken(code);
     return tokens;
   }
