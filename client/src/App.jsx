@@ -16,6 +16,7 @@ import AdminInventoryPage from './pages/admin/InventoryPage';
 import AdminRevenuePage from './pages/admin/RevenuePage';
 import AdminCommunicationsPage from './pages/admin/CommunicationsPage';
 import AdminCustomersPage from './pages/admin/CustomersPage';
+import AdminReferralsPage from './pages/admin/ReferralsPage';
 import ReportViewPage from './pages/ReportViewPage';
 import { lazy, Suspense } from 'react';
 const AdminEstimatePage = lazy(() => import('./pages/admin/EstimatePage'));
@@ -95,7 +96,7 @@ export default function App() {
             <Route path="voice-agent" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading voice agent...</div>}><AdminVoiceAgentPage /></Suspense>} />
             <Route path="blog" element={<Navigate to="/admin/seo" replace />} />
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
-            <Route path="referrals" element={<div style={{color:'#e2e8f0',padding:40,fontSize:16}}>🎁 Referrals — Coming Soon</div>} />
+            <Route path="referrals" element={<AdminReferralsPage />} />
             <Route path="inventory" element={<AdminInventoryPage />} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
           </Route>
