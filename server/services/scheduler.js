@@ -98,6 +98,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 10AM (weekdays) — 7-Day Late Payment SMS (#24)
+  // Checks Square for unpaid invoices 7+ days overdue, sends reminder SMS
+  // =========================================================================
+  cron.schedule('0 10 * * 1-5', async () => {
+    logger.info('Running: late payment check');
+    try {
+      const LatePaymentService = require('./late-payment-checker');
+      const result = await LatePaymentService.checkAndNotify();
+      logger.info(`Late payment check done: ${result.notified} reminder(s) sent, ${result.skipped} skipped`);
+    } catch (err) {
+      logger.error(`Late payment check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // 1ST OF MONTH 6AM — Process monthly autopay charges
   // =========================================================================
   cron.schedule('0 6 1 * *', async () => {
