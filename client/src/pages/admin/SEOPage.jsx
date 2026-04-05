@@ -446,9 +446,7 @@ function BacklinkAgentPanel() {
         <button onClick={loadData} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Refresh</button>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 16 }}>
-        {/* Left: URL Input + Queue */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* Manual URL Input */}
           <Card>
             <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Add URLs</div>
@@ -526,46 +524,8 @@ function BacklinkAgentPanel() {
               </div>
             </Card>
           )}
-        </div>
 
-        {/* Right: X Accounts to Follow */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Card>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>X Accounts to Follow</div>
-            <div style={{ fontSize: 11, color: D.muted, marginBottom: 12 }}>Browse these accounts for backlink opportunities. Copy URLs and paste them in the queue.</div>
-            {targets.length === 0 ? (
-              <div style={{ fontSize: 12, color: D.muted, textAlign: 'center', padding: 16 }}>No accounts saved yet</div>
-            ) : targets.map(t => (
-              <a key={t.id} href={`https://x.com/${t.x_username}`} target="_blank" rel="noopener noreferrer" style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px',
-                background: D.bg, borderRadius: 8, marginBottom: 6, textDecoration: 'none', border: `1px solid ${D.border}`,
-              }}>
-                <span style={{ fontSize: 13, color: D.teal, fontWeight: 600 }}>@{t.x_username}</span>
-                <span style={{ fontSize: 11, color: D.muted }}>Open</span>
-              </a>
-            ))}
-            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-              <input
-                value={newTarget}
-                onChange={e => setNewTarget(e.target.value)}
-                placeholder="@username"
-                style={{ flex: 1, padding: '6px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 12, outline: 'none' }}
-              />
-              <button onClick={handleAddTarget} style={{ padding: '6px 10px', borderRadius: 6, border: 'none', background: D.teal, color: D.white, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Add</button>
-            </div>
-          </Card>
-          <Card style={{ padding: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: D.amber, marginBottom: 6 }}>Daily Workflow</div>
-            <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.6 }}>
-              1. Open each X account above<br/>
-              2. Copy any shared signup/profile links<br/>
-              3. Paste URLs in the queue (left)<br/>
-              4. Click Process Queue<br/>
-              5. Agent signs up automatically
-            </div>
-          </Card>
-        </div>
-      </div>
+    </div>
     </div>
   );
 }
