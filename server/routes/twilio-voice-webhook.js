@@ -117,13 +117,16 @@ router.post('/recording-status', async (req, res) => {
 
       logger.info(`Recording saved: ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
 
-      // Trigger async transcription via Anthropic if Twilio transcribe isn't used
+      // Trigger async call recording processing (transcription + AI extraction + customer creation)
       try {
-        const AssistantEngine = require('../services/ai-assistant/assistant');
-        AssistantEngine.transcribeRecording(CallSid, RecordingUrl + '.mp3').catch(err => {
-          logger.error(`Async transcription failed: ${err.message}`);
-        });
-      } catch { /* assistant not loaded yet */ }
+        const CallRecordingProcessor = require('../services/call-recording-processor');
+        // Delay processing to allow Twilio transcription to arrive first
+        setTimeout(() => {
+          CallRecordingProcessor.processRecording(CallSid).catch(err => {
+            logger.error(`[call-proc] Async processing failed for ${CallSid}: ${err.message}`);
+          });
+        }, 60000); // 60s delay to wait for Twilio transcription
+      } catch (e) { logger.error(`[call-proc] Failed to queue processing: ${e.message}`); }
     }
 
     res.sendStatus(200);
