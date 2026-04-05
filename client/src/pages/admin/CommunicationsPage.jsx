@@ -853,24 +853,6 @@ export default function CommunicationsPage() {
         <PhoneNumbersTab channelStats={channelStats} maxChannel={maxChannel} stats={stats} />
       ) : <>
 
-      {/* --- AI Auto-Reply Toggle --- */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: aiAutoReply ? 'rgba(16,185,129,0.08)' : D.card, border: `1px solid ${aiAutoReply ? D.green + '44' : D.border}`, borderRadius: 12, marginBottom: 16 }}>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>AI Auto-Reply</div>
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{aiAutoReply ? 'AI is responding to inbound messages using Waves brand voice' : 'Toggle on to auto-respond when you are unavailable'}</div>
-        </div>
-        <button onClick={toggleAiAutoReply} disabled={togglingAi} style={{
-          width: 52, height: 28, borderRadius: 14, border: 'none', cursor: 'pointer', position: 'relative',
-          background: aiAutoReply ? D.green : D.border, transition: 'background 0.2s',
-        }}>
-          <span style={{
-            position: 'absolute', top: 3, left: aiAutoReply ? 27 : 3,
-            width: 22, height: 22, borderRadius: '50%', background: D.white,
-            transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
-          }} />
-        </button>
-      </div>
-
       {/* --- Send SMS --- */}
       <div style={{ marginBottom: 28 }}>
         <div style={{
