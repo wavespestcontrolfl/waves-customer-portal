@@ -6,6 +6,27 @@ const logger = require('../logger');
 
 const anthropic = new Anthropic();
 
+async function submitToOmegaIndexer(domain, urls) {
+  const apiKey = process.env.OMEGA_INDEXER_API_KEY;
+  if (!apiKey || urls.length === 0) return;
+
+  try {
+    const urlString = encodeURIComponent(urls.join('|'));
+    const campaignName = encodeURIComponent(`Waves Backlinks - ${domain}`);
+
+    const res = await fetch('https://www.omegaindexer.com/amember/dashboard/api', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `apikey=${apiKey}&campaignname=${campaignName}&dripfeed=2&urls=${urlString}`,
+    });
+
+    const text = await res.text();
+    logger.info(`[backlink-agent] Omega Indexer submitted ${urls.length} URL(s) for ${domain}: ${text}`);
+  } catch (err) {
+    logger.error(`[backlink-agent] Omega Indexer failed for ${domain}: ${err.message}`);
+  }
+}
+
 const PROFILE = {
   business_name: 'Waves Pest Control',
   website: process.env.BACKLINK_WEBSITE_URL || 'https://wavespestcontrol.com',
@@ -222,6 +243,10 @@ Respond in JSON only, no markdown:
         backlink_url: PROFILE.website,
       });
       logger.info(`[backlink-agent] Signup complete: ${queueItem.domain}`);
+
+      // Submit to Omega Indexer for fast indexing
+      await submitToOmegaIndexer(queueItem.domain, [result.profile_url, queueItem.url].filter(Boolean));
+
       return { success: true, profileUrl: result.profile_url, needsVerification: result.needs_email_verification };
     } else {
       await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'failed', error_message: result.error_message || 'Signup failed', updated_at: new Date() });
