@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
 
 /* ── theme tokens ───────────────────────────────────────────── */
@@ -67,6 +67,40 @@ function TierRow({ name, detail, price, recommended, dimmed }) {
       <div style={sTierPrice}>{price}</div>
     </div>
   );
+}
+
+/* ── Form context + helpers (outside component = stable React identity) ── */
+const FormCtx = createContext({});
+
+function Field({ label, children, style: sx }) {
+  return <div style={{ ...sField, ...sx }}><label style={sLabel}>{label}</label>{children}</div>;
+}
+function Input({ k, type = 'text', placeholder, min, max }) {
+  const { form, set } = useContext(FormCtx);
+  return <input type={type} value={form[k]} onChange={e => set(k, e.target.value)} placeholder={placeholder} min={min} max={max} style={sInput} />;
+}
+function Select({ k, options }) {
+  const { form, set } = useContext(FormCtx);
+  return (
+    <select value={form[k]} onChange={e => set(k, e.target.value)} style={sSelect}>
+      {options.map(o => <option key={o.value} value={o.value} style={{ background: C.input, color: C.white }}>{o.label}</option>)}
+    </select>
+  );
+}
+function Checkbox({ k, label }) {
+  const { form, toggle } = useContext(FormCtx);
+  return (
+    <label style={sCheckbox}>
+      <input type="checkbox" checked={form[k]} onChange={() => toggle(k)} style={sCb} />
+      {label}
+    </label>
+  );
+}
+function statusStyle(type) {
+  if (type === 'ok') return { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, padding: '10px 14px', borderRadius: C.radius, marginBottom: 16, background: 'rgba(16,185,129,0.1)', color: C.green, border: '1px solid rgba(16,185,129,0.2)' };
+  if (type === 'err') return { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, padding: '10px 14px', borderRadius: C.radius, marginBottom: 16, background: 'rgba(239,68,68,0.1)', color: C.red, border: '1px solid rgba(239,68,68,0.2)' };
+  if (type === 'loading') return { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, padding: '10px 14px', borderRadius: C.radius, marginBottom: 16, background: 'rgba(14,165,233,0.1)', color: C.teal, border: '1px solid rgba(14,165,233,0.2)' };
+  return { display: 'none' };
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -384,44 +418,15 @@ function EstimateToolView() {
     setSending(false);
   }
 
-  /* ── Field helper ─────────────────────────────────────────── */
-  function Field({ label, children, style: sx }) {
-    return <div style={{ ...sField, ...sx }}><label style={sLabel}>{label}</label>{children}</div>;
-  }
-  function Input({ k, type = 'text', placeholder, min, max }) {
-    return <input type={type} value={form[k]} onChange={e => set(k, e.target.value)} placeholder={placeholder} min={min} max={max} style={sInput} />;
-  }
-  function Select({ k, options }) {
-    return (
-      <select value={form[k]} onChange={e => set(k, e.target.value)} style={sSelect}>
-        {options.map(o => <option key={o.value} value={o.value} style={{ background: C.input, color: C.white }}>{o.label}</option>)}
-      </select>
-    );
-  }
-  function Checkbox({ k, label }) {
-    return (
-      <label style={sCheckbox}>
-        <input type="checkbox" checked={form[k]} onChange={() => toggle(k)} style={sCb} />
-        {label}
-      </label>
-    );
-  }
-
-  /* ── status style ─────────────────────────────────────────── */
-  function statusStyle(type) {
-    if (type === 'ok') return { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, padding: '10px 14px', borderRadius: C.radius, marginBottom: 16, background: 'rgba(16,185,129,0.1)', color: C.green, border: '1px solid rgba(16,185,129,0.2)' };
-    if (type === 'err') return { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, padding: '10px 14px', borderRadius: C.radius, marginBottom: 16, background: 'rgba(239,68,68,0.1)', color: C.red, border: '1px solid rgba(239,68,68,0.2)' };
-    if (type === 'loading') return { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, padding: '10px 14px', borderRadius: C.radius, marginBottom: 16, background: 'rgba(14,165,233,0.1)', color: C.teal, border: '1px solid rgba(14,165,233,0.2)' };
-    return { display: 'none' };
-  }
-
   const E = estimate; // shorthand
+  const formCtx = { form, set, toggle };
   const R = E?.results || {};
 
   /* ═══════════════════════════════════════════════════════════
      RENDER
      ═══════════════════════════════════════════════════════════ */
   return (
+    <FormCtx.Provider value={formCtx}>
     <div style={{ background: C.dark, color: C.white, maxWidth: 1440, margin: '0 auto', padding: 28, minHeight: '100vh', fontSize: 16, fontFamily: "'DM Sans', sans-serif" }}>
       {/* HEADER */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28, paddingBottom: 18, borderBottom: `2px solid ${C.border}` }}>
@@ -1023,6 +1028,7 @@ function EstimateToolView() {
         </div>
       </div>
     </div>
+    </FormCtx.Provider>
   );
 }
 
