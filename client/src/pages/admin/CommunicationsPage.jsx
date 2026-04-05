@@ -818,21 +818,6 @@ export default function CommunicationsPage() {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexWrap: 'wrap', gap: 16 }}>
         <div>
           <h1 style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 24, fontWeight: 700, color: D.white, margin: 0 }}>Communications</h1>
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button onClick={() => handleImport('sms')} disabled={!!importing} style={{
-              padding: '5px 12px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent',
-              color: D.muted, fontSize: 11, cursor: 'pointer', opacity: importing ? 0.5 : 1,
-            }}>{importing === 'sms' ? 'Importing SMS...' : 'Import SMS from Sheet'}</button>
-            <button onClick={() => handleImport('calls')} disabled={!!importing} style={{
-              padding: '5px 12px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent',
-              color: D.muted, fontSize: 11, cursor: 'pointer', opacity: importing ? 0.5 : 1,
-            }}>{importing === 'calls' ? 'Importing Calls...' : 'Import Calls from Sheet'}</button>
-            {importResult && (
-              <span style={{ fontSize: 11, color: importResult.error ? D.red : D.green, alignSelf: 'center' }}>
-                {importResult.error || `Imported ${importResult.imported}, skipped ${importResult.skipped}`}
-              </span>
-            )}
-          </div>
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
           <StatCard label="Sent this month" value={totalSent} color={D.green} />
