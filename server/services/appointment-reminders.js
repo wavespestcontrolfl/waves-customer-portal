@@ -217,19 +217,6 @@ const AppointmentReminderService = {
         } catch (err) { results.errors++; logger.error(`[appt-remind] 24h SMS failed: ${err.message}`); }
       }
 
-      // 1-hour reminder (#12): 0.5-1.5 hours before
-      if (appt.hoursUntil >= 0.5 && appt.hoursUntil <= 1.5) {
-        if (await alreadySent(appt.id, '1h')) { results.skipped++; continue; }
-        try {
-          const body = `Hello ${firstName}! This is a reminder from Waves that your ${appt.serviceName} appointment is coming up today at ${timePretty}.\n\n` +
-            `Your technician is preparing to head your way. Please ensure gates are unlocked and pets are secured.\n\n` +
-            `Questions? Call (941) 318-7612.\n\n— Waves Pest Control 🌊`;
-          await TwilioService.sendSMS(customerPhone, body);
-          await logReminder(appt.customer?.id, appt.id, '1h', `${appt.serviceName} at ${timePretty}`);
-          results.sent++;
-          logger.info(`[appt-remind] 1h reminder sent: ${firstName} — ${appt.serviceName}`);
-        } catch (err) { results.errors++; logger.error(`[appt-remind] 1h SMS failed: ${err.message}`); }
-      }
     }
 
     return results;
