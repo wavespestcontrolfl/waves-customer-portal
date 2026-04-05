@@ -158,17 +158,41 @@ router.post('/transcription', async (req, res) => {
 });
 
 // =========================================================================
-// POST /api/webhooks/twilio/outbound-connect — TwiML for admin-initiated outbound calls
-// When the customer answers, dial the admin's phone to connect both parties.
+// POST /api/webhooks/twilio/outbound-admin-prompt — Step 1: Admin picks up, press 1 to connect
+// =========================================================================
+router.post('/outbound-admin-prompt', async (req, res) => {
+  try {
+    const customerNumber = req.query.customerNumber || req.body.customerNumber;
+    const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber;
+    const domain = process.env.SERVER_DOMAIN || req.headers.host;
+
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather numDigits="1" action="https://${domain}/api/webhooks/twilio/outbound-connect?customerNumber=${encodeURIComponent(customerNumber)}&amp;callerIdNumber=${encodeURIComponent(callerIdNumber)}" method="POST" timeout="10">
+    <Say voice="alice">Outbound call to ${customerNumber.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1 $2 $3')}. Press 1 to connect.</Say>
+  </Gather>
+  <Say voice="alice">No input received. Goodbye.</Say>
+</Response>`;
+    res.type('text/xml').send(twiml);
+  } catch (err) {
+    logger.error(`Outbound admin prompt error: ${err.message}`);
+    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Error. Goodbye.</Say></Response>');
+  }
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/outbound-connect — Step 2: Admin pressed 1, now dial the customer
 // =========================================================================
 router.post('/outbound-connect', async (req, res) => {
   try {
-    const adminPhone = process.env.ADAM_PHONE || '+19415993489';
+    const customerNumber = req.query.customerNumber || req.body.customerNumber;
+    const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="alice">Connecting you now.</Say>
-  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed">
-    <Number>${adminPhone}</Number>
+  <Say voice="alice">Connecting now.</Say>
+  <Dial callerId="${callerIdNumber}" record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed">
+    <Number>${customerNumber}</Number>
   </Dial>
 </Response>`;
     res.type('text/xml').send(twiml);

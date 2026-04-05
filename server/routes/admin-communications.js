@@ -44,16 +44,15 @@ router.post('/call', async (req, res, next) => {
     const from = fromNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
     const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
 
-    // Create outbound call — connects `to` and plays hold music / connects to admin
+    const adminPhone = process.env.ADAM_PHONE || '+19415993489';
+
+    // Step 1: Call the admin first. When admin picks up and presses 1, dial the customer.
     const call = await client.calls.create({
-      to,
+      to: adminPhone,
       from,
-      url: `https://${domain}/api/webhooks/twilio/outbound-connect`,
+      url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(to)}&callerIdNumber=${encodeURIComponent(from)}`,
       statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      record: true,
-      recordingStatusCallback: `https://${domain}/api/webhooks/twilio/recording-status`,
-      recordingStatusCallbackEvent: ['completed'],
     });
 
     // Log the outbound call
