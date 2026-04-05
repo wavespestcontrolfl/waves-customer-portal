@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+const PPCDashboardPage = lazy(() => import('./PPCDashboardPage'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', orange: '#f97316', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
@@ -22,6 +23,7 @@ function fmtDec(n) { return '$' + Number(n || 0).toLocaleString(undefined, { min
 function pct(n) { return (Number(n) || 0).toFixed(1) + '%'; }
 
 const TABS = [
+  { key: 'ppc-dashboard', label: 'PPC Dashboard', icon: '📊' },
   { key: 'overview', label: 'Overview', icon: '📈' },
   { key: 'service-lines', label: 'Service Lines', icon: '🎯' },
   { key: 'advisor', label: 'AI Advisor', icon: '🤖' },
@@ -1515,7 +1517,7 @@ function SiteAuditTab() {
 }
 
 export default function AdsPage() {
-  const [tab, setTab] = useState('overview');
+  const [tab, setTab] = useState('ppc-dashboard');
 
   return (
     <div>
@@ -1537,6 +1539,7 @@ export default function AdsPage() {
         ))}
       </div>
 
+      {tab === 'ppc-dashboard' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading PPC dashboard...</div>}><PPCDashboardPage /></Suspense>}
       {tab === 'overview' && <OverviewTab />}
       {tab === 'service-lines' && <ServiceLinesTab />}
       {tab === 'advisor' && <AdvisorTab />}

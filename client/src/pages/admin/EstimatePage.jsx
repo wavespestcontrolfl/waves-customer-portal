@@ -148,6 +148,7 @@ function EstimateToolView() {
   const [customers, setCustomers] = useState([]);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
+  const [showSendForm, setShowSendForm] = useState(false);
 
   const token = localStorage.getItem('waves_admin_token');
   const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
@@ -389,48 +390,25 @@ function EstimateToolView() {
       <div style={{ display: 'grid', gridTemplateColumns: '440px 1fr', gap: 28 }}>
         {/* ═══ LEFT COLUMN: FORM ═══ */}
         <div>
-          {/* Customer search */}
+          {/* Property Lookup */}
           <div style={sPanel}>
-            <div style={sPanelTitle}>Link to Existing Customer</div>
-            <div style={sField}>
-              <label style={sLabel}>Search</label>
-              <input type="text" value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} placeholder="Name, email, or phone..." style={sInput} />
-            </div>
-            {customers.length > 0 && (
-              <div style={{ maxHeight: 160, overflowY: 'auto', border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }}>
-                {customers.map((c, i) => (
-                  <div key={i} onClick={() => selectCustomer(c)} style={{ padding: '10px 14px', cursor: 'pointer', borderBottom: `1px solid ${C.border}`, color: C.white, fontSize: 14 }}>
-                    <strong>{c.name || c.fullName}</strong> — {c.address || c.email || ''}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Customer & Property */}
-          <div style={sPanel}>
-            <div style={sPanelTitle}>Customer & Property</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-              <Field label="Customer Name"><input type="text" value={form.customerName || ''} onChange={e => set('customerName', e.target.value)} placeholder="Full name" style={sInput} /></Field>
-              <Field label="Phone"><input type="tel" value={form.customerPhone || ''} onChange={e => set('customerPhone', e.target.value)} placeholder="(941) 555-1234" style={sInput} /></Field>
-            </div>
-            <Field label="Email (optional)"><input type="email" value={form.customerEmail || ''} onChange={e => set('customerEmail', e.target.value)} placeholder="email@example.com" style={sInput} /></Field>
+            <div style={sPanelTitle}>Property Lookup</div>
             <Field label="Address">
               <input ref={addressRef} type="text" value={form.address} onChange={e => set('address', e.target.value)} placeholder="Start typing an address..." style={sInput} />
             </Field>
             {lookupStatus.type && <div style={statusStyle(lookupStatus.type)}>{lookupStatus.msg}</div>}
-            <div style={{ ...sRow, marginBottom: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
               <button style={sBtnSm(C.blue, 'white')} onClick={doLookup}>RentCast Lookup</button>
-              <button style={{ ...sBtnSm('#10b981', 'white'), display: 'flex', alignItems: 'center', gap: 6 }} onClick={doSatelliteAnalysis}>{'🛰️'} AI Satellite Analysis</button>
+              <button style={sBtnSm('#10b981', 'white')} onClick={doSatelliteAnalysis}>AI Satellite Lookup</button>
               <button style={sBtnSm('transparent', C.gray)} onClick={() => { setForm(f => ({ ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family', hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE', nearWater: 'NO', bedArea: '', palmCount: '', treeCount: '' })); setLookupStatus({ type: '', msg: '' }); setSatelliteStatus({ type: '', msg: '' }); setSatelliteData(null); setEstimate(null); }}>Clear All</button>
             </div>
             {satelliteStatus.type && <div style={statusStyle(satelliteStatus.type)}>{satelliteStatus.msg}</div>}
             {satelliteData && satelliteData.imageUrl && (
               <div style={{ marginBottom: 12 }}>
-                <img src={satelliteData.imageUrl} alt="Satellite view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.grayLight}`, marginBottom: 8 }} />
+                <img src={satelliteData.imageUrl} alt="Satellite view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, marginBottom: 8 }} />
                 {satelliteData.fieldVerify?.length > 0 && (
-                  <div style={{ fontSize: 12, color: C.red, fontWeight: 600, padding: '6px 10px', background: '#FFF3E0', borderRadius: 6 }}>
-                    {'⚠️'} Field verify: {satelliteData.fieldVerify.map(f => f.replace(/_/g, ' ')).join(', ')}
+                  <div style={{ fontSize: 12, color: C.red, fontWeight: 600, padding: '6px 10px', background: 'rgba(239,68,68,0.1)', borderRadius: 6 }}>
+                    Field verify: {satelliteData.fieldVerify.map(f => f.replace(/_/g, ' ')).join(', ')}
                   </div>
                 )}
                 {satelliteData.notes && (
@@ -595,18 +573,37 @@ function EstimateToolView() {
           </div>
 
           {/* Action buttons */}
-          <div style={{ display: 'grid', gridTemplateColumns: estimate ? '1fr 1fr 1fr' : '1fr', gap: 12, marginBottom: 18 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
             <button style={{ ...sBtn(C.teal, C.dark), fontSize: 16, padding: '16px 28px' }} onClick={doGenerate}>GENERATE ESTIMATE</button>
-            {estimate && <button style={{ ...sBtn(C.green, 'white'), fontSize: 16, padding: '16px 28px' }} onClick={doSave} disabled={saving}>{saving ? 'Saving...' : savedId ? '✓ SAVED' : 'SAVE ESTIMATE'}</button>}
-            {estimate && (
-              <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 16, padding: '16px 28px' }} onClick={async () => {
-                if (!savedId) { await doSave(); }
-                setTimeout(() => doSend(), 500);
-              }} disabled={sending}>{sending ? 'Sending...' : '📤 SEND ESTIMATE'}</button>
-            )}
+            <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 16, padding: '16px 28px' }} onClick={() => {
+              if (!estimate) { doGenerate(); }
+              setShowSendForm(true);
+            }}>SEND ESTIMATE</button>
           </div>
+
+          {/* Send Estimate Form */}
+          {showSendForm && (
+            <div style={{ ...sPanel, borderColor: C.teal }}>
+              <div style={sPanelTitle}>Send Estimate to Customer</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+                <Field label="Customer Name"><input type="text" value={form.customerName || ''} onChange={e => set('customerName', e.target.value)} placeholder="Full name" style={sInput} /></Field>
+                <Field label="Phone"><input type="tel" value={form.customerPhone || ''} onChange={e => set('customerPhone', e.target.value)} placeholder="(941) 555-1234" style={sInput} /></Field>
+              </div>
+              <Field label="Email"><input type="email" value={form.customerEmail || ''} onChange={e => set('customerEmail', e.target.value)} placeholder="email@example.com" style={sInput} /></Field>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <button style={{ ...sBtn(C.green, 'white'), fontSize: 14, padding: '14px 20px' }} onClick={async () => {
+                  if (!form.customerPhone && !form.customerEmail) { alert('Enter a phone number or email.'); return; }
+                  if (!estimate) { doGenerate(); }
+                  await doSave();
+                  setTimeout(() => doSend(), 500);
+                }} disabled={sending}>{sending ? 'Sending...' : 'SEND VIA SMS & EMAIL'}</button>
+                <button style={{ ...sBtn('transparent', C.gray), fontSize: 14, padding: '14px 20px', border: `1px solid ${C.border}` }} onClick={() => setShowSendForm(false)}>Cancel</button>
+              </div>
+            </div>
+          )}
+
           {savedId && (
-            <div style={{ fontSize: 12, color: C.green, marginBottom: 12 }}>{'✓'} Saved — ID #{savedId}. Customer will receive SMS with estimate link at /estimate/{savedId}</div>
+            <div style={{ fontSize: 12, color: C.green, marginBottom: 12 }}>Saved — ID #{savedId}. Estimate sent via SMS{form.customerEmail ? ' and email' : ''}.</div>
           )}
         </div>
 

@@ -1,5 +1,6 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
 const BlogPage = lazy(() => import('./BlogPage'));
+const SEODashboardPage = lazy(() => import('./SEODashboardPage'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', orange: '#f97316', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
@@ -468,7 +469,7 @@ export default function SEOPage() {
         ))}
       </div>
 
-      {tab === 'dashboard' && <DashboardTab />}
+      {tab === 'dashboard' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading dashboard...</div>}><SEODashboardPage /></Suspense>}
       {tab === 'advisor' && <AdvisorTab />}
       {tab === 'rankings' && <RankingsTab />}
       {tab === 'backlinks' && <BacklinksTab />}
