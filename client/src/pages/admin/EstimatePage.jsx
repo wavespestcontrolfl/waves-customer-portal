@@ -81,20 +81,57 @@ function EstimateToolView() {
   useEffect(() => {
     const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
     if (!apiKey) return;
-    if (window.google && window.google.maps) {
-      initAutocomplete();
-      return;
+
+    // Inject dark-theme styles for the Google autocomplete dropdown
+    if (!document.getElementById('pac-dark-style')) {
+      const style = document.createElement('style');
+      style.id = 'pac-dark-style';
+      style.textContent = `
+        .pac-container { background: #1e293b !important; border: 1px solid #334155 !important; border-radius: 8px !important; margin-top: 4px !important; z-index: 99999 !important; font-family: 'DM Sans', sans-serif !important; box-shadow: 0 8px 24px rgba(0,0,0,0.5) !important; }
+        .pac-item { padding: 8px 12px !important; border-top: 1px solid #334155 !important; color: #e2e8f0 !important; cursor: pointer !important; font-size: 14px !important; }
+        .pac-item:first-child { border-top: none !important; }
+        .pac-item:hover, .pac-item-selected { background: #0f172a !important; }
+        .pac-item-query { color: #f0f4f8 !important; font-weight: 600 !important; }
+        .pac-matched { color: #0ea5e9 !important; font-weight: 700 !important; }
+        .pac-icon { display: none !important; }
+        .pac-item span { color: #94a3b8 !important; }
+        .pac-item-query span { color: #f0f4f8 !important; }
+        .pac-logo::after { display: none !important; }
+      `;
+      document.head.appendChild(style);
     }
+
+    function tryInit() {
+      if (window.google && window.google.maps && window.google.maps.places && addressRef.current) {
+        initAutocomplete();
+        return true;
+      }
+      return false;
+    }
+
+    if (tryInit()) return;
+
+    // Check if script is already loading
+    if (document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')) {
+      const interval = setInterval(() => { if (tryInit()) clearInterval(interval); }, 300);
+      return () => clearInterval(interval);
+    }
+
     const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&loading=async`;
     script.async = true;
-    script.onload = () => setTimeout(initAutocomplete, 200);
+    script.defer = true;
+    script.onload = () => {
+      const interval = setInterval(() => { if (tryInit()) clearInterval(interval); }, 200);
+      setTimeout(() => clearInterval(interval), 5000);
+    };
     document.head.appendChild(script);
-    return () => { if (script.parentNode) script.parentNode.removeChild(script); };
+    // Don't remove the script on unmount — it breaks Google Maps global state
   }, []);
 
   function initAutocomplete() {
-    if (!addressRef.current || !window.google) return;
+    if (!addressRef.current || !window.google?.maps?.places) return;
+    if (autocompleteRef.current) return; // Already initialized
     const ac = new window.google.maps.places.Autocomplete(addressRef.current, {
       types: ['address'],
       componentRestrictions: { country: 'us' },
