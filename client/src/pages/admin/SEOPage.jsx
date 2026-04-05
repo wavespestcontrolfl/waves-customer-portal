@@ -226,7 +226,7 @@ function BacklinksTab() {
       {/* Sub-tabs */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', gap: 4 }}>
-          {[{ key: 'overview', label: 'Overview' }, { key: 'citations', label: 'Citations' }, { key: 'gaps', label: 'Competitor Gaps' }, { key: 'llm', label: 'LLM Mentions' }].map(t => (
+          {[{ key: 'overview', label: 'Overview' }, { key: 'citations', label: 'Citations' }, { key: 'gaps', label: 'Competitor Gaps' }, { key: 'llm', label: 'LLM Mentions' }, { key: 'agent', label: 'Agent' }].map(t => (
             <button key={t.key} onClick={() => setSubTab(t.key)} style={{ padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, background: subTab === t.key ? D.teal : D.bg, color: subTab === t.key ? D.white : D.muted }}>{t.label}</button>
           ))}
         </div>
@@ -339,6 +339,224 @@ function BacklinksTab() {
           ))}
         </Card>
       )}
+
+      {subTab === 'agent' && <BacklinkAgentPanel />}
+    </div>
+  );
+}
+
+// =========================================================================
+// BACKLINK AGENT PANEL
+// =========================================================================
+function BacklinkAgentPanel() {
+  const [stats, setStats] = useState(null);
+  const [queue, setQueue] = useState([]);
+  const [profiles, setProfiles] = useState([]);
+  const [targets, setTargets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [urlInput, setUrlInput] = useState('');
+  const [newTarget, setNewTarget] = useState('');
+  const [processing, setProcessing] = useState(false);
+  const [addResult, setAddResult] = useState(null);
+
+  const loadData = () => {
+    Promise.all([
+      adminFetch('/admin/backlink-agent/stats').catch(() => null),
+      adminFetch('/admin/backlink-agent/queue?limit=50').catch(() => ({ items: [] })),
+      adminFetch('/admin/backlink-agent/profiles').catch(() => ({ profiles: [] })),
+      adminFetch('/admin/backlink-agent/targets').catch(() => ({ targets: [] })),
+    ]).then(([s, q, p, t]) => {
+      setStats(s);
+      setQueue(q.items || []);
+      setProfiles(p.profiles || []);
+      setTargets(t.targets || []);
+      setLoading(false);
+    });
+  };
+
+  useEffect(() => { loadData(); }, []);
+
+  const handleAddUrls = async () => {
+    const urls = urlInput.split('\n').map(u => u.trim()).filter(u => u && u.startsWith('http'));
+    if (urls.length === 0) return;
+    const result = await adminPost('/admin/backlink-agent/queue', { urls });
+    setAddResult(result);
+    setUrlInput('');
+    loadData();
+  };
+
+  const handleProcess = async () => {
+    setProcessing(true);
+    await adminPost('/admin/backlink-agent/process', { limit: 3 });
+    setTimeout(() => { setProcessing(false); loadData(); }, 3000);
+  };
+
+  const handleRetry = async (id) => {
+    await adminPost(`/admin/backlink-agent/queue/${id}/retry`, {});
+    loadData();
+  };
+
+  const handleSkip = async (id) => {
+    await adminPost(`/admin/backlink-agent/queue/${id}/skip`, {});
+    loadData();
+  };
+
+  const handleAddTarget = async () => {
+    if (!newTarget.trim()) return;
+    await adminPost('/admin/backlink-agent/targets', { username: newTarget.trim() });
+    setNewTarget('');
+    loadData();
+  };
+
+  const handleDeleteTarget = async (id) => {
+    await adminFetch(`/admin/backlink-agent/targets/${id}`, { method: 'DELETE' });
+    loadData();
+  };
+
+  const handlePoll = async () => {
+    await adminPost('/admin/backlink-agent/poll', {});
+    loadData();
+  };
+
+  const handleVerifyEmails = async () => {
+    await adminPost('/admin/backlink-agent/verify-emails', {});
+    loadData();
+  };
+
+  const statusColor = { pending: D.muted, processing: D.teal, signup_complete: D.amber, verified: D.green, failed: D.red, skipped: '#475569' };
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading backlink agent...</div>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Stats */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+        <KpiCard label="Total Queued" value={stats?.total || 0} />
+        <KpiCard label="Pending" value={stats?.pending || 0} color={D.muted} />
+        <KpiCard label="Completed" value={stats?.completed || 0} color={D.amber} />
+        <KpiCard label="Verified" value={stats?.verified || 0} color={D.green} />
+        <KpiCard label="Success Rate" value={`${stats?.successRate || 0}%`} color={stats?.successRate >= 50 ? D.green : D.amber} />
+      </div>
+
+      {/* Controls row */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={handleProcess} disabled={processing} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: processing ? 0.5 : 1 }}>
+          {processing ? 'Processing...' : 'Process Queue'}
+        </button>
+        <button onClick={handlePoll} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Poll X Feeds</button>
+        <button onClick={handleVerifyEmails} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Check Emails</button>
+        <button onClick={loadData} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Refresh</button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 16 }}>
+        {/* Left: URL Input + Queue */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Manual URL Input */}
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Add URLs</div>
+            <textarea
+              value={urlInput}
+              onChange={e => setUrlInput(e.target.value)}
+              placeholder="Paste URLs here, one per line..."
+              rows={4}
+              style={{ width: '100%', padding: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', resize: 'vertical', outline: 'none', boxSizing: 'border-box', marginBottom: 8 }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 12, color: D.muted }}>{urlInput.split('\n').filter(u => u.trim().startsWith('http')).length} URLs detected</span>
+              <button onClick={handleAddUrls} style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Add to Queue</button>
+            </div>
+            {addResult && (
+              <div style={{ marginTop: 8, fontSize: 12, color: D.green }}>
+                Added {addResult.added}, skipped {addResult.skipped}{addResult.duplicates?.length > 0 ? ` (dupes: ${addResult.duplicates.join(', ')})` : ''}
+              </div>
+            )}
+          </Card>
+
+          {/* Queue Table */}
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Queue ({queue.length})</div>
+            <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+              {queue.length === 0 ? (
+                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No URLs in queue. Add some above or poll X feeds.</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${D.border}` }}>
+                      <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, fontSize: 11, textTransform: 'uppercase' }}>Domain</th>
+                      <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, fontSize: 11, textTransform: 'uppercase' }}>Source</th>
+                      <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, fontSize: 11, textTransform: 'uppercase' }}>Status</th>
+                      <th style={{ padding: '8px 10px', textAlign: 'right', color: D.muted, fontSize: 11, textTransform: 'uppercase' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {queue.map(item => (
+                      <tr key={item.id} style={{ borderBottom: `1px solid ${D.border}33` }}>
+                        <td style={{ padding: '8px 10px', color: D.text }}><a href={item.url} target="_blank" rel="noopener noreferrer" style={{ color: D.teal, textDecoration: 'none' }}>{item.domain}</a></td>
+                        <td style={{ padding: '8px 10px', color: D.muted }}>{item.source}</td>
+                        <td style={{ padding: '8px 10px' }}>
+                          <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '2px 8px', borderRadius: 6, background: (statusColor[item.status] || D.muted) + '22', color: statusColor[item.status] || D.muted }}>{item.status}</span>
+                          {item.error_message && <div style={{ fontSize: 10, color: D.red, marginTop: 2 }}>{item.error_message.substring(0, 60)}</div>}
+                        </td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                          {item.status === 'failed' && <button onClick={() => handleRetry(item.id)} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 10, cursor: 'pointer', marginRight: 4 }}>Retry</button>}
+                          {(item.status === 'pending' || item.status === 'failed') && <button onClick={() => handleSkip(item.id)} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 10, cursor: 'pointer' }}>Skip</button>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </Card>
+
+          {/* Profiles */}
+          {profiles.length > 0 && (
+            <Card>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Completed Profiles ({profiles.length})</div>
+              <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+                {profiles.map(p => (
+                  <div key={p.id} style={{ padding: '8px 0', borderBottom: `1px solid ${D.border}33`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <div style={{ fontSize: 13, color: D.text }}>{p.domain || p.site_url}</div>
+                      {p.profile_url && <a href={p.profile_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, textDecoration: 'none' }}>View Profile</a>}
+                    </div>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: p.queue_status === 'verified' ? D.green + '22' : D.amber + '22', color: p.queue_status === 'verified' ? D.green : D.amber }}>
+                      {p.queue_status === 'verified' ? 'VERIFIED' : 'PENDING VERIFY'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+        </div>
+
+        {/* Right: X Targets */}
+        <div>
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>X Feed Monitor</div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+              <input
+                value={newTarget}
+                onChange={e => setNewTarget(e.target.value)}
+                placeholder="@username"
+                style={{ flex: 1, padding: '8px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none' }}
+              />
+              <button onClick={handleAddTarget} style={{ padding: '8px 12px', borderRadius: 6, border: 'none', background: D.teal, color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Add</button>
+            </div>
+            {targets.length === 0 ? (
+              <div style={{ fontSize: 12, color: D.muted, textAlign: 'center', padding: 16 }}>No X accounts monitored yet</div>
+            ) : targets.map(t => (
+              <div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}33` }}>
+                <div>
+                  <div style={{ fontSize: 13, color: D.text, fontWeight: 600 }}>@{t.x_username}</div>
+                  <div style={{ fontSize: 10, color: D.muted }}>{t.last_polled_at ? `Polled ${new Date(t.last_polled_at).toLocaleString()}` : 'Never polled'}</div>
+                </div>
+                <button onClick={() => handleDeleteTarget(t.id)} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.red}33`, background: 'transparent', color: D.red, fontSize: 10, cursor: 'pointer' }}>Remove</button>
+              </div>
+            ))}
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }

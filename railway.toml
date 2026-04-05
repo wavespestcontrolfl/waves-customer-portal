@@ -2,7 +2,8 @@
 builder = "nixpacks"
 
 [build.nixpacks]
-buildCmd = "npm install && npm run build"
+aptPkgs = ["libnss3", "libatk1.0-0", "libatk-bridge2.0-0", "libcups2", "libdrm2", "libxkbcommon0", "libxcomposite1", "libxdamage1", "libxrandr2", "libgbm1", "libpango-1.0-0", "libcairo2", "libasound2", "libxshmfence1", "libx11-xcb1"]
+buildCmd = "npm install && npx playwright install chromium && npm run build"
 
 [deploy]
 startCommand = "npm start"

@@ -53,6 +53,9 @@ const gates = {
 
   // WordPress — publish blog posts to live site
   wordpressPublish: isProd ? process.env.GATE_WORDPRESS_PUBLISH === 'true' : true,
+
+  // Backlink Agent — Playwright browser automation for profile signups
+  backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 };
 
 function isEnabled(gate) {
