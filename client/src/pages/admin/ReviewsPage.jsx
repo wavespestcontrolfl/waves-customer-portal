@@ -1127,11 +1127,10 @@ export default function ReviewsPage() {
                   sub={<span><span style={{ fontFamily: 'JetBrains Mono, monospace' }}>{Number(avgRating).toFixed(1)}</span> <Stars count={Math.round(avgRating)} size={13} /></span>}
                 />
                 <StatCard
-                  label="Unresponded"
+                  label="No Portal Reply"
                   value={unresponded}
-                  color={unresponded > 0 ? D.red : D.green}
-                  highlight={unresponded > 0}
-                  sub={unresponded > 0 ? 'needs attention' : 'all caught up'}
+                  color={unresponded > 0 ? D.amber : D.green}
+                  sub={unresponded > 0 ? 'reply via AI Reply below' : 'all replied'}
                 />
                 <StatCard
                   label="New This Month"

@@ -53,7 +53,7 @@ router.get('/', async (req, res, next) => {
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
       ).first(),
-      reviewsOnly.clone().whereNull('review_reply').whereNotNull('review_text').count('* as count').first(),
+      reviewsOnly.clone().whereNull('review_reply').count('* as count').first(),
       reviewsOnly.clone().where('review_created_at', '>=', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()).count('* as count').first(),
       reviewsOnly.clone().select('location_id')
         .count('* as count')
