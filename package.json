@@ -11,7 +11,7 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
-    "build": "cd client && npm run build",
+    "build": "npx playwright install chromium && cd client && npm run build",
     "start": "node server/index.js",
     "db:migrate": "cd server && npx knex migrate:latest",
     "db:rollback": "cd server && npx knex migrate:rollback",
