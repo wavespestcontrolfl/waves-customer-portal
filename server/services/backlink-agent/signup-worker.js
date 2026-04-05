@@ -1,6 +1,9 @@
 const { chromium } = require('playwright');
 const Anthropic = require('@anthropic-ai/sdk');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const db = require('../../models/db');
 const logger = require('../logger');
 
@@ -35,11 +38,53 @@ const PROFILE = {
   email: process.env.BACKLINK_AGENT_EMAIL || 'contact@wavespestcontrol.com',
   phone: '(941) 318-7612',
   bio: 'Family-owned pest control and lawn care serving Southwest Florida. Pest control, lawn care, mosquito control, termite protection, and more.',
+  tagline: 'Family-Owned Pest Control & Lawn Care in Southwest Florida',
   location: 'Bradenton, FL',
+  category: 'Pest Control',
+  logoUrl: process.env.BACKLINK_LOGO_URL || 'https://wavespestcontrol.com/wp-content/uploads/2024/01/waves-pest-control-logo.png',
+  screenshotUrl: process.env.BACKLINK_SCREENSHOT_URL || 'https://wavespestcontrol.com/wp-content/uploads/2024/01/waves-homepage-screenshot.png',
   generatePassword() {
     return crypto.randomBytes(12).toString('base64url').slice(0, 16) + '!A1';
   },
 };
+
+// Download an image to a temp file for Playwright file uploads
+let _cachedLogoPath = null;
+async function getLogoPath() {
+  if (_cachedLogoPath && fs.existsSync(_cachedLogoPath)) return _cachedLogoPath;
+  try {
+    const res = await fetch(PROFILE.logoUrl);
+    if (!res.ok) throw new Error(`Logo fetch ${res.status}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const ext = PROFILE.logoUrl.includes('.png') ? '.png' : '.jpg';
+    const tmpPath = path.join(os.tmpdir(), `waves-logo${ext}`);
+    fs.writeFileSync(tmpPath, buffer);
+    _cachedLogoPath = tmpPath;
+    logger.info(`[backlink-agent] Logo cached at ${tmpPath}`);
+    return tmpPath;
+  } catch (err) {
+    logger.error(`[backlink-agent] Logo download failed: ${err.message}`);
+    return null;
+  }
+}
+
+let _cachedScreenshotPath = null;
+async function getScreenshotPath() {
+  if (_cachedScreenshotPath && fs.existsSync(_cachedScreenshotPath)) return _cachedScreenshotPath;
+  try {
+    const res = await fetch(PROFILE.screenshotUrl);
+    if (!res.ok) throw new Error(`Screenshot fetch ${res.status}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const ext = PROFILE.screenshotUrl.includes('.png') ? '.png' : '.jpg';
+    const tmpPath = path.join(os.tmpdir(), `waves-screenshot${ext}`);
+    fs.writeFileSync(tmpPath, buffer);
+    _cachedScreenshotPath = tmpPath;
+    return tmpPath;
+  } catch (err) {
+    logger.error(`[backlink-agent] Screenshot download failed: ${err.message}`);
+    return null;
+  }
+}
 
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -142,8 +187,10 @@ Fill it out using this profile information:
 - Password: ${password}
 - Website/URL: ${PROFILE.website}
 - Bio/About: ${PROFILE.bio}
-- Location: ${PROFILE.location}
+- Tagline / Slogan: ${PROFILE.tagline}
+- Location / City: ${PROFILE.location}
 - Phone: ${PROFILE.phone}
+- Category / Industry: ${PROFILE.category}
 
 For username fields, use: wavespestcontrol (or wavespestcontrol_fl if that seems taken)
 
@@ -153,11 +200,14 @@ Return a JSON array of actions to take, in order. No markdown:
   { "action": "click", "selector": "CSS selector" },
   { "action": "select", "selector": "CSS selector", "value": "option value" },
   { "action": "check", "selector": "CSS selector" },
+  { "action": "upload", "selector": "CSS selector for file input", "file": "logo" },
+  { "action": "upload", "selector": "CSS selector for file input", "file": "screenshot" },
   { "action": "submit", "selector": "CSS selector for submit button" }
 ]
 
 Important:
-- Include ALL visible form fields, even optional ones like bio, website, location
+- Include ALL visible form fields, even optional ones like bio, website, location, tagline, category
+- For any file upload fields (logo, image, screenshot, avatar, photo), use the "upload" action with file: "logo" for logo/avatar fields or file: "screenshot" for screenshot/image fields
 - Include checking any "I agree to terms" checkboxes
 - End with the submit button click
 - Use robust selectors (prefer input[name=...], input[type=...], #id over fragile class selectors)
@@ -185,6 +235,17 @@ Important:
           case 'check':
             await page.check(action.selector);
             break;
+          case 'upload': {
+            const filePath = action.file === 'screenshot' ? await getScreenshotPath() : await getLogoPath();
+            if (filePath) {
+              const fileInput = await page.$(action.selector);
+              if (fileInput) {
+                await fileInput.setInputFiles(filePath);
+                logger.info(`[backlink-agent] Uploaded ${action.file} to ${action.selector}`);
+              }
+            }
+            break;
+          }
           case 'submit':
             await page.click(action.selector);
             await page.waitForLoadState('domcontentloaded').catch(() => {});
