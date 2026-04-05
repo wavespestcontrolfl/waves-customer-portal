@@ -532,6 +532,80 @@ function CSRCoachTab() {
 }
 
 // =========================================================================
+// PHONE NUMBERS TAB
+// =========================================================================
+function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
+  // Build per-number stats from the stats API data
+  const numberStats = {};
+  (stats?.locationStats || []).forEach(l => {
+    if (l.number) numberStats[l.number] = { sent: l.sent || 0, received: l.received || 0 };
+  });
+
+  const totalNumbers = ALL_NUMBERS.reduce((s, g) => s + g.numbers.length, 0);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Summary */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <StatCard label="Total Numbers" value={totalNumbers} color={D.white} />
+        <StatCard label="Location Lines" value={ALL_NUMBERS[0].numbers.length} color={D.green} />
+        <StatCard label="Pest Domains" value={ALL_NUMBERS[1].numbers.length} color={D.teal} />
+        <StatCard label="Lawn Domains" value={ALL_NUMBERS[2].numbers.length} color={D.green} />
+        <StatCard label="Other" value={ALL_NUMBERS[3].numbers.length + ALL_NUMBERS[4].numbers.length} color={D.muted} />
+      </div>
+
+      {/* Number Groups */}
+      {ALL_NUMBERS.map(group => (
+        <div key={group.group} style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.teal, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, paddingBottom: 10, borderBottom: `1px solid ${D.border}` }}>
+            {group.group}
+            <span style={{ fontSize: 11, fontWeight: 500, color: D.muted, marginLeft: 8 }}>({group.numbers.length})</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
+            {group.numbers.map((n, i) => {
+              const ns = numberStats[n.number];
+              return (
+                <div key={i} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: '12px 14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: group.group === 'Unassigned' ? D.muted : D.green, flexShrink: 0 }} />
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.white }}>{n.formatted}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: D.muted, marginBottom: ns ? 8 : 0 }}>{n.label}</div>
+                  {ns && (
+                    <div style={{ display: 'flex', gap: 16 }}>
+                      <div>
+                        <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Sent</div>
+                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.green }}>{ns.sent}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Received</div>
+                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.teal }}>{ns.received}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {/* Channel Analytics */}
+      <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20 }}>
+        <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, margin: '0 0 14px' }}>Channel Analytics</h2>
+        {channelStats.length > 0 ? (
+          channelStats.map(c => (
+            <ChannelBar key={c.type} type={c.type} count={c.sent} max={maxChannel} />
+          ))
+        ) : (
+          <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No channel data yet. Analytics will appear as messages are sent and received across your numbers.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =========================================================================
 // MAIN COMMUNICATIONS PAGE
 // =========================================================================
 
@@ -627,7 +701,7 @@ export default function CommunicationsPage() {
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
-        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
+        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'numbers', label: 'Phone Numbers' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
           <button key={t.key} onClick={() => setCommsTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
@@ -637,32 +711,15 @@ export default function CommunicationsPage() {
         ))}
       </div>
 
-      {commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : <>
+      {commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'numbers' ? (
+        <PhoneNumbersTab channelStats={channelStats} maxChannel={maxChannel} stats={stats} />
+      ) : <>
 
-      {/* --- Phone Numbers Overview --- */}
+      {/* --- Send SMS --- */}
       <div style={{ marginBottom: 28 }}>
-        <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>Phone Numbers</h2>
-        {ALL_NUMBERS.map(group => (
-          <div key={group.group} style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: D.teal, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{group.group}</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-              {group.numbers.map((n, i) => (
-                <div key={i} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: '10px 14px', minWidth: 200, flex: '0 1 auto' }}>
-                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: D.white, marginBottom: 2 }}>{n.formatted}</div>
-                  <div style={{ fontSize: 11, color: D.muted }}>{n.label}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* --- Two-column: Send SMS + Channel Analytics --- */}
-      <div style={{ display: 'flex', gap: 20, marginBottom: 28, flexWrap: 'wrap' }}>
-        {/* Send SMS Panel */}
         <div style={{
           background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
-          padding: 20, flex: '1 1 340px', minWidth: 300,
+          padding: 20,
         }}>
           <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, margin: '0 0 14px' }}>SMS</h2>
 
@@ -746,21 +803,6 @@ export default function CommunicationsPage() {
             <div style={{ marginTop: 10, fontSize: 12, color: sendResult.ok ? D.green : D.red, fontFamily: 'DM Sans, sans-serif' }}>
               {sendResult.text}
             </div>
-          )}
-        </div>
-
-        {/* Channel Analytics */}
-        <div style={{
-          background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
-          padding: 20, flex: '1 1 300px', minWidth: 280,
-        }}>
-          <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, margin: '0 0 14px' }}>Channel Analytics</h2>
-          {channelStats.length > 0 ? (
-            channelStats.map(c => (
-              <ChannelBar key={c.type} type={c.type} count={c.sent} max={maxChannel} />
-            ))
-          ) : (
-            <div style={{ color: D.muted, fontSize: 13 }}>No channel data yet.</div>
           )}
         </div>
       </div>
