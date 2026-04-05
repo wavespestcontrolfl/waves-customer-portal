@@ -1,5 +1,23 @@
-import React, { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
+import React, { useState, useEffect, useRef, useCallback, createContext, useContext, Component } from 'react';
 import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
+
+class EstimateErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error('[EstimatePage crash]', error, info.componentStack); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 40, background: '#1e293b', border: '1px solid #ef4444', borderRadius: 12, textAlign: 'center' }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#ef4444', marginBottom: 12 }}>Estimate Render Error</div>
+          <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 16, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', textAlign: 'left', maxHeight: 200, overflow: 'auto' }}>{this.state.error.message}{'\n'}{this.state.error.stack}</div>
+          <button onClick={() => this.setState({ error: null })} style={{ padding: '8px 20px', background: '#0ea5e9', color: '#fff', border: 'none', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>Try Again</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 /* ── theme tokens ───────────────────────────────────────────── */
 const C = {
@@ -796,6 +814,7 @@ function EstimateToolView() {
               <div style={{ fontSize: 15, color: C.gray }}>Enter property data and select services, then click Generate Estimate</div>
             </div>
           ) : (
+            <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
             <div style={sPanel}>
               <div style={{ maxHeight: 'calc(100vh - 120px)', overflowY: 'auto', paddingRight: 10 }}>
                 {/* ── Summary Card ──────────────────────── */}
@@ -1159,6 +1178,7 @@ function EstimateToolView() {
                 )}
               </div>
             </div>
+            </EstimateErrorBoundary>
           )}
         </div>
       </div>

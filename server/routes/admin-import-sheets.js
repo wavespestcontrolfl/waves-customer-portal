@@ -157,25 +157,32 @@ router.post('/calls', async (req, res, next) => {
 // POST /api/admin/import/pricing — import pricing data from CSV in Downloads
 router.post('/pricing', async (req, res, next) => {
   try {
-    const csvResp = await fetch('https://docs.google.com/spreadsheets/d/1Ei60A40nWHg1uX3vD3D4FdrhCmDNV0Uspk1Xc5O_wx0/gviz/tq?tqx=out:csv&sheet=PRICING');
     let csvText;
-    if (csvResp.ok) {
-      csvText = await csvResp.text();
+
+    // Try the local CSV file first (most reliable source)
+    const fs = require('fs');
+    const filePath = '/Users/adambenetti/Downloads/Pricing - Sheet2 (2).csv';
+    if (fs.existsSync(filePath)) {
+      csvText = fs.readFileSync(filePath, 'utf8');
     }
 
-    // Fallback: read from the request body if sheet fails
+    // Fallback: read from the request body
     if (!csvText && req.body?.csvData) {
       csvText = req.body.csvData;
     }
 
-    // Or use the static file
+    // Fallback: try Google Sheet (validate it has the right columns)
     if (!csvText) {
-      const fs = require('fs');
-      const path = require('path');
-      const filePath = '/Users/adambenetti/Downloads/Pricing - Sheet2 (2).csv';
-      if (fs.existsSync(filePath)) {
-        csvText = fs.readFileSync(filePath, 'utf8');
-      }
+      try {
+        const csvResp = await fetch('https://docs.google.com/spreadsheets/d/1Ei60A40nWHg1uX3vD3D4FdrhCmDNV0Uspk1Xc5O_wx0/gviz/tq?tqx=out:csv&sheet=PRICING');
+        if (csvResp.ok) {
+          const sheetText = await csvResp.text();
+          // Only use if it has the expected Product column header
+          if (sheetText && sheetText.split('\n')[0].includes('Product')) {
+            csvText = sheetText;
+          }
+        }
+      } catch (e) { /* ignore sheet fetch errors */ }
     }
 
     if (!csvText) return res.status(400).json({ error: 'No pricing data available' });
