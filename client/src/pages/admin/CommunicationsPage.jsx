@@ -33,6 +33,43 @@ const TEMPLATES = [
   { label: 'Review request', body: 'Thanks for choosing Waves Pest Control! We\'d love your feedback. Please leave us a quick review: [LINK]' },
 ];
 
+const ALL_NUMBERS = [
+  { group: 'Location Lines', numbers: [
+    { number: '+19412975749', formatted: '(941) 297-5749', label: 'wavespestcontrol.com (main)' },
+    { number: '+19413187612', formatted: '(941) 318-7612', label: 'Waves Pest Control Lakewood Ranch' },
+    { number: '+19412972606', formatted: '(941) 297-2606', label: 'Waves Pest Control Sarasota' },
+    { number: '+19412973337', formatted: '(941) 297-3337', label: 'Waves Pest Control Venice' },
+    { number: '+19412972817', formatted: '(941) 297-2817', label: 'Waves Pest Control Parrish' },
+  ]},
+  { group: 'Pest Control Domains', numbers: [
+    { number: '+19412838194', formatted: '(941) 283-8194', label: 'bradentonflexterminator.com' },
+    { number: '+19413265011', formatted: '(941) 326-5011', label: 'bradentonflpestcontrol.com' },
+    { number: '+19412972671', formatted: '(941) 297-2671', label: 'sarasotaflpestcontrol.com' },
+    { number: '+19412135203', formatted: '(941) 213-5203', label: 'palmettoexterminator.com' },
+    { number: '+19412943355', formatted: '(941) 294-3355', label: 'palmettoflpestcontrol.com' },
+    { number: '+19419098995', formatted: '(941) 909-8995', label: 'parrishexterminator.com' },
+    { number: '+19413187765', formatted: '(941) 318-7765', label: 'sarasotaflexterminator.com' },
+    { number: '+19412998937', formatted: '(941) 299-8937', label: 'veniceexterminator.com' },
+    { number: '+19412589109', formatted: '(941) 258-9109', label: 'portcharlotteflpestcontrol.com' },
+    { number: '+19412402066', formatted: '(941) 240-2066', label: 'wavespestcontrol.com/north-port' },
+  ]},
+  { group: 'Lawn Care Domains', numbers: [
+    { number: '+19413041850', formatted: '(941) 304-1850', label: 'bradentonfllawncare.com' },
+    { number: '+19412691692', formatted: '(941) 269-1692', label: 'sarasotafllawncare.com' },
+    { number: '+19412077456', formatted: '(941) 207-7456', label: 'parrishfllawncare.com' },
+    { number: '+19414131227', formatted: '(941) 413-1227', label: 'venicelawncare.com' },
+    { number: '+19412413824', formatted: '(941) 241-3824', label: 'waveslawncare.com' },
+  ]},
+  { group: 'Other', numbers: [
+    { number: '+18559260203', formatted: '(855) 926-0203', label: 'AI Agent' },
+    { number: '+19412412459', formatted: '(941) 241-2459', label: 'Waves Van' },
+  ]},
+  { group: 'Unassigned', numbers: [
+    { number: '+19412535279', formatted: '(941) 253-5279', label: 'Unassigned' },
+    { number: '+19412411388', formatted: '(941) 241-1388', label: 'Unassigned' },
+  ]},
+];
+
 const TYPE_META = {
   reminder: { icon: '🔔', color: D.amber },
   estimate: { icon: '📋', color: D.teal },
@@ -170,36 +207,53 @@ function CallLogTab() {
       {/* Call list */}
       <div style={{ background: D.card, borderRadius: 12, padding: '16px 20px', border: `1px solid ${D.border}` }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>Call Log</h2>
-          <a href="tel:+19413187612" style={{ padding: '6px 14px', borderRadius: 6, background: D.green, color: D.white, fontSize: 12, fontWeight: 600, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}>{'📞'} Call</a>
+          <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>Call History</h2>
         </div>
 
         {calls.length === 0 ? (
           <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No calls recorded yet.</div>
         ) : (
-          <div style={{ maxHeight: 480, overflowY: 'auto' }}>
+          <div style={{ maxHeight: 600, overflowY: 'auto' }}>
             {calls.map(c => {
               const answeredColor = c.answered_by === 'human' ? D.green : c.answered_by === 'voice_agent' ? D.teal : c.answered_by === 'voicemail' ? D.amber : D.red;
               const answeredLabel = c.answered_by === 'human' ? 'Answered' : c.answered_by === 'voice_agent' ? 'AI Agent' : c.answered_by === 'voicemail' ? 'Voicemail' : 'Missed';
-              const dur = c.duration_seconds ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, '0')}` : '—';
+              const dur = c.duration_seconds ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, '0')}` : '--';
 
               return (
-                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
-                  <span style={{ fontSize: 16, width: 20, textAlign: 'center', color: c.direction === 'inbound' ? D.teal : D.green }}>{c.direction === 'inbound' ? '↓' : '↑'}</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>
-                      {c.first_name ? `${c.first_name} ${c.last_name || ''}` : c.from_phone || 'Unknown'}
+                <div key={c.id} style={{ padding: '12px 0', borderBottom: `1px solid ${D.border}` }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontSize: 16, width: 20, textAlign: 'center', color: c.direction === 'inbound' ? D.teal : D.green }}>{c.direction === 'inbound' ? '↓' : '↑'}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>
+                        {c.first_name ? `${c.first_name} ${c.last_name || ''}` : c.from_phone || 'Unknown'}
+                        <span style={{ fontSize: 11, color: D.muted, fontWeight: 400, marginLeft: 8 }}>{c.direction === 'inbound' ? 'Inbound' : 'Outbound'}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: D.muted }}>
+                        {c.from_phone} {c.to_phone ? ` > ${c.to_phone}` : ''} · {dur} · {c.caller_city ? `${c.caller_city}, ${c.caller_state}` : ''}
+                      </div>
+                      {c.voice_agent_outcome && <div style={{ fontSize: 11, color: D.teal, marginTop: 2 }}>Outcome: {c.voice_agent_outcome?.replace(/_/g, ' ')}</div>}
                     </div>
-                    <div style={{ fontSize: 11, color: D.muted }}>
-                      {c.from_phone} · {dur} · {c.caller_city ? `${c.caller_city}, ${c.caller_state}` : ''}
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: answeredColor + '22', color: answeredColor }}>{answeredLabel}</span>
+                      <span style={{ fontSize: 10, color: D.muted }}>{timeAgo(c.created_at)}</span>
                     </div>
-                    {c.voice_agent_outcome && <div style={{ fontSize: 11, color: D.teal, marginTop: 2 }}>Outcome: {c.voice_agent_outcome?.replace(/_/g, ' ')}</div>}
-                    {c.transcription && <div style={{ fontSize: 11, color: D.muted, marginTop: 2, fontStyle: 'italic' }}>"{(c.transcription || '').substring(0, 80)}..."</div>}
                   </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: answeredColor + '22', color: answeredColor }}>{answeredLabel}</span>
-                    <span style={{ fontSize: 10, color: D.muted }}>{timeAgo(c.created_at)}</span>
-                  </div>
+                  {/* Recording player */}
+                  {c.recording_url && (
+                    <div style={{ marginTop: 8, marginLeft: 30, padding: '8px 12px', background: D.bg, borderRadius: 8, border: `1px solid ${D.border}` }}>
+                      <div style={{ fontSize: 11, color: D.muted, marginBottom: 4, fontWeight: 600 }}>Recording {c.recording_duration_seconds ? `(${Math.floor(c.recording_duration_seconds / 60)}:${String(c.recording_duration_seconds % 60).padStart(2, '0')})` : ''}</div>
+                      <audio controls preload="none" style={{ width: '100%', height: 32 }}>
+                        <source src={c.recording_url} type="audio/mpeg" />
+                      </audio>
+                    </div>
+                  )}
+                  {/* Transcription */}
+                  {c.transcription && (
+                    <div style={{ marginTop: 6, marginLeft: 30, padding: '8px 12px', background: D.bg, borderRadius: 8, border: `1px solid ${D.border}` }}>
+                      <div style={{ fontSize: 11, color: D.muted, marginBottom: 2, fontWeight: 600 }}>Transcription</div>
+                      <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5, fontStyle: 'italic' }}>"{c.transcription}"</div>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -405,6 +459,7 @@ export default function CommunicationsPage() {
 
   // Compose state
   const [toNumber, setToNumber] = useState('');
+  const [fromNumber, setFromNumber] = useState('+19413187612');
   const [msgBody, setMsgBody] = useState('');
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
@@ -433,7 +488,7 @@ export default function CommunicationsPage() {
     try {
       await adminFetch('/admin/communications/sms', {
         method: 'POST',
-        body: JSON.stringify({ to: toNumber.trim(), body: msgBody.trim(), messageType: 'manual' }),
+        body: JSON.stringify({ to: toNumber.trim(), body: msgBody.trim(), messageType: 'manual', fromNumber }),
       });
       setSendResult({ ok: true, text: 'Message sent!' });
       setToNumber('');
@@ -488,7 +543,7 @@ export default function CommunicationsPage() {
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
-        {[{ key: 'sms', label: '📱 SMS' }, { key: 'calls', label: '📞 Call Log' }, { key: 'csr', label: '🎯 CSR Coach' }].map(t => (
+        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
           <button key={t.key} onClick={() => setCommsTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
@@ -503,17 +558,19 @@ export default function CommunicationsPage() {
       {/* --- Phone Numbers Overview --- */}
       <div style={{ marginBottom: 28 }}>
         <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>Phone Numbers</h2>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-          {locationNumbers.map((loc, i) => (
-            <PhoneCard key={loc.locationId || i} number={loc.formatted} label={loc.label} sent={loc.sent} received={loc.received} />
-          ))}
-          {trackingNumbers.map((tn, i) => (
-            <PhoneCard key={`trk-${i}`} number={tn.formatted || tn.number || tn} label="Van Wrap Tracking" sent={tn.sent} received={tn.received} isTracking />
-          ))}
-          {locationNumbers.length === 0 && trackingNumbers.length === 0 && (
-            <div style={{ color: D.muted, fontSize: 13, padding: 16 }}>No phone numbers configured yet.</div>
-          )}
-        </div>
+        {ALL_NUMBERS.map(group => (
+          <div key={group.group} style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: D.teal, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{group.group}</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+              {group.numbers.map((n, i) => (
+                <div key={i} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: '10px 14px', minWidth: 200, flex: '0 1 auto' }}>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: D.white, marginBottom: 2 }}>{n.formatted}</div>
+                  <div style={{ fontSize: 11, color: D.muted }}>{n.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* --- Two-column: Send SMS + Channel Analytics --- */}
@@ -524,6 +581,27 @@ export default function CommunicationsPage() {
           padding: 20, flex: '1 1 340px', minWidth: 300,
         }}>
           <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, margin: '0 0 14px' }}>SMS</h2>
+
+          <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>From</label>
+          <select
+            value={fromNumber}
+            onChange={e => setFromNumber(e.target.value)}
+            style={{
+              width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
+              color: D.white, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', marginBottom: 12, boxSizing: 'border-box',
+              WebkitAppearance: 'none', appearance: 'none',
+              backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
+              backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center', paddingRight: 32,
+            }}
+          >
+            {ALL_NUMBERS.map(group => (
+              <optgroup key={group.group} label={group.group}>
+                {group.numbers.map(n => (
+                  <option key={n.number} value={n.number}>{n.formatted} — {n.label}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
 
           <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>To</label>
           <input
