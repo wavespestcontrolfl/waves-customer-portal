@@ -19,11 +19,13 @@ export function interpolate(v, b) {
 }
 
 export function fmt(n) {
-  return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (n === undefined || n === null || isNaN(n)) return '$0.00';
+  return '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 export function fmtInt(n) {
-  return '$' + Math.round(n).toLocaleString();
+  if (n === undefined || n === null || isNaN(n)) return '$0';
+  return '$' + Math.round(Number(n)).toLocaleString();
 }
 
 /* ── main engine ────────────────────────────────────────────── */

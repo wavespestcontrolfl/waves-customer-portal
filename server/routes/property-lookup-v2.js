@@ -1107,7 +1107,7 @@ router.post('/calculate-estimate', async (req, res) => {
         annualAfterDiscount: wg.annualAfterDiscount || 0,
         savings: wg.savings || 0,
         rodentBaitMo: totals.rodentBaitMonthly || 0,
-        services: wg.services || [],
+        services: (wg.services || []).map(s => ({ name: s.name, mo: s.monthly || s.mo || 0, monthly: s.monthly || s.mo || 0 })),
       },
       oneTime: {
         items: v1OtItems,
