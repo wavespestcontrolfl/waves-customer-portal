@@ -709,6 +709,7 @@ export default function CommunicationsPage() {
   const [msgBody, setMsgBody] = useState('');
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
+  const [aiDrafting, setAiDrafting] = useState(false);
 
   // Filters
   const [dirFilter, setDirFilter] = useState('all');
@@ -758,6 +759,24 @@ export default function CommunicationsPage() {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
       setSending(false);
+    }
+  };
+
+  const handleAiDraft = async () => {
+    if (!toNumber.trim()) { alert('Enter a To number first'); return; }
+    setAiDrafting(true);
+    try {
+      // Find the last inbound message from this number to use as context
+      const lastMsg = messages.find(m => m.direction === 'inbound' && (m.from === toNumber.trim() || m.from?.includes(toNumber.trim().replace(/\D/g, '').slice(-10))));
+      const d = await adminFetch('/admin/communications/ai-draft', {
+        method: 'POST',
+        body: JSON.stringify({ customerPhone: toNumber.trim(), lastMessage: lastMsg?.body || '' }),
+      });
+      if (d.draft) setMsgBody(d.draft.slice(0, 160));
+    } catch (e) {
+      alert('AI draft failed: ' + e.message);
+    } finally {
+      setAiDrafting(false);
     }
   };
 
@@ -924,17 +943,30 @@ export default function CommunicationsPage() {
             ))}
           </div>
 
+          <div style={{ display: 'flex', gap: 8 }}>
           <button
             onClick={handleSend}
             disabled={sending || !toNumber.trim() || !msgBody.trim()}
             style={{
-              width: '100%', padding: '10px 0', background: sending ? D.muted : D.green, border: 'none', borderRadius: 8,
+              flex: 1, padding: '10px 0', background: sending ? D.muted : D.green, border: 'none', borderRadius: 8,
               color: D.white, fontSize: 14, fontWeight: 600, cursor: sending ? 'not-allowed' : 'pointer', fontFamily: 'DM Sans, sans-serif',
               opacity: (!toNumber.trim() || !msgBody.trim()) ? 0.5 : 1,
             }}
           >
             {sending ? 'Sending...' : 'Send'}
           </button>
+          <button
+            onClick={handleAiDraft}
+            disabled={aiDrafting || !toNumber.trim()}
+            style={{
+              padding: '10px 18px', background: 'transparent', border: `1px solid ${D.teal}`, borderRadius: 8,
+              color: D.teal, fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'DM Sans, sans-serif',
+              opacity: aiDrafting || !toNumber.trim() ? 0.5 : 1, whiteSpace: 'nowrap',
+            }}
+          >
+            {aiDrafting ? 'Drafting...' : 'AI Draft'}
+          </button>
+          </div>
 
           {sendResult && (
             <div style={{ marginTop: 10, fontSize: 12, color: sendResult.ok ? D.green : D.red, fontFamily: 'DM Sans, sans-serif' }}>

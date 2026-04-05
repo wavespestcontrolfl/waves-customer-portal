@@ -135,6 +135,64 @@ router.get('/stats', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/communications/ai-draft — generate AI reply for a customer message
+router.post('/ai-draft', async (req, res, next) => {
+  try {
+    const { customerPhone, lastMessage } = req.body;
+    if (!customerPhone) return res.status(400).json({ error: 'customerPhone required' });
+
+    // Look up customer context
+    const cleanPhone = customerPhone.replace(/\D/g, '').slice(-10);
+    const customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first();
+
+    // Get recent SMS history for context
+    const recentSms = await db('sms_log')
+      .where(function () {
+        this.where('from_phone', 'like', `%${cleanPhone}`).orWhere('to_phone', 'like', `%${cleanPhone}`);
+      })
+      .orderBy('created_at', 'desc')
+      .limit(5);
+
+    const conversationContext = recentSms.reverse().map(s =>
+      `${s.direction === 'inbound' ? 'Customer' : 'Waves'}: ${s.message_body}`
+    ).join('\n');
+
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic();
+
+    const msg = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 200,
+      messages: [{
+        role: 'user',
+        content: `You are responding as Waves Pest Control via SMS. Write a short, friendly reply (under 160 characters).
+
+About Waves Pest Control:
+- Family-owned pest control and lawn care in Southwest Florida
+- Services: pest control, lawn care, mosquito control, termite protection, rodent removal
+- Locations: Lakewood Ranch, Sarasota, Parrish, Venice
+- Phone: (941) 318-7612
+- Tone: Professional but warm, neighborly, genuine. Use "we" and "our".
+- Always helpful and solution-oriented
+
+${customer ? `Customer: ${customer.first_name} ${customer.last_name}, ${customer.city || ''}, ${customer.waveguard_tier || ''} tier` : `Customer phone: ${customerPhone}`}
+
+${conversationContext ? `Recent conversation:\n${conversationContext}` : ''}
+
+${lastMessage ? `Customer's last message: "${lastMessage}"` : 'No specific message to reply to — write a friendly check-in.'}
+
+Write ONLY the SMS reply text. Keep it under 160 characters. No quotes or labels.`,
+      }],
+    });
+
+    const draft = (msg.content[0]?.text || '').trim();
+    res.json({ draft });
+  } catch (err) {
+    logger.error(`AI draft failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/communications/ai-auto-reply-status
 router.get('/ai-auto-reply-status', async (req, res) => {
   try {
