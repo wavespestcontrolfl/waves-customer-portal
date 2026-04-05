@@ -168,37 +168,36 @@ class GoogleBusinessService {
   }
 
   // =========================================================================
-  // REVIEW SYNC — fetches from Google and upserts into local DB
+  // REVIEW SYNC — uses Google Places API (no GBP API access needed)
   // =========================================================================
   async syncAllReviews() {
-    if (!this.configured) {
-      logger.info('Google Business not configured — skipping review sync');
-      return { synced: 0, new: 0, errors: [] };
-    }
-
+    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
     let totalSynced = 0, totalNew = 0;
     const errors = [];
 
     for (const loc of WAVES_LOCATIONS) {
-      if (!loc.googleLocationResourceName) continue;
-
-      // Check if this location has credentials
-      const envKey = LOCATION_ENV_KEYS[loc.id];
-      if (!envKey || !process.env[`GBP_CLIENT_ID_${envKey}`] || !process.env[`GBP_REFRESH_TOKEN_${envKey}`]) {
-        errors.push({ location: loc.name, error: 'No credentials configured' });
-        continue;
-      }
+      if (!loc.googlePlaceId) continue;
 
       try {
-        const reviews = await this.getReviews(loc.googleLocationResourceName, loc.id, 50);
+        const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=reviews,rating,user_ratings_total&key=${GOOGLE_KEY}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.status !== 'OK') {
+          errors.push({ location: loc.name, error: `Places API: ${data.status}` });
+          continue;
+        }
+
+        const reviews = data.result?.reviews || [];
 
         for (const review of reviews) {
-          const googleId = review.name;
-          const rating = { FIVE: 5, FOUR: 4, THREE: 3, TWO: 2, ONE: 1 }[review.starRating] || 0;
-          const reviewerName = review.reviewer?.displayName || 'Anonymous';
-          const reviewText = review.comment || null;
-          const replyText = review.reviewReply?.comment || null;
-          const createdAt = review.createTime;
+          // Places API uses author_name + time as unique key (no stable ID)
+          const googleId = `places_${loc.googlePlaceId}_${review.time}`;
+          const rating = review.rating || 0;
+          const reviewerName = review.author_name || 'Anonymous';
+          const reviewText = review.text || null;
+          const reviewerPhoto = review.profile_photo_url || null;
+          const createdAt = new Date(review.time * 1000).toISOString();
 
           let customerId = null;
           if (reviewerName && reviewerName !== 'Anonymous') {
@@ -212,9 +211,8 @@ class GoogleBusinessService {
 
           if (existing) {
             await db('google_reviews').where({ id: existing.id }).update({
-              star_rating: rating, review_text: reviewText, review_reply: replyText,
-              reply_updated_at: replyText ? db.fn.now() : null,
-              reviewer_photo_url: review.reviewer?.profilePhotoUrl || null,
+              star_rating: rating, review_text: reviewText,
+              reviewer_photo_url: reviewerPhoto,
               customer_id: customerId || existing.customer_id,
               synced_at: db.fn.now(),
             });
@@ -222,9 +220,8 @@ class GoogleBusinessService {
           } else {
             await db('google_reviews').insert({
               google_review_id: googleId, location_id: loc.id,
-              reviewer_name: reviewerName, reviewer_photo_url: review.reviewer?.profilePhotoUrl || null,
-              star_rating: rating, review_text: reviewText, review_reply: replyText,
-              reply_updated_at: replyText ? new Date() : null,
+              reviewer_name: reviewerName, reviewer_photo_url: reviewerPhoto,
+              star_rating: rating, review_text: reviewText,
               review_created_at: createdAt, customer_id: customerId, synced_at: db.fn.now(),
             });
             totalNew++;
@@ -240,7 +237,7 @@ class GoogleBusinessService {
           }
         }
 
-        logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name}`);
+        logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name} via Places API`);
       } catch (err) {
         logger.error(`Review sync failed for ${loc.name}: ${err.message}`);
         errors.push({ location: loc.name, error: err.message });
