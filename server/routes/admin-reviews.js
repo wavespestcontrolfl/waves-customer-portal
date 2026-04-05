@@ -296,6 +296,10 @@ router.post('/send-request', async (req, res, next) => {
 // POST /api/admin/reviews/sync — manual sync
 router.post('/sync', async (req, res, next) => {
   try {
+    // If fresh=true, clear old synced reviews first (re-pull from Google)
+    if (req.body?.fresh) {
+      await db('google_reviews').where('google_review_id', 'like', 'places_%').del();
+    }
     const result = await gbp.syncAllReviews();
     res.json({ success: true, ...result });
   } catch (err) {

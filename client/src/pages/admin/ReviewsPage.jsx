@@ -959,7 +959,7 @@ export default function ReviewsPage() {
   const handleSync = async () => {
     setSyncing(true);
     try {
-      await adminFetch('/admin/reviews/sync', { method: 'POST' });
+      await adminFetch('/admin/reviews/sync', { method: 'POST', body: JSON.stringify({ fresh: true }) });
       await loadData();
     } catch (e) {
       alert('Sync failed: ' + e.message);

@@ -179,7 +179,7 @@ class GoogleBusinessService {
       if (!loc.googlePlaceId) continue;
 
       try {
-        const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=reviews,rating,user_ratings_total,name&key=${GOOGLE_KEY}`;
+        const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=reviews,rating,user_ratings_total,name&reviews_sort=newest&key=${GOOGLE_KEY}`;
         const res = await fetch(url);
         const data = await res.json();
 
@@ -222,6 +222,9 @@ class GoogleBusinessService {
           const reviewerPhoto = review.profile_photo_url || null;
           const createdAt = new Date(review.time * 1000).toISOString();
 
+          // Places API includes owner response if one exists
+          const ownerReply = review.owner_response?.text || null;
+
           let customerId = null;
           if (reviewerName && reviewerName !== 'Anonymous') {
             const customer = await db('customers')
@@ -233,18 +236,25 @@ class GoogleBusinessService {
           const existing = await db('google_reviews').where({ google_review_id: googleId }).first();
 
           if (existing) {
-            await db('google_reviews').where({ id: existing.id }).update({
+            const upd = {
               star_rating: rating, review_text: reviewText,
               reviewer_photo_url: reviewerPhoto,
               customer_id: customerId || existing.customer_id,
               synced_at: db.fn.now(),
-            });
+            };
+            // Only update reply from Google if we don't have a local reply already
+            if (ownerReply && !existing.review_reply) {
+              upd.review_reply = ownerReply;
+              upd.reply_updated_at = db.fn.now();
+            }
+            await db('google_reviews').where({ id: existing.id }).update(upd);
             totalSynced++;
           } else {
             await db('google_reviews').insert({
               google_review_id: googleId, location_id: loc.id,
               reviewer_name: reviewerName, reviewer_photo_url: reviewerPhoto,
               star_rating: rating, review_text: reviewText,
+              review_reply: ownerReply, reply_updated_at: ownerReply ? new Date() : null,
               review_created_at: createdAt, customer_id: customerId, synced_at: db.fn.now(),
             });
             totalNew++;
