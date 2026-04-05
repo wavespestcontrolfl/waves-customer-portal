@@ -210,15 +210,24 @@ router.put('/:id/stage', async (req, res, next) => {
   try {
     const { stage, notes } = req.body;
     const customer = await db('customers').where({ id: req.params.id }).first();
+    const oldStage = customer.pipeline_stage;
     await db('customers').where({ id: req.params.id }).update({ pipeline_stage: stage, pipeline_stage_changed_at: new Date() });
     if (stage === 'churned' && req.body.churnReason) {
       await db('customers').where({ id: req.params.id }).update({ churned_at: new Date(), churn_reason: req.body.churnReason });
     }
     await db('customer_interactions').insert({
       customer_id: req.params.id, interaction_type: 'note',
-      subject: `Stage changed: ${customer.pipeline_stage} → ${stage}`,
+      subject: `Stage changed: ${oldStage} → ${stage}`,
       body: notes || '', admin_user_id: req.technicianId,
     });
+
+    // Fire email automations (Beehiiv + SMS) on stage change
+    try {
+      const EmailAutomationService = require('../services/email-automations');
+      EmailAutomationService.onStageChange(req.params.id, stage, oldStage)
+        .catch(err => require('../services/logger').error(`[email-auto] Stage change trigger failed: ${err.message}`));
+    } catch (e) { /* non-critical */ }
+
     res.json({ success: true });
   } catch (err) { next(err); }
 });

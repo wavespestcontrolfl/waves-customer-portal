@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
+import EmailAutomationsPanel from './EmailAutomationsPanel';
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
 
@@ -839,7 +841,7 @@ export default function CommunicationsPage() {
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
-        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'numbers', label: 'Phone Numbers' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
+        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'numbers', label: 'Phone Numbers' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
           <button key={t.key} onClick={() => setCommsTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
@@ -849,7 +851,7 @@ export default function CommunicationsPage() {
         ))}
       </div>
 
-      {commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'numbers' ? (
+      {commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'numbers' ? (
         <PhoneNumbersTab channelStats={channelStats} maxChannel={maxChannel} stats={stats} />
       ) : <>
 
