@@ -89,10 +89,11 @@ router.get('/', async (req, res, next) => {
         perLocation: perLocation.map(l => {
           const gs = googleStats[l.location_id];
           return {
-          locationId: l.location_id,
-          count: gs?.totalReviews || parseInt(l.count),
-          avgRating: gs?.rating?.toFixed(1) || parseFloat(l.avg || 0).toFixed(1),
-        })),
+            locationId: l.location_id,
+            count: gs?.totalReviews || parseInt(l.count),
+            avgRating: gs?.rating?.toFixed(1) || parseFloat(l.avg || 0).toFixed(1),
+          };
+        }),
       },
       locations: WAVES_LOCATIONS.map(l => ({ id: l.id, name: l.name, reviewUrl: l.googleReviewUrl })),
     });
