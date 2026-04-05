@@ -119,4 +119,14 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/square-bookings — upcoming Square appointments
+router.get('/square-bookings', async (req, res, next) => {
+  try {
+    const SquareService = require('../services/square');
+    const days = parseInt(req.query.days || '7');
+    const bookings = await SquareService.getUpcomingBookings(days);
+    res.json({ bookings, count: bookings.length });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

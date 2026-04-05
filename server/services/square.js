@@ -5,7 +5,7 @@ const logger = require('./logger');
 const { v4: uuidv4 } = require('uuid');
 
 // Initialize Square client — lazy to avoid crash if creds missing
-let squareClient, paymentsApi, customersApi, cardsApi, invoicesApi;
+let squareClient, paymentsApi, customersApi, cardsApi, invoicesApi, bookingsApi, teamApi;
 if (config.square.accessToken) {
   squareClient = new Client({
     accessToken: config.square.accessToken,
@@ -17,6 +17,8 @@ if (config.square.accessToken) {
   customersApi = squareClient.customersApi;
   cardsApi = squareClient.cardsApi;
   invoicesApi = squareClient.invoicesApi;
+  bookingsApi = squareClient.bookingsApi;
+  teamApi = squareClient.teamApi;
 } else {
   logger.warn('[square] SQUARE_ACCESS_TOKEN not set — payment features disabled');
 }
@@ -281,6 +283,73 @@ const SquareService = {
       )
       .orderBy('payments.payment_date', 'desc')
       .limit(limit);
+  },
+
+  // =========================================================================
+  // SQUARE BOOKINGS / APPOINTMENTS
+  // =========================================================================
+
+  /**
+   * Get upcoming appointments from Square Bookings API
+   * @param {number} days — how many days ahead to look (default 7)
+   */
+  async getUpcomingBookings(days = 7) {
+    if (!bookingsApi) {
+      logger.warn('[square] Bookings API not available');
+      return [];
+    }
+
+    try {
+      const now = new Date();
+      const end = new Date();
+      end.setDate(end.getDate() + days);
+
+      const response = await bookingsApi.listBookings({
+        startAtMin: now.toISOString(),
+        startAtMax: end.toISOString(),
+        limit: 100,
+      });
+
+      const bookings = response.result?.bookings || [];
+
+      // Enrich with customer names from Square
+      const customerIds = [...new Set(bookings.map(b => b.customerId).filter(Boolean))];
+      const customerMap = {};
+      for (const cid of customerIds) {
+        try {
+          const cr = await customersApi.retrieveCustomer(cid);
+          const c = cr.result?.customer;
+          if (c) customerMap[cid] = { name: `${c.givenName || ''} ${c.familyName || ''}`.trim(), phone: c.phoneNumber, email: c.emailAddress };
+        } catch { /* skip */ }
+      }
+
+      return bookings.map(b => {
+        const cust = customerMap[b.customerId] || {};
+        const start = new Date(b.startAt);
+        return {
+          id: b.id,
+          status: b.status, // ACCEPTED, PENDING, CANCELLED_BY_CUSTOMER, etc.
+          startAt: b.startAt,
+          date: start.toISOString().split('T')[0],
+          time: start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
+          dayOfWeek: start.toLocaleDateString('en-US', { weekday: 'short' }),
+          durationMinutes: b.appointmentSegments?.[0]?.durationMinutes || null,
+          customerName: cust.name || 'Walk-in',
+          customerPhone: cust.phone || null,
+          customerEmail: cust.email || null,
+          serviceName: b.appointmentSegments?.[0]?.serviceVariationId || 'Service',
+          teamMemberId: b.appointmentSegments?.[0]?.teamMemberId || null,
+          locationId: b.locationId,
+          note: b.customerNote || b.sellerNote || null,
+          source: b.source || 'SQUARE',
+          version: b.version,
+          createdAt: b.createdAt,
+        };
+      }).sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+    } catch (err) {
+      logger.error(`[square] Failed to fetch bookings: ${err.message}`);
+      return [];
+    }
   },
 };
 
