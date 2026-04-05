@@ -271,39 +271,92 @@ function EstimateToolView() {
     setCustomers([]);
   }
 
-  /* ── RentCast lookup ──────────────────────────────────────── */
+  /* ── v2 Property Lookup — RentCast + Satellite + Claude AI in one call ── */
+  const [enrichedProfile, setEnrichedProfile] = useState(null);
+
   async function doLookup() {
     const address = form.address.trim();
     if (!address) { setLookupStatus({ type: 'err', msg: 'Enter an address' }); return; }
-    setLookupStatus({ type: 'loading', msg: 'Looking up...' });
+    setLookupStatus({ type: 'loading', msg: 'Looking up property... (RentCast + AI Satellite Analysis)' });
+    setSatelliteStatus({ type: 'loading', msg: 'Running AI satellite analysis...' });
     try {
-      const r = await fetch(`/api/admin/lookup/property?address=${encodeURIComponent(address)}`, { headers: authHeaders });
+      const r = await fetch('/api/admin/estimator/property-lookup', {
+        method: 'POST', headers: authHeaders,
+        body: JSON.stringify({ address }),
+      });
       if (!r.ok) throw new Error('API ' + r.status);
       const data = await r.json();
-      // Server returns { property, satellite } — extract the property object
-      const p = data.property || (Array.isArray(data) ? data[0] : data);
-      if (!p || (!p.squareFootage && !p.lotSize && !p.propertyType)) { setLookupStatus({ type: 'err', msg: 'Property not found' }); return; }
+
+      if (data.errors?.length > 0 && !data.enriched) {
+        setLookupStatus({ type: 'err', msg: data.errors.map(e => e.message).join(', ') });
+        setSatelliteStatus({ type: '', msg: '' });
+        return;
+      }
+
+      const ep = data.enriched;
+      setEnrichedProfile(ep);
+
+      // Fill form from enriched profile
       const upd = {};
-      if (p.squareFootage) upd.homeSqFt = String(p.squareFootage);
-      if (p.lotSize) upd.lotSqFt = String(p.lotSize);
-      if (p.stories) upd.stories = String(p.stories);
-      if (p.propertyType) {
-        const pt = p.propertyType.toLowerCase();
+      if (ep.homeSqFt) upd.homeSqFt = String(ep.homeSqFt);
+      if (ep.lotSqFt) upd.lotSqFt = String(ep.lotSqFt);
+      if (ep.stories) upd.stories = String(ep.stories);
+      if (ep.propertyType) {
+        const pt = ep.propertyType.toLowerCase();
         if (pt.includes('single')) upd.propertyType = 'Single Family';
         else if (pt.includes('town')) upd.propertyType = 'Townhome';
         else if (pt.includes('condo')) upd.propertyType = 'Condo';
         else if (pt.includes('duplex')) upd.propertyType = 'Duplex';
         else if (pt.includes('commercial')) upd.propertyType = 'Commercial';
       }
-      if (p.features?.pool || p.pool === true || p.hasPool === true) upd.hasPool = 'YES';
-      // Also grab satellite image if returned
-      if (data.satellite?.imageUrl) {
-        setSatelliteData(prev => prev || { imageUrl: data.satellite.imageUrl });
-      }
+      if (ep.pool === 'YES' || ep.pool === 'POSSIBLE') upd.hasPool = 'YES';
+      if (ep.poolCage === 'YES') upd.hasPoolCage = 'YES';
+      if (ep.largeDriveway) upd.hasLargeDriveway = 'YES';
+      if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
+      if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
+      if (ep.landscapeComplexity) upd.landscapeComplexity = ep.landscapeComplexity;
+      if (ep.nearWater && ep.nearWater !== 'NONE') upd.nearWater = 'YES';
+      if (ep.estimatedBedAreaSf) upd.bedArea = String(ep.estimatedBedAreaSf);
+      if (ep.estimatedPalmCount) upd.palmCount = String(ep.estimatedPalmCount);
+      if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
+
       setForm(f => ({ ...f, ...upd, _boracareAuto: true, _preslabAuto: true }));
-      setLookupStatus({ type: 'ok', msg: `${p.formattedAddress || address} — ${p.squareFootage || '?'} sf / ${p.lotSize || '?'} sf lot / ${p.stories || 1} story` });
+
+      // Satellite images
+      if (data.satellite) {
+        setSatelliteData({
+          imageUrl: data.satellite.closeUrl,
+          wideUrl: data.satellite.wideUrl,
+          inServiceArea: data.satellite.inServiceArea,
+        });
+      }
+
+      // Build status messages
+      const rc = data.rentcast;
+      const ai = data.aiAnalysis;
+      const lines = [];
+      if (rc) lines.push(`${rc.formattedAddress} — ${rc.squareFootage || '?'} sf / ${rc.lotSize || '?'} sf lot / ${rc.stories || 1} story`);
+      if (ep.yearBuilt) lines.push(`Built ${ep.yearBuilt} · ${ep.constructionMaterial} · ${ep.foundationType} foundation · ${ep.roofType} roof`);
+      if (ep.serviceZone) lines.push(`Service Zone ${ep.serviceZone}`);
+      setLookupStatus({ type: 'ok', msg: lines.join('\n') });
+
+      if (ai) {
+        const conf = ep.aiConfidence >= 70 ? 'HIGH' : ep.aiConfidence >= 40 ? 'MEDIUM' : 'LOW';
+        const flags = ep.fieldVerifyFlags?.length || 0;
+        setSatelliteStatus({
+          type: 'ok',
+          msg: `AI Analysis complete — Confidence: ${conf} (${ep.aiConfidence}%)${flags > 0 ? ` · ${flags} field(s) flagged` : ''}\nPest pressure: ${ep.overallPestPressure} · Water: ${ep.nearWater} · Turf: ${ep.estimatedTurfSf} sf`,
+        });
+      } else {
+        setSatelliteStatus({ type: 'err', msg: 'AI satellite analysis unavailable' });
+      }
+
+      if (data.errors?.length > 0) {
+        console.warn('[estimate] Partial errors:', data.errors);
+      }
     } catch (e) {
       setLookupStatus({ type: 'err', msg: e.message });
+      setSatelliteStatus({ type: '', msg: '' });
     }
   }
 
@@ -356,7 +409,88 @@ function EstimateToolView() {
   }
 
   /* ── generate estimate ────────────────────────────────────── */
-  function doGenerate() {
+  async function doGenerate() {
+    // If we have an enriched profile from v2 lookup, use server-side calculation
+    if (enrichedProfile) {
+      try {
+        setLookupStatus(s => ({ ...s, type: 'loading', msg: 'Calculating estimate...' }));
+
+        // Build selected services array from form checkboxes
+        const selectedServices = [];
+        if (form.svcLawn) selectedServices.push('LAWN');
+        if (form.svcPest) selectedServices.push('PEST');
+        if (form.svcTs) selectedServices.push('TREE_SHRUB');
+        if (form.svcInjection) selectedServices.push('PALM_INJECTION');
+        if (form.svcMosquito) selectedServices.push('MOSQUITO');
+        if (form.svcTermiteBait) selectedServices.push('TERMITE_BAIT');
+        if (form.svcRodentBait) selectedServices.push('RODENT_BAIT');
+        if (form.svcOnetimePest) selectedServices.push('ONETIME_PEST');
+        if (form.svcOnetimeLawn) selectedServices.push('ONETIME_LAWN');
+        if (form.svcOnetimeMosquito) selectedServices.push('ONETIME_MOSQUITO');
+        if (form.svcPlugging) selectedServices.push('PLUGGING');
+        if (form.svcTopdress) selectedServices.push('TOPDRESS');
+        if (form.svcDethatch) selectedServices.push('DETHATCH');
+        if (form.svcTrenching) selectedServices.push('TRENCHING');
+        if (form.svcBoracare) selectedServices.push('BORACARE');
+        if (form.svcPreslab) selectedServices.push('PRESLAB');
+        if (form.svcFoam) selectedServices.push('FOAM');
+        if (form.svcRodentTrap) selectedServices.push('RODENT_TRAP');
+        if (form.svcFlea) selectedServices.push('FLEA');
+        if (form.svcWasp) selectedServices.push('STING');
+        if (form.svcRoach) selectedServices.push('ROACH');
+        if (form.svcBedbug) selectedServices.push('BEDBUG');
+        if (form.svcExclusion) selectedServices.push('EXCLUSION');
+
+        const options = {
+          grassType: form.grassType || 'A',
+          pestFreq: parseInt(form.pestFreq) || 4,
+          roachModifier: form.roachModifier || 'NONE',
+          urgency: form.urgency || 'ROUTINE',
+          afterHours: form.isAfterHours === 'YES',
+          recurringCustomer: form.isRecurringCustomer === 'YES',
+          plugArea: parseInt(form.plugArea) || 0,
+          plugSpacing: parseInt(form.plugSpacing) || 12,
+          boracareSqft: parseInt(form.boracareSqft) || 0,
+          preslabSqft: parseInt(form.preslabSqft) || 0,
+          preslabWarranty: form.preslabWarranty || 'BASIC',
+          preslabVolume: form.preslabVolume || 'NONE',
+          foamPoints: parseInt(form.foamPoints) || 5,
+          bedbugRooms: parseInt(form.bedbugRooms) || 1,
+          bedbugMethod: form.bedbugMethod || 'BOTH',
+          exclSimple: parseInt(form.exclSimple) || 0,
+          exclModerate: parseInt(form.exclModerate) || 0,
+          exclAdvanced: parseInt(form.exclAdvanced) || 0,
+          exclWaiveInspection: form.exclWaive === 'YES',
+          roachType: form.roachType || 'REGULAR',
+          onetimeLawnType: form.otLawnType || 'FERT',
+        };
+
+        // Override enriched profile with any manual form edits
+        const profile = { ...enrichedProfile };
+        if (form.homeSqFt) profile.homeSqFt = parseInt(form.homeSqFt);
+        if (form.lotSqFt) profile.lotSqFt = parseInt(form.lotSqFt);
+        if (form.stories) profile.stories = parseInt(form.stories);
+        if (form.bedArea) profile.estimatedBedAreaSf = parseInt(form.bedArea);
+        if (form.palmCount) profile.estimatedPalmCount = parseInt(form.palmCount);
+        if (form.treeCount) profile.estimatedTreeCount = parseInt(form.treeCount);
+        profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
+
+        const r = await fetch('/api/admin/estimator/calculate-estimate', {
+          method: 'POST', headers: authHeaders,
+          body: JSON.stringify({ profile, selectedServices, options }),
+        });
+        const result = await r.json();
+        if (result.error) { alert(result.error); setLookupStatus(s => ({ ...s, type: 'err', msg: result.error })); return; }
+        setEstimate(result);
+        setSavedId(null);
+        setLookupStatus(s => ({ ...s, type: 'ok' }));
+      } catch (e) {
+        alert('Estimate calculation failed: ' + e.message);
+      }
+      return;
+    }
+
+    // Fallback: use v1 client-side calculation
     const yesNo = v => v === 'YES' || v === true;
     const inputs = {
       ...form,
@@ -444,9 +578,8 @@ function EstimateToolView() {
               <input ref={addressRef} type="text" value={form.address} onChange={e => set('address', e.target.value)} placeholder="Start typing an address..." style={sInput} />
             </Field>
             {lookupStatus.type && <div style={statusStyle(lookupStatus.type)}>{lookupStatus.msg}</div>}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
-              <button style={sBtnSm(C.blue, 'white')} onClick={doLookup}>RentCast Lookup</button>
-              <button style={sBtnSm('#10b981', 'white')} onClick={doSatelliteAnalysis}>AI Satellite Lookup</button>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+              <button style={sBtnSm(C.blue, 'white')} onClick={doLookup}>Property Lookup</button>
               <button style={sBtnSm('transparent', C.gray)} onClick={() => { setForm(f => ({ ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family', hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE', nearWater: 'NO', bedArea: '', palmCount: '', treeCount: '' })); setLookupStatus({ type: '', msg: '' }); setSatelliteStatus({ type: '', msg: '' }); setSatelliteData(null); setEstimate(null); }}>Clear All</button>
             </div>
             {satelliteStatus.type && <div style={statusStyle(satelliteStatus.type)}>{satelliteStatus.msg}</div>}
