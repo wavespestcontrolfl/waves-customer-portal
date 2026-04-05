@@ -209,8 +209,9 @@ function EstimateToolView() {
       const r = await fetch(`/api/admin/lookup/property?address=${encodeURIComponent(address)}`, { headers: authHeaders });
       if (!r.ok) throw new Error('API ' + r.status);
       const data = await r.json();
-      const p = Array.isArray(data) ? data[0] : data;
-      if (!p) { setLookupStatus({ type: 'err', msg: 'Not found' }); return; }
+      // Server returns { property, satellite } — extract the property object
+      const p = data.property || (Array.isArray(data) ? data[0] : data);
+      if (!p || (!p.squareFootage && !p.lotSize && !p.propertyType)) { setLookupStatus({ type: 'err', msg: 'Property not found' }); return; }
       const upd = {};
       if (p.squareFootage) upd.homeSqFt = String(p.squareFootage);
       if (p.lotSize) upd.lotSqFt = String(p.lotSize);
@@ -224,6 +225,10 @@ function EstimateToolView() {
         else if (pt.includes('commercial')) upd.propertyType = 'Commercial';
       }
       if (p.features?.pool || p.pool === true || p.hasPool === true) upd.hasPool = 'YES';
+      // Also grab satellite image if returned
+      if (data.satellite?.imageUrl) {
+        setSatelliteData(prev => prev || { imageUrl: data.satellite.imageUrl });
+      }
       setForm(f => ({ ...f, ...upd, _boracareAuto: true, _preslabAuto: true }));
       setLookupStatus({ type: 'ok', msg: `${p.formattedAddress || address} — ${p.squareFootage || '?'} sf / ${p.lotSize || '?'} sf lot / ${p.stories || 1} story` });
     } catch (e) {
