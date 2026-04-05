@@ -92,7 +92,7 @@ router.get('/', async (req, res, next) => {
           locationId: l.location_id,
           count: gs?.totalReviews || parseInt(l.count),
           avgRating: gs?.rating?.toFixed(1) || parseFloat(l.avg || 0).toFixed(1),
-        })),
+        }),
       },
       locations: WAVES_LOCATIONS.map(l => ({ id: l.id, name: l.name, reviewUrl: l.googleReviewUrl })),
     });
