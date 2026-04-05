@@ -494,7 +494,7 @@ function BacklinkAgentPanel() {
                           {item.error_message && <div style={{ fontSize: 10, color: D.red, marginTop: 2 }}>{item.error_message.substring(0, 60)}</div>}
                         </td>
                         <td style={{ padding: '8px 10px', textAlign: 'right' }}>
-                          {item.status === 'failed' && <button onClick={() => handleRetry(item.id)} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 10, cursor: 'pointer', marginRight: 4 }}>Retry</button>}
+                          {(item.status === 'failed' || item.status === 'skipped') && <button onClick={() => handleRetry(item.id)} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 10, cursor: 'pointer', marginRight: 4 }}>Retry</button>}
                           {(item.status === 'pending' || item.status === 'failed') && <button onClick={() => handleSkip(item.id)} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 10, cursor: 'pointer' }}>Skip</button>}
                         </td>
                       </tr>
