@@ -144,7 +144,17 @@ router.post('/sms', async (req, res) => {
     }
 
     // WAVES AI ASSISTANT — route through conversational AI engine
-    if (Body && (customer || numberConfig.type === 'location') && isEnabled('aiAssistantAutoReply')) {
+    // Check both feature gate AND the admin toggle (system_config)
+    let aiAutoReplyOn = false;
+    if (isEnabled('aiAssistantAutoReply')) {
+      aiAutoReplyOn = true;
+    } else {
+      try {
+        const toggle = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
+        if (toggle?.value === 'true') aiAutoReplyOn = true;
+      } catch { /* ignore */ }
+    }
+    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn) {
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({

@@ -133,9 +133,6 @@ router.post('/calls', async (req, res, next) => {
         .where('phone', 'like', `%${cleanPhone.slice(-10)}`)
         .first();
 
-      const firstName = name.split(' ')[0] || null;
-      const lastName = name.split(' ').slice(1).join(' ') || null;
-
       await db('call_log').insert({
         customer_id: customer?.id || null,
         direction: 'inbound',
@@ -146,8 +143,7 @@ router.post('/calls', async (req, res, next) => {
         recording_url: recordingUrl || null,
         transcription: transcript || null,
         transcription_status: transcript ? 'completed' : null,
-        first_name: customer?.first_name || firstName,
-        last_name: customer?.last_name || lastName,
+        notes: name || null,
         created_at: parsedDate,
       });
       imported++;

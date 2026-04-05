@@ -135,4 +135,27 @@ router.get('/stats', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/communications/ai-auto-reply-status
+router.get('/ai-auto-reply-status', async (req, res) => {
+  try {
+    const row = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
+    res.json({ enabled: row?.value === 'true' });
+  } catch { res.json({ enabled: false }); }
+});
+
+// POST /api/admin/communications/ai-auto-reply — toggle
+router.post('/ai-auto-reply', async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    const value = enabled ? 'true' : 'false';
+    const existing = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
+    if (existing) {
+      await db('system_config').where({ key: 'ai_sms_auto_reply' }).update({ value, updated_at: new Date() });
+    } else {
+      await db('system_config').insert({ key: 'ai_sms_auto_reply', value });
+    }
+    res.json({ enabled: value === 'true' });
+  } catch (err) { res.json({ enabled: false, error: err.message }); }
+});
+
 module.exports = router;

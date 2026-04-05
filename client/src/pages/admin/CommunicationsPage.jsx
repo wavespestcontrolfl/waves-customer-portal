@@ -151,6 +151,72 @@ function TypeBadge({ type }) {
   );
 }
 
+// --- Expandable SMS Log Item ---
+function SmsLogItem({ msg: m, onReply }) {
+  const [expanded, setExpanded] = useState(false);
+  const isLong = m.body && m.body.length > 80;
+
+  return (
+    <div
+      style={{ padding: '10px 0', borderBottom: `1px solid ${D.border}`, cursor: 'pointer' }}
+      onClick={() => setExpanded(!expanded)}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <span style={{
+          fontSize: 16, lineHeight: '20px', flexShrink: 0, width: 20, textAlign: 'center',
+          color: m.direction === 'outbound' ? D.green : D.teal,
+        }}>
+          {m.direction === 'outbound' ? '↑' : '↓'}
+        </span>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 3 }}>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: D.text }}>
+              {m.from} → {m.to}
+            </span>
+            {m.customerName && (
+              <span style={{ fontSize: 11, color: D.teal, fontFamily: 'DM Sans, sans-serif' }}>({m.customerName})</span>
+            )}
+          </div>
+          <div style={{ fontSize: 13, color: expanded ? D.text : D.muted, lineHeight: 1.5, wordBreak: 'break-word', whiteSpace: expanded ? 'pre-wrap' : 'normal' }}>
+            {expanded ? m.body : (isLong ? m.body.slice(0, 80) + '...' : m.body)}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <StatusBadge status={m.status} />
+            {m.messageType && <TypeBadge type={m.messageType} />}
+          </div>
+          <span style={{ fontSize: 10, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>{timeAgo(m.createdAt)}</span>
+        </div>
+      </div>
+
+      {/* Expanded actions */}
+      {expanded && (
+        <div style={{ marginTop: 8, marginLeft: 30, display: 'flex', gap: 8 }}>
+          {m.direction === 'inbound' && (
+            <button onClick={e => { e.stopPropagation(); onReply(m.from, m.to); }} style={{
+              padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal, color: D.white,
+              fontSize: 12, fontWeight: 600, cursor: 'pointer',
+            }}>Reply</button>
+          )}
+          {m.direction === 'outbound' && (
+            <button onClick={e => { e.stopPropagation(); onReply(m.to, m.from); }} style={{
+              padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal, color: D.white,
+              fontSize: 12, fontWeight: 600, cursor: 'pointer',
+            }}>Send Again</button>
+          )}
+          <button onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(m.body || ''); }} style={{
+            padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent',
+            color: D.muted, fontSize: 12, cursor: 'pointer',
+          }}>Copy</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Channel Bar ---
 function ChannelBar({ type, count, max }) {
   const meta = TYPE_META[type] || { icon: '💬', color: D.muted };
@@ -633,6 +699,10 @@ export default function CommunicationsPage() {
     }
   };
 
+  // AI auto-reply state
+  const [aiAutoReply, setAiAutoReply] = useState(false);
+  const [togglingAi, setTogglingAi] = useState(false);
+
   // Compose state
   const [toNumber, setToNumber] = useState('');
   const [fromNumber, setFromNumber] = useState('+19413187612');
@@ -656,6 +726,20 @@ export default function CommunicationsPage() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Load AI auto-reply setting
+  useEffect(() => {
+    adminFetch('/admin/communications/ai-auto-reply-status').then(d => setAiAutoReply(d.enabled)).catch(() => {});
+  }, []);
+
+  const toggleAiAutoReply = async () => {
+    setTogglingAi(true);
+    try {
+      const r = await adminFetch('/admin/communications/ai-auto-reply', { method: 'POST', body: JSON.stringify({ enabled: !aiAutoReply }) });
+      setAiAutoReply(r.enabled);
+    } catch { /* ignore */ }
+    setTogglingAi(false);
+  };
 
   const handleSend = async () => {
     if (!toNumber.trim() || !msgBody.trim()) return;
@@ -749,6 +833,24 @@ export default function CommunicationsPage() {
       {commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'numbers' ? (
         <PhoneNumbersTab channelStats={channelStats} maxChannel={maxChannel} stats={stats} />
       ) : <>
+
+      {/* --- AI Auto-Reply Toggle --- */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: aiAutoReply ? 'rgba(16,185,129,0.08)' : D.card, border: `1px solid ${aiAutoReply ? D.green + '44' : D.border}`, borderRadius: 12, marginBottom: 16 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>AI Auto-Reply</div>
+          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{aiAutoReply ? 'AI is responding to inbound messages using Waves brand voice' : 'Toggle on to auto-respond when you are unavailable'}</div>
+        </div>
+        <button onClick={toggleAiAutoReply} disabled={togglingAi} style={{
+          width: 52, height: 28, borderRadius: 14, border: 'none', cursor: 'pointer', position: 'relative',
+          background: aiAutoReply ? D.green : D.border, transition: 'background 0.2s',
+        }}>
+          <span style={{
+            position: 'absolute', top: 3, left: aiAutoReply ? 27 : 3,
+            width: 22, height: 22, borderRadius: '50%', background: D.white,
+            transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+          }} />
+        </button>
+      </div>
 
       {/* --- Send SMS --- */}
       <div style={{ marginBottom: 28 }}>
@@ -879,51 +981,12 @@ export default function CommunicationsPage() {
           </div>
         </div>
 
-        <div style={{ maxHeight: 480, overflowY: 'auto' }}>
+        <div style={{ maxHeight: 600, overflowY: 'auto' }}>
           {filtered.length === 0 ? (
             <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No messages found.</div>
           ) : (
             filtered.map(m => (
-              <div
-                key={m.id}
-                style={{
-                  display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 0',
-                  borderBottom: `1px solid ${D.border}`,
-                }}
-              >
-                {/* Direction arrow */}
-                <span style={{
-                  fontSize: 16, lineHeight: '20px', flexShrink: 0, width: 20, textAlign: 'center',
-                  color: m.direction === 'outbound' ? D.green : D.teal,
-                }}>
-                  {m.direction === 'outbound' ? '↑' : '↓'}
-                </span>
-
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  {/* Top line: from/to + customer name */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 3 }}>
-                    <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.text }}>
-                      {m.from} → {m.to}
-                    </span>
-                    {m.customerName && (
-                      <span style={{ fontSize: 11, color: D.teal, fontFamily: 'DM Sans, sans-serif' }}>({m.customerName})</span>
-                    )}
-                  </div>
-                  {/* Body */}
-                  <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.4, wordBreak: 'break-word' }}>
-                    {m.body && m.body.length > 80 ? m.body.slice(0, 80) + '...' : m.body}
-                  </div>
-                </div>
-
-                {/* Right side: badges + time */}
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-                  <div style={{ display: 'flex', gap: 4 }}>
-                    <StatusBadge status={m.status} />
-                    {m.messageType && <TypeBadge type={m.messageType} />}
-                  </div>
-                  <span style={{ fontSize: 10, color: D.muted, fontFamily: 'JetBrains Mono, monospace' }}>{timeAgo(m.createdAt)}</span>
-                </div>
-              </div>
+              <SmsLogItem key={m.id} msg={m} onReply={(phone, from) => { setToNumber(phone); setFromNumber(from); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />
             ))
           )}
         </div>
