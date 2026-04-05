@@ -110,6 +110,167 @@ router.post('/:id/reply', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/reviews/:id/ai-reply — generate AI reply using Claude
+router.post('/:id/ai-reply', async (req, res, next) => {
+  try {
+    const review = await db('google_reviews').where({ id: req.params.id }).first();
+    if (!review) return res.status(404).json({ error: 'Review not found' });
+
+    const loc = WAVES_LOCATIONS.find(l => l.id === review.location_id) || WAVES_LOCATIONS[0];
+    const locationName = loc.name;
+
+    // Try to find customer city
+    let customerCity = '';
+    if (review.customer_id) {
+      const cust = await db('customers').where({ id: review.customer_id }).first();
+      if (cust) customerCity = cust.city || '';
+    }
+
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic();
+
+    const prompt = `You are an expert in local business reputation management and are writing a personalized response on behalf of Waves Pest Control ${locationName}, a family-owned pest control & lawn care company serving ${locationName} and neighboring cities.
+
+Your response must strictly adhere to Google's best practices, be limited to a maximum of two paragraphs, and be written in the first person plural (using "we" and "our").
+
+Input Data
+Review Text: ${review.review_text || '(No comment — just a star rating)'}
+Reviewer Name: ${review.reviewer_name}
+Star Rating: ${review.star_rating}/5
+Customer City: ${customerCity}
+
+Instructions for Generating the Response
+Greeting & Personalization:
+- Start the response with a warm, human greeting.
+- If the reviewer's name is a common English first name (e.g., John, Lisa, Michael), greet them with: "Hello [First Name]!"
+- If the name is uncommon, use: "Hey there!" or "Hello there!".
+
+Core Content & Keyword Integration (Paragraph 1):
+- Tone: Write with a genuine, approachable, and slightly conversational tone, using "we" and "our" consistently.
+- Review with Comment: We must thank the reviewer and specifically comment on the subject of their review. Naturally weave in one or two high-value search terms relevant to the local homeowner (e.g., "general pest control," "rodent removal," or "reliable scheduling") without sounding robotic.
+- Review with NO Comment (Just Stars): If the review text is empty, we must generate a brief, sincere thank you for their rating, focusing on our commitment as a local pest & lawn company. Do not reference a specific service.
+
+Brand Differentiation & Localization (Paragraph 2):
+- Localization Logic: If the Customer City is provided, we must reference our service in that specific city (e.g., "We are glad our team could deliver excellent service in ${customerCity || 'Sarasota'}!"). If the Customer City data is empty, default the reference to: "Southwest Florida."
+- Commitment: Briefly highlight our commitment to effective pest management and our "neighborly" approach.
+- Uniqueness: Ensure the entire response is completely unique and does not repeat phrasing or structure from previous responses.
+
+Closing & Format:
+- Conclude with a warm, sincere closing statement that acts as a final expression of gratitude or soft call to action.
+- Strictly enforce the two-paragraph limit.
+- Signature: The response must end with the exact sign-off on a separate paragraph:
+
+The 🌊 Waves Pest Control ${locationName} Team
+
+Generate the reply now.`;
+
+    const msg = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 500,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const reply = msg.content[0]?.text || '';
+    res.json({ reply });
+  } catch (err) {
+    logger.error(`AI reply generation failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/reviews/outreach-candidates — customers eligible for review request
+router.get('/outreach-candidates', async (req, res, next) => {
+  try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+
+    // Active customers with completed services in last 30 days who haven't left a review
+    const customers = await db('customers')
+      .where('customers.active', true)
+      .whereExists(function () {
+        this.select(db.raw(1)).from('scheduled_services')
+          .whereRaw('scheduled_services.customer_id = customers.id')
+          .where('scheduled_services.status', 'completed')
+          .where('scheduled_services.scheduled_date', '>=', thirtyDaysAgo);
+      })
+      .whereNotExists(function () {
+        this.select(db.raw(1)).from('google_reviews')
+          .whereRaw('google_reviews.customer_id = customers.id');
+      })
+      .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.city', 'customers.waveguard_tier', 'customers.nearest_location_id')
+      .orderBy('customers.last_contact_date', 'desc')
+      .limit(100);
+
+    // Get last service for each customer
+    const customerIds = customers.map(c => c.id);
+    const lastServices = customerIds.length > 0
+      ? await db('scheduled_services')
+          .whereIn('customer_id', customerIds)
+          .where('status', 'completed')
+          .orderBy('scheduled_date', 'desc')
+          .select('customer_id', 'service_type', 'scheduled_date')
+      : [];
+
+    const lastSvcMap = {};
+    lastServices.forEach(s => {
+      if (!lastSvcMap[s.customer_id]) lastSvcMap[s.customer_id] = s;
+    });
+
+    // Check if review request was already sent (via sms_log)
+    const sentRequests = customerIds.length > 0
+      ? await db('sms_log')
+          .whereIn('customer_id', customerIds)
+          .where('message_type', 'review_request')
+          .select('customer_id')
+      : [];
+    const sentSet = new Set(sentRequests.map(s => s.customer_id));
+
+    res.json({
+      customers: customers.map(c => {
+        const ls = lastSvcMap[c.id];
+        return {
+          id: c.id,
+          name: `${c.first_name} ${c.last_name}`,
+          phone: c.phone,
+          city: c.city,
+          tier: c.waveguard_tier,
+          locationId: c.nearest_location_id,
+          lastService: ls?.service_type || null,
+          lastServiceDate: ls?.scheduled_date || null,
+          requestSent: sentSet.has(c.id),
+        };
+      }),
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/reviews/send-request — send review request SMS to customer
+router.post('/send-request', async (req, res, next) => {
+  try {
+    const { customerId } = req.body;
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+
+    const customer = await db('customers').where({ id: customerId }).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
+    const firstName = customer.first_name || 'there';
+    const reviewUrl = loc.googleReviewUrl || 'https://g.page/r/CRkzS6M4EpncEBM/review';
+
+    const TwilioService = require('../services/twilio');
+    await TwilioService.sendSMS(customer.phone,
+      `Hi ${firstName}! Adam here with Waves Pest Control. Just checking in — hope everything's been great since our last visit.\n\nIf you've been happy with the service, a quick Google review would really help us out:\n\n${reviewUrl}\n\nThanks so much!`,
+      { customerId: customer.id, messageType: 'review_request', customerLocationId: customer.nearest_location_id }
+    );
+
+    await db('activity_log').insert({
+      customer_id: customer.id, action: 'review_requested',
+      description: `Review request sent to ${customer.first_name} ${customer.last_name} (${loc.name})`,
+    });
+
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/reviews/sync — manual sync
 router.post('/sync', async (req, res, next) => {
   try {

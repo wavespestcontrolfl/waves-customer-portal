@@ -108,6 +108,7 @@ function ReviewCard({ review, onReplySubmit }) {
   const [replyText, setReplyText] = useState(review.reply || '');
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
 
   const handleSubmit = async () => {
     if (!replyText.trim()) return;
@@ -121,6 +122,21 @@ function ReviewCard({ review, onReplySubmit }) {
       alert('Failed to post reply: ' + e.message);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleAiReply = async () => {
+    setAiLoading(true);
+    try {
+      const data = await adminFetch(`/admin/reviews/${review.id}/ai-reply`, { method: 'POST' });
+      if (data.reply) {
+        setReplyText(data.reply);
+        setEditing(true);
+      }
+    } catch (e) {
+      alert('AI reply failed: ' + e.message);
+    } finally {
+      setAiLoading(false);
     }
   };
 
@@ -191,10 +207,16 @@ function ReviewCard({ review, onReplySubmit }) {
             <div style={{ fontSize: 14, color: D.text, fontFamily: 'DM Sans, sans-serif', lineHeight: 1.5, marginBottom: 8 }}>
               {review.reply}
             </div>
-            <button onClick={() => { setEditing(true); setReplyText(review.reply); }} style={{
-              padding: '6px 14px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
-              borderRadius: 6, fontSize: 13, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
-            }}>Edit</button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => { setEditing(true); setReplyText(review.reply); }} style={{
+                padding: '6px 14px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
+                borderRadius: 6, fontSize: 13, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
+              }}>Edit</button>
+              <button onClick={handleAiReply} disabled={aiLoading} style={{
+                padding: '6px 14px', background: 'transparent', border: `1px solid ${D.teal}`, color: D.teal,
+                borderRadius: 6, fontSize: 13, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer', opacity: aiLoading ? 0.5 : 1,
+              }}>{aiLoading ? 'Generating...' : 'AI Reply'}</button>
+            </div>
           </div>
         ) : editing || !review.reply ? (
           <div>
@@ -215,6 +237,10 @@ function ReviewCard({ review, onReplySubmit }) {
                 fontSize: 13, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: submitting ? 'not-allowed' : 'pointer',
                 opacity: submitting || !replyText.trim() ? 0.5 : 1,
               }}>{submitting ? 'Posting...' : review.reply ? 'Update Reply' : 'Reply'}</button>
+              <button onClick={handleAiReply} disabled={aiLoading} style={{
+                padding: '8px 18px', background: 'transparent', border: `1px solid ${D.teal}`, color: D.teal, borderRadius: 8,
+                fontSize: 13, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: 'pointer', opacity: aiLoading ? 0.5 : 1,
+              }}>{aiLoading ? 'Generating...' : 'AI Reply'}</button>
               {editing && (
                 <button onClick={() => { setEditing(false); setReplyText(review.reply || ''); }} style={{
                   padding: '8px 14px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
@@ -243,59 +269,99 @@ function Select({ value, onChange, options, style: extraStyle }) {
 }
 
 // =============================================================================
-// CSV PARSING & HELPERS FOR REVIEW OUTREACH
+// REVIEW OUTREACH HELPERS
 // =============================================================================
 
-function parseCSV(text) {
-  const rows = []; let row = []; let cell = ''; let inQ = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQ) {
-      if (ch === '"' && text[i+1] === '"') { cell += '"'; i++; }
-      else if (ch === '"') { inQ = false; }
-      else { cell += ch; }
-    } else {
-      if (ch === '"') { inQ = true; }
-      else if (ch === ',') { row.push(cell); cell = ''; }
-      else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
-      else if (ch === '\r') { /* skip */ }
-      else { cell += ch; }
+// =============================================================================
+// REVIEW OUTREACH — database-backed
+// =============================================================================
+function ReviewOutreach() {
+  const [customers, setCustomers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [sending, setSending] = useState({});
+
+  useEffect(() => {
+    // Fetch customers with recent completed services who haven't left a review
+    adminFetch('/admin/reviews/outreach-candidates')
+      .then(d => { setCustomers(d.customers || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const filtered = customers.filter(c => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (c.name || '').toLowerCase().includes(q) || (c.city || '').toLowerCase().includes(q) || (c.phone || '').toLowerCase().includes(q);
+  });
+
+  const sendReviewRequest = async (customer) => {
+    setSending(prev => ({ ...prev, [customer.id]: true }));
+    try {
+      await adminFetch('/admin/reviews/send-request', {
+        method: 'POST',
+        body: JSON.stringify({ customerId: customer.id }),
+      });
+      setCustomers(prev => prev.map(c => c.id === customer.id ? { ...c, requestSent: true } : c));
+    } catch (e) {
+      alert('Failed: ' + e.message);
+    } finally {
+      setSending(prev => ({ ...prev, [customer.id]: false }));
     }
-  }
-  if (cell || row.length) { row.push(cell); rows.push(row); }
-  return rows;
+  };
+
+  if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center' }}>Loading outreach candidates...</div>;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+        <StatCard label="Outreach Candidates" value={customers.length} color={D.teal} />
+        <StatCard label="Review Requests Sent" value={customers.filter(c => c.requestSent).length} color={D.green} />
+      </div>
+
+      <input
+        type="text" value={search} onChange={e => setSearch(e.target.value)}
+        placeholder="Search by name, city, or phone..."
+        style={{ width: '100%', padding: '10px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box', marginBottom: 16 }}
+      />
+
+      {filtered.length === 0 ? (
+        <div style={{ padding: 48, textAlign: 'center', color: D.muted, background: D.card, borderRadius: 12, border: `1px solid ${D.border}` }}>
+          <div style={{ fontSize: 15 }}>No outreach candidates found</div>
+          <div style={{ fontSize: 13, marginTop: 4 }}>Customers with recent completed services who haven't been asked for a review will appear here.</div>
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 10 }}>
+          {filtered.map(c => (
+            <div key={c.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{c.name}</div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                  {c.city && <span>{c.city} </span>}
+                  {c.phone && <span>· {c.phone} </span>}
+                  {c.lastService && <span>· Last service: {c.lastService} </span>}
+                  {c.lastServiceDate && <span>· {new Date(c.lastServiceDate).toLocaleDateString()}</span>}
+                </div>
+                {c.tier && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: `${D.teal}22`, color: D.teal, marginTop: 4, display: 'inline-block' }}>{c.tier}</span>}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {c.requestSent ? (
+                  <span style={{ fontSize: 12, color: D.green, fontWeight: 600 }}>Sent</span>
+                ) : (
+                  <button onClick={() => sendReviewRequest(c)} disabled={sending[c.id]} style={{
+                    padding: '8px 16px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+                    fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: sending[c.id] ? 0.5 : 1,
+                  }}>{sending[c.id] ? 'Sending...' : 'Send Review Request'}</button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
-function parseDate(d) {
-  if (!d) return null;
-  let s = d.split(' ')[0];
-  if (s.includes('/')) {
-    const parts = s.split('/');
-    let m = parseInt(parts[0]), day = parseInt(parts[1]), y = parseInt(parts[2]);
-    if (y < 100) y += 2000;
-    return new Date(y, m - 1, day);
-  }
-  if (s.includes('-')) {
-    const parts = s.split('-');
-    return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
-  }
-  return new Date(s);
-}
-
-function formatDate(d) {
-  if (!d || isNaN(d)) return '';
-  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
-}
-
-function getSentiment(smsTexts, callTranscripts, serviceNotes) {
-  const text = [...smsTexts, ...callTranscripts, ...serviceNotes].join(' ').toLowerCase();
-  const happy = ['thank','great','awesome','perfect','appreciate','love','happy','excellent','amazing','best','wonderful'];
-  const unhappy = ['cancel','complaint','disappointed','frustrated','problem','not happy','never came'];
-  if (unhappy.some(w => text.includes(w))) return 'issue';
-  if (happy.some(w => text.includes(w))) return 'happy';
-  return 'neutral';
-}
-
+// Legacy — removed Google Sheets dependency
 function getReviewMessage(sentiment, firstName) {
   if (sentiment === 'happy') {
     return `Hey ${firstName}! This is Adam with Waves Pest Control \u{1F30A} Thanks for being a great customer \u2014 it means the world to our small family business.\n\nIf you have 30 seconds, a quick Google review would help us more than you know:\n\nhttps://g.page/r/CRkzS6M4EpncEBE/review\n\nThank you! \u{1F64F}`;
@@ -306,24 +372,8 @@ function getReviewMessage(sentiment, firstName) {
   return `Hi ${firstName}! Adam here with Waves Pest Control \u{1F30A} Just checking in \u2014 hope everything's been great since our last visit.\n\nIf you've been happy with the service, a quick Google review would really help us out:\n\nhttps://g.page/r/CRkzS6M4EpncEBE/review\n\nThanks so much!`;
 }
 
-const SHEET_ID = '1Ei60A40nWHg1uX3vD3D4FdrhCmDNV0Uspk1Xc5O_wx0';
-function sheetURL(tab) {
-  return `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tab)}`;
-}
-
-// --- TECH KPIS columns ---
-const KPI_COLS = {
-  Date: 0, TechName: 1, SvcType: 2, CustName: 3, CustAddr: 4, CustEmail: 5,
-  ApptStart: 6, ApptEnd: 7, LaborHrs: 8, LaborCost: 9, MatCost: 10,
-  TotalJobCost: 11, Revenue: 12, GP$: 13, 'GP%': 14, RPMH: 15,
-  InvoiceURL: 16, SvcPerformed: 17, SvcCallNotes: 18, CustID: 19, ApptID: 20,
-};
-
-// =============================================================================
-// REVIEW OUTREACH COMPONENT
-// =============================================================================
-
-function ReviewOutreach() {
+// (Old Google Sheets outreach was here — replaced by database version above)
+function _PLACEHOLDER_REMOVED() {
   const [jobs, setJobs] = useState([]);
   const [smsRecords, setSmsRecords] = useState([]);
   const [callRecords, setCallRecords] = useState([]);
