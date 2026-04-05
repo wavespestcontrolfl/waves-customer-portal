@@ -29,7 +29,8 @@ class GoogleBusinessService {
       process.env[`GBP_CLIENT_ID_${key}`] && process.env[`GBP_REFRESH_TOKEN_${key}`]
     );
 
-    this.redirectUri = process.env.GBP_REDIRECT_URI || 'https://portal.wavespestcontrol.com/api/admin/settings/google/callback';
+    const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
+    this.redirectUri = process.env.GBP_REDIRECT_URI || `https://${domain}/api/admin/settings/google/callback`;
 
     // Cache of OAuth2 clients per location
     this._clients = {};
