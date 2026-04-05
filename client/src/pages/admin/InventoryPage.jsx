@@ -265,6 +265,24 @@ export default function AdminInventoryPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  const [importingPricing, setImportingPricing] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+
+  const handleImportPricing = async () => {
+    setImportingPricing(true);
+    setImportResult(null);
+    try {
+      const r = await adminFetch('/admin/import/pricing', { method: 'POST' });
+      setImportResult(r);
+      // Reload inventory
+      const inv = await adminFetch('/admin/inventory');
+      setProducts(inv.products || []);
+      setStats(inv.stats || null);
+      setCategories(inv.categories || []);
+    } catch (e) { setImportResult({ error: e.message }); }
+    setImportingPricing(false);
+  };
+
   // Derived counts
   const totalProducts = products.length;
   const pricedCount = products.filter(p => !p.needsPricing).length;
@@ -319,6 +337,14 @@ export default function AdminInventoryPage() {
           </h1>
           <p style={{ fontSize: 13, color: D.muted, margin: '4px 0 0' }}>Manage products and vendor pricing</p>
         </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={handleImportPricing} disabled={importingPricing} style={{
+            background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 8, padding: '8px 16px',
+            color: D.muted, fontSize: 13, cursor: 'pointer', opacity: importingPricing ? 0.5 : 1,
+          }}>{importingPricing ? 'Importing...' : 'Import Pricing'}</button>
+          {importResult && <span style={{ fontSize: 11, color: importResult.error ? D.red : D.green, alignSelf: 'center' }}>
+            {importResult.error || `${importResult.imported} imported, ${importResult.duplicates || 0} dupes skipped`}
+          </span>}
         <button
           onClick={() => setShowVendors(!showVendors)}
           style={{
@@ -329,6 +355,7 @@ export default function AdminInventoryPage() {
         >
           {showVendors ? 'Hide Vendors' : 'Show Vendors'}
         </button>
+        </div>
       </div>
 
       {/* Stats bar */}

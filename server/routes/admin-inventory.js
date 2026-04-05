@@ -74,6 +74,8 @@ router.get('/', async (req, res, next) => {
 router.get('/vendors', async (req, res, next) => {
   try {
     const vendors = await db('vendors')
+      .where('vendors.active', true)
+      .whereNot('vendors.type', 'competitor_reference')
       .select('vendors.*',
         db.raw('(SELECT COUNT(*) FROM vendor_pricing WHERE vendor_pricing.vendor_id = vendors.id) as product_count'),
         db.raw('(SELECT COUNT(*) FROM vendor_pricing WHERE vendor_pricing.vendor_id = vendors.id AND is_best_price = true) as best_price_count')
@@ -124,6 +126,24 @@ router.put('/:productId/pricing', async (req, res, next) => {
       await db('vendor_pricing').where({ product_id: req.params.productId, vendor_id: best.vendor_id }).update({ is_best_price: true });
     }
 
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/inventory/vendors/:id — update vendor (including login info)
+router.put('/vendors/:id', async (req, res, next) => {
+  try {
+    const { loginUsername, loginEmail, loginPassword, accountNumber, loginUrl, notes, website } = req.body;
+    const upd = { updated_at: new Date() };
+    if (loginUsername !== undefined) upd.login_username = loginUsername;
+    if (loginEmail !== undefined) upd.login_email = loginEmail;
+    if (loginPassword !== undefined) upd.login_password_encrypted = loginPassword; // TODO: encrypt
+    if (accountNumber !== undefined) upd.account_number = accountNumber;
+    if (loginUrl !== undefined) upd.login_url = loginUrl;
+    if (notes !== undefined) upd.notes = notes;
+    if (website !== undefined) upd.website = website;
+
+    await db('vendors').where({ id: req.params.id }).update(upd);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
