@@ -961,9 +961,34 @@ router.post('/calculate-estimate', async (req, res) => {
     if (!profile) return res.status(400).json({ error: 'Profile required' });
 
     const { calculateEstimate } = require('../services/pricing-engine-v2');
-    const result = calculateEstimate(profile, selectedServices || [], options || {});
-    res.json(result);
+    const v2 = calculateEstimate(profile, selectedServices || [], options || {});
+
+    // Map v2 result to v1-compatible structure for the existing frontend
+    const mapped = {
+      ...v2,
+      // v1 compatibility layer
+      recurring: {
+        ...v2.recurring,
+        serviceCount: v2.waveguard?.serviceCount || 0,
+        tier: v2.waveguard?.tier || 'Bronze',
+        waveGuardTier: v2.waveguard?.tier || 'Bronze',
+        grandTotal: v2.totals?.recurringMonthly || 0,
+        monthlyTotal: v2.waveguard?.monthlyAfterDiscount || 0,
+        annualTotal: v2.waveguard?.annualAfterDiscount || 0,
+        savings: v2.waveguard?.savings || 0,
+        rodentBaitMo: v2.totals?.rodentBaitMonthly || 0,
+      },
+      oneTime: {
+        ...v2.oneTime,
+        total: v2.totals?.oneTimeTotal || 0,
+        tmInstall: v2.totals?.oneTimeItems?.find(i => i.name?.includes('Trelona'))?.price || 0,
+      },
+      results: v2,
+    };
+
+    res.json(mapped);
   } catch (err) {
+    console.error('[estimate-v2] Calculation error:', err.message, err.stack);
     res.status(500).json({ error: err.message });
   }
 });

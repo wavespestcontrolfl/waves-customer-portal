@@ -856,11 +856,13 @@ function EstimateToolView() {
                 <div style={{ marginBottom: 24 }}>
                   <div style={sSectionTitle}>Property Summary</div>
                   <div style={{ fontSize: 15, color: C.gray, lineHeight: 1.8 }}>
-                    <strong style={{ color: C.white }}>{E.property.type}</strong> — {E.property.homeSqFt.toLocaleString()} sf / {E.property.lotSqFt.toLocaleString()} sf lot / {E.property.stories} story<br />
-                    Footprint: <strong>{E.property.footprint.toLocaleString()} sf</strong> | Pool: {E.property.pool ? 'Yes' : 'No'}{E.property.poolCage ? ' (caged)' : ''} | Driveway: {E.property.driveway ? 'Large' : 'Normal'}<br />
-                    Shrubs: {E.property.shrubs} | Trees: {E.property.trees} | Complexity: {E.property.complexity} | Water: {E.property.nearWater ? 'Yes' : 'No'}
-                    {E.urgLabel && <><br /><span style={sTag('amber')}>{E.urgLabel}</span></>}
-                    {E.isRecurringCustomer && <span style={sTag('green')}>Recurring -15% one-time</span>}
+                    <strong style={{ color: C.white }}>{E.property?.type || E.property?.propertyType || 'Residential'}</strong> — {(E.property?.homeSqFt || 0).toLocaleString()} sf / {(E.property?.lotSqFt || 0).toLocaleString()} sf lot / {E.property?.stories || 1} story<br />
+                    Footprint: <strong>{(E.property?.footprint || 0).toLocaleString()} sf</strong> | Pool: {E.property?.pool === 'YES' || E.property?.pool === true ? 'Yes' : 'No'}{E.property?.poolCage === 'YES' ? ' (caged)' : ''} | Driveway: {E.property?.largeDriveway === 'YES' || E.property?.largeDriveway === true ? 'Large' : 'Normal'}<br />
+                    Shrubs: {E.property?.shrubDensity || E.property?.shrubs || '--'} | Trees: {E.property?.treeDensity || E.property?.trees || '--'} | Complexity: {E.property?.landscapeComplexity || E.property?.complexity || '--'} | Water: {E.property?.nearWater && E.property.nearWater !== 'NONE' ? E.property.nearWater.replace(/_/g, ' ') : 'No'}
+                    {E.property?.yearBuilt && <><br />Built: {E.property.yearBuilt} | {E.property?.constructionMaterial} | {E.property?.foundationType} foundation | {E.property?.roofType} roof</>}
+                    {E.property?.serviceZone && <span style={sTag('teal')}>Zone {E.property.serviceZone}</span>}
+                    {E.urgency?.label && <><br /><span style={sTag('amber')}>{E.urgency.label}</span></>}
+                    {E.recurringCustomer && <span style={sTag('green')}>Recurring -15% one-time</span>}
                   </div>
                 </div>
 
