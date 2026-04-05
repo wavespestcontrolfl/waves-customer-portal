@@ -179,6 +179,7 @@ app.use('/api/admin/schedule', require('./routes/admin-schedule'));
 app.use('/api/admin/drafts', require('./routes/admin-drafts'));
 app.use('/api/admin/gbp', require('./routes/admin-gbp'));
 app.use('/api/admin/email-automations', require('./routes/admin-email-automations'));
+app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 
 // Health check
 app.get('/api/health', (req, res) => {

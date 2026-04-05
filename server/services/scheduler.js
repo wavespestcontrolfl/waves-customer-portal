@@ -158,6 +158,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 4 HOURS — Check RSS feed for new blog posts → auto-post to social
+  // =========================================================================
+  cron.schedule('0 */4 * * *', async () => {
+    logger.info('Running: RSS social media check');
+    try {
+      const SocialMediaService = require('./social-media');
+      const result = await SocialMediaService.checkAndPublish();
+      logger.info(`RSS social media check done: ${result.processed} new post(s) published`);
+    } catch (err) {
+      logger.error(`RSS social media check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 HOURS — Adjust ad budgets based on capacity
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {

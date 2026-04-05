@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { path: '/admin/reviews', icon: '⭐', label: 'Reviews' },
   { path: '/admin/referrals', icon: '🎁', label: 'Referrals' },
   { path: '/admin/ppc', icon: '📣', label: 'PPC' },
+  { path: '/admin/social-media', icon: '📲', label: 'Social Media' },
   { path: '/admin/seo', icon: '🔍', label: 'SEO' },
   { path: '/admin/knowledge', icon: '📚', label: 'Knowledge Base' },
   { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },
