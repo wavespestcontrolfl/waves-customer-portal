@@ -307,4 +307,78 @@ router.post('/sync', async (req, res, next) => {
   }
 });
 
+// =========================================================================
+// GBP LOCATION DATA — via Places API
+// =========================================================================
+
+// GET /api/admin/reviews/gbp-locations — all location details from Places API
+router.get('/gbp-locations', async (req, res, next) => {
+  try {
+    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
+    const fields = 'name,formatted_address,formatted_phone_number,opening_hours,website,photos,types,business_status,url,rating,user_ratings_total';
+
+    const locations = [];
+    for (const loc of WAVES_LOCATIONS) {
+      if (!loc.googlePlaceId) continue;
+      try {
+        const r = await fetch(`https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=${fields}&key=${GOOGLE_KEY}`);
+        const data = await r.json();
+        if (data.status !== 'OK') continue;
+        const p = data.result;
+
+        // Build photo URLs
+        const photos = (p.photos || []).map(photo => ({
+          url: `https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${photo.photo_reference}&key=${GOOGLE_KEY}`,
+          width: photo.width,
+          height: photo.height,
+          attributions: photo.html_attributions,
+        }));
+
+        // Parse hours
+        const hours = (p.opening_hours?.weekday_text || []);
+
+        locations.push({
+          id: loc.id,
+          name: p.name,
+          address: p.formatted_address,
+          phone: p.formatted_phone_number,
+          website: p.website,
+          mapsUrl: p.url,
+          status: p.business_status,
+          rating: p.rating,
+          totalReviews: p.user_ratings_total,
+          types: p.types,
+          hours,
+          openNow: p.opening_hours?.open_now,
+          photos,
+          reviewUrl: loc.googleReviewUrl,
+          placeId: loc.googlePlaceId,
+        });
+      } catch (err) {
+        logger.error(`GBP location fetch failed for ${loc.name}: ${err.message}`);
+      }
+    }
+
+    res.json({ locations });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/reviews/export — export reviews as CSV
+router.get('/export', async (req, res, next) => {
+  try {
+    const reviews = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .orderBy('review_created_at', 'desc');
+
+    const header = 'Location,Reviewer,Rating,Review Text,Reply,Review Date,Synced At\n';
+    const rows = reviews.map(r =>
+      `"${r.location_id}","${(r.reviewer_name || '').replace(/"/g, '""')}",${r.star_rating},"${(r.review_text || '').replace(/"/g, '""')}","${(r.review_reply || '').replace(/"/g, '""')}","${r.review_created_at || ''}","${r.synced_at || ''}"`
+    ).join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename=waves-reviews-export.csv');
+    res.send(header + rows);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

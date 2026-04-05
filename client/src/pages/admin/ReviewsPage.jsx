@@ -275,6 +275,215 @@ function Select({ value, onChange, options, style: extraStyle }) {
 }
 
 // =============================================================================
+// =============================================================================
+// GBP MANAGEMENT
+// =============================================================================
+function GBPManagement() {
+  const [locations, setLocations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedLoc, setSelectedLoc] = useState(null);
+  const [locTab, setLocTab] = useState('info');
+
+  useEffect(() => {
+    adminFetch('/admin/reviews/gbp-locations')
+      .then(d => {
+        setLocations(d.locations || []);
+        if (d.locations?.length > 0) setSelectedLoc(d.locations[0]);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const handleExport = () => {
+    const token = localStorage.getItem('waves_admin_token');
+    const url = `${window.location.origin}/api/admin/reviews/export`;
+    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.blob())
+      .then(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'waves-reviews-export.csv';
+        a.click();
+      });
+  };
+
+  if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center' }}>Loading GBP data from Google...</div>;
+
+  const loc = selectedLoc;
+
+  return (
+    <div>
+      {/* Location selector */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        {locations.map(l => (
+          <button key={l.id} onClick={() => { setSelectedLoc(l); setLocTab('info'); }} style={{
+            padding: '12px 20px', borderRadius: 10, border: `1px solid ${selectedLoc?.id === l.id ? D.teal : D.border}`,
+            background: selectedLoc?.id === l.id ? `${D.teal}15` : D.card, cursor: 'pointer',
+            display: 'flex', flexDirection: 'column', gap: 4, minWidth: 180,
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: selectedLoc?.id === l.id ? D.teal : D.white, fontFamily: 'DM Sans, sans-serif' }}>{l.name}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: D.amber, fontFamily: "'JetBrains Mono', monospace" }}>{l.rating}</span>
+              <Stars count={Math.round(l.rating || 0)} size={12} />
+              <span style={{ fontSize: 11, color: D.muted }}>({l.totalReviews})</span>
+            </div>
+            <div style={{ fontSize: 11, color: l.openNow ? D.green : D.red }}>{l.openNow ? 'Open now' : 'Closed'}</div>
+          </button>
+        ))}
+      </div>
+
+      {!loc ? (
+        <div style={{ color: D.muted, padding: 40, textAlign: 'center', background: D.card, borderRadius: 12, border: `1px solid ${D.border}` }}>
+          No location data available. Make sure Google Places API is enabled.
+        </div>
+      ) : (
+        <>
+          {/* Sub-tabs */}
+          <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+            {[
+              { key: 'info', label: 'Location Info' },
+              { key: 'hours', label: 'Hours' },
+              { key: 'photos', label: 'Photos' },
+              { key: 'export', label: 'Export Reviews' },
+            ].map(t => (
+              <button key={t.key} onClick={() => setLocTab(t.key)} style={{
+                padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
+                background: locTab === t.key ? D.teal : 'transparent', color: locTab === t.key ? D.white : D.muted,
+                transition: 'all 0.15s', fontFamily: 'DM Sans, sans-serif',
+              }}>{t.label}</button>
+            ))}
+          </div>
+
+          {/* Location Info */}
+          {locTab === 'info' && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
+                <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16, fontFamily: 'DM Sans, sans-serif' }}>Business Information</div>
+                {[
+                  { label: 'Business Name', value: loc.name },
+                  { label: 'Address', value: loc.address },
+                  { label: 'Phone', value: loc.phone },
+                  { label: 'Website', value: loc.website, link: true },
+                  { label: 'Status', value: loc.status === 'OPERATIONAL' ? 'Open' : loc.status },
+                  { label: 'Categories', value: (loc.types || []).join(', ') },
+                  { label: 'Place ID', value: loc.placeId },
+                ].map((field, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '10px 0', borderBottom: `1px solid ${D.border}33` }}>
+                    <span style={{ fontSize: 12, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5, minWidth: 120 }}>{field.label}</span>
+                    {field.link ? (
+                      <a href={field.value} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: D.teal, textDecoration: 'none', textAlign: 'right', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{field.value}</a>
+                    ) : (
+                      <span style={{ fontSize: 13, color: D.white, textAlign: 'right', maxWidth: 300 }}>{field.value || '--'}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {/* Rating Card */}
+                <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}`, textAlign: 'center' }}>
+                  <div style={{ fontSize: 48, fontWeight: 800, color: D.amber, fontFamily: "'JetBrains Mono', monospace" }}>{loc.rating}</div>
+                  <Stars count={Math.round(loc.rating || 0)} size={20} />
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>{loc.totalReviews} reviews on Google</div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'center' }}>
+                    <a href={loc.mapsUrl} target="_blank" rel="noopener noreferrer" style={{
+                      padding: '8px 16px', borderRadius: 8, background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, textDecoration: 'none',
+                    }}>View on Maps</a>
+                    <a href={loc.reviewUrl} target="_blank" rel="noopener noreferrer" style={{
+                      padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, color: D.muted, fontSize: 13, textDecoration: 'none',
+                    }}>Review Link</a>
+                  </div>
+                </div>
+
+                {/* Quick Actions */}
+                <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Quick Actions</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <a href={`https://business.google.com/dashboard/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{
+                      padding: '10px 14px', background: '#0f1923', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
+                    }}>Open Google Business Profile</a>
+                    <a href={`https://business.google.com/posts/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{
+                      padding: '10px 14px', background: '#0f1923', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
+                    }}>Create Google Post</a>
+                    <a href={`https://business.google.com/messaging/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{
+                      padding: '10px 14px', background: '#0f1923', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
+                    }}>View Messages</a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Hours */}
+          {locTab === 'hours' && (
+            <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}`, maxWidth: 500 }}>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Business Hours</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: loc.openNow ? D.green : D.red }} />
+                <span style={{ fontSize: 14, color: loc.openNow ? D.green : D.red, fontWeight: 600 }}>{loc.openNow ? 'Currently Open' : 'Currently Closed'}</span>
+              </div>
+              {(loc.hours || []).length > 0 ? loc.hours.map((h, i) => {
+                const isToday = i === (new Date().getDay() + 6) % 7;
+                return (
+                  <div key={i} style={{
+                    padding: '10px 14px', borderRadius: 8, marginBottom: 4,
+                    background: isToday ? `${D.teal}10` : 'transparent',
+                    border: isToday ? `1px solid ${D.teal}33` : '1px solid transparent',
+                    display: 'flex', justifyContent: 'space-between',
+                  }}>
+                    <span style={{ fontSize: 13, color: isToday ? D.teal : D.white, fontWeight: isToday ? 600 : 400 }}>{h}</span>
+                  </div>
+                );
+              }) : (
+                <div style={{ color: D.muted, fontSize: 13 }}>No hours data available</div>
+              )}
+              <div style={{ marginTop: 16, fontSize: 12, color: D.muted }}>
+                To update hours, go to <a href={`https://business.google.com/dashboard/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>Google Business Profile</a>
+              </div>
+            </div>
+          )}
+
+          {/* Photos */}
+          {locTab === 'photos' && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>{loc.name} Photos ({(loc.photos || []).length})</div>
+                <a href={`https://business.google.com/photos/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{
+                  padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.teal}`, color: D.teal, fontSize: 13, textDecoration: 'none',
+                }}>Manage on Google</a>
+              </div>
+              {(loc.photos || []).length === 0 ? (
+                <div style={{ color: D.muted, padding: 40, textAlign: 'center', background: D.card, borderRadius: 12, border: `1px solid ${D.border}` }}>No photos found</div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
+                  {loc.photos.map((photo, i) => (
+                    <div key={i} style={{ borderRadius: 10, overflow: 'hidden', border: `1px solid ${D.border}`, background: D.card }}>
+                      <img src={photo.url} alt={`${loc.name} photo ${i + 1}`} style={{ width: '100%', height: 180, objectFit: 'cover', display: 'block' }} loading="lazy" />
+                      <div style={{ padding: '8px 10px', fontSize: 11, color: D.muted }}>{photo.width}x{photo.height}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Export */}
+          {locTab === 'export' && (
+            <div style={{ background: D.card, borderRadius: 12, padding: 24, border: `1px solid ${D.border}`, maxWidth: 500 }}>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 8 }}>Export Reviews</div>
+              <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>Download all synced reviews across all locations as a CSV file.</div>
+              <button onClick={handleExport} style={{
+                padding: '12px 24px', borderRadius: 8, border: 'none', background: D.teal, color: D.white,
+                fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'DM Sans, sans-serif',
+              }}>Download CSV</button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // REVIEW OUTREACH HELPERS
 // =============================================================================
 
@@ -1062,8 +1271,9 @@ export default function ReviewsPage() {
       {/* ====================== TAB TOGGLE ====================== */}
       <div style={{ display: 'flex', gap: 0, marginBottom: 24, borderBottom: `1px solid ${D.border}` }}>
         {[
-          { key: 'reviews', label: '\u2B50 Reviews' },
-          { key: 'outreach', label: '📞 Review Outreach' },
+          { key: 'reviews', label: 'Reviews' },
+          { key: 'gbp', label: 'GBP Management' },
+          { key: 'outreach', label: 'Review Outreach' },
         ].map(tab => (
           <button
             key={tab.key}
@@ -1201,6 +1411,7 @@ export default function ReviewsPage() {
       )}
 
       {/* ====================== TAB: REVIEW OUTREACH ====================== */}
+      {activeTab === 'gbp' && <GBPManagement />}
       {activeTab === 'outreach' && <ReviewOutreach />}
     </div>
   );
