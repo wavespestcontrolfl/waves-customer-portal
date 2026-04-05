@@ -30,6 +30,12 @@ exports.up = async function (knex) {
     t.index('status');
   });
 
+  // Seed X accounts to follow (manual reference — not auto-polled)
+  const accounts = ['jakobjelling', 'PabloSantanaT', 'elgermerlo', 'anson7956', 'RoxanaLimban', 'seonatia', 'foundrceo', 'mehrab_build'];
+  for (const username of accounts) {
+    await knex('backlink_agent_targets').insert({ x_username: username, is_active: true }).onConflict('x_username').ignore();
+  }
+
   // Completed signup profiles
   await knex.schema.createTable('backlink_agent_profiles', t => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));

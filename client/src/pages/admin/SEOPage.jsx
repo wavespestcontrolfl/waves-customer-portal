@@ -438,13 +438,11 @@ function BacklinkAgentPanel() {
         <KpiCard label="Success Rate" value={`${stats?.successRate || 0}%`} color={stats?.successRate >= 50 ? D.green : D.amber} />
       </div>
 
-      {/* Controls row */}
+      {/* Controls */}
       <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={handleProcess} disabled={processing} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: processing ? 0.5 : 1 }}>
-          {processing ? 'Processing...' : 'Process Queue'}
+        <button onClick={handleProcess} disabled={processing || (stats?.pending || 0) === 0} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: processing || !(stats?.pending) ? 0.5 : 1 }}>
+          {processing ? 'Processing...' : `Process Queue (${stats?.pending || 0})`}
         </button>
-        <button onClick={handlePoll} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Poll X Feeds</button>
-        <button onClick={handleVerifyEmails} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Check Emails</button>
         <button onClick={loadData} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Refresh</button>
       </div>
 
@@ -530,30 +528,41 @@ function BacklinkAgentPanel() {
           )}
         </div>
 
-        {/* Right: X Targets */}
-        <div>
+        {/* Right: X Accounts to Follow */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>X Feed Monitor</div>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>X Accounts to Follow</div>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 12 }}>Browse these accounts for backlink opportunities. Copy URLs and paste them in the queue.</div>
+            {targets.length === 0 ? (
+              <div style={{ fontSize: 12, color: D.muted, textAlign: 'center', padding: 16 }}>No accounts saved yet</div>
+            ) : targets.map(t => (
+              <a key={t.id} href={`https://x.com/${t.x_username}`} target="_blank" rel="noopener noreferrer" style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px',
+                background: D.bg, borderRadius: 8, marginBottom: 6, textDecoration: 'none', border: `1px solid ${D.border}`,
+              }}>
+                <span style={{ fontSize: 13, color: D.teal, fontWeight: 600 }}>@{t.x_username}</span>
+                <span style={{ fontSize: 11, color: D.muted }}>Open</span>
+              </a>
+            ))}
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
               <input
                 value={newTarget}
                 onChange={e => setNewTarget(e.target.value)}
                 placeholder="@username"
-                style={{ flex: 1, padding: '8px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none' }}
+                style={{ flex: 1, padding: '6px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 12, outline: 'none' }}
               />
-              <button onClick={handleAddTarget} style={{ padding: '8px 12px', borderRadius: 6, border: 'none', background: D.teal, color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Add</button>
+              <button onClick={handleAddTarget} style={{ padding: '6px 10px', borderRadius: 6, border: 'none', background: D.teal, color: D.white, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Add</button>
             </div>
-            {targets.length === 0 ? (
-              <div style={{ fontSize: 12, color: D.muted, textAlign: 'center', padding: 16 }}>No X accounts monitored yet</div>
-            ) : targets.map(t => (
-              <div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}33` }}>
-                <div>
-                  <div style={{ fontSize: 13, color: D.text, fontWeight: 600 }}>@{t.x_username}</div>
-                  <div style={{ fontSize: 10, color: D.muted }}>{t.last_polled_at ? `Polled ${new Date(t.last_polled_at).toLocaleString()}` : 'Never polled'}</div>
-                </div>
-                <button onClick={() => handleDeleteTarget(t.id)} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.red}33`, background: 'transparent', color: D.red, fontSize: 10, cursor: 'pointer' }}>Remove</button>
-              </div>
-            ))}
+          </Card>
+          <Card style={{ padding: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: D.amber, marginBottom: 6 }}>Daily Workflow</div>
+            <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.6 }}>
+              1. Open each X account above<br/>
+              2. Copy any shared signup/profile links<br/>
+              3. Paste URLs in the queue (left)<br/>
+              4. Click Process Queue<br/>
+              5. Agent signs up automatically
+            </div>
           </Card>
         </div>
       </div>
