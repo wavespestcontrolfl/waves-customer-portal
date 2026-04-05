@@ -13,8 +13,10 @@ router.get('/', async (req, res, next) => {
   try {
     const { location, rating, responded, search, page = 1, limit = 30 } = req.query;
 
+    // Exclude stats rows from actual reviews
     let query = db('google_reviews')
       .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
+      .where('google_reviews.reviewer_name', '!=', '_stats')
       .select(
         'google_reviews.*',
         'customers.first_name as cust_first', 'customers.last_name as cust_last',
@@ -34,22 +36,39 @@ router.get('/', async (req, res, next) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const reviews = await query.limit(parseInt(limit)).offset(offset);
 
-    // Aggregate stats
+    // Get real Google stats from Places API (stored during sync)
+    const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+    const googleStats = {};
+    for (const row of statsRows) {
+      try {
+        const parsed = JSON.parse(row.review_text);
+        googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews };
+      } catch { /* ignore */ }
+    }
+
+    // Aggregate stats from actual reviews (excluding _stats rows)
+    const reviewsOnly = db('google_reviews').where('reviewer_name', '!=', '_stats');
     const [totals, unresponded, thisMonth, perLocation] = await Promise.all([
-      db('google_reviews').select(
+      reviewsOnly.clone().select(
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
       ).first(),
-      db('google_reviews').whereNull('review_reply').whereNotNull('review_text').count('* as count').first(),
-      db('google_reviews').where('review_created_at', '>=', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()).count('* as count').first(),
-      db('google_reviews').select('location_id')
+      reviewsOnly.clone().whereNull('review_reply').whereNotNull('review_text').count('* as count').first(),
+      reviewsOnly.clone().where('review_created_at', '>=', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()).count('* as count').first(),
+      reviewsOnly.clone().select('location_id')
         .count('* as count')
         .avg('star_rating as avg')
         .groupBy('location_id'),
     ]);
 
-    // Star breakdown
-    const breakdown = await db('google_reviews').select('star_rating').count('* as count').groupBy('star_rating').orderBy('star_rating', 'desc');
+    // Star breakdown (exclude stats rows)
+    const breakdown = await db('google_reviews').where('reviewer_name', '!=', '_stats').select('star_rating').count('* as count').groupBy('star_rating').orderBy('star_rating', 'desc');
+
+    // Use Google's real totals if available
+    const totalGoogleReviews = Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0);
+    const avgGoogleRating = Object.values(googleStats).length > 0
+      ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
+      : parseFloat(totals?.avg_rating || 0);
 
     res.json({
       reviews: reviews.map(r => ({
@@ -62,15 +81,17 @@ router.get('/', async (req, res, next) => {
         syncedAt: r.synced_at,
       })),
       stats: {
-        totalReviews: parseInt(totals?.total || 0),
-        avgRating: parseFloat(totals?.avg_rating || 0),
+        totalReviews: totalGoogleReviews || parseInt(totals?.total || 0),
+        avgRating: parseFloat(avgGoogleRating) || parseFloat(totals?.avg_rating || 0),
         unresponded: parseInt(unresponded?.count || 0),
         newThisMonth: parseInt(thisMonth?.count || 0),
         breakdown: Object.fromEntries(breakdown.map(b => [b.star_rating, parseInt(b.count)])),
-        perLocation: perLocation.map(l => ({
+        perLocation: perLocation.map(l => {
+          const gs = googleStats[l.location_id];
+          return {
           locationId: l.location_id,
-          count: parseInt(l.count),
-          avgRating: parseFloat(l.avg || 0).toFixed(1),
+          count: gs?.totalReviews || parseInt(l.count),
+          avgRating: gs?.rating?.toFixed(1) || parseFloat(l.avg || 0).toFixed(1),
         })),
       },
       locations: WAVES_LOCATIONS.map(l => ({ id: l.id, name: l.name, reviewUrl: l.googleReviewUrl })),

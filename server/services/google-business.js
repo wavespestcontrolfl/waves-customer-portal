@@ -179,7 +179,7 @@ class GoogleBusinessService {
       if (!loc.googlePlaceId) continue;
 
       try {
-        const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=reviews,rating,user_ratings_total&key=${GOOGLE_KEY}`;
+        const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=reviews,rating,user_ratings_total,name&key=${GOOGLE_KEY}`;
         const res = await fetch(url);
         const data = await res.json();
 
@@ -189,6 +189,29 @@ class GoogleBusinessService {
         }
 
         const reviews = data.result?.reviews || [];
+        const googleRating = data.result?.rating || null;
+        const googleTotalReviews = data.result?.user_ratings_total || null;
+
+        // Store aggregate stats for this location
+        if (googleRating || googleTotalReviews) {
+          try {
+            const existing = await db('google_reviews')
+              .where({ google_review_id: `places_stats_${loc.id}` }).first();
+            const statsData = JSON.stringify({ rating: googleRating, totalReviews: googleTotalReviews });
+            if (existing) {
+              await db('google_reviews').where({ id: existing.id }).update({
+                review_text: statsData, synced_at: db.fn.now(),
+              });
+            } else {
+              await db('google_reviews').insert({
+                google_review_id: `places_stats_${loc.id}`, location_id: loc.id,
+                reviewer_name: '_stats', star_rating: Math.round(googleRating || 5),
+                review_text: statsData, review_created_at: new Date().toISOString(),
+                synced_at: db.fn.now(),
+              });
+            }
+          } catch { /* non-critical */ }
+        }
 
         for (const review of reviews) {
           // Places API uses author_name + time as unique key (no stable ID)

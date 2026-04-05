@@ -241,6 +241,12 @@ function ReviewCard({ review, onReplySubmit }) {
                 padding: '8px 18px', background: 'transparent', border: `1px solid ${D.teal}`, color: D.teal, borderRadius: 8,
                 fontSize: 13, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: 'pointer', opacity: aiLoading ? 0.5 : 1,
               }}>{aiLoading ? 'Generating...' : 'AI Reply'}</button>
+              {replyText.trim() && (
+                <button onClick={() => { navigator.clipboard.writeText(replyText); }} style={{
+                  padding: '8px 18px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, borderRadius: 8,
+                  fontSize: 13, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: 'pointer',
+                }}>Copy</button>
+              )}
               {editing && (
                 <button onClick={() => { setEditing(false); setReplyText(review.reply || ''); }} style={{
                   padding: '8px 14px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
