@@ -180,10 +180,10 @@ router.post('/pricing', async (req, res, next) => {
       csvText = req.body.csvData;
     }
 
-    // Fallback: try Google Sheet (validate it has the right columns)
+    // Fallback: try Google Sheet
     if (!csvText) {
       try {
-        const csvResp = await fetch('https://docs.google.com/spreadsheets/d/1Ei60A40nWHg1uX3vD3D4FdrhCmDNV0Uspk1Xc5O_wx0/gviz/tq?tqx=out:csv&sheet=PRICING');
+        const csvResp = await fetch('https://docs.google.com/spreadsheets/d/1GbZ8KGMdJr8_DsRsW5qsshZSJaiKivg8ZR9Fz09lnb0/gviz/tq?tqx=out:csv&gid=24910236');
         if (csvResp.ok) {
           const sheetText = await csvResp.text();
           if (sheetText && sheetText.split('\n')[0].includes('Product')) {
@@ -209,14 +209,14 @@ router.post('/pricing', async (req, res, next) => {
 
     for (const row of rows) {
       const product = (row['Product'] || '').trim();
-      const activeIngredient = (row['Active Ingredient / Descriptor'] || '').trim();
+      const activeIngredient = (row['Active Ingredient / Descriptor'] || row['Active Ingredient'] || '').trim();
       let category = (row['Category'] || '').trim();
       const subcategory = (row['Subcategory'] || '').trim();
       const categorySection = (row['Category Section'] || '').trim();
       let sku = (row['SKU'] || '').trim();
       let vendor = (row['Vendor'] || '').trim();
       let size = (row['Size'] || '').trim();
-      const sourceUrl = (row['Source URL'] || '').trim();
+      const sourceUrl = (row['Source URL'] || row['URL'] || '').trim();
       const priceStr = (row['Price'] || '').replace(/[$,]/g, '').trim();
       const unitPriceStr = (row['Unit Price'] || '').replace(/[$,]/g, '').trim();
 
@@ -252,19 +252,26 @@ router.post('/pricing', async (req, res, next) => {
       // Find or create product in products_catalog
       let productRecord = await db('products_catalog').whereILike('name', product).first();
       if (!productRecord) {
-        [productRecord] = await db('products_catalog').insert({
+        const insertData = {
           name: product,
-          category: category || 'Uncategorized',
-          subcategory: subcategory || null,
+          category: (category || 'Uncategorized').substring(0, 100),
           active_ingredient: activeIngredient || null,
-          sku: sku || null,
           container_size: size || null,
           needs_pricing: !priceStr,
-        }).returning('*');
+        };
+        if (sku) insertData.sku = sku;
+        // subcategory column may not exist yet — try with it, fall back without
+        try {
+          insertData.subcategory = subcategory || null;
+          [productRecord] = await db('products_catalog').insert(insertData).returning('*');
+        } catch (colErr) {
+          delete insertData.subcategory;
+          [productRecord] = await db('products_catalog').insert(insertData).returning('*');
+        }
       } else {
         // Update if we have more info
         const upd = {};
-        if (!productRecord.category && category) upd.category = category;
+        if ((!productRecord.category || productRecord.category === 'Uncategorized') && category) upd.category = (category).substring(0, 100);
         if (!productRecord.active_ingredient && activeIngredient) upd.active_ingredient = activeIngredient;
         if (!productRecord.sku && sku) upd.sku = sku;
         if (!productRecord.container_size && size) upd.container_size = size;
@@ -306,7 +313,10 @@ router.post('/pricing', async (req, res, next) => {
     }
 
     res.json({ success: true, imported, skipped, duplicates, total: rows.length });
-  } catch (err) { next(err); }
+  } catch (err) {
+    console.error('[pricing-import] Error:', err.message, err.stack);
+    next(err);
+  }
 });
 
 module.exports = router;
