@@ -9,6 +9,7 @@ const WAVES_LOCATIONS = [
     googleAccountId: '115462050041013627815',
     googleLocationId: '11325506936615341094',
     googleLocationResourceName: 'accounts/115462050041013627815/locations/11325506936615341094',
+    googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_LWR',
     googleReviewUrl: 'https://g.page/r/CVRc_P5butTMEBM/review',
   },
   {
@@ -21,6 +22,7 @@ const WAVES_LOCATIONS = [
     googleAccountId: '107615291009184011722',
     googleLocationId: '3749219908465956526',
     googleLocationResourceName: 'accounts/107615291009184011722/locations/3749219908465956526',
+    googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_PARRISH',
     googleReviewUrl: 'https://g.page/r/Ca-4KKoWwFacEBM/review',
   },
   {
@@ -33,6 +35,7 @@ const WAVES_LOCATIONS = [
     googleAccountId: '115143019869062526912',
     googleLocationId: '2262372053807555721',
     googleLocationResourceName: 'accounts/115143019869062526912/locations/2262372053807555721',
+    googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_SARASOTA',
     googleReviewUrl: 'https://g.page/r/CRkzS6M4EpncEBM/review',
   },
   {
@@ -45,6 +48,7 @@ const WAVES_LOCATIONS = [
     googleAccountId: '111995684974127201844',
     googleLocationId: '9775694678945206688',
     googleLocationResourceName: 'accounts/111995684974127201844/locations/9775694678945206688',
+    googleRefreshTokenEnv: 'GBP_REFRESH_TOKEN_VENICE',
     googleReviewUrl: 'https://g.page/r/CURA5pQ1KatBEBM/review',
   },
 ];

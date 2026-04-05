@@ -90,7 +90,7 @@ router.post('/:id/reply', async (req, res, next) => {
     // Try to post to Google
     if (gbp.configured && review.google_review_id) {
       try {
-        await gbp.replyToReview(review.google_review_id, replyText);
+        await gbp.replyToReview(review.google_review_id, replyText, review.location_id);
       } catch (e) {
         logger.error(`Google reply failed: ${e.message}`);
         // Still save locally even if Google API fails
