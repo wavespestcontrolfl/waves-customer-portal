@@ -107,21 +107,64 @@ router.post('/', async (req, res) => {
     await PipelineManager.onEvent(customer.id, 'lead_created');
     await LeadScorer.calculateScore(customer.id);
 
-    // Notify Adam
+    // Notify Adam — during business hours (8AM-9PM ET) trigger a call, otherwise SMS
+    const now = new Date();
+    const etHour = parseInt(now.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/New_York' }));
+    const isDuringHours = etHour >= 8 && etHour < 21;
+
     try {
-      await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-        `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${address || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
-        { messageType: 'internal_alert' }
-      );
-    } catch (e) { logger.error(`Lead alert SMS failed: ${e.message}`); }
+      if (isDuringHours && TwilioService.client) {
+        // During business hours: initiate call to admin connecting to the lead
+        try {
+          const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
+          await TwilioService.client.calls.create({
+            to: WAVES_ADMIN_PHONE,
+            from: '+19412972606',
+            url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(phoneFormatted)}&callerIdNumber=${encodeURIComponent('+19412972606')}`,
+            record: true,
+          });
+          logger.info(`[lead-webhook] Business hours — calling admin to connect with ${firstName}`);
+        } catch (callErr) {
+          logger.error(`[lead-webhook] Admin call failed, falling back to SMS: ${callErr.message}`);
+          await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+            `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${address || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
+            { messageType: 'internal_alert' }
+          );
+        }
+      } else {
+        // After hours: SMS alert only
+        await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+          `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${address || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
+          { messageType: 'internal_alert' }
+        );
+      }
+    } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
     // Auto-reply to lead
     try {
-      await TwilioService.sendSMS(phoneFormatted,
-        `Hi ${firstName}! Thanks for reaching out to Waves Pest Control 🌊 We received your info and will follow up shortly with a custom quote. Questions? Reply to this text. — Adam, Waves`,
+      const replyMsg = isDuringHours
+        ? `Hello ${firstName}! Waves here! We received your quote request. One of our specialists will be calling soon—feel free to reply if you'd rather chat by message.\n\nThank you for considering Waves! 🌊`
+        : `Hi ${firstName}! Thanks for reaching out to Waves Pest Control 🌊 We received your info and will follow up first thing in the morning with a custom quote. Questions? Reply to this text. — Adam, Waves`;
+      await TwilioService.sendSMS(phoneFormatted, replyMsg,
         { customerId: customer.id, messageType: 'auto_reply', customerLocationId: location.id }
       );
     } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
+
+    // Beehiiv — create subscriber, tag as Lead, enroll in lead automation
+    try {
+      const beehiiv = require('../services/beehiiv');
+      if (beehiiv.configured && email) {
+        const sub = await beehiiv.upsertSubscriber(email, {
+          firstName, lastName, utmSource: landingUrl || pageUrl, utmMedium: 'website_quote',
+        });
+        if (sub?.id) {
+          await beehiiv.addTags(sub.id, ['Lead']);
+          const autoId = process.env.BEEHIIV_AUTO_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c';
+          await beehiiv.enrollInAutomation(autoId, { email, subscriptionId: sub.id });
+          logger.info(`[lead-webhook] Beehiiv: subscribed ${email}, tagged Lead, enrolled in automation`);
+        }
+      }
+    } catch (e) { logger.error(`Lead Beehiiv failed: ${e.message}`); }
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     try {
