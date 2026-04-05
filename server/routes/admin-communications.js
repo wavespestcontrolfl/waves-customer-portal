@@ -23,6 +23,54 @@ router.post('/sms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/communications/call — initiate an outbound call via Twilio
+router.post('/call', async (req, res, next) => {
+  try {
+    const { to, fromNumber } = req.body;
+    if (!to) return res.status(400).json({ error: 'to number required' });
+
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('twilioVoice')) {
+      return res.json({ success: false, error: 'Voice gate is disabled' });
+    }
+
+    const twilio = require('twilio');
+    const config = require('../config');
+    if (!config.twilio.accountSid || !config.twilio.authToken) {
+      return res.status(500).json({ error: 'Twilio not configured' });
+    }
+    const client = twilio(config.twilio.accountSid, config.twilio.authToken);
+
+    const from = fromNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+    const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
+
+    // Create outbound call — connects `to` and plays hold music / connects to admin
+    const call = await client.calls.create({
+      to,
+      from,
+      url: `https://${domain}/api/webhooks/twilio/outbound-connect`,
+      statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+      record: true,
+      recordingStatusCallback: `https://${domain}/api/webhooks/twilio/recording-status`,
+      recordingStatusCallbackEvent: ['completed'],
+    });
+
+    // Log the outbound call
+    const customer = await db('customers').where({ phone: to }).first().catch(() => null);
+    await db('call_log').insert({
+      customer_id: customer?.id || null,
+      direction: 'outbound',
+      from_phone: from,
+      to_phone: to,
+      twilio_call_sid: call.sid,
+      status: 'initiated',
+    }).catch(() => {});
+
+    res.json({ success: true, callSid: call.sid });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/communications/log — SMS history
 router.get('/log', async (req, res, next) => {
   try {

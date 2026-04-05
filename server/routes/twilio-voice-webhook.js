@@ -158,6 +158,27 @@ router.post('/transcription', async (req, res) => {
 });
 
 // =========================================================================
+// POST /api/webhooks/twilio/outbound-connect — TwiML for admin-initiated outbound calls
+// When the customer answers, dial the admin's phone to connect both parties.
+// =========================================================================
+router.post('/outbound-connect', async (req, res) => {
+  try {
+    const adminPhone = process.env.ADAM_PHONE || '+19415993489';
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Connecting you now.</Say>
+  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed">
+    <Number>${adminPhone}</Number>
+  </Dial>
+</Response>`;
+    res.type('text/xml').send(twiml);
+  } catch (err) {
+    logger.error(`Outbound connect error: ${err.message}`);
+    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, unable to connect.</Say></Response>');
+  }
+});
+
+// =========================================================================
 // POST /api/webhooks/twilio/call-status — Status callback for outbound calls
 // =========================================================================
 router.post('/call-status', async (req, res) => {

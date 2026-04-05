@@ -174,12 +174,37 @@ function ChannelBar({ type, count, max }) {
 function CallLogTab() {
   const [calls, setCalls] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [callTo, setCallTo] = useState('');
+  const [callFrom, setCallFrom] = useState('+19413187612');
+  const [calling, setCalling] = useState(false);
+  const [callResult, setCallResult] = useState(null);
 
-  useEffect(() => {
+  const loadCalls = () => {
     adminFetch('/ai/admin/calls?days=30').then(d => { setCalls(d.calls || []); setLoading(false); }).catch(() => setLoading(false));
-  }, []);
+  };
 
-  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading call log...</div>;
+  useEffect(() => { loadCalls(); }, []);
+
+  const handleCall = async () => {
+    if (!callTo.trim()) return;
+    setCalling(true);
+    setCallResult(null);
+    try {
+      await adminFetch('/admin/communications/call', {
+        method: 'POST',
+        body: JSON.stringify({ to: callTo.trim(), fromNumber: callFrom }),
+      });
+      setCallResult({ ok: true, text: 'Call initiated! Your phone will ring shortly.' });
+      setCallTo('');
+      setTimeout(loadCalls, 3000);
+    } catch (e) {
+      setCallResult({ ok: false, text: `Failed: ${e.message}` });
+    } finally {
+      setCalling(false);
+    }
+  };
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading calls...</div>;
 
   const answered = calls.filter(c => c.answered_by === 'human').length;
   const aiHandled = calls.filter(c => c.answered_by === 'voice_agent').length;
@@ -202,6 +227,65 @@ function CallLogTab() {
             <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
           </div>
         ))}
+      </div>
+
+      {/* Make a Call panel */}
+      <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}`, marginBottom: 16 }}>
+        <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: '0 0 14px' }}>Make a Call</h2>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>From</label>
+            <select
+              value={callFrom}
+              onChange={e => setCallFrom(e.target.value)}
+              style={{
+                width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
+                color: D.white, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box',
+                WebkitAppearance: 'none', appearance: 'none',
+                backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
+                backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center', paddingRight: 32,
+              }}
+            >
+              {ALL_NUMBERS.map(group => (
+                <optgroup key={group.group} label={group.group}>
+                  {group.numbers.map(n => (
+                    <option key={n.number} value={n.number}>{n.formatted} — {n.label}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>To</label>
+            <input
+              type="tel"
+              placeholder="+1 (xxx) xxx-xxxx"
+              value={callTo}
+              onChange={e => setCallTo(e.target.value)}
+              style={{
+                width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
+                color: D.white, fontSize: 14, fontFamily: "'JetBrains Mono', monospace", outline: 'none', boxSizing: 'border-box',
+              }}
+            />
+          </div>
+        </div>
+
+        <button
+          onClick={handleCall}
+          disabled={calling || !callTo.trim()}
+          style={{
+            padding: '10px 24px', background: calling ? D.muted : D.green, border: 'none', borderRadius: 8,
+            color: D.white, fontSize: 14, fontWeight: 600, cursor: calling ? 'not-allowed' : 'pointer',
+            fontFamily: 'DM Sans, sans-serif', opacity: !callTo.trim() ? 0.5 : 1,
+          }}
+        >
+          {calling ? 'Calling...' : 'Call'}
+        </button>
+
+        {callResult && (
+          <div style={{ marginTop: 10, fontSize: 12, color: callResult.ok ? D.green : D.red }}>{callResult.text}</div>
+        )}
       </div>
 
       {/* Call list */}
