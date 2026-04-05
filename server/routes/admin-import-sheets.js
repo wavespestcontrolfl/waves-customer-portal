@@ -158,12 +158,21 @@ router.post('/calls', async (req, res, next) => {
 router.post('/pricing', async (req, res, next) => {
   try {
     let csvText;
-
-    // Try the local CSV file first (most reliable source)
     const fs = require('fs');
-    const filePath = '/Users/adambenetti/Downloads/Pricing - Sheet2 (2).csv';
-    if (fs.existsSync(filePath)) {
-      csvText = fs.readFileSync(filePath, 'utf8');
+    const path = require('path');
+
+    // Try bundled CSV first (deployed with the app)
+    const bundledPath = path.join(__dirname, '..', 'data', 'pricing.csv');
+    if (fs.existsSync(bundledPath)) {
+      csvText = fs.readFileSync(bundledPath, 'utf8');
+    }
+
+    // Fallback: local dev path
+    if (!csvText) {
+      const localPath = '/Users/adambenetti/Downloads/Pricing - Sheet2 (2).csv';
+      if (fs.existsSync(localPath)) {
+        csvText = fs.readFileSync(localPath, 'utf8');
+      }
     }
 
     // Fallback: read from the request body
@@ -177,7 +186,6 @@ router.post('/pricing', async (req, res, next) => {
         const csvResp = await fetch('https://docs.google.com/spreadsheets/d/1Ei60A40nWHg1uX3vD3D4FdrhCmDNV0Uspk1Xc5O_wx0/gviz/tq?tqx=out:csv&sheet=PRICING');
         if (csvResp.ok) {
           const sheetText = await csvResp.text();
-          // Only use if it has the expected Product column header
           if (sheetText && sheetText.split('\n')[0].includes('Product')) {
             csvText = sheetText;
           }
