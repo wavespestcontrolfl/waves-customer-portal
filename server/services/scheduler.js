@@ -69,31 +69,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8AM — Send service reminders for tomorrow's appointments
+  // EVERY 30 MIN — Appointment reminders (72h, 24h, 1h) from DB + Google Calendar
+  // Replaces Zapier zaps #12, #13, #20
   // =========================================================================
-  cron.schedule('0 8 * * *', async () => {
-    logger.info('Running: service reminder job');
+  cron.schedule('*/30 * * * *', async () => {
+    logger.info('Running: appointment reminder check');
     try {
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      const tomorrowStr = tomorrow.toISOString().split('T')[0];
-
-      const upcoming = await db('scheduled_services')
-        .where({ scheduled_date: tomorrowStr })
-        .whereIn('status', ['pending', 'confirmed'])
-        .select('id', 'customer_id');
-
-      for (const svc of upcoming) {
-        try {
-          await TwilioService.sendServiceReminder(svc.customer_id, svc.id);
-        } catch (err) {
-          logger.error(`Reminder failed for service ${svc.id}: ${err.message}`);
-        }
-      }
-
-      logger.info(`Service reminders sent: ${upcoming.length}`);
+      const AppointmentReminders = require('./appointment-reminders');
+      const result = await AppointmentReminders.checkAll();
+      if (result.sent > 0) logger.info(`Appointment reminders: ${result.sent} sent, ${result.skipped} skipped`);
     } catch (err) {
-      logger.error(`Service reminder job failed: ${err.message}`);
+      logger.error(`Appointment reminder check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — Check for new appointments + WDO inspections
+  // Replaces Zapier zaps #21, #22
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const AppointmentReminders = require('./appointment-reminders');
+      const result = await AppointmentReminders.checkNewAppointments();
+      if (result.confirmations > 0 || result.wdoPreps > 0) {
+        logger.info(`New appointments: ${result.confirmations} confirmations, ${result.wdoPreps} WDO preps`);
+      }
+    } catch (err) {
+      logger.error(`New appointment check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
