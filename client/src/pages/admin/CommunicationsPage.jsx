@@ -708,6 +708,8 @@ export default function CommunicationsPage() {
 
   // Compose state
   const [toNumber, setToNumber] = useState('');
+  const [toSearch, setToSearch] = useState('');
+  const [toResults, setToResults] = useState([]);
   const [fromNumber, setFromNumber] = useState('+19413187612');
   const [msgBody, setMsgBody] = useState('');
   const [sending, setSending] = useState(false);
@@ -885,29 +887,70 @@ export default function CommunicationsPage() {
 
           <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>To</label>
           <input
-            type="tel"
-            placeholder="+1 (xxx) xxx-xxxx"
-            value={toNumber}
-            onChange={e => setToNumber(e.target.value)}
+            type="text"
+            placeholder="Search by name or enter phone number..."
+            value={toSearch || toNumber}
+            onChange={async (e) => {
+              const val = e.target.value;
+              // If it looks like a phone number, set directly
+              if (/^[\d\s\(\)\-\+]+$/.test(val)) {
+                setToNumber(val);
+                setToSearch('');
+                setToResults([]);
+              } else {
+                setToSearch(val);
+                setToNumber('');
+                if (val.length >= 2) {
+                  try {
+                    const r = await fetch(`${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8`, {
+                      headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+                    });
+                    if (r.ok) {
+                      const d = await r.json();
+                      setToResults(d.customers || []);
+                    }
+                  } catch {}
+                } else {
+                  setToResults([]);
+                }
+              }
+            }}
             style={{
               width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-              color: D.white, fontSize: 14, fontFamily: 'JetBrains Mono, monospace', outline: 'none', marginBottom: 12, boxSizing: 'border-box',
+              color: D.white, fontSize: 14, fontFamily: 'DM Sans, sans-serif', outline: 'none', marginBottom: toResults.length ? 0 : 12, boxSizing: 'border-box',
             }}
           />
+          {toResults.length > 0 && (
+            <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 8px 8px', maxHeight: 180, overflowY: 'auto', marginBottom: 12 }}>
+              {toResults.map(c => (
+                <div key={c.id} onClick={() => {
+                  setToNumber(c.phone || '');
+                  setToSearch(`${c.firstName} ${c.lastName} — ${c.phone || ''}`);
+                  setToResults([]);
+                }} style={{
+                  padding: '8px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`,
+                  fontSize: 13, color: D.white,
+                }}>
+                  <strong>{c.firstName} {c.lastName}</strong>
+                  <span style={{ color: D.muted, marginLeft: 8 }}>{c.phone || 'no phone'}</span>
+                </div>
+              ))}
+            </div>
+          )}
 
           <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>Message</label>
           <textarea
             placeholder="Type your message..."
             value={msgBody}
-            onChange={e => { if (e.target.value.length <= 160) setMsgBody(e.target.value); }}
+            onChange={e => setMsgBody(e.target.value)}
             rows={3}
             style={{
               width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
               color: D.white, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', resize: 'vertical', marginBottom: 4, boxSizing: 'border-box',
             }}
           />
-          <div style={{ textAlign: 'right', fontSize: 11, fontFamily: 'JetBrains Mono, monospace', color: msgBody.length > 140 ? D.amber : D.muted, marginBottom: 12 }}>
-            {msgBody.length}/160
+          <div style={{ textAlign: 'right', fontSize: 11, fontFamily: 'JetBrains Mono, monospace', color: D.muted, marginBottom: 12 }}>
+            {msgBody.length} chars
           </div>
 
           {/* Quick Templates */}
