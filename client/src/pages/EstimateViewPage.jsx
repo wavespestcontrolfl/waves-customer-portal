@@ -859,16 +859,8 @@ export default function EstimateViewPage() {
           ) : (
             <div style={{ textAlign: 'center', padding: 24, background: '#E8F5E9', borderRadius: 14 }}>
               <div style={{ fontSize: 18, fontWeight: 800, color: B.green, marginBottom: 8 }}>{'✅'} Estimate Accepted!</div>
-              <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 16 }}>Check your texts for the onboarding link.</div>
-              <div style={{ borderTop: '1px solid #C8E6C9', paddingTop: 16 }}>
-                <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Ready to get started?</div>
-                <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 12 }}>Book your first appointment — pick a time that works for you.</div>
-                <a href={`/book/${token}?city=${encodeURIComponent(e.serviceCity || e.city || '')}`} style={{
-                  display: 'inline-block', padding: '12px 28px', borderRadius: 10,
-                  background: B.wavesBlue, color: '#fff', fontSize: 15, fontWeight: 700,
-                  textDecoration: 'none',
-                }}>{'📅'} Book Your Appointment</a>
-              </div>
+              <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 8 }}>Welcome to Waves! Check your texts for the setup link.</div>
+              <div style={{ fontSize: 13, color: B.grayMid, lineHeight: 1.6 }}>We'll walk you through payment setup, property preferences, and scheduling your first service — all in under 2 minutes.</div>
             </div>
           )}
 
