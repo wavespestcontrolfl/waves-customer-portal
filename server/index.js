@@ -63,6 +63,8 @@ const dispatchRoutes = require('./routes/dispatch');
 const dispatchKnowledgeRoutes = require('./routes/knowledge');
 const aiAssistantRoutes = require('./routes/ai-assistant');
 const twilioVoiceWebhookRoutes = require('./routes/twilio-voice-webhook');
+const adminReviewRequestRoutes = require('./routes/admin-review-requests');
+const reviewPublicRoutes = require('./routes/review-public');
 
 const app = express();
 
@@ -199,6 +201,8 @@ app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
+app.use('/api/review', reviewPublicRoutes);
+app.use('/api/admin/review-requests', adminReviewRequestRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -38,6 +38,7 @@ const AdminEquipmentPage = lazy(() => import('./pages/admin/EquipmentPage'));
 const AdminKnowledgeBasePage = lazy(() => import('./pages/admin/KnowledgeBasePage'));
 const AdminInvoicesPage = lazy(() => import('./pages/admin/AdminInvoicesPage'));
 const PayPage = lazy(() => import('./pages/PayPage'));
+const ReviewPage = lazy(() => import('./pages/ReviewPage'));
 import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
@@ -86,6 +87,7 @@ export default function App() {
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
+          <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookingPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />
           <Route path="/tech" element={<TechLayout />}>

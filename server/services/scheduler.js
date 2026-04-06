@@ -583,6 +583,34 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // EVERY 15 MIN — Send scheduled review request SMS
+  // Picks up review requests whose scheduled_for has passed.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const ReviewService = require('./review-request');
+      const result = await ReviewService.processScheduled();
+      if (result.sent > 0) logger.info(`Review requests processed: ${result.sent} sent`);
+    } catch (err) {
+      logger.error(`Review request processing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 10AM — Review follow-up reminders (48hr non-responders)
+  // =========================================================================
+  cron.schedule('0 10 * * *', async () => {
+    logger.info('Running: review follow-up reminders');
+    try {
+      const ReviewService = require('./review-request');
+      const result = await ReviewService.processFollowups();
+      logger.info(`Review follow-ups done: ${result.sent} sent`);
+    } catch (err) {
+      logger.error(`Review follow-up failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
