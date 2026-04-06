@@ -182,6 +182,8 @@ app.use('/api/admin/email-automations', require('./routes/admin-email-automation
 app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 app.use('/api/admin/call-recordings', require('./routes/admin-call-recordings'));
 
+app.use('/api/rate', require('./routes/review-gate'));
+
 // Health check
 app.get('/api/health', (req, res) => {
   const { gates } = require('./config/feature-gates');

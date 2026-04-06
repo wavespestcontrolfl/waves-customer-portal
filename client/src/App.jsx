@@ -28,6 +28,7 @@ const AdminVoiceAgentPage = lazy(() => import('./pages/admin/VoiceAgentPage'));
 const AdminBlogPage = lazy(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazy(() => import('./pages/admin/KnowledgePage'));
 const AdminSettingsPage = lazy(() => import('./pages/admin/SettingsPage'));
+const RatePage = lazy(() => import('./pages/RatePage'));
 const AdminSocialMediaPage = lazy(() => import('./pages/admin/SocialMediaPage'));
 import BookingPage from './pages/BookingPage';
 
@@ -74,6 +75,7 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/onboard/:token" element={<OnboardingPage />} />
           <Route path="/estimate/:token" element={<EstimateViewPage />} />
+          <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/book/:estimateToken" element={<BookingPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />

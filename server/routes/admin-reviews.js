@@ -1,10 +1,36 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const gbp = require('../services/google-business');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
+
+const PORTAL_DOMAIN = process.env.PORTAL_DOMAIN || 'portal.wavespestcontrol.com';
+
+/**
+ * Generate a unique review request token and create a review_requests record.
+ * Returns the created record.
+ */
+async function createReviewRequest({ customerId, locationId, techName, serviceType, serviceDate }) {
+  const token = crypto.randomBytes(24).toString('base64url'); // 32 chars, URL-safe
+  const expiresAt = new Date(Date.now() + 14 * 86400000); // 14 days
+
+  const [record] = await db('review_requests').insert({
+    customer_id: customerId,
+    token,
+    location_id: locationId,
+    tech_name: techName || null,
+    service_type: serviceType || null,
+    service_date: serviceDate || null,
+    status: 'pending',
+    sent_at: db.fn.now(),
+    expires_at: expiresAt.toISOString(),
+  }).returning('*');
+
+  return record;
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -265,10 +291,10 @@ router.get('/outreach-candidates', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/reviews/send-request — send review request SMS to customer
+// POST /api/admin/reviews/send-request — send review request SMS with NPS gate
 router.post('/send-request', async (req, res, next) => {
   try {
-    const { customerId } = req.body;
+    const { customerId, serviceType, techName } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
 
     const customer = await db('customers').where({ id: customerId }).first();
@@ -276,20 +302,36 @@ router.post('/send-request', async (req, res, next) => {
 
     const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
     const firstName = customer.first_name || 'there';
-    const reviewUrl = loc.googleReviewUrl || 'https://g.page/r/CRkzS6M4EpncEBM/review';
+
+    // Get last completed service for context
+    const lastSvc = await db('scheduled_services')
+      .where({ customer_id: customerId, status: 'completed' })
+      .orderBy('scheduled_date', 'desc').first();
+
+    // Create a review_requests record with a unique token
+    const reviewReq = await createReviewRequest({
+      customerId: customer.id,
+      locationId: loc.id,
+      techName: techName || lastSvc?.tech_name || null,
+      serviceType: serviceType || lastSvc?.service_type || 'pest control',
+      serviceDate: lastSvc?.scheduled_date || null,
+    });
+
+    const rateUrl = `https://${PORTAL_DOMAIN}/rate/${reviewReq.token}`;
+    const svcLabel = reviewReq.service_type || 'pest control service';
 
     const TwilioService = require('../services/twilio');
     await TwilioService.sendSMS(customer.phone,
-      `Hi ${firstName}! Adam here with Waves Pest Control. Just checking in — hope everything's been great since our last visit.\n\nIf you've been happy with the service, a quick Google review would really help us out:\n\n${reviewUrl}\n\nThanks so much!`,
+      `Hey ${firstName}! Thanks for choosing Waves 🌊 We'd love to hear how your ${svcLabel} went — it only takes 10 seconds:\n\n${rateUrl}\n\nThank you! — Waves Pest Control`,
       { customerId: customer.id, messageType: 'review_request', customerLocationId: customer.nearest_location_id }
     );
 
     await db('activity_log').insert({
       customer_id: customer.id, action: 'review_requested',
-      description: `Review request sent to ${customer.first_name} ${customer.last_name} (${loc.name})`,
+      description: `Review request sent to ${customer.first_name} ${customer.last_name} (${loc.name}) — token: ${reviewReq.token.slice(0, 8)}...`,
     });
 
-    res.json({ success: true });
+    res.json({ success: true, token: reviewReq.token });
   } catch (err) { next(err); }
 });
 
@@ -380,5 +422,152 @@ router.get('/export', async (req, res, next) => {
     res.send(header + rows);
   } catch (err) { next(err); }
 });
+
+// =========================================================================
+// REVIEW STATS — NPS, response times, conversion
+// =========================================================================
+
+// GET /api/admin/reviews/stats
+router.get('/stats', async (req, res, next) => {
+  try {
+    // --- NPS from review_requests ---
+    let npsScore = null;
+    let npsCounts = { promoters: 0, passives: 0, detractors: 0, total: 0 };
+    try {
+      const npsRows = await db('review_requests')
+        .where('status', 'submitted')
+        .whereNotNull('category')
+        .select('category')
+        .count('* as count')
+        .groupBy('category');
+
+      for (const row of npsRows) {
+        const c = parseInt(row.count);
+        if (row.category === 'promoter') npsCounts.promoters = c;
+        else if (row.category === 'passive') npsCounts.passives = c;
+        else if (row.category === 'detractor') npsCounts.detractors = c;
+      }
+      npsCounts.total = npsCounts.promoters + npsCounts.passives + npsCounts.detractors;
+      if (npsCounts.total > 0) {
+        npsScore = Math.round(((npsCounts.promoters - npsCounts.detractors) / npsCounts.total) * 100);
+      }
+    } catch { /* review_requests table may not exist yet */ }
+
+    // --- Avg response time (review_created_at to reply_updated_at) ---
+    const responseTimes = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .whereNotNull('review_reply')
+      .whereNotNull('reply_updated_at')
+      .whereNotNull('review_created_at')
+      .select(
+        db.raw("AVG(EXTRACT(EPOCH FROM (reply_updated_at - review_created_at)) / 3600) as avg_hours")
+      )
+      .first();
+    const avgResponseHours = responseTimes?.avg_hours ? Math.round(parseFloat(responseTimes.avg_hours)) : null;
+
+    // --- Unanswered > 24h ---
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600000).toISOString();
+    const unansweredRow = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .whereNull('review_reply')
+      .where('review_created_at', '<', twentyFourHoursAgo)
+      .count('* as count')
+      .first();
+    const unansweredOver24h = parseInt(unansweredRow?.count || 0);
+
+    // --- Monthly review counts (last 6 months) ---
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    const monthlyCounts = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .where('review_created_at', '>=', sixMonthsAgo.toISOString())
+      .select(
+        db.raw("TO_CHAR(review_created_at, 'YYYY-MM') as month"),
+        db.raw('COUNT(*) as count'),
+        db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')
+      )
+      .groupByRaw("TO_CHAR(review_created_at, 'YYYY-MM')")
+      .orderBy('month', 'asc');
+
+    // --- Conversion rate (review requests sent vs submitted) ---
+    let conversionRate = null;
+    try {
+      const conversionRow = await db('review_requests')
+        .select(
+          db.raw('COUNT(*) as total_sent'),
+          db.raw("COUNT(*) FILTER (WHERE status = 'submitted') as total_submitted"),
+          db.raw("COUNT(*) FILTER (WHERE category = 'promoter') as promoters_total"),
+          db.raw("COUNT(*) FILTER (WHERE google_review_clicked = true) as clicked_google")
+        )
+        .first();
+      const totalSent = parseInt(conversionRow?.total_sent || 0);
+      const totalSubmitted = parseInt(conversionRow?.total_submitted || 0);
+      const clickedGoogle = parseInt(conversionRow?.clicked_google || 0);
+      conversionRate = {
+        totalSent,
+        totalSubmitted,
+        submissionRate: totalSent > 0 ? Math.round((totalSubmitted / totalSent) * 100) : 0,
+        googleClicks: clickedGoogle,
+        googleConversion: totalSent > 0 ? Math.round((clickedGoogle / totalSent) * 100) : 0,
+      };
+    } catch { /* table may not exist */ }
+
+    // --- Rating breakdown ---
+    const breakdown = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .select('star_rating')
+      .count('* as count')
+      .groupBy('star_rating')
+      .orderBy('star_rating', 'desc');
+
+    res.json({
+      nps: { score: npsScore, ...npsCounts },
+      avgResponseHours,
+      unansweredOver24h,
+      monthlyCounts: monthlyCounts.map(m => ({ month: m.month, count: parseInt(m.count), avgRating: parseFloat(m.avg_rating) })),
+      conversionRate,
+      ratingBreakdown: Object.fromEntries(breakdown.map(b => [b.star_rating, parseInt(b.count)])),
+    });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// QR CODE — generate QR for a location's review page
+// =========================================================================
+
+// GET /api/admin/reviews/qr/:locationId
+router.get('/qr/:locationId', async (req, res, next) => {
+  try {
+    const loc = WAVES_LOCATIONS.find(l => l.id === req.params.locationId);
+    if (!loc) return res.status(404).json({ error: 'Location not found' });
+
+    const reviewUrl = loc.googleReviewUrl;
+
+    // Generate QR code SVG using a lightweight approach via Google Charts API
+    // This avoids adding a QR library dependency
+    const qrApiUrl = `https://chart.googleapis.com/chart?cht=qr&chs=400x400&chl=${encodeURIComponent(reviewUrl)}&choe=UTF-8`;
+
+    // Return the URL and also an inline SVG-compatible data URI
+    // For direct embedding, use the Google Charts URL
+    const { format } = req.query;
+
+    if (format === 'redirect') {
+      return res.redirect(qrApiUrl);
+    }
+
+    // Default: return JSON with the QR image URL and review URL
+    res.json({
+      locationId: loc.id,
+      locationName: loc.name,
+      reviewUrl,
+      qrImageUrl: qrApiUrl,
+      // Also provide a self-hosted version via QR Server API (no Google dependency)
+      qrImageUrlAlt: `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(reviewUrl)}`,
+    });
+  } catch (err) { next(err); }
+});
+
+// Export createReviewRequest for use by other modules (e.g., admin-schedule auto-send)
+router.createReviewRequest = createReviewRequest;
 
 module.exports = router;

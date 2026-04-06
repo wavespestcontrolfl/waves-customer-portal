@@ -266,6 +266,56 @@ class GoogleBusinessService {
                 description: `New ${rating}-star review on ${loc.name} from ${reviewerName}: "${(reviewText || '').slice(0, 100)}"`,
                 metadata: JSON.stringify({ locationId: loc.id, rating, reviewerName }),
               });
+
+              // --- Negative review escalation ---
+              try {
+                const WAVES_ADMIN_PHONE = '+19413187612';
+                const TwilioService = require('./twilio');
+                await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+                  `⚠️ ${rating}-star review from ${reviewerName} on ${loc.name}: "${(reviewText || 'No comment').substring(0, 100)}..."`,
+                  { messageType: 'internal_alert' }
+                );
+              } catch (smsErr) {
+                logger.error(`[gbp] Negative review SMS alert failed: ${smsErr.message}`);
+              }
+
+              // Auto-generate AI draft reply (saved to google_reviews, not posted)
+              try {
+                const Anthropic = require('@anthropic-ai/sdk');
+                const aiClient = new Anthropic();
+                const aiMsg = await aiClient.messages.create({
+                  model: 'claude-sonnet-4-20250514',
+                  max_tokens: 400,
+                  messages: [{ role: 'user', content: `Write a professional, empathetic reply to a ${rating}-star review for Waves Pest Control ${loc.name}. The reviewer "${reviewerName}" said: "${reviewText || '(no comment)'}". Keep it under 2 paragraphs. Acknowledge the concern, apologize, and invite them to contact us directly. End with: The 🌊 Waves Pest Control ${loc.name} Team` }],
+                });
+                const draftReply = aiMsg.content[0]?.text || '';
+                if (draftReply) {
+                  // Store as draft in metadata (not posted as actual reply)
+                  const reviewRecord = await db('google_reviews').where({ google_review_id: googleId }).first();
+                  if (reviewRecord) {
+                    await db('google_reviews').where({ id: reviewRecord.id }).update({
+                      review_reply: `[DRAFT] ${draftReply}`,
+                    });
+                  }
+                }
+              } catch (aiErr) {
+                logger.error(`[gbp] AI draft reply generation failed: ${aiErr.message}`);
+              }
+
+              // Create escalation interaction if customer matched
+              if (customerId) {
+                try {
+                  await db('customer_interactions').insert({
+                    customer_id: customerId,
+                    interaction_type: 'escalation',
+                    subject: `${rating}-star Google review escalation`,
+                    notes: `Negative review on ${loc.name}: "${(reviewText || '').slice(0, 300)}"`,
+                    channel: 'google_review',
+                  });
+                } catch (intErr) {
+                  logger.error(`[gbp] Escalation interaction insert failed: ${intErr.message}`);
+                }
+              }
             }
           }
         }
