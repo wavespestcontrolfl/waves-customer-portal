@@ -287,7 +287,7 @@ export default function OnboardingPage() {
               <div style={{ fontSize: 28, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui, marginTop: 8 }}>${q.monthlyRate.toFixed(2)}<span style={{ fontSize: 14, fontWeight: 400, color: B.grayMid }}>/mo</span></div>
               {q.tier && (
                 <div style={{ fontSize: 13, fontWeight: 600, color: B.green, marginTop: 4 }}>
-                  WaveGuard {q.tier} — {q.tier === 'Gold' ? '15%' : q.tier === 'Platinum' ? '20%' : q.tier === 'Silver' ? '10%' : '0%'} bundle savings
+                  WaveGuard {q.tier} — {q.tier === 'Platinum' ? '30%' : q.tier === 'Gold' ? '20%' : q.tier === 'Silver' ? '15%' : q.tier === 'Bronze' ? '10%' : '0%'} bundle savings
                 </div>
               )}
               {q.depositAmount > 0 && (

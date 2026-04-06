@@ -432,7 +432,7 @@ export default function PayPage() {
               Save on every visit
             </div>
             <div style={{ fontSize: 13, color: W.textBody, lineHeight: 1.5 }}>
-              Upgrade to <strong style={{ color: '#F9A825' }}>Gold WaveGuard</strong> and save 15% on all services -- that's ${(invoice.subtotal * 0.15).toFixed(2)} off today's service alone.
+              Upgrade to <strong style={{ color: '#F9A825' }}>Gold WaveGuard</strong> and save 20% on all services -- that's ${(invoice.subtotal * 0.20).toFixed(2)} off today's service alone.
               Reply to the text from Waves or call <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a>.
             </div>
           </div>

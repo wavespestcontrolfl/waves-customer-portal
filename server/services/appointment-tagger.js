@@ -214,7 +214,7 @@ class AppointmentTagger {
     if (sent) return;
 
     const tier = service.waveguard_tier;
-    const perks = { Platinum: 'unlimited callbacks, priority scheduling, 20% off, $500K termite guarantee', Gold: 'unlimited callbacks, priority scheduling, 15% off', Silver: 'unlimited callbacks, 10% off' }[tier] || 'regular scheduled service';
+    const perks = { Platinum: 'unlimited callbacks, priority scheduling, 30% off, $500K termite guarantee', Gold: 'unlimited callbacks, priority scheduling, 20% off', Silver: 'unlimited callbacks, 15% off', Bronze: 'unlimited callbacks, 10% off' }[tier] || 'regular scheduled service';
 
     await TwilioService.sendSMS(service.phone,
       `Welcome to the Waves family, ${service.first_name}! 🌊\n\nYour first ${service.service_type || 'service'} is coming up. Your WaveGuard ${tier || ''} includes ${perks}.\n\nYour tech will text when en route. After service, you'll get a detailed report.\n\nPortal: wavespestcontrol.com/portal\nQuestions? Reply here. — Adam, Waves`,

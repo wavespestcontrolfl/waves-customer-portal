@@ -632,7 +632,7 @@ export default function CustomersPage() {
 
   const detectTier = (c) => {
     // Detect tier from monthly rate vs what it would be without discount
-    // Silver=10%, Gold=15%, Platinum=20%
+    // Bronze=10%, Silver=15%, Gold=20%, Platinum=30%
     if (c.tier && c.tier !== 'Bronze') return c.tier;
     if (c.monthlyRate > 200) return 'Platinum';
     if (c.monthlyRate > 100) return 'Gold';
@@ -1063,7 +1063,7 @@ export default function CustomersPage() {
                       <div>
                         <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Tier</label>
                         <select value={editForm.tier || ''} onChange={e => setEditForm(p => ({ ...p, tier: e.target.value || null }))} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
-                          <option value="">No Plan</option><option value="Bronze">Bronze</option><option value="Silver">Silver (10%)</option><option value="Gold">Gold (15%)</option><option value="Platinum">Platinum (20%)</option>
+                          <option value="">No Plan</option><option value="Bronze">Bronze (10%)</option><option value="Silver">Silver (15%)</option><option value="Gold">Gold (20%)</option><option value="Platinum">Platinum (30%)</option>
                         </select>
                       </div>
                       <div>

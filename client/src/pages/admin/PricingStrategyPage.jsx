@@ -257,10 +257,10 @@ function OfferBuilderTab({ showToast }) {
       {/* Current WaveGuard tiers as offers */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
         {[
-          { name: 'WaveGuard Bronze', services: 1, discount: '0%', price: '$49-89/mo', anchor: '$120+/mo', guarantee: 'Satisfaction Guarantee', bonuses: ['Digital Service Reports'] },
-          { name: 'WaveGuard Silver', services: 2, discount: '10%', price: '$85-140/mo', anchor: '$190+/mo', guarantee: '100% Satisfaction + Free Re-treat', bonuses: ['Digital Reports', 'Priority Scheduling', 'Free Termite Inspection'] },
-          { name: 'WaveGuard Gold', services: 3, discount: '15%', price: '$130-200/mo', anchor: '$280+/mo', guarantee: '100% Satisfaction + Free Re-treat + Money Back', bonuses: ['All Silver perks', '15% Off One-Time Treatments', '24hr Response'] },
-          { name: 'WaveGuard Platinum', services: '4+', discount: '20%', price: '$180-280/mo', anchor: '$400+/mo', guarantee: 'Unconditional Money Back', bonuses: ['All Gold perks', 'Dedicated Tech', 'Quarterly Property Reviews', 'Loyalty Rewards'] },
+          { name: 'WaveGuard Bronze', services: 1, discount: '10%', price: '$49-89/mo', anchor: '$120+/mo', guarantee: 'Satisfaction Guarantee', bonuses: ['Digital Service Reports'] },
+          { name: 'WaveGuard Silver', services: 2, discount: '15%', price: '$85-140/mo', anchor: '$190+/mo', guarantee: '100% Satisfaction + Free Re-treat', bonuses: ['Digital Reports', 'Priority Scheduling', 'Free Termite Inspection'] },
+          { name: 'WaveGuard Gold', services: 3, discount: '20%', price: '$130-200/mo', anchor: '$280+/mo', guarantee: '100% Satisfaction + Free Re-treat + Money Back', bonuses: ['All Silver perks', '20% Off One-Time Treatments', '24hr Response'] },
+          { name: 'WaveGuard Platinum', services: '4+', discount: '30%', price: '$180-280/mo', anchor: '$400+/mo', guarantee: 'Unconditional Money Back', bonuses: ['All Gold perks', 'Dedicated Tech', 'Quarterly Property Reviews', 'Loyalty Rewards'] },
         ].map(o => (
           <div key={o.name} style={{ ...sCard, marginBottom: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 700, color: D.white, marginBottom: 8 }}>{o.name}</div>

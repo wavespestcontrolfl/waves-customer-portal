@@ -12,7 +12,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 // WaveGuard tier discounts
-const TIER_DISCOUNT = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+const TIER_DISCOUNT = { Bronze: 0.10, Silver: 0.15, Gold: 0.20, Platinum: 0.30 };
 
 // Services Waves offers — used to find gaps for upsells
 const ALL_SERVICES = [

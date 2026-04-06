@@ -39,9 +39,9 @@ const BADGE_DEFS = [
   { type: 'referral_mvp', category: 'referral', title: 'Referral MVP', icon: '🦸', description: "MVP status. You've built a Waves neighborhood.", order: 4 },
 
   // TIER
-  { type: 'tier_silver', category: 'tier', title: 'WaveGuard Silver', icon: '🥈', description: '10% bundle savings unlocked', order: 1 },
-  { type: 'tier_gold', category: 'tier', title: 'WaveGuard Gold', icon: '🥇', description: '15% bundle savings unlocked', order: 2 },
-  { type: 'tier_platinum', category: 'tier', title: 'WaveGuard Platinum', icon: '💎', description: '20% bundle savings — maximum protection', order: 3 },
+  { type: 'tier_silver', category: 'tier', title: 'WaveGuard Silver', icon: '🥈', description: '15% bundle savings unlocked', order: 1 },
+  { type: 'tier_gold', category: 'tier', title: 'WaveGuard Gold', icon: '🥇', description: '20% bundle savings unlocked', order: 2 },
+  { type: 'tier_platinum', category: 'tier', title: 'WaveGuard Platinum', icon: '💎', description: '30% bundle savings — maximum protection', order: 3 },
   { type: 'tier_up', category: 'tier', title: 'Tier Up', icon: '⬆️', description: 'You leveled up your protection', order: 4 },
 
   // SERVICE

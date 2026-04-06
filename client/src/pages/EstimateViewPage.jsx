@@ -97,7 +97,7 @@ const FAQ_CATEGORIES = [
   {
     category: 'Price & Value', questions: [
       { q: "Why is your price different from the big national brands?", a: "We're not a franchise charging you for a corporate office in Tennessee. Every dollar goes to better products, trained techs, and actual time on your property. The big brands rush through in 8 minutes — our techs spend 30-45 minutes on a standard visit because we're treating your specific lawn and pest issues, not running a conveyor belt." },
-      { q: "Can I just do quarterly pest and skip the lawn/mosquito?", a: "Absolutely. But here's the thing — bundling saves you real money. Adding lawn care to your pest plan unlocks Silver (10% off everything). Add mosquito and you're at Gold (15% off). Most customers save $200-400/year by bundling vs. buying services separately." },
+      { q: "Can I just do quarterly pest and skip the lawn/mosquito?", a: "Absolutely. But here's the thing — bundling saves you real money. Adding lawn care to your pest plan unlocks Silver (15% off everything). Add mosquito and you're at Gold (20% off). Most customers save $200-400/year by bundling vs. buying services separately." },
       { q: "Can you match my current provider's price?", a: "We don't price-match because we don't cut corners to hit a number. What we do is show you exactly what you're getting — every product, every visit, logged in your portal. Most customers who switch to us from a big brand were paying less but getting far less. One customer in Lakewood Ranch told us their old company didn't even spray inside." },
     ],
   },

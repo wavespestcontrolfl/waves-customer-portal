@@ -52,9 +52,10 @@ const ADDONS = [
 ];
 
 function getTier(count) {
-  if (count >= 4) return { name: 'Platinum', discount: 0.20 };
-  if (count >= 3) return { name: 'Gold', discount: 0.15 };
-  if (count >= 2) return { name: 'Silver', discount: 0.10 };
+  if (count >= 4) return { name: 'Platinum', discount: 0.30 };
+  if (count >= 3) return { name: 'Gold', discount: 0.20 };
+  if (count >= 2) return { name: 'Silver', discount: 0.15 };
+  if (count >= 1) return { name: 'Bronze', discount: 0.10 };
   return { name: 'Bronze', discount: 0 };
 }
 

@@ -857,6 +857,7 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [lastService, setLastService] = useState(null);
   const [reviewDismissed, setReviewDismissed] = useState(false);
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
+  const [referralStats, setReferralStats] = useState(null);
   const badgeData = useBadges();
   const [satRating, setSatRating] = useState(0);
   const [satHover, setSatHover] = useState(0);
@@ -878,6 +879,9 @@ function DashboardTab({ customer, onSwitchTab }) {
     }).catch(console.error);
     api.getPendingSatisfaction().then(d => {
       if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
+    }).catch(console.error);
+    api.getReferrals().then(d => {
+      if (d?.stats) setReferralStats(d.stats);
     }).catch(console.error);
   }, []);
 
@@ -1005,6 +1009,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                     </div>
                     <button onClick={() => setSatDismissed(true)} style={{
                       background: 'none', border: 'none', color: B.grayMid, cursor: 'pointer', fontSize: 20, padding: 0, lineHeight: 1,
+                      minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center',
                     }}>×</button>
                   </div>
 
@@ -1124,7 +1129,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   </div>
                   <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
                     {satRating <= 3
-                      ? "Adam at Waves will personally follow up with you within 24 hours."
+                      ? `${(pendingSatisfaction.technician_name || pendingSatisfaction.technicianName) ? (pendingSatisfaction.technician_name || pendingSatisfaction.technicianName).split(' ')[0] + ' at Waves' : 'Your team at Waves'} will personally follow up with you within 24 hours.`
                       : satRating <= 7
                         ? "We appreciate you letting us know. We're always working to improve."
                         : "Thank you for being a valued Waves customer!"}
@@ -1172,6 +1177,30 @@ function DashboardTab({ customer, onSwitchTab }) {
           {customer.address?.line1}, {customer.address?.city}, {customer.address?.state} {customer.address?.zip}<br/>
           <span style={{ color: B.blueLight }}>{(customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || 'Lawn'} · {customer.property?.propertySqFt?.toLocaleString()} sq ft · {customer.property?.lotSqFt?.toLocaleString()} sq ft lot</span>
         </div>
+      </div>
+
+      {/* Quick Actions Row */}
+      <div style={{
+        display: 'flex', gap: 10, overflowX: 'auto', WebkitOverflowScrolling: 'touch',
+        paddingBottom: 4, scrollbarWidth: 'none',
+      }}>
+        {[
+          { icon: '🔧', label: 'Request Service', action: () => onSwitchTab?.('services') },
+          { icon: '💬', label: 'Message Us', action: () => onSwitchTab?.('messages') },
+          { icon: '💳', label: 'Pay Now', action: () => onSwitchTab?.('billing') },
+          { icon: '🎁', label: 'Refer a Friend', action: () => onSwitchTab?.('refer') },
+        ].map((item, i) => (
+          <button key={i} onClick={item.action} style={{
+            ...BUTTON_BASE, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+            padding: '14px 16px', minWidth: 90, flexShrink: 0, borderRadius: 14,
+            background: B.white, border: `1.5px solid ${B.bluePale}`,
+            color: B.navy, fontSize: 11, fontWeight: 600, fontFamily: FONTS.ui,
+            boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+          }}>
+            <span style={{ fontSize: 22 }}>{item.icon}</span>
+            {item.label}
+          </button>
+        ))}
       </div>
 
       {/* Tech Tracker — shows when service is today */}
@@ -1228,6 +1257,22 @@ function DashboardTab({ customer, onSwitchTab }) {
             {/* Service details */}
             <div style={{ padding: '16px 20px' }}>
               <div style={{ fontSize: 15, fontWeight: 700, color: B.navy }}>{nextService.serviceType}</div>
+              <div style={{ fontSize: 12, color: B.grayDark, marginTop: 3, lineHeight: 1.5, fontStyle: 'italic' }}>
+                {(() => {
+                  const sType = (nextService.serviceType || '').toLowerCase();
+                  if (sType.includes('lawn') || sType.includes('fertiliz') || sType.includes('celsius'))
+                    return 'Fertilizer application + weed spot treatment + perimeter pest barrier';
+                  if (sType.includes('pest') || sType.includes('general'))
+                    return 'Interior + exterior perimeter spray + entry point treatment';
+                  if (sType.includes('mosquito'))
+                    return 'Backyard fogging + standing water treatment + barrier spray';
+                  if (sType.includes('rodent'))
+                    return 'Bait station check + exclusion inspection + trapping';
+                  if (sType.includes('termite'))
+                    return 'Termite monitoring station inspection + barrier check';
+                  return 'Full property inspection + targeted treatment application';
+                })()}
+              </div>
               <div style={{ fontSize: 13, color: B.grayMid, marginTop: 4 }}>
                 Technician: <strong style={{ color: B.navy }}>{nextService.technician || 'TBD'}</strong>
                 {nextService.windowStart && ` · ${formatTime(nextService.windowStart)} – ${formatTime(nextService.windowEnd)}`}
@@ -1273,8 +1318,8 @@ function DashboardTab({ customer, onSwitchTab }) {
                     });
                   }} style={{
                     ...BUTTON_BASE, padding: '10px 20px', flex: 1,
-                    background: B.red, color: '#fff', fontSize: 13,
-                    boxShadow: `0 3px 10px ${B.red}30`,
+                    background: B.green, color: '#fff', fontSize: 13,
+                    boxShadow: `0 3px 10px ${B.green}30`,
                   }}>✓ Confirm Appointment</button>
                 ) : (
                   <span style={{
@@ -1292,6 +1337,48 @@ function DashboardTab({ customer, onSwitchTab }) {
           </div>
         );
       })()}
+
+      {/* Last Service Summary */}
+      {lastService && (
+        <div style={{
+          background: B.white, borderRadius: 16, padding: 20,
+          border: `1px solid ${B.bluePale}`, boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <span style={{ fontSize: 22 }}>✅</span>
+            <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Last Visit</div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy }}>{lastService.type || lastService.serviceType}</div>
+              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
+                {parseDate(lastService.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
+              </div>
+            </div>
+            <span style={{
+              fontSize: 11, padding: '3px 10px', borderRadius: 6,
+              background: '#E8F5E9', color: B.green, fontWeight: 700,
+            }}>Completed</span>
+          </div>
+          {lastService.notes || lastService.technician_notes ? (
+            <div style={{
+              marginTop: 10, padding: '10px 14px', borderRadius: 10,
+              background: B.offWhite, fontSize: 13, color: B.grayDark, lineHeight: 1.6,
+              borderLeft: `3px solid ${B.wavesBlue}`,
+            }}>
+              {((lastService.notes || lastService.technician_notes) || '').slice(0, 100)}
+              {((lastService.notes || lastService.technician_notes) || '').length > 100 ? '...' : ''}
+            </div>
+          ) : (
+            <div style={{
+              marginTop: 10, padding: '10px 14px', borderRadius: 10,
+              background: B.offWhite, fontSize: 12, color: B.grayMid, lineHeight: 1.5,
+            }}>
+              Service completed — full report in Documents
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Irrigation Recommendations */}
       {irrigationRecs.length > 0 && (
@@ -1315,43 +1402,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         </div>
       )}
 
-      {/* Badge Row */}
-      {!badgeData.loading && badgeData.data && (
-        <BadgeRow
-          badges={badgeData.data.badges}
-          earnedCount={badgeData.data.earnedCount}
-          totalCount={badgeData.data.totalCount}
-          onViewAll={() => onSwitchTab?.('plan')}
-        />
-      )}
-
-      {/* Contextual Promotions — based on services they don't have + season */}
-      <PromotionCards />
-
-      {/* Quick stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        {[
-          { label: 'Monthly Rate', value: `$${customer.monthlyRate}`, sub: `${tier?.discount || '0%'} discount`, icon: '💰' },
-          { label: 'Balance', value: balance ? `$${balance.currentBalance.toFixed(2)}` : '...', sub: 'All current', icon: '✅' },
-          { label: 'Services YTD', value: stats?.servicesYTD ?? '...', sub: `Celsius: ${stats?.celsiusApplicationsThisYear ?? '?'}/${stats?.celsiusMaxPerYear ?? 3}`, icon: '📋' },
-          { label: 'Member Since', value: customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—', sub: '', icon: '⭐' },
-        ].map((s, i) => (
-          <div key={i} style={{
-            background: B.white, borderRadius: 14, padding: 16,
-            border: `1px solid ${B.bluePale}`,
-          }}>
-            <div style={{ fontSize: 20, marginBottom: 6 }}>{s.icon}</div>
-            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayDark, fontFamily: FONTS.ui }}>{s.label}</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: B.navy, marginTop: 2, fontFamily: FONTS.ui }}>{s.value}</div>
-            <div style={{ fontSize: 11, color: B.green, fontWeight: 600, marginTop: 2 }}>{s.sub}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* My Requests — open service requests */}
-      <MyRequestsCard />
-
-      {/* Lawn Health Progress — conditional display */}
+      {/* Lawn Health Progress — conditional display (moved up) */}
       {!lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (
         <LawnHealthCard scores={lawnHealth.scores} initialScores={lawnHealth.initialScores} />
       )}
@@ -1369,6 +1420,42 @@ function DashboardTab({ customer, onSwitchTab }) {
         </div>
       )}
 
+      {/* Contextual Promotions — based on services they don't have + season */}
+      <PromotionCards />
+
+      {/* Quick stats */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        {[
+          { label: 'Monthly Rate', value: `$${customer.monthlyRate}`, sub: `${tier?.discount || '0%'} discount`, icon: '💰' },
+          { label: 'Next Service', value: nextService ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—', sub: nextService?.serviceType || '', icon: '📅' },
+          { label: 'Services YTD', value: stats?.servicesYTD ?? '...', sub: stats?.celsiusApplicationsThisYear != null ? `Weed treatments: ${stats.celsiusApplicationsThisYear} of ${stats.celsiusMaxPerYear || 3} annual` : '', icon: '📋' },
+          { label: 'Member Since', value: customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—', sub: '', icon: '⭐' },
+        ].map((s, i) => (
+          <div key={i} style={{
+            background: B.white, borderRadius: 14, padding: 16,
+            border: `1px solid ${B.bluePale}`,
+          }}>
+            <div style={{ fontSize: 20, marginBottom: 6 }}>{s.icon}</div>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayDark, fontFamily: FONTS.ui }}>{s.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: B.navy, marginTop: 2, fontFamily: FONTS.ui }}>{s.value}</div>
+            <div style={{ fontSize: 11, color: B.green, fontWeight: 600, marginTop: 2 }}>{s.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* My Requests — open service requests */}
+      <MyRequestsCard />
+
+      {/* Badge Row */}
+      {!badgeData.loading && badgeData.data && (
+        <BadgeRow
+          badges={badgeData.data.badges}
+          earnedCount={badgeData.data.earnedCount}
+          totalCount={badgeData.data.totalCount}
+          onViewAll={() => onSwitchTab?.('plan')}
+        />
+      )}
+
       {/* Referral — compact dashboard card */}
       <div style={{
         background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
@@ -1379,9 +1466,15 @@ function DashboardTab({ customer, onSwitchTab }) {
       }}>
         <div style={{ fontSize: 36 }}>🎁</div>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 15, fontWeight: 800, fontFamily: FONTS.heading }}>Give $25, Get $25</div>
+          <div style={{ fontSize: 15, fontWeight: 800, fontFamily: FONTS.heading }}>
+            {referralStats && referralStats.totalReferrals > 0
+              ? `You've referred ${referralStats.totalReferrals} neighbor${referralStats.totalReferrals !== 1 ? 's' : ''} — $${referralStats.totalEarned} earned!`
+              : 'Give $25, Get $25'}
+          </div>
           <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2, lineHeight: 1.5 }}>
-            Know someone who needs pest control? Refer a neighbor and you both get $25.
+            {referralStats && referralStats.totalReferrals > 0
+              ? 'Keep sharing — every referral earns you $25.'
+              : 'Know someone who needs pest control? Refer a neighbor and you both get $25.'}
           </div>
         </div>
         <button onClick={() => onSwitchTab?.('refer')} style={{
@@ -3684,7 +3777,7 @@ const ADD_ONS = [
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 const TIER_SERVICES = { Bronze: 1, Silver: 2, Gold: 3, Platinum: 4 };
-const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.20, Platinum: 0.30 };
+const TIER_DISCOUNTS = { Bronze: 0.10, Silver: 0.15, Gold: 0.20, Platinum: 0.30 };
 
 const TIER_SERVICE_NAMES = {
   Bronze: ['Quarterly Pest Control'],
