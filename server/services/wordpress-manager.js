@@ -117,46 +117,58 @@ class WordPressManager {
         } catch { /* skip */ }
       }
     } else {
-      // Strategy B: Only scan pages that have Elementor forms
-      console.log(`[wp-mgr] Scanning ${site.domain} via HTML (${allIds.length} pages)`);
+      // Strategy B: Search postmeta via a custom REST endpoint or individual page edit
+      // Elementor stores webhook URLs in _elementor_data postmeta (not in rendered HTML)
+      // We need context=edit on individual pages - try each page that has an Elementor form
+      console.log(`[wp-mgr] Scanning ${site.domain} — checking ${allIds.length} pages for forms`);
 
-      // First, quick scan: get content of all pages to find which ones have forms
+      // Quick filter: only check pages whose rendered content has elementor-form
       const pagesWithForms = [];
-      for (const { id, type } of allIds) {
-        try {
-          const item = await this.wpFetch(site, `/wp/v2/${type}/${id}?_fields=id,title,link,content`);
+      // Batch fetch content to find which pages have forms
+      for (let i = 0; i < allIds.length; i += 10) {
+        const batch = allIds.slice(i, i + 10);
+        const promises = batch.map(({ id, type }) =>
+          this.wpFetch(site, `/wp/v2/${type}/${id}?_fields=id,title,link,content`).catch(() => null)
+        );
+        const results2 = await Promise.all(promises);
+        for (const item of results2) {
+          if (!item) continue;
           const content = item.content?.rendered || '';
-          if (content.includes('elementor-form') || content.includes('webhook') || content.includes('zapier')) {
-            pagesWithForms.push({ id, type, title: item.title?.rendered || `Page ${id}`, link: item.link || '' });
+          if (content.includes('elementor-form') || content.includes('form_fields')) {
+            pagesWithForms.push(item);
           }
-        } catch { /* skip */ }
+        }
       }
 
-      console.log(`[wp-mgr] ${site.domain}: ${pagesWithForms.length} pages have forms, fetching HTML`);
+      console.log(`[wp-mgr] ${site.domain}: ${pagesWithForms.length} pages have forms`);
 
-      // Only fetch HTML for pages with forms
+      // For pages with forms, try context=edit to get _elementor_data
       for (const page of pagesWithForms) {
         try {
-          const pageRes = await fetch(page.link, { signal: AbortSignal.timeout(10000) });
-          if (pageRes.ok) {
-            const html = await pageRes.text();
-            const zapierMatches = html.match(/hooks\.zapier\.com\/hooks\/catch\/[^"'\\<>\s]+/g) || [];
-            for (const match of zapierMatches) {
-              const url = 'https://' + match;
-              if (!results.forms.some(f => f.postId === page.id && f.webhookUrl === url)) {
-                results.forms.push({ postId: page.id, postTitle: page.title, postType: page.type, postUrl: page.link, webhookUrl: url, formId: null, source: 'html_scan' });
-              }
-            }
-            // Also check for portal webhook
-            const portalMatches = html.match(/waves-customer-portal[^"'\\<>\s]*webhooks\/lead/g) || [];
-            for (const match of portalMatches) {
-              const url = 'https://' + match;
-              if (!results.forms.some(f => f.postId === page.id && f.webhookUrl === url)) {
-                results.forms.push({ postId: page.id, postTitle: page.title, postType: page.type, postUrl: page.link, webhookUrl: url, formId: null, source: 'html_scan' });
-              }
-            }
+          const editItem = await this.wpFetch(site, `/wp/v2/pages/${page.id}?context=edit`);
+          const found = this.extractWebhooksFromItem(editItem);
+          if (found.length > 0) {
+            results.forms.push(...found.map(f => ({
+              postId: page.id, postTitle: page.title?.rendered || `Page ${page.id}`,
+              postType: 'pages', postUrl: page.link, webhookUrl: f.url,
+              formId: f.formId || null, source: f.source,
+            })));
           }
-        } catch { /* timeout is fine */ }
+        } catch (editErr) {
+          // context=edit failed — try fetching via Elementor REST API
+          try {
+            const elData = await this.wpFetch(site, `/elementor/v1/documents/${page.id}`);
+            if (elData?.elements) {
+              const found = [];
+              this.walkElementorTree(elData.elements, found);
+              results.forms.push(...found.map(f => ({
+                postId: page.id, postTitle: page.title?.rendered || `Page ${page.id}`,
+                postType: 'pages', postUrl: page.link, webhookUrl: f.url,
+                formId: f.formId || null, source: 'elementor_api',
+              })));
+            }
+          } catch { /* Elementor API not available either */ }
+        }
       }
     }
 
