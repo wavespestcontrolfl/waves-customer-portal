@@ -386,10 +386,11 @@ router.put('/:id/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/schedule/optimize — route optimization v2
-// Groups by zone, sorts by time window, then nearest-neighbor within each group.
+// POST /api/admin/schedule/optimize — route optimization v3 (Google Routes API)
+// Uses Google Routes API with traffic-aware optimization, falls back to nearest-neighbor.
 router.post('/optimize', async (req, res, next) => {
   try {
+    const RouteOptimizer = require('../services/route-optimizer');
     const { date, technicianId } = req.body;
     const dateStr = date || new Date().toISOString().split('T')[0];
 
@@ -400,130 +401,161 @@ router.post('/optimize', async (req, res, next) => {
       })
       .whereNotIn('status', ['cancelled', 'completed'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select('scheduled_services.id', 'scheduled_services.time_window',
-        'scheduled_services.zone',
-        'customers.lat', 'customers.lng', 'customers.city', 'customers.zip');
+      .select(
+        'scheduled_services.id', 'scheduled_services.time_window',
+        'scheduled_services.zone', 'scheduled_services.service_type',
+        'scheduled_services.technician_id',
+        'customers.lat', 'customers.lng', 'customers.city', 'customers.zip',
+        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
+      );
 
     if (!services.length) {
-      return res.json({ success: true, order: [], estimatedDriveMinutes: 0 });
+      return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
 
-    const HQ = { lat: 27.3946, lng: -82.3984 };
-
-    // Zone priority order (north to south roughly)
-    const ZONE_ORDER = ['parrish', 'palmetto', 'ellenton', 'bradenton_north', 'bradenton_south', 'lakewood_ranch', 'sarasota', 'venice_north_port'];
-
-    // Time window priority: morning before afternoon
-    function windowPriority(tw) {
-      const w = (tw || '').toLowerCase();
-      if (w.includes('morning') || w.includes('am') || w === 'early') return 0;
-      if (w.includes('afternoon') || w.includes('pm') || w === 'midday') return 1;
-      if (w.includes('evening') || w === 'late') return 2;
-      return 1; // default to afternoon
-    }
-
-    // Assign zone from customer city/zip if not already set on the service
+    // Assign zone from customer city/zip if not already set
     for (const svc of services) {
       if (!svc.zone) {
         svc.zone = getZone(svc.city, svc.zip);
       }
     }
 
-    // Group by zone
-    const zoneGroups = {};
-    for (const svc of services) {
-      const z = svc.zone || 'lakewood_ranch';
-      if (!zoneGroups[z]) zoneGroups[z] = [];
-      zoneGroups[z].push(svc);
-    }
-
-    // Sort zones by priority order
-    const sortedZones = Object.keys(zoneGroups).sort((a, b) => {
-      const ai = ZONE_ORDER.indexOf(a);
-      const bi = ZONE_ORDER.indexOf(b);
-      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    // Run optimization
+    const result = await RouteOptimizer.optimizeRoute(services, {
+      startLat: RouteOptimizer.HQ.lat,
+      startLng: RouteOptimizer.HQ.lng,
+      endAtStart: true,
+      techId: technicianId || null,
     });
 
-    // Within each zone, sort by time window, then nearest-neighbor
-    const ordered = [];
-    let current = HQ;
-    let totalDriveMinutes = 0;
-
-    for (const zone of sortedZones) {
-      const group = zoneGroups[zone];
-
-      // Sort by time window priority first
-      group.sort((a, b) => windowPriority(a.time_window) - windowPriority(b.time_window));
-
-      // Sub-group by same time window, then nearest-neighbor within each sub-group
-      const windowBuckets = {};
-      for (const svc of group) {
-        const wp = windowPriority(svc.time_window);
-        if (!windowBuckets[wp]) windowBuckets[wp] = [];
-        windowBuckets[wp].push(svc);
-      }
-
-      const windowKeys = Object.keys(windowBuckets).sort((a, b) => a - b);
-
-      for (const wk of windowKeys) {
-        const bucket = windowBuckets[wk];
-        const remaining = [...bucket];
-
-        while (remaining.length) {
-          let nearest = remaining[0];
-          let nearestDist = Infinity;
-
-          for (const svc of remaining) {
-            const svcLat = parseFloat(svc.lat);
-            const svcLng = parseFloat(svc.lng);
-
-            if (svcLat && svcLng) {
-              const dist = haversine(current.lat, current.lng, svcLat, svcLng);
-              if (dist < nearestDist) { nearestDist = dist; nearest = svc; }
-            } else {
-              // No lat/lng — use zip code proximity heuristic
-              const zipDist = Math.abs(parseInt(svc.zip || '34202') - parseInt(current.zip || '34202'));
-              const fakeDist = zipDist * 0.5; // rough miles-per-zip-digit
-              if (fakeDist < nearestDist) { nearestDist = fakeDist; nearest = svc; }
-            }
-          }
-
-          // Calculate drive time: straight-line distance * 1.4 road factor, assume 30mph avg
-          if (nearestDist < Infinity && nearestDist > 0) {
-            const roadMiles = nearestDist * 1.4;
-            const driveMin = (roadMiles / 30) * 60; // 30 mph average
-            totalDriveMinutes += driveMin;
-          }
-
-          ordered.push(nearest);
-          remaining.splice(remaining.indexOf(nearest), 1);
-          current = {
-            lat: parseFloat(nearest.lat) || current.lat,
-            lng: parseFloat(nearest.lng) || current.lng,
-            zip: nearest.zip || current.zip,
-          };
-        }
-      }
-    }
-
     // Update route_order on each service
-    for (let i = 0; i < ordered.length; i++) {
-      await db('scheduled_services').where({ id: ordered[i].id }).update({ route_order: i + 1 });
+    for (let i = 0; i < result.orderedStops.length; i++) {
+      await db('scheduled_services')
+        .where({ id: result.orderedStops[i].id })
+        .update({ route_order: i + 1 });
     }
 
-    const estimatedDriveMinutes = Math.round(totalDriveMinutes);
+    const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
+    const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
+    const savedPercent = result.unoptimizedDistanceMeters > 0
+      ? Math.round((savedDistanceMeters / result.unoptimizedDistanceMeters) * 100)
+      : 0;
 
-    res.json({
+    const response = {
       success: true,
-      order: ordered.map((s, i) => ({
+      order: result.orderedStops.map((s, i) => ({
         id: s.id,
         routeOrder: i + 1,
         zone: s.zone,
         timeWindow: s.time_window,
         city: s.city,
+        customerName: (s.customer_name || '').trim(),
       })),
-      estimatedDriveMinutes,
+      totalDistanceMeters: result.totalDistanceMeters,
+      totalDurationMinutes,
+      unoptimizedDistanceMeters: result.unoptimizedDistanceMeters,
+      savedDistanceMeters,
+      savedPercent,
+      legs: result.legs,
+      source: result.source,
+      // Backwards-compat field
+      estimatedDriveMinutes: totalDurationMinutes,
+    };
+
+    if (result.apiWarning) {
+      response.apiWarning = result.apiWarning;
+      if (result.apiWarning.includes('Routes API')) {
+        response.hint = 'Enable "Routes API" in Google Cloud Console: https://console.cloud.google.com/apis/library/routes.googleapis.com';
+      }
+    }
+
+    res.json(response);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/optimize-route — single-tech route optimization
+// Optimizes only the specified technician's stops for a given date.
+router.post('/optimize-route', async (req, res, next) => {
+  try {
+    const RouteOptimizer = require('../services/route-optimizer');
+    const { technicianId, date } = req.body;
+
+    if (!technicianId) {
+      return res.status(400).json({ error: 'technicianId is required' });
+    }
+
+    const dateStr = date || new Date().toISOString().split('T')[0];
+
+    const services = await db('scheduled_services')
+      .where({ scheduled_date: dateStr, technician_id: technicianId })
+      .whereNotIn('status', ['cancelled', 'completed'])
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select(
+        'scheduled_services.id', 'scheduled_services.time_window',
+        'scheduled_services.zone', 'scheduled_services.service_type',
+        'scheduled_services.technician_id',
+        'customers.lat', 'customers.lng', 'customers.city', 'customers.zip',
+        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
+      );
+
+    if (!services.length) {
+      return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
+    }
+
+    // Assign zone
+    for (const svc of services) {
+      if (!svc.zone) {
+        svc.zone = getZone(svc.city, svc.zip);
+      }
+    }
+
+    const result = await RouteOptimizer.optimizeRoute(services, {
+      startLat: RouteOptimizer.HQ.lat,
+      startLng: RouteOptimizer.HQ.lng,
+      endAtStart: true,
+      techId: technicianId,
     });
+
+    // Update route_order
+    for (let i = 0; i < result.orderedStops.length; i++) {
+      await db('scheduled_services')
+        .where({ id: result.orderedStops[i].id })
+        .update({ route_order: i + 1 });
+    }
+
+    const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
+    const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
+    const savedPercent = result.unoptimizedDistanceMeters > 0
+      ? Math.round((savedDistanceMeters / result.unoptimizedDistanceMeters) * 100)
+      : 0;
+
+    const response = {
+      success: true,
+      order: result.orderedStops.map((s, i) => ({
+        id: s.id,
+        routeOrder: i + 1,
+        zone: s.zone,
+        timeWindow: s.time_window,
+        city: s.city,
+        customerName: (s.customer_name || '').trim(),
+      })),
+      totalDistanceMeters: result.totalDistanceMeters,
+      totalDurationMinutes,
+      unoptimizedDistanceMeters: result.unoptimizedDistanceMeters,
+      savedDistanceMeters,
+      savedPercent,
+      legs: result.legs,
+      source: result.source,
+    };
+
+    if (result.apiWarning) {
+      response.apiWarning = result.apiWarning;
+      if (result.apiWarning.includes('Routes API')) {
+        response.hint = 'Enable "Routes API" in Google Cloud Console: https://console.cloud.google.com/apis/library/routes.googleapis.com';
+      }
+    }
+
+    res.json(response);
   } catch (err) { next(err); }
 });
 
