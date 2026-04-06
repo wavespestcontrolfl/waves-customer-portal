@@ -287,8 +287,9 @@ router.put('/:id/status', async (req, res, next) => {
 
       // Send en-route SMS with real ETA
       try {
+        const custFirstName = svc.first_name || 'there';
         await TwilioService.sendSMS(svc.cust_phone,
-          `🌊 Your Waves tech is on the way! ETA: ~${etaMinutes} minutes. Please ensure gates are unlocked and pets are secured.`,
+          `Hello ${custFirstName}! Your Waves technician is on the way. ETA: ~${etaMinutes} minutes.`,
           { customerId: svc.customer_id, messageType: 'en_route' }
         );
       } catch (e) { logger.error(`En route SMS failed: ${e.message}`); }
