@@ -58,7 +58,35 @@ const CUSTOMER_INTERACTION_OPTIONS = [
 
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
+const SKIP_REASONS = [
+  { value: 'not_home', label: 'Customer not home' },
+  { value: 'inaccessible', label: 'Property inaccessible' },
+  { value: 'weather', label: 'Weather' },
+  { value: 'customer_requested', label: 'Customer requested' },
+  { value: 'tech_behind', label: 'Tech running behind' },
+];
+
 /* ── Helpers ──────────────────────────────────────────── */
+
+function stripSquareBoilerplate(notes) {
+  if (!notes) return '';
+  return notes.replace(/\*{3}\s*Please make changes.*?(?:\.|\n|$)/gi, '')
+    .replace(/https?:\/\/app\.squareup\.com\S*/g, '')
+    .trim();
+}
+
+function sanitizeServiceTypeClient(serviceType) {
+  if (!serviceType) return 'Service';
+  if (/^[A-Z0-9]{5,}$/.test(serviceType)) return 'Service';
+  return serviceType;
+}
+
+function formatLastServiceDate(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + 'T00:00:00');
+  if (isNaN(d.getTime())) return 'New customer — first visit';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -185,6 +213,7 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
   const [updating, setUpdating] = useState(false);
   const [lawnUploading, setLawnUploading] = useState(false);
   const [lawnDone, setLawnDone] = useState(false);
+  const [showSkipReasons, setShowSkipReasons] = useState(false);
   const lawnFileRef = useRef(null);
   const zoneColor = zoneColors?.[service.zone] || service.zoneColor || D.blue;
   const status = service.status;
@@ -310,7 +339,7 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
               padding: '4px 10px', borderRadius: 8, background: zoneColor + '18', display: 'inline-block',
               cursor: 'pointer',
             }} onClick={() => { service._editing = true; setUpdating(u => !u); }}>
-              {service.serviceType}
+              {sanitizeServiceTypeClient(service.serviceType)}
             </span>
             {service.estimatedDuration && (
               <span style={{ fontSize: 12, color: D.muted, cursor: 'pointer' }} onClick={() => { service._editing = true; setUpdating(u => !u); }}>
@@ -324,15 +353,41 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
       {/* Property alerts */}
       <PropertyAlerts alerts={service.propertyAlerts} />
 
-      {/* Last service notes (truncated) */}
-      {service.lastServiceDate && (
-        <div style={{ fontSize: 12, color: D.muted, fontStyle: 'italic', marginBottom: 8, lineHeight: 1.5 }}>
-          Last: {new Date(service.lastServiceDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-          {service.lastServiceNotes && (
-            <> — {service.lastServiceNotes.substring(0, 100)}{service.lastServiceNotes.length > 100 ? '...' : ''}</>
-          )}
-        </div>
-      )}
+      {/* Communication status icons */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <span title={service.reminderSent ? 'Reminder sent' : 'Reminder pending'} style={{
+          fontSize: 11, color: service.reminderSent ? D.green : D.gray,
+          display: 'flex', alignItems: 'center', gap: 3,
+        }}>
+          {service.reminderSent ? '\u2713' : '\u25CB'} Reminder
+        </span>
+        <span title={service.customerConfirmed ? 'Customer confirmed' : 'Not confirmed'} style={{
+          fontSize: 11, color: service.customerConfirmed ? D.green : D.gray,
+          display: 'flex', alignItems: 'center', gap: 3,
+        }}>
+          {service.customerConfirmed ? '\u2713' : '\u25CB'} Confirmed
+        </span>
+        <span title={service.enRouteSent ? 'En route sent' : 'En route not sent'} style={{
+          fontSize: 11, color: service.enRouteSent ? D.green : D.gray,
+          display: 'flex', alignItems: 'center', gap: 3,
+        }}>
+          {service.enRouteSent ? '\u2713' : '\u25CB'} En Route
+        </span>
+      </div>
+
+      {/* Last service info */}
+      <div style={{ fontSize: 12, color: D.muted, fontStyle: 'italic', marginBottom: 8, lineHeight: 1.5 }}>
+        {(() => {
+          const formatted = formatLastServiceDate(service.lastServiceDate);
+          if (!formatted && !service.lastServiceDate) return 'New customer \u2014 first visit';
+          return formatted ? `Last: ${formatted}` : 'New customer \u2014 first visit';
+        })()}
+        {service.lastServiceNotes && (() => {
+          const cleaned = stripSquareBoilerplate(service.lastServiceNotes);
+          if (!cleaned) return null;
+          return <> \u2014 {cleaned.substring(0, 100)}{cleaned.length > 100 ? '...' : ''}</>;
+        })()}
+      </div>
 
       {/* Materials needed */}
       {service.materialsNeeded && service.materialsNeeded.length > 0 && (
@@ -371,11 +426,44 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
             }}>
               Complete
             </button>
-            <button onClick={() => changeStatus('skipped')} disabled={updating} style={{
-              ...btnBase, background: 'transparent', color: D.gray, border: `1px solid ${D.border}`,
-            }}>
-              Skip
-            </button>
+            <div style={{ position: 'relative', display: 'inline-block' }}>
+              <button onClick={() => setShowSkipReasons(!showSkipReasons)} disabled={updating} style={{
+                ...btnBase, background: 'transparent', color: D.gray, border: `1px solid ${D.border}`,
+              }}>
+                Skip
+              </button>
+              {showSkipReasons && (
+                <div style={{
+                  position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 50,
+                  background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
+                  padding: 4, minWidth: 200, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                }}>
+                  {SKIP_REASONS.map(r => (
+                    <button key={r.value} onClick={async () => {
+                      setUpdating(true);
+                      setShowSkipReasons(false);
+                      try {
+                        await adminFetch(`/admin/schedule/${service.id}/status`, {
+                          method: 'PUT',
+                          body: JSON.stringify({ status: 'skipped', notes: `Skip reason: ${r.label}` }),
+                        });
+                        onStatusChange(service.id, 'skipped');
+                      } catch (e) { alert('Failed: ' + e.message); }
+                      setUpdating(false);
+                    }} style={{
+                      display: 'block', width: '100%', padding: '8px 12px', border: 'none',
+                      background: 'transparent', color: D.text, fontSize: 12, textAlign: 'left',
+                      cursor: 'pointer', borderRadius: 6,
+                    }}
+                      onMouseEnter={e => e.currentTarget.style.background = D.border + '44'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </>
         )}
         {status === 'completed' && (
@@ -432,11 +520,39 @@ const btnBase = {
 
 /* ── Tech Section (collapsible) ───────────────────────── */
 
+function groupMultiServiceStops(services) {
+  const groups = {};
+  const singles = [];
+  services.forEach(svc => {
+    const key = `${svc.customerId || svc.customer_id || ''}_${svc.scheduledDate || ''}_${svc.windowStart || ''}`;
+    if (!svc.customerId && !svc.customer_id) {
+      singles.push(svc);
+      return;
+    }
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(svc);
+  });
+  const result = [];
+  Object.values(groups).forEach(group => {
+    if (group.length === 1) {
+      result.push(group[0]);
+    } else {
+      // Create a consolidated entry: use first service as base, attach extra types
+      const primary = { ...group[0] };
+      primary._multiServices = group;
+      primary._extraServiceTypes = group.slice(1).map(s => sanitizeServiceTypeClient(s.serviceType));
+      result.push(primary);
+    }
+  });
+  return [...result, ...singles];
+}
+
 function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onProtocol }) {
   const [collapsed, setCollapsed] = useState(false);
 
   const completedCount = tech.completedServices || tech.services.filter(s => s.status === 'completed').length;
   const totalHrs = Math.round(((tech.estimatedServiceMinutes || 0) + (tech.estimatedDriveMinutes || 0)) / 60 * 10) / 10;
+  const consolidatedServices = groupMultiServiceStops(tech.services);
 
   return (
     <div style={{ marginBottom: 20 }}>
@@ -506,16 +622,32 @@ function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete,
       {/* Service cards */}
       {!collapsed && (
         <div style={{ paddingLeft: 20, paddingTop: 12 }}>
-          {tech.services.map(svc => (
-            <ServiceCard
-              key={svc.id}
-              service={svc}
-              zoneColors={zoneColors}
-              onStatusChange={onStatusChange}
-              onComplete={onComplete}
-              onReschedule={onReschedule}
-              onProtocol={onProtocol}
-            />
+          {consolidatedServices.map(svc => (
+            <div key={svc.id}>
+              {svc._extraServiceTypes && svc._extraServiceTypes.length > 0 && (
+                <div style={{ display: 'flex', gap: 6, marginBottom: 4, flexWrap: 'wrap', paddingLeft: 4 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    Multi-service stop:
+                  </span>
+                  {[sanitizeServiceTypeClient(svc.serviceType), ...svc._extraServiceTypes].map((t, i) => (
+                    <span key={i} style={{
+                      fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6,
+                      background: D.teal + '18', color: D.teal, border: `1px solid ${D.teal}33`,
+                    }}>
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <ServiceCard
+                service={svc}
+                zoneColors={zoneColors}
+                onStatusChange={onStatusChange}
+                onComplete={onComplete}
+                onReschedule={onReschedule}
+                onProtocol={onProtocol}
+              />
+            </div>
           ))}
         </div>
       )}
@@ -640,10 +772,10 @@ function ProtocolPanel({ service, onClose }) {
                 )}
 
                 {/* Last service notes */}
-                {service.lastServiceNotes && (
+                {service.lastServiceNotes && stripSquareBoilerplate(service.lastServiceNotes) && (
                   <div style={{ background: D.bg, borderRadius: 10, padding: 12, border: `1px solid ${D.border}` }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Last Visit Notes</div>
-                    <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>{service.lastServiceNotes}</div>
+                    <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>{stripSquareBoilerplate(service.lastServiceNotes)}</div>
                   </div>
                 )}
               </div>
@@ -1651,7 +1783,34 @@ export default function SchedulePage() {
 
   const totalCount = services.length;
   const completedCount = services.filter(s => s.status === 'completed').length;
-  const remainingCount = totalCount - completedCount - services.filter(s => s.status === 'skipped').length;
+  const skippedCount = services.filter(s => s.status === 'skipped').length;
+  const remainingCount = totalCount - completedCount - skippedCount;
+
+  // Header stats: estimated time + revenue
+  const AVG_SERVICE_MIN = 35;
+  const estTotalMin = totalCount * AVG_SERVICE_MIN;
+  const estTotalHrs = Math.floor(estTotalMin / 60);
+  const estTotalMinRemainder = estTotalMin % 60;
+  const estRemainingMin = remainingCount * AVG_SERVICE_MIN;
+  const estFinishTime = (() => {
+    const now = new Date();
+    const finish = new Date(now.getTime() + estRemainingMin * 60000);
+    return finish.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  })();
+  const estRevenue = (() => {
+    const total = services.reduce((sum, s) => sum + (s.price || 125), 0);
+    return total;
+  })();
+
+  // Today's Focus alerts
+  const unassignedCount = unassigned.length;
+  const newCustomers = services.filter(s => !s.lastServiceDate);
+  const weatherData = data.weather || {};
+  const rainProbability = weatherData.rainProbability ?? weatherData.rain_probability ?? null;
+  const windSpeed = weatherData.windSpeed ?? weatherData.wind_speed ?? null;
+  const weatherTemp = weatherData.temp ?? weatherData.temperature ?? null;
+  const hasRainAlert = rainProbability != null && rainProbability > 40;
+  const hasFocusAlerts = unassignedCount > 0 || newCustomers.length > 0 || hasRainAlert;
 
   const SCHEDULE_TABS = [
     { id: 'board', label: 'Board' },
@@ -1699,12 +1858,20 @@ export default function SchedulePage() {
           {activeTab === 'board' && (
             <>
               <div style={{
-                display: 'flex', gap: 16, alignItems: 'center', fontSize: 13, color: D.muted,
+                display: 'flex', gap: 12, alignItems: 'center', fontSize: 13, color: D.muted,
                 background: D.card, padding: '8px 16px', borderRadius: 10, border: `1px solid ${D.border}`,
+                flexWrap: 'wrap',
               }}>
                 <span><strong style={{ color: D.white }}>{totalCount}</strong> services</span>
-                <span><strong style={{ color: D.green }}>{completedCount}</strong> completed</span>
-                <span><strong style={{ color: D.amber }}>{remainingCount}</strong> remaining</span>
+                <span><strong style={{ color: D.green }}>{completedCount}</strong> done</span>
+                <span><strong style={{ color: D.amber }}>{remainingCount}</strong> left</span>
+                <span style={{ borderLeft: `1px solid ${D.border}`, paddingLeft: 12 }}>
+                  ~{estTotalHrs}h{estTotalMinRemainder > 0 ? `${estTotalMinRemainder}m` : ''} total
+                </span>
+                <span>ETA <strong style={{ color: D.teal }}>{estFinishTime}</strong></span>
+                <span style={{ borderLeft: `1px solid ${D.border}`, paddingLeft: 12 }}>
+                  <strong style={{ color: D.green }}>${estRevenue.toLocaleString()}</strong> revenue
+                </span>
               </div>
               <button onClick={handleSyncCalendar} disabled={syncingCal} style={{
                 ...btnBase, background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, fontSize: 13, height: 38,
@@ -1761,14 +1928,48 @@ export default function SchedulePage() {
       {/* ── Board Tab Content ── */}
       {activeTab === 'board' && <>
 
-      {/* Weather bar placeholder */}
+      {/* Today's Focus summary */}
+      {hasFocusAlerts && (
+        <div style={{
+          background: D.amber + '12', borderRadius: 10, padding: '12px 18px', marginBottom: 12,
+          border: `1px solid ${D.amber}33`, display: 'flex', flexDirection: 'column', gap: 6,
+        }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: D.amber, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            Today's Focus
+          </div>
+          {unassignedCount > 0 && (
+            <div style={{ fontSize: 13, color: D.red, fontWeight: 600 }}>
+              {unassignedCount} service{unassignedCount > 1 ? 's' : ''} unassigned — assign techs
+            </div>
+          )}
+          {newCustomers.length > 0 && (
+            <div style={{ fontSize: 13, color: D.teal, fontWeight: 600 }}>
+              {newCustomers.length} new customer{newCustomers.length > 1 ? 's' : ''} today (first visit)
+            </div>
+          )}
+          {hasRainAlert && (
+            <div style={{ fontSize: 13, color: D.amber, fontWeight: 600 }}>
+              Rain expected ({rainProbability}% chance) — monitor spray conditions
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Weather bar */}
       <div style={{
         background: D.card, borderRadius: 10, padding: '10px 18px', marginBottom: 20,
         border: `1px solid ${D.border}`, fontSize: 13, color: D.text,
-        display: 'flex', alignItems: 'center', gap: 16,
+        display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
       }}>
-        <span>82F Clear</span>
-        <span style={{ color: D.green, fontWeight: 700 }}>SPRAY: GO</span>
+        <span>{weatherTemp ?? 82}{'\u00B0'}F</span>
+        {windSpeed != null && <span>{windSpeed}mph</span>}
+        {rainProbability != null && <span>{rainProbability}% rain</span>}
+        <span style={{
+          color: (rainProbability != null && rainProbability > 50) || (windSpeed != null && windSpeed > 15) ? D.red : D.green,
+          fontWeight: 700,
+        }}>
+          SPRAY: {(rainProbability != null && rainProbability > 50) || (windSpeed != null && windSpeed > 15) ? 'HOLD' : 'GO'}
+        </span>
       </div>
 
       {/* Tech sections */}

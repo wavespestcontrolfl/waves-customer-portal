@@ -7,10 +7,10 @@ const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Square catalog IDs are uppercase alphanumeric, 20+ chars — replace with readable label
+// Square catalog IDs are uppercase alphanumeric — replace with readable label
 function sanitizeServiceType(serviceType) {
   if (!serviceType) return 'Service';
-  if (/^[A-Z0-9]{15,}$/.test(serviceType)) return 'Service';
+  if (/^[A-Z0-9]{5,}$/.test(serviceType)) return 'Service';
   return serviceType;
 }
 
