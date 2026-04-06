@@ -107,10 +107,11 @@ router.post('/', async (req, res) => {
     await PipelineManager.onEvent(customer.id, 'lead_created');
     await LeadScorer.calculateScore(customer.id);
 
-    // Notify Adam — during business hours (8AM-9PM ET) trigger a call, otherwise SMS
+    // Notify Adam — during business hours (8AM-8PM ET) trigger a call, otherwise SMS
     const now = new Date();
     const etHour = parseInt(now.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/New_York' }));
-    const isDuringHours = etHour >= 8 && etHour < 21;
+    const isDuringHours = etHour >= 8 && etHour < 20;
+    let callConnected = false;
 
     try {
       if (isDuringHours && TwilioService.client) {
@@ -123,6 +124,7 @@ router.post('/', async (req, res) => {
             url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(phoneFormatted)}&callerIdNumber=${encodeURIComponent('+19412972606')}`,
             record: true,
           });
+          callConnected = true;
           logger.info(`[lead-webhook] Business hours — calling admin to connect with ${firstName}`);
         } catch (callErr) {
           logger.error(`[lead-webhook] Admin call failed, falling back to SMS: ${callErr.message}`);
@@ -140,11 +142,11 @@ router.post('/', async (req, res) => {
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
-    // Auto-reply to lead
+    // Auto-reply to lead — always send during business hours (whether call connected or not)
     try {
       const replyMsg = isDuringHours
-        ? `Hello ${firstName}! Waves here! We received your quote request. One of our specialists will be calling soon—feel free to reply if you'd rather chat by message.\n\nThank you for considering Waves! 🌊`
-        : `Hi ${firstName}! Thanks for reaching out to Waves Pest Control 🌊 We received your info and will follow up first thing in the morning with a custom quote. Questions? Reply to this text. — Adam, Waves`;
+        ? `Hello ${firstName}! Waves here! We received your quote request. One of our specialists will be calling soon—feel free to reply if you'd rather chat by message.\n\nThank you for considering Waves!`
+        : `Hello ${firstName}! Thanks for reaching out to Waves. We received your info and will follow up first thing in the morning with a custom quote.\n\nQuestions? Reply to this message.\nThank you for choosing Waves!`;
       await TwilioService.sendSMS(phoneFormatted, replyMsg,
         { customerId: customer.id, messageType: 'auto_reply', customerLocationId: location.id }
       );
