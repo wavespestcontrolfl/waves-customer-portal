@@ -50,7 +50,7 @@ const SquareBookingSync = {
     const bookings = await SquareService.getUpcomingBookings(daysAhead);
     if (!bookings.length) {
       logger.info('[square-sync] No upcoming bookings from Square');
-      return { synced: 0, created: 0, updated: 0, skipped: 0, errors: [] };
+      return { synced: 0, created: 0, updated: 0, skipped: 0, errors: [], message: 'Square returned 0 bookings for the next ' + daysAhead + ' days. Check Square Dashboard → Appointments to verify bookings exist.' };
     }
 
     let created = 0, updated = 0, skipped = 0;

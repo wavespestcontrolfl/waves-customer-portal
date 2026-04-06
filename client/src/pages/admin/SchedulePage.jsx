@@ -1218,6 +1218,8 @@ export default function SchedulePage() {
       const result = await r.json();
       if (!r.ok) {
         alert(`Square sync error: ${result.error || r.status}${result.hint ? '\n\n' + result.hint : ''}`);
+      } else if (result.message) {
+        alert(result.message);
       } else {
         alert(`Square sync: ${result.created} new, ${result.updated} updated, ${result.skipped} unchanged`);
         fetchSchedule(date);
