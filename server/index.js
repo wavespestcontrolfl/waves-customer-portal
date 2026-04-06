@@ -75,12 +75,12 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://web.squarecdn.com", "https://sandbox.web.squarecdn.com"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
       imgSrc: ["'self'", "https:", "data:", "blob:"],
-      connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://api.rentcast.io", "https://generativelanguage.googleapis.com", "https://www.googleapis.com"],
-      frameSrc: ["'self'", "https://www.google.com"],
+      connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://api.rentcast.io", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://pci-connect.squareup.com", "https://pci-connect.squareupsandbox.com"],
+      frameSrc: ["'self'", "https://www.google.com", "https://web.squarecdn.com", "https://sandbox.web.squarecdn.com", "https://pci-connect.squareup.com", "https://pci-connect.squareupsandbox.com"],
       mediaSrc: ["'self'", "https:"],
     },
   },
@@ -186,6 +186,8 @@ app.use('/api/admin/email-automations', require('./routes/admin-email-automation
 app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 app.use('/api/admin/call-recordings', require('./routes/admin-call-recordings'));
 
+app.use('/api/admin/invoices', require('./routes/admin-invoices'));
+app.use('/api/pay', require('./routes/pay'));
 app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));

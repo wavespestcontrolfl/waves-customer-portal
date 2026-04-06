@@ -68,38 +68,23 @@ export default function DashboardPage() {
   if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center', fontSize: 15 }}>Loading dashboard...</div>;
   if (!data || data.error || !data.kpis) return <div style={{ color: D.red, padding: 60, textAlign: 'center' }}>Failed to load dashboard. <a href="/admin/login" style={{ color: D.teal }}>Try logging in again</a></div>;
 
-  if (dashTab === 'revenue') {
-    return (
-      <div>
-        <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
-          <button onClick={() => setDashTab('overview')} style={{ padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, background: 'transparent', color: D.muted }}>Overview</button>
-          <button style={{ padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, background: D.teal, color: D.white }}>Revenue</button>
-        </div>
-        <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading revenue...</div>}><RevenuePage /></Suspense>
-      </div>
-    );
-  }
-
   const k = data.kpis;
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
+  const [activeKPI, setActiveKPI] = useState(null);
+
   const KPI_CARDS = [
-    { icon: '💰', label: 'Revenue MTD', value: fmt(k.revenueMTD), change: k.revenueChangePercent, changeSuffix: '% vs last month', color: k.revenueChangePercent >= 0 ? D.green : D.red },
-    { icon: '👥', label: 'Active Customers', value: k.activeCustomers, change: k.newCustomersThisMonth, changeSuffix: ' new this month', changePrefix: '+', color: D.green },
-    { icon: '📋', label: 'Estimates Pending', value: k.estimatesPending, sub: 'awaiting response', color: D.amber },
-    { icon: '📅', label: 'Services This Week', value: `${k.servicesThisWeek.completed}/${k.servicesThisWeek.total}`, sub: `${k.servicesThisWeek.total - k.servicesThisWeek.completed} remaining`, color: D.teal },
-    { icon: '⏱️', label: 'Avg Response', value: `${k.avgResponseTimeHours} hrs`, sub: 'sent → accepted', color: D.muted },
-    { icon: '⭐', label: 'Google Reviews', value: `${k.googleReviewRating} ★`, sub: `${k.googleReviewCount} reviews`, color: D.amber },
+    { id: 'revenue', icon: '💰', label: 'Revenue MTD', value: fmt(k.revenueMTD), change: k.revenueChangePercent, changeSuffix: '% vs last month', color: k.revenueChangePercent >= 0 ? D.green : D.red, detail: 'revenue' },
+    { id: 'customers', icon: '👥', label: 'Active Customers', value: k.activeCustomers, change: k.newCustomersThisMonth, changeSuffix: ' new this month', changePrefix: '+', color: D.green, detail: 'customers' },
+    { id: 'estimates', icon: '📋', label: 'Estimates Pending', value: k.estimatesPending, sub: 'awaiting response', color: D.amber, detail: 'estimates' },
+    { id: 'services', icon: '📅', label: 'Services This Week', value: `${k.servicesThisWeek.completed}/${k.servicesThisWeek.total}`, sub: `${k.servicesThisWeek.total - k.servicesThisWeek.completed} remaining`, color: D.teal, detail: 'schedule' },
+    { id: 'response', icon: '⏱️', label: 'Avg Response', value: `${k.avgResponseTimeHours} hrs`, sub: 'sent → accepted', color: D.muted, detail: 'estimates' },
+    { id: 'reviews', icon: '⭐', label: 'Google Reviews', value: `${k.googleReviewRating} ★`, sub: `${k.googleReviewCount} reviews`, color: D.amber, detail: 'reviews' },
   ];
 
   return (
     <div>
-      {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
-        <button style={{ padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, background: D.teal, color: D.white }}>Overview</button>
-        <button onClick={() => setDashTab('revenue')} style={{ padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, background: 'transparent', color: D.muted }}>Revenue</button>
-      </div>
-
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
         <div>
@@ -108,14 +93,18 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* KPI Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 20 }}>
+      {/* KPI Cards — clickable */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)', gap: 14, marginBottom: 20 }}>
         {KPI_CARDS.map((kpi, i) => (
-          <div key={i} style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}` }}>
+          <div key={i} onClick={() => setActiveKPI(activeKPI === kpi.id ? null : kpi.id)} style={{
+            background: D.card, borderRadius: 10, padding: isMobile ? 14 : 20, cursor: 'pointer',
+            border: activeKPI === kpi.id ? `2px solid ${D.teal}` : `1px solid ${D.border}`,
+            transition: 'all 0.15s',
+          }}>
             <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, color: D.muted, marginBottom: 8 }}>
               {kpi.icon} {kpi.label}
             </div>
-            <div style={{ fontSize: 28, fontWeight: 700, color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>
+            <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 700, color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>
               {kpi.value}
             </div>
             {kpi.change !== undefined && (
@@ -129,6 +118,77 @@ export default function DashboardPage() {
           </div>
         ))}
       </div>
+
+      {/* Detail Panel — shows content for clicked KPI */}
+      {activeKPI === 'revenue' && (
+        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Revenue Breakdown</div>
+            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
+          </div>
+          <Suspense fallback={<div style={{ color: D.muted, padding: 20, textAlign: 'center' }}>Loading...</div>}><RevenuePage /></Suspense>
+        </div>
+      )}
+
+      {activeKPI === 'customers' && (
+        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Customer Summary</div>
+            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
+          </div>
+          {data.revenueChart?.byTier?.length > 0 ? data.revenueChart.byTier.map((t, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
+              <span style={{ fontSize: 14, color: D.text }}>{t.tier || 'No Plan'} <span style={{ color: D.muted }}>({t.count})</span></span>
+              <span style={{ fontSize: 14, fontWeight: 700, color: D.green, fontFamily: "'JetBrains Mono', monospace" }}>{fmt(t.revenue)}/mo</span>
+            </div>
+          )) : <div style={{ color: D.muted, padding: 20, textAlign: 'center' }}>No tier data available</div>}
+          <a href="/admin/customers" style={{ display: 'block', marginTop: 12, fontSize: 13, color: D.teal, textDecoration: 'none' }}>View all customers →</a>
+        </div>
+      )}
+
+      {activeKPI === 'estimates' && (
+        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Pending Estimates</div>
+            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
+          </div>
+          <div style={{ fontSize: 13, color: D.muted, marginBottom: 12 }}>{k.estimatesPending} estimates awaiting customer response</div>
+          <a href="/admin/estimates" style={{ display: 'inline-block', padding: '10px 20px', borderRadius: 8, background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>View Estimates →</a>
+        </div>
+      )}
+
+      {activeKPI === 'services' && data.todaysSchedule && (
+        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Today's Services</div>
+            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
+          </div>
+          {data.todaysSchedule.map(s => (
+            <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${D.border}` }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{s.customerName}</div>
+                <div style={{ fontSize: 11, color: D.muted }}>{s.serviceType} · {fmtTimeShort(s.windowStart)}</div>
+              </div>
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 8, background: `${STATUS_COLORS[s.status] || D.muted}20`, color: STATUS_COLORS[s.status] || D.muted }}>{s.status}</span>
+            </div>
+          ))}
+          <a href="/admin/schedule" style={{ display: 'block', marginTop: 12, fontSize: 13, color: D.teal, textDecoration: 'none' }}>View full schedule →</a>
+        </div>
+      )}
+
+      {activeKPI === 'reviews' && (
+        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Review Performance</div>
+            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
+          </div>
+          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+            <div><div style={{ fontSize: 11, color: D.muted }}>Rating</div><div style={{ fontSize: 24, fontWeight: 700, color: D.amber }}>{k.googleReviewRating} ★</div></div>
+            <div><div style={{ fontSize: 11, color: D.muted }}>Total Reviews</div><div style={{ fontSize: 24, fontWeight: 700, color: D.white }}>{k.googleReviewCount}</div></div>
+          </div>
+          <a href="/admin/reviews" style={{ display: 'block', marginTop: 12, fontSize: 13, color: D.teal, textDecoration: 'none' }}>Manage reviews →</a>
+        </div>
+      )}
 
       {/* Revenue Chart */}
       <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}`, marginBottom: 20 }}>
@@ -209,7 +269,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Two columns: Schedule + Activity */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 14, marginBottom: 20 }}>
         {/* Today's Schedule */}
         <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
@@ -268,7 +328,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Quick Actions */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 10 }}>
         {[
           { icon: '⚡', label: 'New Estimate', path: '/admin/estimates' },
           { icon: '👤', label: 'New Customer', path: '/admin/customers' },

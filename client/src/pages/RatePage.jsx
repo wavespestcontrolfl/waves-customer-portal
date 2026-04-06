@@ -8,16 +8,35 @@ const HIGHLIGHTS = [
   'Great Communication', 'Clean Work', 'Fast Service', 'Fair Price', 'Above & Beyond',
 ];
 
+const SERVICE_OPTIONS = [
+  'Pest Control',
+  'Lawn Care',
+  'Mosquito',
+  'Tree & Shrub',
+];
+
+const STANDOUT_OPTIONS = [
+  'On time', 'Professional', 'Thorough', 'Friendly', 'Great results', 'Fair price',
+];
+
 export default function RatePage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [score, setScore] = useState(null);
-  const [screen, setScreen] = useState('rating'); // rating, highlights, feedback, success, redirect
+  const [screen, setScreen] = useState('rating'); // rating, highlights, ai-review, feedback, success, redirect
   const [highlights, setHighlights] = useState([]);
   const [feedback, setFeedback] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // AI Review Writer state
+  const [selectedServices, setSelectedServices] = useState([]);
+  const [selectedStandouts, setSelectedStandouts] = useState([]);
+  const [personalNote, setPersonalNote] = useState('');
+  const [generatedReview, setGeneratedReview] = useState('');
+  const [generating, setGenerating] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     fetch(`${API_BASE}/rate/${token}`)
@@ -35,6 +54,18 @@ export default function RatePage() {
 
   const toggleHighlight = (h) => {
     setHighlights(prev => prev.includes(h) ? prev.filter(x => x !== h) : [...prev, h]);
+  };
+
+  const toggleService = (s) => {
+    setSelectedServices(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
+  };
+
+  const toggleStandout = (s) => {
+    setSelectedStandouts(prev => {
+      if (prev.includes(s)) return prev.filter(x => x !== s);
+      if (prev.length >= 3) return prev; // max 3
+      return [...prev, s];
+    });
   };
 
   const handleSubmit = async () => {
@@ -55,6 +86,67 @@ export default function RatePage() {
     setSubmitting(false);
   };
 
+  // Submit score, then go to AI review step
+  const handleHighlightsNext = async () => {
+    setSubmitting(true);
+    try {
+      await fetch(`${API_BASE}/rate/${token}/submit`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ score, feedback: '', highlights }),
+      });
+    } catch { /* proceed anyway */ }
+    setSubmitting(false);
+    // Pre-select service type from data if available
+    if (data?.serviceType) {
+      const match = SERVICE_OPTIONS.find(s => data.serviceType.toLowerCase().includes(s.toLowerCase()));
+      if (match && !selectedServices.includes(match)) {
+        setSelectedServices([match]);
+      }
+    }
+    setScreen('ai-review');
+  };
+
+  const handleGenerateReview = async () => {
+    setGenerating(true);
+    setGeneratedReview('');
+    try {
+      const r = await fetch(`${API_BASE}/rate/${token}/generate-review`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          services: selectedServices,
+          highlights: selectedStandouts,
+          personalNote,
+        }),
+      });
+      const result = await r.json();
+      setGeneratedReview(result.review || '');
+    } catch {
+      setGeneratedReview('Great experience with Waves Pest Control. Professional service and thorough treatment. Would recommend to anyone in Southwest Florida.');
+    }
+    setGenerating(false);
+  };
+
+  const handleCopyReview = () => {
+    navigator.clipboard.writeText(generatedReview).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    });
+  };
+
+  const handleGoToGoogle = () => {
+    if (data?.googleReviewUrl) {
+      window.location.href = data.googleReviewUrl;
+    }
+  };
+
+  const handleSkipToGoogle = () => {
+    if (data?.googleReviewUrl) {
+      window.location.href = data.googleReviewUrl;
+    } else {
+      setScreen('success');
+    }
+  };
+
   const firstName = data?.firstName || 'there';
   const techName = data?.techName || 'your technician';
 
@@ -71,7 +163,7 @@ export default function RatePage() {
     <Page>
       <div style={{ textAlign: 'center', padding: 36, color: '#3A5068', fontSize: 15, lineHeight: 1.5 }}>
         <p>This link may have expired or already been used.</p>
-        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: '#E85D3A', fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com →</a></p>
+        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: '#E85D3A', fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
       </div>
     </Page>
   );
@@ -117,7 +209,9 @@ export default function RatePage() {
       {/* Highlights Screen (8-10) */}
       {screen === 'highlights' && (
         <div style={{ textAlign: 'center' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#E8F5E9', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>🎉</div>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#E8F5E9', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
+            <span role="img" aria-label="party">&#127881;</span>
+          </div>
           <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 24, fontWeight: 800, color: '#0A3D7A', marginBottom: 8 }}>Awesome, thank you!</div>
           <div style={{ fontSize: 15, color: '#3A5068', lineHeight: 1.55, marginBottom: 16 }}>What stood out about your experience?</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
@@ -129,7 +223,7 @@ export default function RatePage() {
               }}>{h}</button>
             ))}
           </div>
-          <button onClick={handleSubmit} disabled={submitting} style={{
+          <button onClick={handleHighlightsNext} disabled={submitting} style={{
             display: 'inline-flex', alignItems: 'center', gap: 10, padding: '14px 28px',
             background: '#E85D3A', color: '#fff', border: 'none', borderRadius: 12,
             fontSize: 16, fontWeight: 800, cursor: 'pointer', boxShadow: '0 4px 14px rgba(232,93,58,.35)',
@@ -141,13 +235,134 @@ export default function RatePage() {
         </div>
       )}
 
+      {/* AI Review Writer Screen */}
+      {screen === 'ai-review' && (
+        <div>
+          <div style={{ textAlign: 'center', marginBottom: 20 }}>
+            <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 22, fontWeight: 800, color: '#0A3D7A', marginBottom: 6 }}>
+              We'll write it for you!
+            </div>
+            <div style={{ fontSize: 14, color: '#3A5068', lineHeight: 1.5 }}>
+              Answer a couple quick questions and we'll draft a Google review you can paste.
+            </div>
+          </div>
+
+          {/* Service selection */}
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#0A3D7A', marginBottom: 8 }}>What service did you receive?</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {SERVICE_OPTIONS.map(s => (
+                <button key={s} onClick={() => toggleService(s)} style={{
+                  padding: '9px 16px', border: `2px solid ${selectedServices.includes(s) ? '#1E7FD9' : '#D8E4EE'}`,
+                  borderRadius: 20, background: selectedServices.includes(s) ? '#1E7FD9' : '#fff',
+                  color: selectedServices.includes(s) ? '#fff' : '#3A5068', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                }}>{s}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Standout selection */}
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#0A3D7A', marginBottom: 4 }}>What stood out?</div>
+            <div style={{ fontSize: 11, color: '#8FA4B8', marginBottom: 8 }}>Pick up to 3</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {STANDOUT_OPTIONS.map(s => (
+                <button key={s} onClick={() => toggleStandout(s)} style={{
+                  padding: '9px 16px', border: `2px solid ${selectedStandouts.includes(s) ? '#00C853' : '#D8E4EE'}`,
+                  borderRadius: 20, background: selectedStandouts.includes(s) ? '#00C853' : '#fff',
+                  color: selectedStandouts.includes(s) ? '#fff' : '#3A5068', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                  opacity: (!selectedStandouts.includes(s) && selectedStandouts.length >= 3) ? 0.4 : 1,
+                }}>{s}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Personal note */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#0A3D7A', marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: '#8FA4B8' }}>(optional)</span></div>
+            <input
+              value={personalNote}
+              onChange={e => setPersonalNote(e.target.value)}
+              placeholder="e.g. No more ants in the kitchen!"
+              maxLength={150}
+              style={{
+                width: '100%', padding: '12px 14px', border: '2px solid #D8E4EE', borderRadius: 12,
+                fontSize: 14, color: '#0A3D7A', outline: 'none', boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          {/* Generate button */}
+          {!generatedReview && (
+            <button onClick={handleGenerateReview} disabled={generating || selectedServices.length === 0} style={{
+              width: '100%', padding: 14, border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 800,
+              color: '#fff', cursor: (generating || selectedServices.length === 0) ? 'default' : 'pointer',
+              background: (generating || selectedServices.length === 0) ? '#B0BEC5' : '#1E7FD9',
+              opacity: selectedServices.length === 0 ? 0.5 : 1,
+              transition: 'all 0.2s',
+            }}>
+              {generating ? 'Writing your review...' : 'AI Write My Review'}
+            </button>
+          )}
+
+          {/* Generated review display */}
+          {generatedReview && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#0A3D7A', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Your Review</div>
+              <div style={{
+                background: '#F0F7FF', border: '2px solid #B3D9FF', borderRadius: 14, padding: 16,
+                fontSize: 15, color: '#0A3D7A', lineHeight: 1.65, marginBottom: 14,
+                position: 'relative',
+              }}>
+                <div style={{ position: 'absolute', top: -6, left: 16, background: '#F0F7FF', padding: '0 6px', fontSize: 10, color: '#5B9BD5', fontWeight: 700, letterSpacing: 0.5 }}>READY TO PASTE</div>
+                {generatedReview}
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                <button onClick={handleCopyReview} style={{
+                  flex: 1, padding: 14, border: 'none', borderRadius: 12, fontSize: 15, fontWeight: 800,
+                  color: '#fff', cursor: 'pointer',
+                  background: copied ? '#00C853' : '#1E7FD9',
+                  transition: 'background 0.2s',
+                }}>
+                  {copied ? 'Copied!' : 'Copy to Clipboard'}
+                </button>
+              </div>
+
+              <button onClick={handleGoToGoogle} style={{
+                width: '100%', padding: 14, border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 800,
+                color: '#fff', cursor: 'pointer', background: '#E85D3A',
+                boxShadow: '0 4px 14px rgba(232,93,58,.35)',
+              }}>
+                Go to Google Reviews
+              </button>
+
+              <button onClick={handleGenerateReview} disabled={generating} style={{
+                display: 'block', margin: '12px auto 0', fontSize: 13, color: '#1E7FD9', background: 'none',
+                border: 'none', cursor: 'pointer', fontWeight: 600,
+              }}>
+                {generating ? 'Rewriting...' : 'Regenerate review'}
+              </button>
+            </div>
+          )}
+
+          {/* Skip link */}
+          <button onClick={handleSkipToGoogle} style={{
+            display: 'block', margin: '16px auto 0', fontSize: 13, color: '#8FA4B8', background: 'none',
+            border: 'none', cursor: 'pointer', textDecoration: 'underline',
+          }}>
+            Skip -- Write my own on Google
+          </button>
+        </div>
+      )}
+
       {/* Feedback Screen (1-7) */}
       {screen === 'feedback' && (
         <div style={{ textAlign: 'center' }}>
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: score <= 3 ? '#FFEBEE' : '#FFF8E1', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
-            {score <= 3 ? '😔' : '🤔'}
+            {score <= 3 ? '\uD83D\uDE14' : '\uD83E\uDD14'}
           </div>
-          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FFEBEE', color: '#E53935', fontSize: 13, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>⚡ We want to make this right</div>}
+          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FFEBEE', color: '#E53935', fontSize: 13, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>We want to make this right</div>}
           <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 24, fontWeight: 800, color: '#0A3D7A', marginBottom: 8 }}>
             {score <= 3 ? "We're sorry to hear that." : "Thanks for the feedback."}
           </div>
@@ -169,7 +384,9 @@ export default function RatePage() {
       {/* Redirect Screen (going to Google) */}
       {screen === 'redirect' && (
         <div style={{ textAlign: 'center', padding: '20px 0' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#E8F5E9', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>🎉</div>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#E8F5E9', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
+            <span role="img" aria-label="party">&#127881;</span>
+          </div>
           <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 24, fontWeight: 800, color: '#0A3D7A', marginBottom: 8 }}>Taking you to Google...</div>
           <div style={{ fontSize: 15, color: '#3A5068' }}>Your review means the world to our small team!</div>
         </div>
@@ -178,7 +395,9 @@ export default function RatePage() {
       {/* Success Screen */}
       {screen === 'success' && (
         <div style={{ textAlign: 'center', padding: '20px 0' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#E8F5E9', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>✅</div>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#E8F5E9', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
+            <span role="img" aria-label="check">&#9989;</span>
+          </div>
           <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 24, fontWeight: 800, color: '#0A3D7A', marginBottom: 8 }}>Thank you!</div>
           <div style={{ fontSize: 15, color: '#3A5068', lineHeight: 1.55 }}>Your feedback helps us serve you better.</div>
         </div>

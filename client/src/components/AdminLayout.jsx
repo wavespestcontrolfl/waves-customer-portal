@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { path: '/admin/schedule', icon: '📅', label: 'Schedule' },
   { path: '/admin/communications', icon: '📱', label: 'Communications' },
   { path: '/admin/reviews', icon: '⭐', label: 'Reviews' },
+  { path: '/admin/invoices', icon: '🧾', label: 'Invoices' },
   { path: '/admin/referrals', icon: '🎁', label: 'Referrals' },
   { path: '/admin/ppc', icon: '📣', label: 'PPC' },
   { path: '/admin/social-media', icon: '📲', label: 'Social Media' },

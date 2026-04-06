@@ -36,6 +36,8 @@ const AdminPricingPage = lazy(() => import('./pages/admin/PricingStrategyPage'))
 const AdminLawnAssessmentPage = lazy(() => import('./pages/admin/LawnAssessmentPanel'));
 const AdminEquipmentPage = lazy(() => import('./pages/admin/EquipmentPage'));
 const AdminKnowledgeBasePage = lazy(() => import('./pages/admin/KnowledgeBasePage'));
+const AdminInvoicesPage = lazy(() => import('./pages/admin/AdminInvoicesPage'));
+const PayPage = lazy(() => import('./pages/PayPage'));
 import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
@@ -83,6 +85,7 @@ export default function App() {
           <Route path="/estimate/:token" element={<EstimateViewPage />} />
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/:token" element={<ReportViewPage />} />
+          <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookingPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />
           <Route path="/tech" element={<TechLayout />}>
@@ -112,6 +115,7 @@ export default function App() {
             <Route path="lawn-assessment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn assessment...</div>}><AdminLawnAssessmentPage /></Suspense>} />
             <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
             <Route path="kb" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgeBasePage /></Suspense>} />
+            <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
             <Route path="wordpress" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading WordPress...</div>}><AdminWordPressSitesPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />

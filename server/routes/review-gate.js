@@ -133,4 +133,77 @@ router.post('/:token/submit', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/rate/:token/generate-review — AI-powered review writer
+router.post('/:token/generate-review', async (req, res, next) => {
+  try {
+    const { services, highlights, personalNote } = req.body;
+
+    const request = await db('review_requests')
+      .where({ token: req.params.token })
+      .first();
+
+    if (!request) {
+      return res.status(404).json({ error: 'Review link not found' });
+    }
+
+    const customer = await db('customers').where({ id: request.customer_id }).first();
+    const firstName = customer?.first_name || 'there';
+
+    // Build the prompt
+    const serviceList = (services && services.length > 0)
+      ? services.join(', ')
+      : (request.service_type || 'pest control');
+
+    const highlightList = (highlights && highlights.length > 0)
+      ? highlights.join(', ')
+      : '';
+
+    const personalDetail = personalNote ? personalNote.trim() : '';
+
+    const prompt = `Write a Google review for a pest control company called Waves Pest Control in Southwest Florida. Write it as if you are the customer named ${firstName}. Use a natural, conversational tone that sounds like a real person wrote it.
+
+Details to include:
+- Services received: ${serviceList}
+${highlightList ? `- What stood out: ${highlightList}` : ''}
+${personalDetail ? `- Customer's personal note: "${personalDetail}"` : ''}
+${request.tech_name ? `- Technician name: ${request.tech_name}` : ''}
+
+Rules:
+- Write 2-4 sentences only
+- No emojis
+- Sound genuine and specific, not generic
+- Mention specific services or what they liked
+- Do not use exclamation marks more than once
+- Do not start with "I"
+- Do not mention star ratings`;
+
+    // Call Claude API
+    let reviewText = '';
+    try {
+      const Anthropic = require('@anthropic-ai/sdk');
+      const anthropic = new Anthropic();
+
+      const message = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 256,
+        messages: [{ role: 'user', content: prompt }],
+      });
+
+      reviewText = message.content[0]?.text?.trim() || '';
+    } catch (aiErr) {
+      logger.error(`[review-gate] AI review generation failed: ${aiErr.message}`);
+      // Fallback: generate a simple template
+      const parts = [];
+      if (highlightList) parts.push(`They were ${highlightList.toLowerCase()}`);
+      if (request.tech_name) parts.push(`${request.tech_name} did a great job`);
+      parts.push(`Really happy with the ${serviceList.toLowerCase()} service from Waves Pest Control`);
+      if (personalDetail) parts.push(personalDetail);
+      parts.push('Would definitely recommend them to anyone in Southwest Florida.');
+      reviewText = parts.join('. ') + (parts[parts.length - 1].endsWith('.') ? '' : '.');
+    }
+
+    res.json({ review: reviewText });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
