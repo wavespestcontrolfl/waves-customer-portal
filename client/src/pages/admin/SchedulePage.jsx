@@ -1501,11 +1501,259 @@ const checkboxRow = { display: 'flex', alignItems: 'center', gap: 8, fontSize: 1
 
 /* ── Protocol Reference Tab ────────────────────────────── */
 
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/* Product descriptions — plain-language for techs and Virginia */
+const PRODUCT_DESCRIPTIONS = {
+  'acelepryn xtra': 'prevents chinch bugs, webworms, and grubs for 2-3 months',
+  'acelepryn': 'prevents chinch bugs, webworms, and grubs for 2-3 months',
+  'speedzone southern': 'kills broadleaf weeds without harming St. Augustine',
+  'speedzone': 'kills broadleaf weeds without harming St. Augustine',
+  'celsius wg': 'selective weed killer for warm-season grass (max 3x/year)',
+  'celsius': 'selective weed killer for warm-season grass (max 3x/year)',
+  'k-flow 0-0-25': 'potassium that strengthens roots against drought and disease',
+  'k-flow': 'potassium that strengthens roots against drought and disease',
+  'prodiamine 65 wdg': 'pre-emergent that stops crabgrass and weeds before they sprout',
+  'prodiamine': 'pre-emergent that stops crabgrass and weeds before they sprout',
+  'lesco 24-0-11': 'slow-release nitrogen fertilizer for steady green-up',
+  'lesco 24-2-11': 'slow-release fertilizer with phosphorus for root development',
+  'lesco 0-0-18': 'potassium + magnesium for winter root strength',
+  'lesco elite 0-0-28': 'premium potassium for winter hardiness and root health',
+  'chelated iron plus': 'foliar iron for deep green color without excess growth',
+  'chelated iron': 'foliar iron for deep green color without excess growth',
+  'high mn combo': 'manganese and micronutrients for stress recovery',
+  'carbonpro-l': 'biostimulant that feeds soil biology and improves nutrient uptake',
+  'headway g': 'dual-action fungicide for large patch and take-all root rot (FRAC 11+3)',
+  'headway': 'dual-action fungicide for large patch and take-all root rot (FRAC 11+3)',
+  'medallion sc': 'fungicide for large patch — different mode of action (FRAC 7)',
+  'medallion': 'fungicide for large patch — different mode of action (FRAC 7)',
+  'torque sc': 'fungicide for fall disease prevention (FRAC 12)',
+  'torque': 'fungicide for fall disease prevention (FRAC 12)',
+  'sedgehammer plus': 'kills nutsedge without damaging turf',
+  'sedgehammer': 'kills nutsedge without damaging turf',
+  'dismiss': 'fast-acting sedge control — visible results in days',
+  'primo maxx': 'plant growth regulator for denser, thicker turf (Premium only)',
+  'talstar p': 'broad-spectrum insecticide for chinch bug rescue treatment',
+  'talstar': 'broad-spectrum insecticide for chinch bug rescue treatment',
+  'arena 50 wdg': 'backup insecticide if Talstar fails — different mode of action (Group 4A)',
+  'arena': 'backup insecticide if Talstar fails — different mode of action (Group 4A)',
+  'hydretain': 'moisture manager that reduces watering needs by 50%',
+  'atrazine 4l': 'winter broadleaf and grassy weed control (apply under 85F only)',
+  'atrazine': 'winter broadleaf and grassy weed control (apply under 85F only)',
+  'three-way': 'broadleaf weed killer — backup when Atrazine is weather-blocked',
+  'blindside wdg': 'broadleaf + sedge control — safe fallback after Celsius cap (Groups 14+2)',
+  'blindside': 'broadleaf + sedge control — safe fallback after Celsius cap (Groups 14+2)',
+  'pillar sc': 'dual fungicide for take-all root rot in shade turf (FRAC 11+3)',
+  'pillar': 'dual fungicide for take-all root rot in shade turf (FRAC 11+3)',
+  'moisture manager': 'wetting agent that helps water penetrate compacted soil',
+  'dispatch': 'wetting agent that helps water penetrate compacted soil',
+  'green flo 6-0-0': 'calcium supplement for summer cation balance',
+  'green flo phyte plus': 'phosphite + potassium for disease suppression and root health',
+};
+
+/* Safety rules per track */
+const TRACK_SAFETY_RULES = {
+  'A_St_Aug_Sun': [
+    'Celsius WG: MAX 3 apps/year/property',
+    'SpeedZone: do NOT apply >90\u00b0F',
+    'N blackout Jun 1 \u2013 Sep 30',
+  ],
+  'B_St_Aug_Shade': [
+    'Celsius WG: MAX 3 apps/year/property',
+    'NEVER SpeedZone on shade St. Aug',
+    'NO PGR (Primo Maxx) on shade turf',
+    'N blackout Jun 1 \u2013 Sep 30',
+  ],
+  'C1_Bermuda': [
+    'Celsius WG: MAX 3 apps/year/property',
+    'No Atrazine on Bermuda \u2014 EVER',
+    'N blackout Jun 1 \u2013 Sep 30',
+  ],
+  'C2_Zoysia': [
+    'Celsius WG: MAX 3 apps/year/property',
+    'No Atrazine on Zoysia \u2014 EVER',
+    'N blackout Jun 1 \u2013 Sep 30',
+  ],
+  'D_Bahia': [
+    'Celsius WG: MAX 3 apps/year/property',
+    'SpeedZone: do NOT apply >90\u00b0F',
+    'N blackout Jun 1 \u2013 Sep 30',
+  ],
+};
+
+/* Parse product lines and attach descriptions */
+function parseProductLines(text) {
+  if (!text) return [];
+  return text.split('\n').filter(l => l.trim()).map(line => {
+    const clean = line.replace(/^\u2605\s*/, '').replace(/^IF\s+.*?:\s*/, '').trim();
+    const nameMatch = clean.match(/^([A-Za-z][A-Za-z0-9\s\-+/.]+?)(?:\s+(?:split|liquid|broadleaf|preventive|fert|foliar|biostimulant|drought|wetting|late|curative|PGR)|\s*\(|\s*\$|$)/i);
+    const productName = nameMatch ? nameMatch[1].trim().toLowerCase() : '';
+    // Try matching product descriptions
+    let desc = null;
+    for (const [key, val] of Object.entries(PRODUCT_DESCRIPTIONS)) {
+      if (productName.includes(key) || clean.toLowerCase().includes(key)) {
+        desc = val;
+        break;
+      }
+    }
+    return { raw: line, description: desc };
+  });
+}
+
+/* Tier dot component */
+function TierDot({ active, label }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, marginRight: 6 }}>
+      <span style={{
+        display: 'inline-block', width: 10, height: 10, borderRadius: '50%',
+        background: active ? D.green : 'transparent',
+        border: `2px solid ${active ? D.green : D.gray}`,
+      }} />
+      <span style={{ fontSize: 10, fontWeight: 600, color: active ? D.green : D.muted }}>{label}</span>
+    </span>
+  );
+}
+
+/* Tier dots row with legend */
+function TierDots({ tiers, tier4x, tier6x }) {
+  if (tiers) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
+        <TierDot active={tiers.bronze} label="B" />
+        <TierDot active={tiers.silver} label="S" />
+        <TierDot active={tiers.enhanced} label="E" />
+        <TierDot active={tiers.premium} label="P" />
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+      <TierDot active={tier4x} label="4x" />
+      <TierDot active={tier6x} label="6x" />
+    </div>
+  );
+}
+
+/* Current Visit Card — the hero card shown by default */
+function CurrentVisitCard({ visit, trackName }) {
+  if (!visit) return null;
+  const primaryProducts = parseProductLines(visit.primary);
+  const secondaryProducts = parseProductLines(visit.secondary);
+  const totalCost = (parseFloat(visit.material_cost) || 0) + (parseFloat(visit.labor_cost) || 0);
+
+  // Extract weather gates and warnings from notes
+  const warnings = [];
+  if (visit.notes) {
+    const parts = visit.notes.split(/\.\s+|\n/).filter(Boolean);
+    parts.forEach(p => {
+      const lower = p.toLowerCase();
+      if (lower.includes('weather') || lower.includes('>90') || lower.includes('<85') || lower.includes('celsius') && lower.includes('app') || lower.includes('threshold') || lower.includes('blackout')) {
+        warnings.push(p.trim().replace(/^\u2605\s*/, ''));
+      }
+    });
+  }
+
+  return (
+    <div style={{
+      background: D.card, border: `2px solid ${D.teal}`, borderRadius: 14,
+      overflow: 'hidden', marginBottom: 8,
+    }}>
+      {/* Visit header */}
+      <div style={{
+        padding: '14px 16px', background: D.teal + '18',
+        borderBottom: `1px solid ${D.teal}44`,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8,
+      }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: D.teal, letterSpacing: 0.5 }}>
+            VISIT {visit.visit} — {visit.month?.toUpperCase()}
+          </div>
+          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>{trackName}</div>
+        </div>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <TierDots tiers={visit.tiers} tier4x={visit.tier_4x} tier6x={visit.tier_6x} />
+        </div>
+      </div>
+
+      <div style={{ padding: '14px 16px' }}>
+        {/* Primary Products */}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Primary Products</div>
+          {primaryProducts.map((p, i) => (
+            <div key={i} style={{ marginBottom: 6 }}>
+              <div style={{ fontSize: 13, color: D.text, lineHeight: 1.4 }}>{p.raw}</div>
+              {p.description && (
+                <div style={{ fontSize: 11, color: D.muted, marginLeft: 12, fontStyle: 'italic', lineHeight: 1.3 }}>{p.description}</div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Secondary / Conditional */}
+        {secondaryProducts.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Secondary / Conditional</div>
+            {secondaryProducts.map((p, i) => (
+              <div key={i} style={{ marginBottom: 6 }}>
+                <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.4 }}>{p.raw}</div>
+                {p.description && (
+                  <div style={{ fontSize: 11, color: D.gray, marginLeft: 12, fontStyle: 'italic', lineHeight: 1.3 }}>{p.description}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Warnings */}
+        {warnings.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            {warnings.map((w, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 4,
+                padding: '6px 10px', background: D.amber + '14', borderRadius: 6,
+                border: `1px solid ${D.amber}33`,
+              }}>
+                <span style={{ color: D.amber, fontSize: 13, flexShrink: 0 }}>{'\u26a0\ufe0f'}</span>
+                <span style={{ fontSize: 12, color: D.amber, lineHeight: 1.4 }}>{w}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Cost summary */}
+        <div style={{
+          display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center',
+          padding: '10px 12px', background: D.bg, borderRadius: 8,
+          border: `1px solid ${D.border}`,
+        }}>
+          <div style={{ fontSize: 12, color: D.muted }}>
+            Materials: <span style={{ color: D.amber, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>${visit.material_cost || '0'}</span>
+          </div>
+          <div style={{ fontSize: 12, color: D.muted }}>
+            Labor: <span style={{ color: D.text, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>${visit.labor_cost || '0'}</span>
+          </div>
+          <div style={{ fontSize: 13, color: D.green, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", marginLeft: 'auto' }}>
+            Total: ${totalCost.toFixed(2)}
+          </div>
+        </div>
+
+        {/* Notes/SOP */}
+        {visit.notes && (
+          <div style={{ marginTop: 10, fontSize: 12, color: D.muted, lineHeight: 1.5, padding: '8px 10px', background: D.bg + '88', borderRadius: 6 }}>
+            {visit.notes}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProtocolReferenceTab() {
   const [programs, setPrograms] = useState(null);
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [trackData, setTrackData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [showFullCalendar, setShowFullCalendar] = useState(false);
 
   useEffect(() => {
     adminFetch('/admin/protocols/programs').then(d => { setPrograms(d); setLoading(false); }).catch(() => setLoading(false));
@@ -1514,6 +1762,7 @@ function ProtocolReferenceTab() {
   const loadTrack = async (key) => {
     setSelectedTrack(key);
     setTrackData(null);
+    setShowFullCalendar(false);
     const param = key === 'tree_shrub' ? 'program=tree_shrub' : `track=${key}`;
     const d = await adminFetch(`/admin/protocols/programs?${param}`);
     setTrackData(d.track || d.program);
@@ -1521,12 +1770,16 @@ function ProtocolReferenceTab() {
 
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading protocols...</div>;
 
+  const currentMonthIndex = new Date().getMonth(); // 0-based
+  const currentMonthAbbr = MONTH_NAMES[currentMonthIndex];
+
+  // Find the current visit based on month
+  const currentVisit = trackData?.visits?.find(v => v.month === currentMonthAbbr);
+
   const thSt = { padding: '8px 10px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, textAlign: 'left', borderBottom: `1px solid ${D.border}` };
   const tdSt = { padding: '8px 10px', fontSize: 12, color: D.text, borderBottom: `1px solid ${D.border}22`, verticalAlign: 'top', lineHeight: 1.5 };
 
-  const tierBadge = (active, label) => (
-    <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: active ? D.green + '22' : D.border + '44', color: active ? D.green : D.muted, fontWeight: 700, marginRight: 3 }}>{label}</span>
-  );
+  const safetyRules = selectedTrack && selectedTrack !== 'tree_shrub' ? (TRACK_SAFETY_RULES[selectedTrack] || []) : [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1542,7 +1795,7 @@ function ProtocolReferenceTab() {
             fontSize: 13, fontWeight: 600, transition: 'all 0.15s',
             borderLeft: `3px solid ${selectedTrack === t.key ? D.teal : D.green}`,
           }}>
-            {'🌿'} {t.name?.substring(0, 35) || t.key}
+            {'\ud83c\udf3f'} {t.name?.substring(0, 35) || t.key}
             <div style={{ fontSize: 10, color: selectedTrack === t.key ? D.white + 'cc' : D.muted, marginTop: 2 }}>{t.visits} visits/year</div>
           </button>
         ))}
@@ -1553,71 +1806,162 @@ function ProtocolReferenceTab() {
           fontSize: 13, fontWeight: 600, transition: 'all 0.15s',
           borderLeft: `3px solid ${selectedTrack === 'tree_shrub' ? D.teal : D.amber}`,
         }}>
-          {'🌳'} Tree & Shrub v3
+          {'\ud83c\udf33'} Tree & Shrub v3
           <div style={{ fontSize: 10, color: selectedTrack === 'tree_shrub' ? D.white + 'cc' : D.muted, marginTop: 2 }}>12 visits/year</div>
         </button>
       </div>
 
       {/* Track detail */}
       {trackData && (
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {/* Header */}
-          <div style={{ padding: '16px 20px', borderBottom: `1px solid ${D.border}`, background: D.bg }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>{trackData.name}</div>
+          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' }}>
+            <div style={{ padding: '14px 16px', background: D.bg }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>{trackData.name}</div>
+            </div>
           </div>
 
-          {/* Notes/warnings */}
-          {trackData.notes?.length > 0 && (
-            <div style={{ padding: '12px 20px', borderBottom: `1px solid ${D.border}`, background: '#1a1a0a' }}>
-              {trackData.notes.map((n, i) => (
-                <div key={i} style={{ fontSize: 12, color: n.startsWith('⚠') ? D.amber : D.green, marginBottom: 4, lineHeight: 1.5 }}>{n}</div>
+          {/* Safety Rules Bar — always visible, compact amber strip */}
+          {safetyRules.length > 0 && (
+            <div style={{
+              display: 'flex', flexWrap: 'wrap', gap: 8, padding: '10px 14px',
+              background: D.amber + '14', border: `1px solid ${D.amber}44`,
+              borderRadius: 10, alignItems: 'center',
+            }}>
+              <span style={{ fontSize: 12, fontWeight: 800, color: D.amber, marginRight: 4, flexShrink: 0 }}>{'\u26a0'} SAFETY:</span>
+              {safetyRules.map((rule, i) => (
+                <span key={i} style={{
+                  fontSize: 11, color: D.amber, padding: '3px 8px',
+                  background: D.amber + '18', borderRadius: 6,
+                  border: `1px solid ${D.amber}33`, whiteSpace: 'nowrap',
+                  fontWeight: 600,
+                }}>
+                  {rule}
+                </span>
               ))}
             </div>
           )}
 
-          {/* Visits table */}
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={thSt}>#</th>
-                  <th style={thSt}>Month</th>
-                  <th style={{ ...thSt, minWidth: 250 }}>Primary Applications</th>
-                  <th style={{ ...thSt, minWidth: 200 }}>Secondary / Conditional</th>
-                  <th style={thSt}>Mat$</th>
-                  <th style={thSt}>Lab$</th>
-                  <th style={thSt}>Tiers</th>
-                  <th style={{ ...thSt, minWidth: 200 }}>Notes / SOP</th>
-                </tr>
-              </thead>
-              <tbody>
-                {trackData.visits?.map((v, i) => (
-                  <tr key={i} style={{ background: i % 2 === 0 ? 'transparent' : D.bg + '44' }}>
-                    <td style={{ ...tdSt, fontWeight: 700, color: D.teal, textAlign: 'center' }}>{v.visit}</td>
-                    <td style={{ ...tdSt, fontWeight: 600, color: D.white, whiteSpace: 'nowrap' }}>{v.month}</td>
-                    <td style={{ ...tdSt, whiteSpace: 'pre-wrap' }}>{v.primary}</td>
-                    <td style={{ ...tdSt, whiteSpace: 'pre-wrap', color: D.muted }}>{v.secondary || '—'}</td>
-                    <td style={{ ...tdSt, fontFamily: "'JetBrains Mono', monospace", color: D.amber, whiteSpace: 'nowrap' }}>{v.material_cost ? `$${v.material_cost}` : '—'}</td>
-                    <td style={{ ...tdSt, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'nowrap' }}>{v.labor_cost ? `$${v.labor_cost}` : '—'}</td>
-                    <td style={tdSt}>
-                      {v.tiers ? (
-                        <>{tierBadge(v.tiers.bronze, 'B')}{tierBadge(v.tiers.silver, 'S')}{tierBadge(v.tiers.enhanced, 'E')}{tierBadge(v.tiers.premium, 'P')}</>
-                      ) : (
-                        <>{tierBadge(v.tier_4x, '4x')}{tierBadge(v.tier_6x, '6x')}</>
-                      )}
-                    </td>
-                    <td style={{ ...tdSt, fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap' }}>{v.notes || '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {/* Current Visit Card — default hero view */}
+          {currentVisit && (
+            <CurrentVisitCard visit={currentVisit} trackName={trackData.name} />
+          )}
+
+          {!currentVisit && trackData.visits?.length > 0 && (
+            <div style={{
+              background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
+              padding: '16px 20px', textAlign: 'center',
+            }}>
+              <div style={{ fontSize: 14, color: D.muted }}>No visit mapped to {currentMonthAbbr} for this track.</div>
+            </div>
+          )}
+
+          {/* Tier legend */}
+          <div style={{
+            display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center',
+            padding: '8px 14px', background: D.card, borderRadius: 8,
+            border: `1px solid ${D.border}`,
+          }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Tier Legend:</span>
+            <span style={{ fontSize: 11, color: D.text }}>
+              <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: D.green, marginRight: 3, verticalAlign: 'middle' }} />
+              = included
+            </span>
+            <span style={{ fontSize: 11, color: D.muted }}>
+              <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', border: `2px solid ${D.gray}`, marginRight: 3, verticalAlign: 'middle', boxSizing: 'border-box' }} />
+              = not included
+            </span>
+            <span style={{ fontSize: 10, color: D.muted }}>B=Bronze S=Silver E=Enhanced P=Premium</span>
           </div>
+
+          {/* View Full Calendar toggle */}
+          <button onClick={() => setShowFullCalendar(prev => !prev)} style={{
+            width: '100%', padding: '12px 16px', background: D.card,
+            border: `1px solid ${D.border}`, borderRadius: 10, cursor: 'pointer',
+            color: D.teal, fontSize: 13, fontWeight: 700,
+            display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6,
+            transition: 'all 0.15s',
+          }}>
+            {showFullCalendar ? 'Hide full calendar' : 'View full calendar'} <span style={{ fontSize: 16, transition: 'transform 0.2s', transform: showFullCalendar ? 'rotate(180deg)' : 'none' }}>{'\u25bc'}</span>
+          </button>
+
+          {/* Full 12-month table — hidden by default */}
+          {showFullCalendar && (
+            <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' }}>
+              {/* Notes/warnings */}
+              {trackData.notes?.length > 0 && (
+                <div style={{ padding: '12px 20px', borderBottom: `1px solid ${D.border}`, background: '#1a1a0a' }}>
+                  {trackData.notes.map((n, i) => (
+                    <div key={i} style={{ fontSize: 12, color: n.startsWith('\u26a0') ? D.amber : D.green, marginBottom: 4, lineHeight: 1.5 }}>{n}</div>
+                  ))}
+                </div>
+              )}
+
+              {/* Visits table */}
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      <th style={thSt}>#</th>
+                      <th style={thSt}>Month</th>
+                      <th style={{ ...thSt, minWidth: 250 }}>Primary Applications</th>
+                      <th style={{ ...thSt, minWidth: 200 }}>Secondary / Conditional</th>
+                      <th style={thSt}>Mat$</th>
+                      <th style={thSt}>Lab$</th>
+                      <th style={thSt}>Tiers</th>
+                      <th style={{ ...thSt, minWidth: 200 }}>Notes / SOP</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trackData.visits?.map((v, i) => {
+                      const isCurrentMonth = v.month === currentMonthAbbr;
+                      return (
+                        <tr key={i} style={{
+                          background: isCurrentMonth ? D.teal + '14' : (i % 2 === 0 ? 'transparent' : D.bg + '44'),
+                          borderLeft: isCurrentMonth ? `3px solid ${D.teal}` : '3px solid transparent',
+                        }}>
+                          <td style={{ ...tdSt, fontWeight: 700, color: isCurrentMonth ? D.teal : D.teal + '99', textAlign: 'center' }}>{v.visit}</td>
+                          <td style={{ ...tdSt, fontWeight: 600, color: isCurrentMonth ? D.white : D.text, whiteSpace: 'nowrap' }}>
+                            {v.month}
+                            {isCurrentMonth && <span style={{ fontSize: 9, color: D.teal, marginLeft: 4, fontWeight: 800 }}>NOW</span>}
+                          </td>
+                          <td style={{ ...tdSt, whiteSpace: 'pre-wrap' }}>
+                            {parseProductLines(v.primary).map((p, pi) => (
+                              <div key={pi} style={{ marginBottom: 3 }}>
+                                <div style={{ color: D.text }}>{p.raw}</div>
+                                {p.description && <div style={{ fontSize: 10, color: D.muted, fontStyle: 'italic', marginLeft: 8 }}>{p.description}</div>}
+                              </div>
+                            ))}
+                          </td>
+                          <td style={{ ...tdSt, whiteSpace: 'pre-wrap', color: D.muted }}>
+                            {parseProductLines(v.secondary).map((p, pi) => (
+                              <div key={pi} style={{ marginBottom: 3 }}>
+                                <div>{p.raw}</div>
+                                {p.description && <div style={{ fontSize: 10, color: D.gray, fontStyle: 'italic', marginLeft: 8 }}>{p.description}</div>}
+                              </div>
+                            ))}
+                            {(!v.secondary) && '\u2014'}
+                          </td>
+                          <td style={{ ...tdSt, fontFamily: "'JetBrains Mono', monospace", color: D.amber, whiteSpace: 'nowrap' }}>{v.material_cost ? `$${v.material_cost}` : '\u2014'}</td>
+                          <td style={{ ...tdSt, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'nowrap' }}>{v.labor_cost ? `$${v.labor_cost}` : '\u2014'}</td>
+                          <td style={tdSt}>
+                            <TierDots tiers={v.tiers} tier4x={v.tier_4x} tier6x={v.tier_6x} />
+                          </td>
+                          <td style={{ ...tdSt, fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap' }}>{v.notes || '\u2014'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {!selectedTrack && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 40, textAlign: 'center' }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>{'📋'}</div>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>{'\ud83d\udccb'}</div>
           <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 4 }}>Select a program above</div>
           <div style={{ fontSize: 13, color: D.muted }}>View the full visit-by-visit protocol with products, rates, costs, and tier requirements.</div>
         </div>
