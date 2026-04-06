@@ -134,22 +134,34 @@ class WordPressManager {
   async fetchAllPostType(site, postType) {
     const items = [];
     let page = 1;
-    const perPage = 100;
+    const perPage = 50;
 
     while (true) {
       try {
-        const batch = await this.wpFetch(
-          site,
-          `/wp/v2/${postType}?per_page=${perPage}&page=${page}&status=publish,draft&context=edit`
-        );
+        // Try context=edit first (includes meta/_elementor_data)
+        let batch;
+        try {
+          batch = await this.wpFetch(
+            site,
+            `/wp/v2/${postType}?per_page=${perPage}&page=${page}&status=publish,draft&context=edit`
+          );
+        } catch (editErr) {
+          // Fallback to view context if edit not allowed
+          console.warn(`[wp-mgr] context=edit failed for ${site.domain}/${postType} page ${page}, trying view: ${editErr.message}`);
+          batch = await this.wpFetch(
+            site,
+            `/wp/v2/${postType}?per_page=${perPage}&page=${page}&status=publish,draft`
+          );
+        }
         if (!Array.isArray(batch) || batch.length === 0) break;
         items.push(...batch);
         if (batch.length < perPage) break;
         page++;
       } catch (err) {
-        // 400 = bad page range, we're done
-        if (err.message.includes('400')) break;
-        throw err;
+        // 400 = bad page range or past last page
+        if (err.message.includes('400') || err.message.includes('rest_post_invalid_page_number')) break;
+        console.error(`[wp-mgr] fetchAllPostType ${site.domain}/${postType} page ${page}: ${err.message}`);
+        break; // Don't throw — return what we have
       }
     }
     return items;
