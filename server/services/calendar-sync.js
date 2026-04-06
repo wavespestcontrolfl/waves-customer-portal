@@ -156,7 +156,11 @@ const CalendarSync = {
     }
 
     // ── Google Calendar ──
+    // DISABLED: Google Calendar "Adam Benetti - Square Appointments" is a mirror
+    // of Square Bookings, so syncing both creates duplicates. Square is the source of truth.
+    const SKIP_GCAL = true;
     try {
+      if (SKIP_GCAL) throw new Error('Google Calendar sync disabled — Square is source of truth');
       if (!GOOGLE_KEY) throw new Error('Set GOOGLE_API_KEY or GOOGLE_CALENDAR_API_KEY in Railway env vars');
 
       const now = new Date();
