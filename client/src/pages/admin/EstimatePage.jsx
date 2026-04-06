@@ -934,6 +934,30 @@ function EstimateToolView() {
                   </div>
                 </div>
 
+                {/* ── Pricing Modifiers ────────────────── */}
+                {E.modifiers?.length > 0 && (
+                <div style={{ marginBottom: 24 }}>
+                  <div style={sSectionTitle}>Pricing Modifiers</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {E.modifiers.map((m, i) => (
+                      <div key={i} style={{
+                        display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
+                        background: m.type === 'up' ? 'rgba(239,68,68,0.06)' : m.type === 'down' ? 'rgba(16,185,129,0.06)' : 'rgba(14,165,233,0.06)',
+                        borderRadius: 6, border: `1px solid ${m.type === 'up' ? 'rgba(239,68,68,0.15)' : m.type === 'down' ? 'rgba(16,185,129,0.15)' : 'rgba(14,165,233,0.15)'}`,
+                      }}>
+                        <span style={{ fontSize: 12, flexShrink: 0 }}>
+                          {m.type === 'up' ? '▲' : m.type === 'down' ? '▼' : '●'}
+                        </span>
+                        <span style={{ fontSize: 12, color: m.type === 'up' ? '#ef4444' : m.type === 'down' ? '#10b981' : C.gray, flex: 1 }}>
+                          {m.label}
+                        </span>
+                        <span style={{ fontSize: 10, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.5 }}>{m.service}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                )}
+
                 {/* ── Recurring Programs ────────────────── */}
                 {E.hasRecurring && (
                   <>

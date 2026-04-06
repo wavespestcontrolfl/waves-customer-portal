@@ -134,6 +134,23 @@ export function calculateEstimate(inputs) {
 
   let R = {}, wgServices = [];
 
+  /* ── pricing modifiers tracking ─────────────────────────── */
+  const modifiers = [];
+  const addMod = (service, label, impact, type = 'info') => modifiers.push({ service, label, impact, type });
+
+  // Track property-level modifiers
+  if (footprint > 0) addMod('property', `Footprint: ${footprint.toLocaleString()} sq ft`, null, 'info');
+  if (hasPool || hasPoolCage) addMod('pest', hasPoolCage ? 'Pool cage: +$22/visit' : 'Pool: +$5/visit', hasPoolCage ? 22 : 5, 'up');
+  if (shrubDensity === 'HEAVY') addMod('pest', 'Heavy shrubs: +$25/visit', 25, 'up');
+  else if (shrubDensity === 'LIGHT') addMod('pest', 'Light shrubs: -$5/visit', -5, 'down');
+  if (treeDensity === 'HEAVY') addMod('pest', 'Heavy trees: +$15/visit', 15, 'up');
+  else if (treeDensity === 'LIGHT') addMod('pest', 'Light trees: -$3/visit', -3, 'down');
+  if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$8/visit', 8, 'up');
+  if (nearWater && nearWater !== 'NONE') addMod('mosquito', `Near water (${nearWater.replace(/_/g, ' ')}): higher mosquito pressure`, null, 'up');
+  if (urgLabel) addMod('one-time', `Urgency: ${urgLabel}`, null, 'up');
+  if (isRC) addMod('one-time', 'Recurring customer: -15% one-time', null, 'down');
+  if (roachMod === 'GERMAN' || roachMod === 'REGULAR') addMod('pest', `Roach modifier (${roachMod}): +15%/visit`, null, 'up');
+
   /* ═══════════ RECURRING ═══════════ */
   let hasRec = false;
 
@@ -690,5 +707,6 @@ export function calculateEstimate(inputs) {
     isRecurringCustomer: isRC,
     hasRecurring: hasRec || ac > 0,
     hasOneTime: hasOT,
+    modifiers,
   };
 }
