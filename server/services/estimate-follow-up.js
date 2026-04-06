@@ -95,15 +95,15 @@ const EstimateFollowUp = {
       }
     } catch { /* columns may not exist */ }
 
-    // 4. Expiring in 5 days
+    // 4. Expiring in 2 days
     try {
       const expiring = await db('estimates')
         .whereIn('status', ['sent', 'viewed'])
         .whereNotNull('expires_at')
         .whereNotNull('customer_phone')
         .whereBetween('expires_at', [
-          new Date(Date.now() + 4 * 86400000),
-          new Date(Date.now() + 6 * 86400000),
+          new Date(Date.now() + 1 * 86400000),
+          new Date(Date.now() + 3 * 86400000),
         ])
         .whereRaw('COALESCE(follow_up_count, 0) < 4');
 

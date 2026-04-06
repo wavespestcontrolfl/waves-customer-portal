@@ -15,7 +15,7 @@ router.post('/', async (req, res, next) => {
 
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 30);
+    expiresAt.setDate(expiresAt.getDate() + 7);
 
     const [estimate] = await db('estimates').insert({
       customer_id: customerId || null,
