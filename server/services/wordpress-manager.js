@@ -131,66 +131,69 @@ class WordPressManager {
         } catch { /* skip */ }
       }
     } else {
-      // Strategy B: Search postmeta via a custom REST endpoint or individual page edit
-      // Elementor stores webhook URLs in _elementor_data postmeta (not in rendered HTML)
-      // We need context=edit on individual pages - try each page that has an Elementor form
-      console.log(`[wp-mgr] Scanning ${site.domain} — checking ${allIds.length} pages for forms`);
+      // Strategy B: Try context=edit on pages known to have forms
+      // Key pages that typically have forms: homepage, quote page, contact page
+      console.log(`[wp-mgr] Scanning ${site.domain} — ${allIds.length} total pages`);
 
-      // Quick filter: only check pages whose rendered content has elementor-form
+      // Check EVERY page's content for forms (parallel, 10 at a time)
       const pagesWithForms = [];
-      // Batch fetch content to find which pages have forms
       for (let i = 0; i < allIds.length; i += 10) {
         const batch = allIds.slice(i, i + 10);
-        const promises = batch.map(({ id, type }) =>
-          this.wpFetch(site, `/wp/v2/${type}/${id}?_fields=id,title,link,content`).catch(() => null)
+        const fetches = await Promise.allSettled(
+          batch.map(({ id, type }) =>
+            fetch(`https://${site.domain}/wp-json/wp/v2/${type}/${id}?_fields=id,title,link,content`, {
+              signal: AbortSignal.timeout(10000),
+            }).then(r => r.ok ? r.json() : null).catch(() => null)
+          )
         );
-        const results2 = await Promise.all(promises);
-        for (const item of results2) {
+        for (const f of fetches) {
+          const item = f.status === 'fulfilled' ? f.value : null;
           if (!item) continue;
           const content = item.content?.rendered || '';
-          if (content.includes('elementor-form') || content.includes('form_fields')) {
+          if (content.includes('elementor-form') || content.includes('elementor-widget-form') || content.includes('form_fields')) {
             pagesWithForms.push(item);
           }
         }
       }
 
-      console.log(`[wp-mgr] ${site.domain}: ${pagesWithForms.length} pages have forms`);
+      console.log(`[wp-mgr] ${site.domain}: ${pagesWithForms.length} pages have Elementor forms`);
 
-      // For pages with forms, try context=edit to get _elementor_data
+      // For each page with forms, get _elementor_data via context=edit (WITH auth)
       for (const page of pagesWithForms) {
         const pageTitle = page.title?.rendered || `Page ${page.id}`;
         console.log(`[wp-mgr] Checking page ${page.id}: ${pageTitle}`);
         try {
           const editItem = await this.wpFetch(site, `/wp/v2/pages/${page.id}?context=edit`);
           const hasElData = !!editItem.meta?._elementor_data;
-          console.log(`[wp-mgr]   context=edit OK, has _elementor_data: ${hasElData}`);
+          console.log(`[wp-mgr]   context=edit OK, _elementor_data: ${hasElData}, meta keys: ${Object.keys(editItem.meta || {}).join(',')}`);
 
           if (hasElData) {
             const found = this.extractWebhooksFromItem(editItem);
-            console.log(`[wp-mgr]   webhooks found: ${found.length}`);
-            if (found.length > 0) {
-              results.forms.push(...found.map(f => ({
-                postId: page.id, postTitle: pageTitle,
-                postType: 'pages', postUrl: page.link, webhookUrl: f.url,
-                formId: f.formId || null, source: f.source,
-              })));
-            }
-          } else {
-            // _elementor_data not in meta — search raw content
-            const rawContent = editItem.content?.raw || '';
-            console.log(`[wp-mgr]   raw content length: ${rawContent.length}, contains webhook: ${rawContent.includes('webhook')}`);
-            const webhookMatches = rawContent.match(/hooks\.zapier\.com[^"'\\<>\s]*/g) || [];
-            for (const match of webhookMatches) {
-              results.forms.push({ postId: page.id, postTitle: pageTitle, postType: 'pages', postUrl: page.link, webhookUrl: 'https://' + match, formId: null, source: 'raw_content' });
+            console.log(`[wp-mgr]   webhooks found via _elementor_data: ${found.length}`);
+            results.forms.push(...found.map(f => ({
+              postId: page.id, postTitle: pageTitle, postType: 'pages', postUrl: page.link,
+              webhookUrl: f.url, formId: f.formId || null, source: f.source,
+            })));
+          }
+
+          // Also search raw content for webhook URLs
+          const rawContent = editItem.content?.raw || editItem.content?.rendered || '';
+          if (rawContent.includes('zapier') || rawContent.includes('webhook')) {
+            console.log(`[wp-mgr]   raw content has webhook/zapier references`);
+            const matches = rawContent.match(/https?:\/\/hooks\.zapier\.com\/hooks\/catch\/[^"'\\<>\s]+/g) || [];
+            for (const url of matches) {
+              if (!results.forms.some(f => f.postId === page.id && f.webhookUrl === url)) {
+                results.forms.push({ postId: page.id, postTitle: pageTitle, postType: 'pages', postUrl: page.link, webhookUrl: url, formId: null, source: 'raw_content' });
+              }
             }
           }
         } catch (editErr) {
-          console.log(`[wp-mgr]   context=edit FAILED: ${editErr.message.substring(0, 100)}`);
-          results.errors.push({ postId: page.id, error: editErr.message.substring(0, 200) });
+          console.log(`[wp-mgr]   context=edit FAILED: ${editErr.message.substring(0, 150)}`);
+          results.errors.push({ postId: page.id, title: pageTitle, error: editErr.message.substring(0, 200) });
         }
       }
 
-      console.log(`[wp-mgr] Scan complete for ${site.domain}: ${results.forms.length} webhooks found, ${results.errors.length} errors`);
+      console.log(`[wp-mgr] Scan complete for ${site.domain}: ${results.forms.length} webhooks, ${pagesWithForms.length} form pages, ${results.errors.length} errors`);
     }
 
     // Update site record
