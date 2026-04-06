@@ -141,7 +141,7 @@ function voiceAgentRoutes(app, httpServer) {
     // Check business hours (8 AM - 9 PM ET)
     const now = new Date();
     const etHour = parseInt(now.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/New_York' }));
-    const isBusinessHours = etHour >= 8 && etHour < 21;
+    const isBusinessHours = etHour >= 8 && etHour < 20;
 
     if (!isBusinessHours && shouldAgentHandle()) {
       // After hours + voice agent ON → go straight to AI agent, skip ringing

@@ -40,7 +40,7 @@ const sessions = new Map();
 let agentConfig = {
   enabled: false,              // master toggle
   afterHoursOnly: true,        // default: only active outside business hours
-  businessHours: { start: 8, end: 18 },
+  businessHours: { start: 8, end: 20 },
   maxRingSeconds: 25,
   model: "claude-sonnet-4-20250514",
   ttsProvider: "ElevenLabs",
