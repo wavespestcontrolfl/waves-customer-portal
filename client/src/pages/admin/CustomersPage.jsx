@@ -1043,8 +1043,8 @@ export default function CustomersPage() {
                       ))}
                       <div>
                         <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Tier</label>
-                        <select value={editForm.tier || 'Bronze'} onChange={e => setEditForm(p => ({ ...p, tier: e.target.value }))} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
-                          <option value="Bronze">Bronze</option><option value="Silver">Silver (10%)</option><option value="Gold">Gold (15%)</option><option value="Platinum">Platinum (20%)</option>
+                        <select value={editForm.tier || ''} onChange={e => setEditForm(p => ({ ...p, tier: e.target.value || null }))} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
+                          <option value="">No Plan</option><option value="Bronze">Bronze</option><option value="Silver">Silver (10%)</option><option value="Gold">Gold (15%)</option><option value="Platinum">Platinum (20%)</option>
                         </select>
                       </div>
                       <div>

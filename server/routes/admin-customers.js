@@ -289,7 +289,7 @@ router.post('/', async (req, res, next) => {
     const [customer] = await db('customers').insert({
       first_name: firstName, last_name: lastName, phone, email,
       address_line1: addressLine1 || '', city: city || '', state: state || 'FL', zip: zip || '',
-      waveguard_tier: tier || 'Bronze', monthly_rate: monthlyRate || 0,
+      waveguard_tier: tier || null, monthly_rate: monthlyRate || 0,
       member_since: new Date().toISOString().split('T')[0],
       referral_code: code, lead_source: leadSource,
       pipeline_stage: pipelineStage || 'new_lead',

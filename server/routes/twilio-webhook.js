@@ -127,7 +127,7 @@ router.post('/sms', async (req, res) => {
           nearest_location_id: numberConfig.location || loc.id,
           pipeline_stage: 'new_lead', pipeline_stage_changed_at: new Date(),
           last_contact_date: new Date(), last_contact_type: Body ? 'sms_inbound' : 'call_inbound',
-          member_since: new Date().toISOString().split('T')[0], waveguard_tier: 'Bronze',
+          member_since: new Date().toISOString().split('T')[0],
           crm_notes: `Inbound ${Body ? 'SMS' : 'call'} from ${numberConfig.domain || 'van wrap'}. ${Body ? 'Message: ' + Body : ''}`,
         }).returning('*');
 

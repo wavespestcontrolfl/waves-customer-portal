@@ -97,7 +97,7 @@ async function syncJobsFromSchedule(date) {
       lng: svc.lng ? parseFloat(svc.lng) : null,
       service_type: svc.service_type?.toLowerCase().replace(/[\s-]+/g, '_') || 'general_pest',
       job_category: jobCategory,
-      waveguard_tier: (svc.waveguard_tier || 'Bronze').toLowerCase(),
+      waveguard_tier: svc.waveguard_tier ? svc.waveguard_tier.toLowerCase() : null,
       assigned_tech_id: dispatchTechId,
       scheduled_date: d,
       scheduled_time: svc.window_start || '09:00',

@@ -91,7 +91,7 @@ router.post('/', async (req, res) => {
       last_contact_date: new Date(),
       last_contact_type: 'form_submission',
       member_since: new Date().toISOString().split('T')[0],
-      waveguard_tier: 'Bronze',
+      waveguard_tier: null,
     }).returning('*');
 
     await db('property_preferences').insert({ customer_id: customer.id });
