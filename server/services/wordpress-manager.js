@@ -123,22 +123,27 @@ class WordPressManager {
       console.log(`[wp-mgr] Scan complete for ${site.domain}: ${results.forms.length} webhooks found on ${pagesWithForms.length} pages`);
     }
 
-    // Update site record
-    const webhookUrls = results.forms.map((f) => f.webhookUrl);
-    const hasZapier = webhookUrls.some((u) => u.includes('zapier'));
-    const hasPortal = webhookUrls.some((u) => !u.includes('zapier'));
-    let webhook_status = 'unknown';
-    if (results.forms.length === 0) webhook_status = 'scanned_no_webhooks';
-    else if (hasZapier && hasPortal) webhook_status = 'mixed';
-    else if (hasZapier) webhook_status = 'zapier';
-    else webhook_status = 'portal';
+    // Update site record (minimal DB write)
+    try {
+      const webhookUrls = results.forms.map((f) => f.webhookUrl);
+      const hasZapier = webhookUrls.some((u) => u.includes('zapier'));
+      const hasPortal = webhookUrls.some((u) => u.includes('webhook') && !u.includes('zapier'));
+      const hasDbOnly = webhookUrls.some((u) => u.includes('stored_in_elementor'));
+      let webhook_status = 'scanned_no_webhooks';
+      if (hasZapier) webhook_status = 'zapier';
+      else if (hasPortal) webhook_status = 'portal';
+      else if (hasDbOnly) webhook_status = 'needs_plugin';
+      if (hasZapier && hasPortal) webhook_status = 'mixed';
 
-    await db('wordpress_sites').where({ id: siteId }).update({
-      forms_count: results.forms.length,
-      webhook_status,
-      last_synced_at: new Date(),
-      last_error: results.errors.length > 0 ? results.errors.map((e) => e.error).join('; ') : null,
-    });
+      await db('wordpress_sites').where({ id: siteId }).update({
+        forms_count: results.forms.length,
+        webhook_status,
+        last_synced_at: new Date(),
+        last_error: null,
+      });
+    } catch (dbErr) {
+      console.error(`[wp-mgr] DB update failed: ${dbErr.message}`);
+    }
 
     return results;
   }
