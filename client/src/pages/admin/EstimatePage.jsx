@@ -353,6 +353,7 @@ function EstimateToolView() {
       if (data.satellite) {
         setSatelliteData({
           imageUrl: data.satellite.closeUrl,
+          closeUrl: data.satellite.closeUrl,
           wideUrl: data.satellite.wideUrl,
           inServiceArea: data.satellite.inServiceArea,
         });
@@ -599,11 +600,14 @@ function EstimateToolView() {
     if (!savedId) { alert('Save the estimate first.'); return; }
     setSending(true);
     try {
+      const method = form.sendMethod || 'both';
       const r = await fetch(`/api/admin/estimates/${savedId}/send`, {
         method: 'POST', headers: authHeaders,
+        body: JSON.stringify({ sendMethod: method }),
       });
       if (!r.ok) throw new Error('Send failed: ' + r.status);
-      alert('Estimate sent!');
+      const label = method === 'sms' ? 'SMS' : method === 'email' ? 'email' : 'SMS & email';
+      alert(`Estimate sent via ${label}!`);
     } catch (e) { alert(e.message); }
     setSending(false);
   }
@@ -652,12 +656,23 @@ function EstimateToolView() {
               <button style={sBtnSm('transparent', C.gray)} onClick={() => { setForm(f => ({ ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family', hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE', nearWater: 'NO', bedArea: '', palmCount: '', treeCount: '' })); setLookupStatus({ type: '', msg: '' }); setSatelliteStatus({ type: '', msg: '' }); setSatelliteData(null); setEstimate(null); }}>Clear All</button>
             </div>
             {satelliteStatus.type && <div style={statusStyle(satelliteStatus.type)}>{satelliteStatus.msg}</div>}
-            {satelliteData && satelliteData.imageUrl && (
+            {satelliteData && (satelliteData.imageUrl || satelliteData.closeUrl) && (
               <div style={{ marginBottom: 12 }}>
-                <img src={satelliteData.imageUrl} alt="Satellite view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, marginBottom: 8 }} />
+                <div style={{ display: 'grid', gridTemplateColumns: satelliteData.wideUrl ? '1fr 1fr' : '1fr', gap: 6, marginBottom: 8 }}>
+                  <div>
+                    <img src={satelliteData.closeUrl || satelliteData.imageUrl} alt="Close view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
+                    <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Close View</div>
+                  </div>
+                  {satelliteData.wideUrl && (
+                    <div>
+                      <img src={satelliteData.wideUrl} alt="Area view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
+                      <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Area View</div>
+                    </div>
+                  )}
+                </div>
                 {satelliteData.fieldVerify?.length > 0 && (
                   <div style={{ fontSize: 12, color: C.red, fontWeight: 600, padding: '6px 10px', background: 'rgba(239,68,68,0.1)', borderRadius: 6 }}>
-                    Field verify: {satelliteData.fieldVerify.map(f => f.replace(/_/g, ' ')).join(', ')}
+                    Field verify: {satelliteData.fieldVerify.map(f => typeof f === 'string' ? f.replace(/_/g, ' ') : (f.field || '')).join(', ')}
                   </div>
                 )}
                 {satelliteData.notes && (
@@ -866,14 +881,31 @@ function EstimateToolView() {
                   </div>
                 </div>
               )}
-              <div className="estimate-send-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <button style={{ ...sBtn(C.green, 'white'), fontSize: 14, padding: '14px 20px' }} onClick={async () => {
-                  if (!form.customerPhone) { alert('Enter a phone number.'); return; }
-                  if (!estimate) { doGenerate(); }
-                  await doSave();
-                  setTimeout(() => doSend(), 500);
-                }} disabled={sending}>{sending ? 'Sending...' : 'SEND VIA SMS & EMAIL'}</button>
-                <button style={{ ...sBtn('transparent', C.gray), fontSize: 14, padding: '14px 20px', border: `1px solid ${C.border}` }} onClick={() => setShowSendForm(false)}>Cancel</button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                  <button style={{ ...sBtn(C.green, 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
+                    if (!form.customerPhone) { alert('Enter a phone number.'); return; }
+                    if (!estimate) { doGenerate(); }
+                    set('sendMethod', 'sms');
+                    await doSave();
+                    setTimeout(() => doSend(), 500);
+                  }} disabled={sending}>{sending ? '...' : 'SMS Only'}</button>
+                  <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
+                    if (!form.customerEmail) { alert('Enter an email.'); return; }
+                    if (!estimate) { doGenerate(); }
+                    set('sendMethod', 'email');
+                    await doSave();
+                    setTimeout(() => doSend(), 500);
+                  }} disabled={sending}>{sending ? '...' : 'Email Only'}</button>
+                  <button style={{ ...sBtn(C.teal, 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
+                    if (!form.customerPhone && !form.customerEmail) { alert('Enter phone or email.'); return; }
+                    if (!estimate) { doGenerate(); }
+                    set('sendMethod', 'both');
+                    await doSave();
+                    setTimeout(() => doSend(), 500);
+                  }} disabled={sending}>{sending ? '...' : 'Both'}</button>
+                </div>
+                <button style={{ ...sBtn('transparent', C.gray), fontSize: 13, padding: '10px 16px', border: `1px solid ${C.border}` }} onClick={() => setShowSendForm(false)}>Cancel</button>
               </div>
             </div>
           )}
@@ -928,7 +960,7 @@ function EstimateToolView() {
                     {/* Recommendation */}
                     {E.recurring.serviceCount >= 2 && (() => {
                       const parts = [];
-                      if (R.lawn) parts.push('Enhanced Lawn');
+                      if (R.lawn) parts.push('Lawn Care');
                       if (R.pest) parts.push(R.pest.label + ' Pest');
                       if (R.mq) { const ri = E.results.mqMeta?.ri ?? 1; parts.push(R.mq[ri].n + ' Mosquito'); }
                       if (R.tmBait) parts.push('Trelona Premier');
@@ -941,9 +973,9 @@ function EstimateToolView() {
                     })()}
 
                     {/* Field verify */}
-                    {E.fieldVerify.length > 0 && (
+                    {E.fieldVerify?.length > 0 && (
                       <div style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: '14px 18px', marginBottom: 20, fontSize: 14, color: C.gray, lineHeight: 1.6 }}>
-                        <strong style={{ color: C.red }}>Field Verify:</strong> {E.fieldVerify.join(', ')} — estimated from satellite data, tech should confirm on-site.
+                        <strong style={{ color: C.red }}>Field Verify:</strong> {E.fieldVerify.map(f => typeof f === 'string' ? f : (f.field || f.name || JSON.stringify(f))).join(', ')} — estimated from satellite data, tech should confirm on-site.
                       </div>
                     )}
                   </>

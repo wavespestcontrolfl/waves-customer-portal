@@ -40,18 +40,19 @@ router.post('/:id/send', async (req, res, next) => {
 
     const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+    const sendMethod = req.body?.sendMethod || 'both';
 
     // Send SMS
-    if (estimate.customer_phone) {
+    if ((sendMethod === 'sms' || sendMethod === 'both') && estimate.customer_phone) {
       try {
         await TwilioService.sendSMS(estimate.customer_phone,
-          `Hi ${firstName}! Your Waves Pest Control estimate is ready 🌊\n\n${viewUrl}\n\nQuestions? Reply to this text or call (941) 318-7612.`
+          `Hi ${firstName}! Your Waves Pest Control estimate is ready.\n\n${viewUrl}\n\nQuestions? Reply to this text or call (941) 318-7612.`
         );
       } catch (e) { logger.error(`Estimate SMS failed: ${e.message}`); }
     }
 
     // Send Email via Google Workspace SMTP
-    if (estimate.customer_email && process.env.GOOGLE_SMTP_PASSWORD) {
+    if ((sendMethod === 'email' || sendMethod === 'both') && estimate.customer_email && process.env.GOOGLE_SMTP_PASSWORD) {
       try {
         const nodemailer = require('nodemailer');
         const transporter = nodemailer.createTransport({
