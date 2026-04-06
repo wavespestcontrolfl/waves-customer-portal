@@ -1210,11 +1210,18 @@ export default function SchedulePage() {
   const handleSyncSquare = async () => {
     setSyncingSquare(true);
     try {
-      const result = await adminFetch('/admin/schedule/sync-square', {
-        method: 'POST', body: JSON.stringify({ days: 14 }),
+      const r = await fetch(`${API_BASE}/admin/schedule/sync-square`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days: 14 }),
       });
-      alert(`Square sync: ${result.created} new, ${result.updated} updated, ${result.skipped} unchanged`);
-      fetchSchedule(date);
+      const result = await r.json();
+      if (!r.ok) {
+        alert(`Square sync error: ${result.error || r.status}${result.hint ? '\n\n' + result.hint : ''}`);
+      } else {
+        alert(`Square sync: ${result.created} new, ${result.updated} updated, ${result.skipped} unchanged`);
+        fetchSchedule(date);
+      }
     } catch (e) {
       alert('Square sync failed: ' + e.message);
     }

@@ -304,15 +304,21 @@ const SquareService = {
       const end = new Date();
       end.setDate(end.getDate() + days);
 
-      const response = await bookingsApi.listBookings(
-        100,          // limit
-        undefined,    // cursor
-        undefined,    // customerId
-        undefined,    // teamMemberId
-        undefined,    // locationId
-        now.toISOString(),   // startAtMin
-        end.toISOString(),   // startAtMax
-      );
+      // Try with location ID first (required for some accounts)
+      const locationId = config.square.locationId || process.env.SQUARE_LOCATION_ID;
+      let response;
+      try {
+        response = await bookingsApi.listBookings(
+          100, undefined, undefined, undefined, locationId,
+          now.toISOString(), end.toISOString(),
+        );
+      } catch (locErr) {
+        // Retry without location ID
+        response = await bookingsApi.listBookings(
+          100, undefined, undefined, undefined, undefined,
+          now.toISOString(), end.toISOString(),
+        );
+      }
 
       const bookings = response.result?.bookings || [];
 

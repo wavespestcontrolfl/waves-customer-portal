@@ -397,7 +397,15 @@ router.post('/sync-square', async (req, res, next) => {
     const days = parseInt(req.body.days) || 14;
     const result = await SquareBookingSync.sync(days);
     res.json(result);
-  } catch (err) { next(err); }
+  } catch (err) {
+    logger.error(`[sync-square] ${err.message}`);
+    res.status(500).json({
+      error: err.message,
+      hint: err.message.includes('not onboarded') ? 'Square Appointments may not be enabled for this account' :
+            err.message.includes('401') ? 'Check SQUARE_ACCESS_TOKEN and SQUARE_ENVIRONMENT=production in Railway env vars' :
+            'Check server logs for details',
+    });
+  }
 });
 
 module.exports = router;
