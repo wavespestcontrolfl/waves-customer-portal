@@ -144,6 +144,20 @@ const CalendarSync = {
             // Fallback without new columns
             await db('scheduled_services').insert(ins);
           }
+          // Register for appointment reminders (no confirmation SMS for square_sync)
+          try {
+            const AppointmentReminders = require('./appointment-reminders');
+            const newSvc = await db('scheduled_services').where({ square_booking_id: b.id }).first();
+            if (newSvc) {
+              await AppointmentReminders.registerAppointment(
+                newSvc.id, customerId, start.toISOString(),
+                b.serviceName || 'Service', 'square_sync'
+              );
+            }
+          } catch (remErr) {
+            logger.error(`[cal-sync] Reminder registration failed: ${remErr.message}`);
+          }
+
           results.square.created++;
         } catch (err) {
           logger.error(`[cal-sync] Square booking insert failed: ${err.message}`);

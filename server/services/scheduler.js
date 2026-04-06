@@ -69,17 +69,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Appointment reminders (72h, 24h, 1h) from DB + Google Calendar
-  // Replaces Zapier zaps #12, #13, #20
+  // EVERY 15 MIN — Appointment reminders (72h, 24h) from appointment_reminders table
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
-    logger.info('Running: appointment reminder check');
+  cron.schedule('*/15 * * * *', async () => {
     try {
-      const AppointmentReminders = require('./appointment-reminders');
-      const result = await AppointmentReminders.checkAll();
-      if (result.sent > 0) logger.info(`Appointment reminders: ${result.sent} sent, ${result.skipped} skipped`);
+      const reminders = require('./appointment-reminders');
+      await reminders.checkAndSendReminders();
     } catch (err) {
-      logger.error(`Appointment reminder check failed: ${err.message}`);
+      logger.error(`Reminder check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -96,22 +93,6 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Calendar sync failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // EVERY 15 MIN — Check for new appointments + WDO inspections
-  // Replaces Zapier zaps #21, #22
-  // =========================================================================
-  cron.schedule('*/15 * * * *', async () => {
-    try {
-      const AppointmentReminders = require('./appointment-reminders');
-      const result = await AppointmentReminders.checkNewAppointments();
-      if (result.confirmations > 0 || result.wdoPreps > 0) {
-        logger.info(`New appointments: ${result.confirmations} confirmations, ${result.wdoPreps} WDO preps`);
-      }
-    } catch (err) {
-      logger.error(`New appointment check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

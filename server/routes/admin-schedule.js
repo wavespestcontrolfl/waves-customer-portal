@@ -242,6 +242,16 @@ router.post('/', async (req, res, next) => {
       );
     }
 
+    // Register for appointment reminders (sends confirmation for admin_manual)
+    try {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        svc.id, customerId,
+        scheduledDate + 'T' + (windowStart || '08:00'),
+        serviceType, 'admin_manual'
+      );
+    } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
+
     // Trigger appointment type automations
     try {
       const AppointmentTagger = require('../services/appointment-tagger');
@@ -318,6 +328,14 @@ router.put('/:id/status', async (req, res, next) => {
 
       // Schedule a review request SMS for 2 hours after completion
       scheduleReviewRequest(svc);
+    }
+
+    // Handle cancellation — notify via appointment reminders
+    if (status === 'cancelled') {
+      try {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        await AppointmentReminders.handleCancellation(req.params.id);
+      } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
     }
 
     await db('scheduled_services').where({ id: req.params.id }).update(updates);
