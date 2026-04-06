@@ -295,32 +295,42 @@ const SquareService = {
    */
   async getUpcomingBookings(days = 7) {
     if (!bookingsApi) {
-      logger.warn('[square] Bookings API not available');
-      return [];
+      throw new Error('Square Bookings API not available — check SQUARE_ACCESS_TOKEN');
     }
 
-    try {
-      const now = new Date();
-      const end = new Date();
-      end.setDate(end.getDate() + days);
+    const now = new Date();
+    // Look back 1 day + forward to catch in-progress bookings
+    const start = new Date(now.getTime() - 86400000);
+    const end = new Date();
+    end.setDate(end.getDate() + days);
 
-      // Try with location ID first (required for some accounts)
-      const locationId = config.square.locationId || process.env.SQUARE_LOCATION_ID;
-      let response;
+    const locationId = config.square.locationId || process.env.SQUARE_LOCATION_ID;
+    logger.info(`[square] Fetching bookings: ${start.toISOString()} to ${end.toISOString()}, location=${locationId || 'all'}, env=${config.square.environment}`);
+
+    let response;
+    // Try with location ID first
+    try {
+      response = await bookingsApi.listBookings(
+        100, undefined, undefined, undefined, locationId || undefined,
+        start.toISOString(), end.toISOString(),
+      );
+    } catch (locErr) {
+      logger.warn(`[square] listBookings with location failed: ${locErr.message}`);
+      // Retry without location ID
       try {
         response = await bookingsApi.listBookings(
-          100, undefined, undefined, undefined, locationId,
-          now.toISOString(), end.toISOString(),
-        );
-      } catch (locErr) {
-        // Retry without location ID
-        response = await bookingsApi.listBookings(
           100, undefined, undefined, undefined, undefined,
-          now.toISOString(), end.toISOString(),
+          start.toISOString(), end.toISOString(),
         );
+      } catch (err2) {
+        // Throw with useful info
+        const detail = err2.errors?.[0]?.detail || err2.message;
+        throw new Error(`Square Bookings API failed: ${detail} (env=${config.square.environment})`);
       }
+    }
 
-      const bookings = response.result?.bookings || [];
+    const bookings = response.result?.bookings || [];
+    logger.info(`[square] Found ${bookings.length} bookings from Square`);
 
       // Enrich with customer names from Square
       const customerIds = [...new Set(bookings.map(b => b.customerId).filter(Boolean))];
@@ -356,10 +366,6 @@ const SquareService = {
           createdAt: b.createdAt,
         };
       }).sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
-    } catch (err) {
-      logger.error(`[square] Failed to fetch bookings: ${err.message}`);
-      return [];
-    }
   },
 };
 
