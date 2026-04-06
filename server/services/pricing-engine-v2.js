@@ -1185,9 +1185,9 @@ function calcWaveGuard(recurring) {
   // Determine tier and discount
   // Using 5/10/15% as per estimating tool (not 10/20/30% from website — flagged as unresolved)
   let tier = 'Bronze', discountPct = 0;
-  if (serviceCount >= 4) { tier = 'Platinum'; discountPct = 0.15; }
-  else if (serviceCount === 3) { tier = 'Gold'; discountPct = 0.10; }
-  else if (serviceCount === 2) { tier = 'Silver'; discountPct = 0.05; }
+  if (serviceCount >= 4) { tier = 'Platinum'; discountPct = 0.20; }
+  else if (serviceCount === 3) { tier = 'Gold'; discountPct = 0.15; }
+  else if (serviceCount === 2) { tier = 'Silver'; discountPct = 0.10; }
 
   const discountAmount = Math.round(annualBeforeDiscount * discountPct * 100) / 100;
   const annualAfterDiscount = Math.round((annualBeforeDiscount - discountAmount) * 100) / 100;
