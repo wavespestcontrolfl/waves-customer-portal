@@ -27,6 +27,53 @@ router.post('/sms', async (req, res) => {
     // Try to match sender to a customer
     const customer = await db('customers').where({ phone: From }).first();
 
+    // ── STOP / UNSUBSCRIBE keyword handling ──
+    const bodyTrimmed = (Body || '').trim().toUpperCase();
+    const STOP_KEYWORDS = ['STOP', 'UNSUBSCRIBE', 'CANCEL', 'QUIT', 'END'];
+    const START_KEYWORDS = ['START', 'SUBSCRIBE', 'YES'];
+
+    if (customer && STOP_KEYWORDS.includes(bodyTrimmed)) {
+      try {
+        await db('notification_prefs').where({ customer_id: customer.id }).update({ sms_enabled: false });
+        logger.info(`[sms-optout] Customer ${customer.id} (${customer.first_name}) opted out of SMS`);
+      } catch (e) { logger.error(`[sms-optout] Failed to update prefs: ${e.message}`); }
+
+      await db('sms_log').insert({
+        customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
+        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
+      }).catch(() => {});
+
+      await db('activity_log').insert({
+        customer_id: customer.id, action: 'sms_opt_out',
+        description: `${customer.first_name} ${customer.last_name} unsubscribed from SMS (keyword: ${bodyTrimmed})`,
+      }).catch(() => {});
+
+      return res.type('text/xml').send(
+        `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
+      );
+    }
+
+    if (customer && START_KEYWORDS.includes(bodyTrimmed)) {
+      try {
+        await db('notification_prefs').where({ customer_id: customer.id }).update({ sms_enabled: true });
+        logger.info(`[sms-optin] Customer ${customer.id} (${customer.first_name}) re-subscribed to SMS`);
+      } catch (e) { logger.error(`[sms-optin] Failed to update prefs: ${e.message}`); }
+
+      await db('sms_log').insert({
+        customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
+        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
+      }).catch(() => {});
+
+      await db('activity_log').insert({
+        customer_id: customer.id, action: 'sms_opt_in',
+        description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
+      }).catch(() => {});
+
+      return res.type('text/xml').send(
+        `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`
+      );
+    }
+
     // Check for pending reschedule reply FIRST
     if (customer && numberConfig.type === 'location') {
       try {

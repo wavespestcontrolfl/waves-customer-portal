@@ -129,4 +129,133 @@ router.get('/square-bookings', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/forecast — revenue forecasting
+router.get('/forecast', async (req, res, next) => {
+  try {
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+
+    // MRR — sum of monthly_rate for all active customers
+    const mrrResult = await db('customers')
+      .where({ active: true })
+      .where('monthly_rate', '>', 0)
+      .sum('monthly_rate as total')
+      .count('* as count')
+      .first();
+    const mrr = parseFloat(mrrResult?.total || 0);
+    const arr = mrr * 12;
+    const activeRecurringCount = parseInt(mrrResult?.count || 0);
+
+    // Helper: get date N days from now
+    function futureDate(days) {
+      const d = new Date(today.getTime() + days * 86400000);
+      return d.toISOString().split('T')[0];
+    }
+
+    const date30 = futureDate(30);
+    const date60 = futureDate(60);
+    const date90 = futureDate(90);
+
+    // One-time scheduled services revenue in next 30/60/90 days
+    // Use estimated_price if available, otherwise a default estimate
+    const DEFAULT_SERVICE_PRICE = 150;
+
+    async function getOneTimeRevenue(endDate) {
+      try {
+        const result = await db('scheduled_services')
+          .where('scheduled_date', '>=', todayStr)
+          .where('scheduled_date', '<=', endDate)
+          .whereNotIn('status', ['cancelled'])
+          .select(
+            db.raw('COUNT(*) as count'),
+            db.raw('COALESCE(SUM(estimated_price), 0) as estimated_total')
+          )
+          .first();
+        const count = parseInt(result?.count || 0);
+        const estimatedTotal = parseFloat(result?.estimated_total || 0);
+        // If no estimated_price column or all zeros, use default
+        return estimatedTotal > 0 ? estimatedTotal : count * DEFAULT_SERVICE_PRICE;
+      } catch {
+        // estimated_price column may not exist
+        const result = await db('scheduled_services')
+          .where('scheduled_date', '>=', todayStr)
+          .where('scheduled_date', '<=', endDate)
+          .whereNotIn('status', ['cancelled'])
+          .count('* as count')
+          .first();
+        return parseInt(result?.count || 0) * DEFAULT_SERVICE_PRICE;
+      }
+    }
+
+    // Pipeline estimates — sent/viewed status, apply conversion rate
+    const PIPELINE_CONVERSION_RATE = 0.35; // 35% estimated close rate
+
+    async function getPipelineRevenue() {
+      const estimates = await db('estimates')
+        .whereIn('status', ['sent', 'viewed'])
+        .where('expires_at', '>', new Date().toISOString())
+        .select('monthly_total', 'annual_total', 'onetime_total');
+
+      let totalMonthly = 0;
+      let totalOneTime = 0;
+      for (const e of estimates) {
+        totalMonthly += parseFloat(e.monthly_total || 0);
+        totalOneTime += parseFloat(e.onetime_total || 0);
+      }
+
+      return {
+        count: estimates.length,
+        rawMonthly: totalMonthly,
+        rawOneTime: totalOneTime,
+        weightedMonthly: totalMonthly * PIPELINE_CONVERSION_RATE,
+        weightedOneTime: totalOneTime * PIPELINE_CONVERSION_RATE,
+      };
+    }
+
+    const [oneTime30, oneTime60, oneTime90, pipeline] = await Promise.all([
+      getOneTimeRevenue(date30),
+      getOneTimeRevenue(date60),
+      getOneTimeRevenue(date90),
+      getPipelineRevenue(),
+    ]);
+
+    // Recurring revenue projections for each window
+    const recurring30 = mrr;
+    const recurring60 = mrr * 2;
+    const recurring90 = mrr * 3;
+
+    res.json({
+      mrr,
+      arr,
+      activeRecurringCustomers: activeRecurringCount,
+      pipeline: {
+        estimateCount: pipeline.count,
+        conversionRate: PIPELINE_CONVERSION_RATE,
+        rawMonthly: pipeline.rawMonthly,
+        rawOneTime: pipeline.rawOneTime,
+        weightedMonthly: pipeline.weightedMonthly,
+        weightedOneTime: pipeline.weightedOneTime,
+      },
+      next30: {
+        recurring: recurring30,
+        oneTime: oneTime30,
+        pipeline: pipeline.weightedMonthly + pipeline.weightedOneTime,
+        total: recurring30 + oneTime30 + pipeline.weightedMonthly + pipeline.weightedOneTime,
+      },
+      next60: {
+        recurring: recurring60,
+        oneTime: oneTime60,
+        pipeline: pipeline.weightedMonthly * 2 + pipeline.weightedOneTime,
+        total: recurring60 + oneTime60 + pipeline.weightedMonthly * 2 + pipeline.weightedOneTime,
+      },
+      next90: {
+        recurring: recurring90,
+        oneTime: oneTime90,
+        pipeline: pipeline.weightedMonthly * 3 + pipeline.weightedOneTime,
+        total: recurring90 + oneTime90 + pipeline.weightedMonthly * 3 + pipeline.weightedOneTime,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

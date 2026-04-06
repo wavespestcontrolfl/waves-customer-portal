@@ -163,6 +163,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // NIGHTLY 2AM — Recalculate customer health scores
+  // =========================================================================
+  cron.schedule('0 2 * * *', async () => {
+    try {
+      const { calculateAllHealthScores } = require('./customer-health-v2');
+      const result = await calculateAllHealthScores();
+      logger.info(`Health scores updated: ${result.updated} customers`);
+    } catch (err) {
+      logger.error(`Health score update failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // 28TH OF MONTH 10AM — Send billing reminders (for customers who opted in)
   // =========================================================================
   cron.schedule('0 10 28 * *', async () => {

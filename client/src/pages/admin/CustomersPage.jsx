@@ -527,6 +527,46 @@ function CustomerIntelligenceTab() {
 // =============================================================================
 const KANBAN_STAGES = ['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'won', 'active_customer', 'at_risk'];
 
+function CustomerTimeline({ customerId }) {
+  const [timeline, setTimeline] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    adminFetch(`/admin/customers/${customerId}/timeline`)
+      .then(d => { setTimeline(d.timeline || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [customerId]);
+
+  if (loading) return <div style={{ color: D.muted, fontSize: 12, padding: 12 }}>Loading timeline...</div>;
+  if (!timeline.length) return null;
+
+  const ICONS = { sms: '💬', call: '📞', service: '🔧', payment: '💰', review: '⭐', scheduled_service: '📅', interaction: '📝', activity: '📋' };
+  const COLORS = { sms: D.teal, call: '#60a5fa', service: D.green, payment: D.green, review: D.amber, scheduled_service: D.teal, interaction: D.muted, activity: D.muted };
+  const items = showAll ? timeline : timeline.slice(0, 8);
+
+  return (
+    <div style={{ gridColumn: '1 / -1', marginTop: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1 }}>Timeline ({timeline.length})</div>
+        {timeline.length > 8 && <button onClick={() => setShowAll(!showAll)} style={{ background: 'none', border: 'none', color: D.teal, fontSize: 11, cursor: 'pointer' }}>{showAll ? 'Show less' : `Show all ${timeline.length}`}</button>}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {items.map((item, i) => (
+          <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 0', borderBottom: i < items.length - 1 ? `1px solid ${D.border}22` : 'none', fontSize: 12 }}>
+            <span style={{ fontSize: 14, width: 20, textAlign: 'center', flexShrink: 0 }}>{ICONS[item.type] || '•'}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ color: COLORS[item.type] || D.muted, fontWeight: 600 }}>{item.title}</span>
+              {item.description && <span style={{ color: D.muted, marginLeft: 6 }}>— {item.description.substring(0, 80)}</span>}
+            </div>
+            <span style={{ color: D.muted, fontSize: 10, fontFamily: 'JetBrains Mono, monospace', flexShrink: 0 }}>{item.date ? timeAgo(item.date) : ''}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function CustomersPage() {
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
@@ -872,7 +912,7 @@ export default function CustomersPage() {
                   }}>
                     {!expandedData ? <div style={{ color: D.muted, textAlign: 'center', padding: 20 }}>Loading...</div> :
                     expandedData.error ? <div style={{ color: D.red, textAlign: 'center' }}>Failed to load details</div> : (
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+                      <><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
                         {/* Column 1: Contact Info */}
                         <div>
                           <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Contact</div>
@@ -941,6 +981,8 @@ export default function CustomersPage() {
                           </div>
                         </div>
                       </div>
+                      <CustomerTimeline customerId={c.id} />
+                      </>
                     )}
                   </div>
                 )}

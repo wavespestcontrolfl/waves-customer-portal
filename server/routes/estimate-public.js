@@ -52,6 +52,17 @@ router.put('/:token/accept', async (req, res, next) => {
 
     await db('estimates').where({ id: estimate.id }).update({ status: 'accepted', accepted_at: db.fn.now() });
 
+    // Send acceptance SMS to customer (#5 — last Zapier zap replacement)
+    if (estimate.customer_phone) {
+      try {
+        const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
+        await TwilioService.sendSMS(estimate.customer_phone,
+          `Hey ${firstName}! Great news — your Waves Pest Control estimate has been accepted! We'll be in touch shortly to schedule your first service. Questions? Reply here or call (941) 318-7612. — Waves 🌊`
+        );
+        logger.info(`[estimate-accept] Acceptance SMS sent to ${firstName} (${estimate.customer_phone})`);
+      } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
+    }
+
     // Create customer if doesn't exist
     let customerId = estimate.customer_id;
     if (!customerId && estimate.customer_phone) {
@@ -109,6 +120,15 @@ router.put('/:token/accept', async (req, res, next) => {
           `🎉 Estimate accepted! ${estimate.customer_name} at ${estimate.address} — ${estimate.waveguard_tier || 'Bronze'} WaveGuard $${estimate.monthly_total}/mo. Onboarding link sent.`
         );
       } catch (e) { logger.error(`Estimate accept SMS failed: ${e.message}`); }
+    }
+
+    // Auto-convert estimate to active customer (Feature #5)
+    if (customerId) {
+      try {
+        const EstimateConverter = require('../services/estimate-converter');
+        await EstimateConverter.convertEstimate(estimate.id);
+        logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id}`);
+      } catch (e) { logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`); }
     }
 
     res.json({ success: true, onboardingToken });

@@ -120,6 +120,110 @@ router.get('/pipeline/view', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/timeline — unified customer timeline
+router.get('/:id/timeline', async (req, res, next) => {
+  try {
+    const customerId = req.params.id;
+    const customer = await db('customers').where({ id: customerId }).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const timeline = [];
+
+    // customer_interactions
+    const interactions = await db('customer_interactions').where({ customer_id: customerId }).select('interaction_type', 'subject', 'body', 'created_at');
+    for (const i of interactions) {
+      timeline.push({
+        type: 'interaction', title: i.subject || `${i.interaction_type} interaction`,
+        description: i.body || '', date: i.created_at,
+        metadata: { interactionType: i.interaction_type },
+      });
+    }
+
+    // sms_log
+    const smsLogs = await db('sms_log').where({ customer_id: customerId }).select('direction', 'message_body', 'created_at');
+    for (const s of smsLogs) {
+      timeline.push({
+        type: 'sms', title: `SMS ${s.direction === 'inbound' ? 'received' : 'sent'}`,
+        description: (s.message_body || '').slice(0, 200), date: s.created_at,
+        metadata: { direction: s.direction },
+      });
+    }
+
+    // call_log
+    try {
+      const calls = await db('call_log').where({ customer_id: customerId }).select('from_phone', 'duration_seconds', 'call_summary', 'created_at');
+      for (const c of calls) {
+        timeline.push({
+          type: 'call', title: 'Phone call',
+          description: c.call_summary || `Call from ${c.from_phone}`, date: c.created_at,
+          metadata: { fromPhone: c.from_phone, durationSeconds: c.duration_seconds },
+        });
+      }
+    } catch { /* call_log table may not exist */ }
+
+    // service_records
+    const services = await db('service_records')
+      .where({ 'service_records.customer_id': customerId })
+      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+      .select('service_records.service_type', 'service_records.service_date', 'technicians.name as tech_name');
+    for (const s of services) {
+      timeline.push({
+        type: 'service', title: `Service: ${s.service_type}`,
+        description: s.tech_name ? `Performed by ${s.tech_name}` : 'Service completed',
+        date: s.service_date, metadata: { serviceType: s.service_type, techName: s.tech_name },
+      });
+    }
+
+    // payments
+    const payments = await db('payments').where({ customer_id: customerId }).select('amount', 'payment_date', 'description');
+    for (const p of payments) {
+      timeline.push({
+        type: 'payment', title: `Payment: $${parseFloat(p.amount || 0).toFixed(2)}`,
+        description: p.description || 'Payment received', date: p.payment_date,
+        metadata: { amount: parseFloat(p.amount || 0) },
+      });
+    }
+
+    // scheduled_services
+    const scheduled = await db('scheduled_services').where({ customer_id: customerId }).select('service_type', 'scheduled_date', 'status');
+    for (const s of scheduled) {
+      timeline.push({
+        type: 'scheduled_service', title: `Scheduled: ${s.service_type}`,
+        description: `Status: ${s.status}`, date: s.scheduled_date,
+        metadata: { serviceType: s.service_type, status: s.status },
+      });
+    }
+
+    // google_reviews
+    try {
+      const reviews = await db('google_reviews').where({ customer_id: customerId }).select('star_rating', 'review_text', 'review_created_at');
+      for (const r of reviews) {
+        timeline.push({
+          type: 'review', title: `Google Review: ${'★'.repeat(r.star_rating)}${'☆'.repeat(5 - r.star_rating)}`,
+          description: (r.review_text || '').slice(0, 200), date: r.review_created_at,
+          metadata: { starRating: r.star_rating },
+        });
+      }
+    } catch { /* google_reviews may not have customer_id */ }
+
+    // activity_log
+    try {
+      const activities = await db('activity_log').where({ customer_id: customerId }).select('action', 'description', 'created_at');
+      for (const a of activities) {
+        timeline.push({
+          type: 'activity', title: a.action, description: a.description || '',
+          date: a.created_at, metadata: { action: a.action },
+        });
+      }
+    } catch { /* ignore */ }
+
+    // Sort by date descending
+    timeline.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
+    res.json({ timeline });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id — full detail
 router.get('/:id', async (req, res, next) => {
   try {

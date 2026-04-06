@@ -288,7 +288,8 @@ router.put('/:id/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/schedule/optimize — route optimization
+// POST /api/admin/schedule/optimize — route optimization v2
+// Groups by zone, sorts by time window, then nearest-neighbor within each group.
 router.post('/optimize', async (req, res, next) => {
   try {
     const { date, technicianId } = req.body;
@@ -302,34 +303,129 @@ router.post('/optimize', async (req, res, next) => {
       .whereNotIn('status', ['cancelled', 'completed'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select('scheduled_services.id', 'scheduled_services.time_window',
-        'customers.lat', 'customers.lng', 'customers.city');
+        'scheduled_services.zone',
+        'customers.lat', 'customers.lng', 'customers.city', 'customers.zip');
 
-    // Simple nearest-neighbor from HQ
-    const HQ = { lat: 27.3946, lng: -82.3984 };
-    const ordered = [];
-    const remaining = [...services];
-    let current = HQ;
-
-    while (remaining.length) {
-      let nearest = remaining[0];
-      let nearestDist = Infinity;
-
-      for (const svc of remaining) {
-        if (!svc.lat || !svc.lng) continue;
-        const dist = haversine(current.lat, current.lng, parseFloat(svc.lat), parseFloat(svc.lng));
-        if (dist < nearestDist) { nearestDist = dist; nearest = svc; }
-      }
-
-      ordered.push(nearest);
-      remaining.splice(remaining.indexOf(nearest), 1);
-      current = { lat: parseFloat(nearest.lat) || HQ.lat, lng: parseFloat(nearest.lng) || HQ.lng };
+    if (!services.length) {
+      return res.json({ success: true, order: [], estimatedDriveMinutes: 0 });
     }
 
+    const HQ = { lat: 27.3946, lng: -82.3984 };
+
+    // Zone priority order (north to south roughly)
+    const ZONE_ORDER = ['parrish', 'palmetto', 'ellenton', 'bradenton_north', 'bradenton_south', 'lakewood_ranch', 'sarasota', 'venice_north_port'];
+
+    // Time window priority: morning before afternoon
+    function windowPriority(tw) {
+      const w = (tw || '').toLowerCase();
+      if (w.includes('morning') || w.includes('am') || w === 'early') return 0;
+      if (w.includes('afternoon') || w.includes('pm') || w === 'midday') return 1;
+      if (w.includes('evening') || w === 'late') return 2;
+      return 1; // default to afternoon
+    }
+
+    // Assign zone from customer city/zip if not already set on the service
+    for (const svc of services) {
+      if (!svc.zone) {
+        svc.zone = getZone(svc.city, svc.zip);
+      }
+    }
+
+    // Group by zone
+    const zoneGroups = {};
+    for (const svc of services) {
+      const z = svc.zone || 'lakewood_ranch';
+      if (!zoneGroups[z]) zoneGroups[z] = [];
+      zoneGroups[z].push(svc);
+    }
+
+    // Sort zones by priority order
+    const sortedZones = Object.keys(zoneGroups).sort((a, b) => {
+      const ai = ZONE_ORDER.indexOf(a);
+      const bi = ZONE_ORDER.indexOf(b);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+
+    // Within each zone, sort by time window, then nearest-neighbor
+    const ordered = [];
+    let current = HQ;
+    let totalDriveMinutes = 0;
+
+    for (const zone of sortedZones) {
+      const group = zoneGroups[zone];
+
+      // Sort by time window priority first
+      group.sort((a, b) => windowPriority(a.time_window) - windowPriority(b.time_window));
+
+      // Sub-group by same time window, then nearest-neighbor within each sub-group
+      const windowBuckets = {};
+      for (const svc of group) {
+        const wp = windowPriority(svc.time_window);
+        if (!windowBuckets[wp]) windowBuckets[wp] = [];
+        windowBuckets[wp].push(svc);
+      }
+
+      const windowKeys = Object.keys(windowBuckets).sort((a, b) => a - b);
+
+      for (const wk of windowKeys) {
+        const bucket = windowBuckets[wk];
+        const remaining = [...bucket];
+
+        while (remaining.length) {
+          let nearest = remaining[0];
+          let nearestDist = Infinity;
+
+          for (const svc of remaining) {
+            const svcLat = parseFloat(svc.lat);
+            const svcLng = parseFloat(svc.lng);
+
+            if (svcLat && svcLng) {
+              const dist = haversine(current.lat, current.lng, svcLat, svcLng);
+              if (dist < nearestDist) { nearestDist = dist; nearest = svc; }
+            } else {
+              // No lat/lng — use zip code proximity heuristic
+              const zipDist = Math.abs(parseInt(svc.zip || '34202') - parseInt(current.zip || '34202'));
+              const fakeDist = zipDist * 0.5; // rough miles-per-zip-digit
+              if (fakeDist < nearestDist) { nearestDist = fakeDist; nearest = svc; }
+            }
+          }
+
+          // Calculate drive time: straight-line distance * 1.4 road factor, assume 30mph avg
+          if (nearestDist < Infinity && nearestDist > 0) {
+            const roadMiles = nearestDist * 1.4;
+            const driveMin = (roadMiles / 30) * 60; // 30 mph average
+            totalDriveMinutes += driveMin;
+          }
+
+          ordered.push(nearest);
+          remaining.splice(remaining.indexOf(nearest), 1);
+          current = {
+            lat: parseFloat(nearest.lat) || current.lat,
+            lng: parseFloat(nearest.lng) || current.lng,
+            zip: nearest.zip || current.zip,
+          };
+        }
+      }
+    }
+
+    // Update route_order on each service
     for (let i = 0; i < ordered.length; i++) {
       await db('scheduled_services').where({ id: ordered[i].id }).update({ route_order: i + 1 });
     }
 
-    res.json({ success: true, order: ordered.map((s, i) => ({ id: s.id, routeOrder: i + 1 })) });
+    const estimatedDriveMinutes = Math.round(totalDriveMinutes);
+
+    res.json({
+      success: true,
+      order: ordered.map((s, i) => ({
+        id: s.id,
+        routeOrder: i + 1,
+        zone: s.zone,
+        timeWindow: s.time_window,
+        city: s.city,
+      })),
+      estimatedDriveMinutes,
+    });
   } catch (err) { next(err); }
 });
 
