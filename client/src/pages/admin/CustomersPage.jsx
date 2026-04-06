@@ -580,6 +580,9 @@ export default function CustomersPage() {
   const [sortDir, setSortDir] = useState('asc');
   const [showAddModal, setShowAddModal] = useState(false);
   const [syncingSquare, setSyncingSquare] = useState(false);
+  const [page, setPage] = useState(1);
+  const [totalCustomers, setTotalCustomers] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   const [expandedId, setExpandedId] = useState(null);
   const [expandedData, setExpandedData] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -591,9 +594,19 @@ export default function CustomersPage() {
     setExpandedId(id);
     setExpandedData(null);
     try {
+      // Auto-sync from Square first (non-blocking)
+      adminFetch(`/admin/customers/${id}/sync-square`, { method: 'POST' }).catch(() => {});
       const data = await adminFetch(`/admin/customers/${id}`);
       setExpandedData(data);
     } catch { setExpandedData({ error: true }); }
+  };
+
+  const refreshExpanded = async (id) => {
+    try {
+      await adminFetch(`/admin/customers/${id}/sync-square`, { method: 'POST' });
+      const data = await adminFetch(`/admin/customers/${id}`);
+      setExpandedData(data);
+    } catch { /* ignore */ }
   };
 
   const startEdit = (c) => {
@@ -627,17 +640,21 @@ export default function CustomersPage() {
     return c.tier || 'Bronze';
   };
 
-  const loadCustomers = () => {
+  const loadCustomers = (p) => {
+    const pg = p || page;
     setLoading(true);
     setError(null);
     const params = new URLSearchParams();
     if (search.trim()) params.set('search', search.trim());
     if (filterStage !== 'all') params.set('stage', filterStage);
     if (filterTier !== 'all') params.set('tier', filterTier);
-    const qs = params.toString();
-    adminFetch(`/admin/customers${qs ? '?' + qs : ''}`)
+    params.set('page', String(pg));
+    params.set('limit', '100');
+    adminFetch(`/admin/customers?${params.toString()}`)
       .then(data => {
         setCustomers(Array.isArray(data) ? data : data.customers || []);
+        setTotalCustomers(data.total || 0);
+        setTotalPages(data.totalPages || 1);
         setLoading(false);
       })
       .catch(e => { setError(e.message); setLoading(false); });
@@ -649,12 +666,12 @@ export default function CustomersPage() {
       .catch(() => {}); // silent fail for pipeline
   };
 
-  useEffect(() => { loadCustomers(); }, [filterStage, filterTier]);
+  useEffect(() => { setPage(1); loadCustomers(1); }, [filterStage, filterTier]);
   useEffect(() => { if (view === 'pipeline') loadPipeline(); }, [view]);
 
   // Debounced search
   useEffect(() => {
-    const t = setTimeout(() => loadCustomers(), 300);
+    const t = setTimeout(() => { setPage(1); loadCustomers(1); }, 300);
     return () => clearTimeout(t);
   }, [search]);
 
@@ -942,17 +959,21 @@ export default function CustomersPage() {
 
                         {/* Column 2: Services + Payments */}
                         <div>
-                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Service History ({(expandedData.services || []).length})</div>
-                          {(expandedData.services || []).slice(0, 5).map((s, i) => (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1 }}>Service History ({(expandedData.services || []).length})</div>
+                            <button onClick={() => refreshExpanded(c.id)} style={{ padding: '3px 8px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 4, color: D.muted, fontSize: 10, cursor: 'pointer' }}>Sync Square</button>
+                          </div>
+                          {(expandedData.services || []).map((s, i) => (
                             <div key={i} style={{ padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22` }}>
                               <span style={{ color: D.white }}>{s.service_type}</span>
                               <span style={{ color: D.muted, marginLeft: 8 }}>{s.service_date ? new Date(s.service_date).toLocaleDateString() : ''}</span>
+                              {s.total_cost > 0 && <span style={{ color: D.green, marginLeft: 8, fontFamily: 'JetBrains Mono, monospace' }}>${parseFloat(s.total_cost).toFixed(2)}</span>}
                             </div>
                           ))}
-                          {(expandedData.services || []).length === 0 && <div style={{ fontSize: 12, color: D.muted }}>No services</div>}
+                          {(expandedData.services || []).length === 0 && <div style={{ fontSize: 12, color: D.muted }}>No services — click "Sync Square" to import</div>}
 
                           <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, marginTop: 16 }}>Payments ({(expandedData.payments || []).length})</div>
-                          {(expandedData.payments || []).slice(0, 5).map((p, i) => (
+                          {(expandedData.payments || []).map((p, i) => (
                             <div key={i} style={{ padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22` }}>
                               <span style={{ color: D.green, fontFamily: 'JetBrains Mono, monospace' }}>${parseFloat(p.amount || 0).toFixed(2)}</span>
                               <span style={{ color: D.muted, marginLeft: 8 }}>{p.payment_date ? new Date(p.payment_date).toLocaleDateString() : ''}</span>
@@ -1026,6 +1047,22 @@ export default function CustomersPage() {
                 )}
               </div>
             ))
+          )}
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, marginTop: 20, padding: '12px 0' }}>
+              <button onClick={() => { const p = Math.max(1, page - 1); setPage(p); loadCustomers(p); }} disabled={page <= 1} style={{
+                padding: '8px 18px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent',
+                color: page <= 1 ? D.border : D.muted, fontSize: 13, cursor: page <= 1 ? 'default' : 'pointer',
+              }}>← Previous</button>
+              <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: D.muted }}>
+                Page {page} of {totalPages} ({totalCustomers} total)
+              </span>
+              <button onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); loadCustomers(p); }} disabled={page >= totalPages} style={{
+                padding: '8px 18px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent',
+                color: page >= totalPages ? D.border : D.muted, fontSize: 13, cursor: page >= totalPages ? 'default' : 'pointer',
+              }}>Next →</button>
+            </div>
           )}
         </>
       )}

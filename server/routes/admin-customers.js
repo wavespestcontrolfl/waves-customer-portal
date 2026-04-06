@@ -120,6 +120,17 @@ router.get('/pipeline/view', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/customers/:id/sync-square — pull service history from Square
+router.post('/:id/sync-square', async (req, res, next) => {
+  try {
+    const SquareHistorySync = require('../services/square-history-sync');
+    const result = await SquareHistorySync.syncCustomer(req.params.id);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/customers/:id/timeline — unified customer timeline
 router.get('/:id/timeline', async (req, res, next) => {
   try {
