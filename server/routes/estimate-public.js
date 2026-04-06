@@ -24,6 +24,39 @@ router.get('/:token', async (req, res, next) => {
 
     const data = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
 
+    // ── Hormozi Grand Slam Offer enhancements ─────────────────────
+    // Try to load offer package for this estimate's tier, fall back to defaults
+    let offerPackage = null;
+    try {
+      offerPackage = await db('offer_packages')
+        .where('status', 'active')
+        .orderBy('created_at', 'desc')
+        .first();
+    } catch (_) { /* table may not exist yet */ }
+
+    const guaranteeText = offerPackage?.guarantee_text
+      || '100% Satisfaction Guarantee — If you\'re not completely satisfied after your first service, we\'ll re-treat for free or refund your money. No questions asked.';
+
+    const bonuses = offerPackage?.bonuses
+      ? (typeof offerPackage.bonuses === 'string' ? JSON.parse(offerPackage.bonuses) : offerPackage.bonuses)
+      : [
+          { name: 'Free Annual Termite Inspection', value: 185 },
+          { name: 'Priority 24-Hour Scheduling', value: 0 },
+          { name: '15% Off Any One-Time Treatment', value: 0 },
+        ];
+
+    // Anchor price = sum of individual service prices before WaveGuard bundle discount
+    const monthlyTotal = parseFloat(estimate.monthly_total || 0);
+    const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+    const discount = tierDiscount[estimate.waveguard_tier] || 0;
+    const anchorPrice = discount > 0
+      ? Math.round((monthlyTotal / (1 - discount)) * 100) / 100
+      : Math.round(monthlyTotal * 1.25 * 100) / 100; // Bronze: show 25% "without WaveGuard" markup
+
+    const savingsAmount = Math.round((anchorPrice - monthlyTotal) * 100) / 100;
+    const bonusTotal = bonuses.reduce((sum, b) => sum + (b.value || 0), 0);
+    const perceivedTotalValue = Math.round(((anchorPrice * 12) + bonusTotal) * 100) / 100;
+
     res.json({
       expired: false,
       estimate: {
@@ -31,13 +64,19 @@ router.get('/:token', async (req, res, next) => {
         status: estimate.status,
         customerName: estimate.customer_name,
         address: estimate.address,
-        monthlyTotal: parseFloat(estimate.monthly_total || 0),
+        monthlyTotal,
         annualTotal: parseFloat(estimate.annual_total || 0),
         onetimeTotal: parseFloat(estimate.onetime_total || 0),
         tier: estimate.waveguard_tier,
         data,
         createdAt: estimate.created_at,
         expiresAt: estimate.expires_at,
+        // Hormozi value-stacking fields
+        guaranteeText,
+        bonuses,
+        anchorPrice,
+        savingsAmount,
+        perceivedTotalValue,
       },
     });
   } catch (err) { next(err); }
