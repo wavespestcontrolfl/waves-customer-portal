@@ -813,18 +813,118 @@ function CSRCoachTab() {
 // =========================================================================
 // PHONE NUMBERS TAB
 // =========================================================================
+
+// Health status helper: determines dot color and label based on last inbound date
+function getHealthStatus(lastInboundDate, isUnassigned) {
+  if (isUnassigned) return { color: '#6b7280', label: 'Unassigned', key: 'gray' };
+  if (!lastInboundDate) return { color: '#ef4444', label: 'Dormant (no inbound)', key: 'red' };
+  const now = new Date();
+  const last = new Date(lastInboundDate);
+  const daysSince = Math.floor((now - last) / (1000 * 60 * 60 * 24));
+  if (daysSince <= 30) return { color: '#10b981', label: `Active (${daysSince}d ago)`, key: 'green' };
+  if (daysSince <= 60) return { color: '#f59e0b', label: `Low activity (${daysSince}d ago)`, key: 'amber' };
+  return { color: '#ef4444', label: `Dormant (${daysSince}d ago)`, key: 'red' };
+}
+
+// Channel type metadata for expanded analytics
+const CHANNEL_TYPE_META = {
+  manual: { icon: '💬', label: 'Manual', color: D.muted },
+  auto_reminder: { icon: '🔔', label: 'Auto Reminder', color: D.amber },
+  auto_enroute: { icon: '🚐', label: 'Auto En Route', color: D.green },
+  auto_completion: { icon: '✅', label: 'Auto Completion', color: D.green },
+  auto_review: { icon: '⭐', label: 'Auto Review', color: D.amber },
+  auto_estimate: { icon: '📋', label: 'Auto Estimate', color: D.teal },
+  auto_payment: { icon: '💳', label: 'Auto Payment', color: '#8b5cf6' },
+  internal_alert: { icon: '🚨', label: 'Internal Alert', color: D.red },
+  reminder: { icon: '🔔', label: 'Reminder', color: D.amber },
+  estimate: { icon: '📋', label: 'Estimate', color: D.teal },
+  review: { icon: '⭐', label: 'Review', color: D.amber },
+  completion: { icon: '✅', label: 'Completion', color: D.green },
+  en_route: { icon: '🚐', label: 'En Route', color: D.green },
+  confirmation: { icon: '📩', label: 'Confirmation', color: D.teal },
+  inbound: { icon: '📥', label: 'Inbound', color: D.teal },
+};
+
 function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
   // Build per-number stats from the stats API data
   const numberStats = {};
   (stats?.locationStats || []).forEach(l => {
-    if (l.number) numberStats[l.number] = { sent: l.sent || 0, received: l.received || 0 };
+    if (l.number) numberStats[l.number] = {
+      sent: l.sent || 0,
+      received: l.received || 0,
+      inboundThisMonth: l.inboundThisMonth || l.received || 0,
+      lastInboundDate: l.lastInboundDate || l.lastActivity || null,
+      smsEnabled: l.smsEnabled !== undefined ? l.smsEnabled : true,
+      voiceEnabled: l.voiceEnabled !== undefined ? l.voiceEnabled : true,
+    };
   });
 
   const totalNumbers = ALL_NUMBERS.reduce((s, g) => s + g.numbers.length, 0);
+  const estMonthlyCost = totalNumbers * 1.15; // ~$1.15/number/month typical Twilio
+
+  // Find top performing number by messages
+  let topLabel = '';
+  let topCount = 0;
+  ALL_NUMBERS.forEach(g => g.numbers.forEach(n => {
+    const ns = numberStats[n.number];
+    const total = (ns?.sent || 0) + (ns?.received || 0);
+    if (total > topCount) { topCount = total; topLabel = n.label; }
+  }));
+
+  // Count dormant numbers (no inbound in 60+ days, excluding Unassigned)
+  let dormantCount = 0;
+  ALL_NUMBERS.forEach(g => {
+    if (g.group === 'Unassigned') return;
+    g.numbers.forEach(n => {
+      const ns = numberStats[n.number];
+      const health = getHealthStatus(ns?.lastInboundDate, false);
+      if (health.key === 'red') dormantCount++;
+    });
+  });
+
+  // Channel analytics: compute automation rate
+  const totalChannelMessages = channelStats.reduce((s, c) => s + (c.sent || 0), 0);
+  const manualMessages = channelStats.find(c => c.type === 'manual')?.sent || 0;
+  const automatedMessages = totalChannelMessages - manualMessages;
+  const automationRate = totalChannelMessages > 0 ? Math.round((automatedMessages / totalChannelMessages) * 100) : 0;
+
+  // Expanded channel types — merge existing stats with all possible types
+  const allChannelTypes = ['manual', 'auto_reminder', 'auto_enroute', 'auto_completion', 'auto_review', 'auto_estimate', 'auto_payment', 'internal_alert'];
+  const channelStatsMap = {};
+  channelStats.forEach(c => { channelStatsMap[c.type] = c.sent || 0; });
+  // Also map legacy types
+  const expandedChannels = allChannelTypes.map(type => ({
+    type,
+    count: channelStatsMap[type] || channelStatsMap[type.replace('auto_', '')] || 0,
+  })).filter(c => c.count > 0);
+  // If no expanded data, fall back to original channelStats
+  const displayChannels = expandedChannels.length > 0 ? expandedChannels : channelStats.map(c => ({ type: c.type, count: c.sent || 0 }));
+  const maxDisplayChannel = displayChannels.length > 0 ? Math.max(...displayChannels.map(c => c.count), 1) : 1;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Summary */}
+
+      {/* Smart Summary Banner */}
+      <div style={{
+        background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
+        padding: '14px 20px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+      }}>
+        <span style={{ fontSize: 13, color: D.text, fontFamily: 'DM Sans, sans-serif' }}>
+          <span style={{ fontWeight: 700, color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>{totalNumbers}</span> numbers
+          <span style={{ color: D.muted, margin: '0 6px' }}>{'\u00B7'}</span>
+          <span style={{ fontWeight: 700, color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>${estMonthlyCost.toFixed(2)}</span> est. monthly cost
+          {topLabel && <>
+            <span style={{ color: D.muted, margin: '0 6px' }}>{'\u00B7'}</span>
+            Top: <span style={{ fontWeight: 600, color: D.teal }}>{topLabel}</span> ({topCount} msgs)
+          </>}
+          {dormantCount > 0 && <>
+            <span style={{ color: D.muted, margin: '0 6px' }}>{'\u00B7'}</span>
+            <span style={{ color: D.red, fontWeight: 600 }}>{dormantCount} dormant</span>
+          </>}
+        </span>
+      </div>
+
+      {/* Summary Stat Cards */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         <StatCard label="Total Numbers" value={totalNumbers} color={D.white} />
         <StatCard label="GBP Locations" value={ALL_NUMBERS[0].numbers.length} color={D.green} />
@@ -834,32 +934,99 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
       </div>
 
       {/* Number Groups */}
-      {ALL_NUMBERS.map(group => (
+      {ALL_NUMBERS.map(group => {
+        const isUnassignedGroup = group.group === 'Unassigned';
+        return (
         <div key={group.group} style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: D.teal, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, paddingBottom: 10, borderBottom: `1px solid ${D.border}` }}>
             {group.group}
             <span style={{ fontSize: 11, fontWeight: 500, color: D.muted, marginLeft: 8 }}>({group.numbers.length})</span>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
             {group.numbers.map((n, i) => {
               const ns = numberStats[n.number];
+              const health = getHealthStatus(ns?.lastInboundDate, isUnassignedGroup);
+              const daysSinceInbound = ns?.lastInboundDate
+                ? Math.floor((new Date() - new Date(ns.lastInboundDate)) / (1000 * 60 * 60 * 24))
+                : null;
+              const showDormancyWarning = !isUnassignedGroup && (daysSinceInbound === null || daysSinceInbound >= 60);
+              const smsEnabled = ns?.smsEnabled !== undefined ? ns.smsEnabled : true;
+              const voiceEnabled = ns?.voiceEnabled !== undefined ? ns.voiceEnabled : true;
+
               return (
                 <div key={i} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: '12px 14px' }}>
+                  {/* Number + health dot */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: group.group === 'Unassigned' ? D.muted : D.green, flexShrink: 0 }} />
+                    <span
+                      title={health.label}
+                      style={{ width: 8, height: 8, borderRadius: '50%', background: health.color, flexShrink: 0 }}
+                    />
                     <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.white }}>{n.formatted}</span>
+                    {/* SMS/Voice capability indicators */}
+                    <span style={{ marginLeft: 'auto', display: 'flex', gap: 4, flexShrink: 0 }}>
+                      <span title={smsEnabled ? 'SMS enabled' : 'SMS disabled'} style={{
+                        fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                        background: smsEnabled ? D.green + '22' : D.red + '22',
+                        color: smsEnabled ? D.green : D.red,
+                        fontFamily: "'JetBrains Mono', monospace", fontWeight: 600,
+                      }}>SMS {smsEnabled ? '\u2713' : '\u2717'}</span>
+                      <span title={voiceEnabled ? 'Voice enabled' : 'Voice disabled'} style={{
+                        fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                        background: voiceEnabled ? D.green + '22' : D.red + '22',
+                        color: voiceEnabled ? D.green : D.red,
+                        fontFamily: "'JetBrains Mono', monospace", fontWeight: 600,
+                      }}>Voice {voiceEnabled ? '\u2713' : '\u2717'}</span>
+                    </span>
                   </div>
-                  <div style={{ fontSize: 12, color: D.muted, marginBottom: ns ? 8 : 0 }}>{n.label}</div>
-                  {ns && (
-                    <div style={{ display: 'flex', gap: 16 }}>
-                      <div>
-                        <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Sent</div>
-                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.green }}>{ns.sent}</div>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Received</div>
-                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.teal }}>{ns.received}</div>
-                      </div>
+
+                  {/* Label */}
+                  <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>{n.label}</div>
+
+                  {/* Activity metrics */}
+                  <div style={{ display: 'flex', gap: 12, marginBottom: 6 }}>
+                    <div>
+                      <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Sent</div>
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.green }}>{ns?.sent || 0}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Received</div>
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.teal }}>{ns?.received || 0}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Inbound/mo</div>
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.teal }}>{ns?.inboundThisMonth || 0}</div>
+                    </div>
+                  </div>
+
+                  {/* Last inbound date */}
+                  {!isUnassignedGroup && (
+                    <div style={{ fontSize: 10, color: D.muted, marginBottom: 4 }}>
+                      Last inbound: {ns?.lastInboundDate
+                        ? <span style={{ color: health.color }}>{new Date(ns.lastInboundDate).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                        : <span style={{ color: D.red }}>never</span>
+                      }
+                    </div>
+                  )}
+
+                  {/* Dormancy warning */}
+                  {showDormancyWarning && !isUnassignedGroup && (
+                    <div style={{
+                      marginTop: 6, padding: '6px 10px', borderRadius: 6,
+                      background: D.red + '12', borderLeft: `3px solid ${D.red}`,
+                      fontSize: 11, color: D.red, lineHeight: 1.4,
+                    }}>
+                      {'\u26A0\uFE0F'} No inbound in {daysSinceInbound != null ? `${daysSinceInbound}` : '90+'} days — review SEO ranking
+                    </div>
+                  )}
+
+                  {/* Unassigned action note */}
+                  {isUnassignedGroup && (
+                    <div style={{
+                      marginTop: 6, padding: '6px 10px', borderRadius: 6,
+                      background: D.muted + '12', borderLeft: `3px solid ${D.muted}`,
+                      fontSize: 11, color: D.muted, lineHeight: 1.4,
+                    }}>
+                      Unassigned — assign to a domain or campaign to start tracking
                     </div>
                   )}
                 </div>
@@ -867,15 +1034,62 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
             })}
           </div>
         </div>
-      ))}
+        );
+      })}
 
-      {/* Channel Analytics */}
+      {/* Channel Analytics — Expanded */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20 }}>
-        <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, margin: '0 0 14px' }}>Channel Analytics</h2>
-        {channelStats.length > 0 ? (
-          channelStats.map(c => (
-            <ChannelBar key={c.type} type={c.type} count={c.sent} max={maxChannel} />
-          ))
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+          <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>Channel Analytics</h2>
+          {totalChannelMessages > 0 && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '4px 12px', borderRadius: 8,
+              background: D.teal + '18', border: `1px solid ${D.teal}33`,
+            }}>
+              <span style={{ fontSize: 11, color: D.muted }}>Automation rate</span>
+              <span style={{ fontSize: 14, fontWeight: 700, color: D.teal, fontFamily: "'JetBrains Mono', monospace" }}>{automationRate}%</span>
+              <span style={{ fontSize: 10, color: D.muted }}>of SMS is automated</span>
+            </div>
+          )}
+        </div>
+
+        {displayChannels.length > 0 ? (
+          <>
+            {/* Pill badges summary */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 16 }}>
+              {displayChannels.map(c => {
+                const meta = CHANNEL_TYPE_META[c.type] || { icon: '💬', label: c.type, color: D.muted };
+                return (
+                  <span key={c.type} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                    padding: '4px 10px', borderRadius: 20,
+                    background: meta.color + '18', border: `1px solid ${meta.color}33`,
+                    fontSize: 11, color: meta.color, fontFamily: 'DM Sans, sans-serif',
+                  }}>
+                    {meta.icon} {meta.label}
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, marginLeft: 2 }}>{c.count}</span>
+                  </span>
+                );
+              })}
+            </div>
+
+            {/* Bar chart */}
+            {displayChannels.sort((a, b) => b.count - a.count).map(c => {
+              const meta = CHANNEL_TYPE_META[c.type] || { icon: '💬', label: c.type, color: D.muted };
+              const pct = maxDisplayChannel > 0 ? (c.count / maxDisplayChannel) * 100 : 0;
+              return (
+                <div key={c.type} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                  <span style={{ fontSize: 16, width: 24, textAlign: 'center' }}>{meta.icon}</span>
+                  <span style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 12, color: D.text, width: 120, textTransform: 'capitalize' }}>{meta.label}</span>
+                  <div style={{ flex: 1, height: 10, background: D.bg, borderRadius: 5, overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${pct}%`, background: meta.color, borderRadius: 5, transition: 'width 0.4s ease' }} />
+                  </div>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: D.muted, width: 36, textAlign: 'right' }}>{c.count}</span>
+                </div>
+              );
+            })}
+          </>
         ) : (
           <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No channel data yet. Analytics will appear as messages are sent and received across your numbers.</div>
         )}
