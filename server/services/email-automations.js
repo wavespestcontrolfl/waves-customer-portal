@@ -1,13 +1,13 @@
 /**
  * Email Automation Service — replaces 7 Zapier zaps.
  *
- * Triggers on customer lifecycle events (stage changes, service bookings,
- * reviews) and performs:
- *   1. Beehiiv: upsert subscriber → add tags → enroll in automation
- *   2. SMS: send onboarding/welcome text via Twilio
- *   3. Log: record the automation run in email_automation_log
+ * ALL TRIGGERS ARE MANUAL for now — admin clicks a button to send.
+ * Future: auto-trigger based on Square service bookings.
  *
- * Each automation maps to a Beehiiv automation ID + Twilio SMS template.
+ * Each automation:
+ *   1. Beehiiv: upsert subscriber → add tags → enroll in automation
+ *   2. SMS: send onboarding text via Twilio (if configured)
+ *   3. Log: record the run in email_automation_log
  */
 
 const db = require('../models/db');
@@ -15,14 +15,14 @@ const beehiiv = require('./beehiiv');
 const TwilioService = require('./twilio');
 const logger = require('./logger');
 
-// ── Automation definitions (maps to the 7 Zapier zaps) ──
+// ── Automation definitions ──
 const AUTOMATIONS = {
   new_recurring: {
     name: 'New Recurring Customer',
-    trigger: 'stage_change',
-    triggerValue: 'won',
+    description: 'For any new recurring customer who signs up for a pest, lawn, or combo program',
+    trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_RECURRING || 'aut_3f539f94-024a-466f-9d50-4454173627dd',
-    tags: ['new customer'],
+    tags: ['new customer', 'recurring'],
     smsTemplate: (c) =>
       `Hello ${c.first_name}! Welcome to a safer, pest-free home with Waves Pest Control 🌊\n\n` +
       `We just sent you a welcome email with everything you need to know about your service. ` +
@@ -32,19 +32,19 @@ const AUTOMATIONS = {
   },
   cold_lead: {
     name: 'Cold Lead Nurture',
-    trigger: 'stage_change',
-    triggerValue: 'dormant',
+    description: 'For customers who declined or haven\'t responded to an estimate',
+    trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_COLD || 'aut_13dca63e-702d-4020-870c-27c742532a06',
     tags: ['cold customer'],
-    smsTemplate: null, // No SMS for cold leads
+    smsTemplate: null,
     enabled: true,
   },
   lawn_service: {
     name: 'Lawn Care Onboarding',
-    trigger: 'service_type',
-    triggerValue: 'lawn',
+    description: 'For new recurring lawn care customers specifically',
+    trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_LAWN || 'aut_0c794b25-1a87-46aa-9ef3-6c508348d288',
-    tags: ['lawn'],
+    tags: ['lawn', 'recurring'],
     smsTemplate: (c) =>
       `Hello ${c.first_name}! Welcome to a better lawn with Waves! 🌊\n\n` +
       `We just emailed you a breakdown of what to expect with your lawn care program. ` +
@@ -53,11 +53,11 @@ const AUTOMATIONS = {
     enabled: true,
   },
   new_appointment: {
-    name: 'New Appointment',
-    trigger: 'stage_change',
-    triggerValue: 'estimate_sent',
+    name: 'New First-Time Appointment',
+    description: 'For non-recurring, first-time customers who have never booked with us before',
+    trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_APPT || 'aut_d34a894e-a5bc-43fc-af47-7efba42881e7',
-    tags: ['new appointment'],
+    tags: ['new appointment', 'first-time'],
     smsTemplate: (c) =>
       `Hello ${c.first_name}! We just emailed you a breakdown of what to expect from Waves Pest Control 🌊\n\n` +
       `Check your inbox for the details. We're looking forward to helping you!\n\n` +
@@ -66,19 +66,19 @@ const AUTOMATIONS = {
   },
   review_thank_you: {
     name: 'Review Thank You',
-    trigger: 'review_received',
-    triggerValue: null,
+    description: 'For customers who have recently given us a Google review',
+    trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_REVIEW || 'aut_9348030b-df19-48cf-be6e-c83d74434f87',
     tags: ['reviewed'],
-    smsTemplate: null, // Thank-you handled by email only
+    smsTemplate: null,
     enabled: true,
   },
   bed_bug: {
     name: 'Bed Bug Treatment',
-    trigger: 'service_type',
-    triggerValue: 'bed bug',
+    description: 'For first-time customers who have booked a bed bug treatment',
+    trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_BEDBUG || 'aut_53cfd473-982b-49fd-b03d-62a9d462909c',
-    tags: ['bed bug treatment'],
+    tags: ['bed bug treatment', 'first-time'],
     smsTemplate: (c) =>
       `Hello ${c.first_name}! Let's get your home bed bug-free 🌊\n\n` +
       `We just emailed you everything you need to know about your treatment plan. ` +
@@ -88,10 +88,10 @@ const AUTOMATIONS = {
   },
   cockroach: {
     name: 'Cockroach Control',
-    trigger: 'service_type',
-    triggerValue: 'roach',
+    description: 'For first-time customers who have booked a cockroach treatment',
+    trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_ROACH || 'aut_53cfd473-982b-49fd-b03d-62a9d462909c',
-    tags: ['roach treatment'],
+    tags: ['roach treatment', 'first-time'],
     smsTemplate: (c) =>
       `Hello ${c.first_name}! Let's get your home roach-free 🌊\n\n` +
       `We just emailed you your treatment plan details. Check your inbox!\n\n` +
@@ -104,77 +104,8 @@ const EmailAutomationService = {
   AUTOMATIONS,
 
   /**
-   * Run all automations that match a stage change event.
-   * Called when PUT /api/admin/customers/:id/stage fires.
-   */
-  async onStageChange(customerId, newStage, oldStage) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    if (!customer) return;
-
-    const results = [];
-    for (const [key, auto] of Object.entries(AUTOMATIONS)) {
-      if (!auto.enabled) continue;
-      if (auto.trigger !== 'stage_change') continue;
-      if (auto.triggerValue !== newStage) continue;
-
-      try {
-        const result = await this.executeAutomation(key, auto, customer);
-        results.push({ automation: key, ...result });
-      } catch (err) {
-        logger.error(`[email-auto] ${key} failed for customer ${customerId}: ${err.message}`);
-        results.push({ automation: key, success: false, error: err.message });
-      }
-    }
-    return results;
-  },
-
-  /**
-   * Run all automations that match a service type.
-   * Called when a new service is booked for a customer.
-   */
-  async onServiceBooked(customerId, serviceType) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    if (!customer) return;
-
-    const svcLower = (serviceType || '').toLowerCase();
-    const results = [];
-    for (const [key, auto] of Object.entries(AUTOMATIONS)) {
-      if (!auto.enabled) continue;
-      if (auto.trigger !== 'service_type') continue;
-      if (!svcLower.includes(auto.triggerValue)) continue;
-
-      try {
-        const result = await this.executeAutomation(key, auto, customer);
-        results.push({ automation: key, ...result });
-      } catch (err) {
-        logger.error(`[email-auto] ${key} failed for customer ${customerId}: ${err.message}`);
-        results.push({ automation: key, success: false, error: err.message });
-      }
-    }
-    return results;
-  },
-
-  /**
-   * Run the review thank-you automation.
-   * Called when a new review is synced.
-   */
-  async onReviewReceived(customerId) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    if (!customer) return;
-
-    const auto = AUTOMATIONS.review_thank_you;
-    if (!auto.enabled) return;
-
-    try {
-      return await this.executeAutomation('review_thank_you', auto, customer);
-    } catch (err) {
-      logger.error(`[email-auto] review_thank_you failed for ${customerId}: ${err.message}`);
-      return { success: false, error: err.message };
-    }
-  },
-
-  /**
    * Execute a single automation for a customer.
+   * This is the core function — called by manualTrigger.
    */
   async executeAutomation(key, auto, customer) {
     const email = customer.email;
@@ -183,20 +114,19 @@ const EmailAutomationService = {
       return { success: false, error: 'No email on file' };
     }
 
-    // Check if we already ran this automation for this customer recently (24hr dedupe)
+    // 24hr dedupe
     const recent = await db('email_automation_log')
       .where({ customer_id: customer.id, automation_key: key })
       .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
       .first();
     if (recent) {
-      logger.info(`[email-auto] Skipping ${key} for ${customer.id}: already ran in last 24h`);
-      return { success: false, error: 'Already ran recently (24h dedupe)' };
+      return { success: false, error: 'Already sent in last 24h' };
     }
 
     let beehiivResult = null;
     let smsResult = null;
 
-    // Step 1: Beehiiv — upsert subscriber, add tags, enroll in automation
+    // Step 1: Beehiiv
     if (beehiiv.configured) {
       try {
         const subscriber = await beehiiv.upsertSubscriber(email, {
@@ -205,55 +135,45 @@ const EmailAutomationService = {
           utmSource: 'waves_portal',
           utmMedium: key,
         });
-
         if (subscriber?.id) {
-          // Add tags
-          if (auto.tags?.length) {
-            await beehiiv.addTags(subscriber.id, auto.tags);
-          }
-          // Enroll in automation
+          if (auto.tags?.length) await beehiiv.addTags(subscriber.id, auto.tags);
           if (auto.beehiivAutomationId) {
-            await beehiiv.enrollInAutomation(auto.beehiivAutomationId, {
-              email,
-              subscriptionId: subscriber.id,
-            });
+            await beehiiv.enrollInAutomation(auto.beehiivAutomationId, { email, subscriptionId: subscriber.id });
           }
           beehiivResult = { subscriberId: subscriber.id, tags: auto.tags };
         }
       } catch (err) {
-        logger.error(`[email-auto] Beehiiv step failed for ${key}: ${err.message}`);
+        logger.error(`[email-auto] Beehiiv failed for ${key}: ${err.message}`);
         beehiivResult = { error: err.message };
       }
     } else {
       beehiivResult = { skipped: 'BEEHIIV_API_KEY not configured' };
     }
 
-    // Step 2: SMS — send onboarding text
+    // Step 2: SMS
     if (auto.smsTemplate && customer.phone) {
       try {
-        const msg = auto.smsTemplate(customer);
-        await TwilioService.sendSMS(customer.phone, msg);
+        await TwilioService.sendSMS(customer.phone, auto.smsTemplate(customer));
         smsResult = { sent: true, to: customer.phone };
-        logger.info(`[email-auto] SMS sent for ${key} to ${customer.phone}`);
       } catch (err) {
         logger.error(`[email-auto] SMS failed for ${key}: ${err.message}`);
         smsResult = { error: err.message };
       }
     }
 
-    // Step 3: Log the automation run
+    // Step 3: Log
     await db('email_automation_log').insert({
       customer_id: customer.id,
       automation_key: key,
       automation_name: auto.name,
-      trigger_type: auto.trigger,
-      trigger_value: auto.triggerValue,
+      trigger_type: 'manual',
+      trigger_value: key,
       beehiiv_result: JSON.stringify(beehiivResult),
       sms_result: JSON.stringify(smsResult),
       status: beehiivResult?.error || smsResult?.error ? 'partial' : 'success',
     });
 
-    logger.info(`[email-auto] Completed ${key} for ${customer.first_name} ${customer.last_name} (${email})`);
+    logger.info(`[email-auto] ${key} sent for ${customer.first_name} ${customer.last_name} (${email})`);
     return { success: true, beehiiv: beehiivResult, sms: smsResult };
   },
 
@@ -263,6 +183,7 @@ const EmailAutomationService = {
   async manualTrigger(automationKey, customerId) {
     const auto = AUTOMATIONS[automationKey];
     if (!auto) throw new Error(`Unknown automation: ${automationKey}`);
+    if (!auto.enabled) throw new Error(`Automation "${auto.name}" is disabled`);
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
@@ -271,7 +192,7 @@ const EmailAutomationService = {
   },
 
   /**
-   * Get automation log for a customer or all customers.
+   * Get automation log.
    */
   async getLog({ customerId, automationKey, limit = 50, offset = 0 } = {}) {
     let query = db('email_automation_log').orderBy('created_at', 'desc');

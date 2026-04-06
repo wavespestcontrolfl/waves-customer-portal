@@ -221,12 +221,8 @@ router.put('/:id/stage', async (req, res, next) => {
       body: notes || '', admin_user_id: req.technicianId,
     });
 
-    // Fire email automations (Beehiiv + SMS) on stage change
-    try {
-      const EmailAutomationService = require('../services/email-automations');
-      EmailAutomationService.onStageChange(req.params.id, stage, oldStage)
-        .catch(err => require('../services/logger').error(`[email-auto] Stage change trigger failed: ${err.message}`));
-    } catch (e) { /* non-critical */ }
+    // Email automations are manual-only for now (triggered from Communications → Email Automations tab)
+    // Future: auto-trigger based on Square service bookings
 
     res.json({ success: true });
   } catch (err) { next(err); }
