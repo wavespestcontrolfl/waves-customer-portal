@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
-import { FONTS, BUTTON_BASE } from '../theme';
 
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', red: '#ef4444' };
 
@@ -30,18 +29,28 @@ export default function AdminLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [user, setUser] = useState(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('waves_admin_token');
     if (!token) { navigate('/admin/login', { replace: true }); return; }
     const u = localStorage.getItem('waves_admin_user');
     if (u) setUser(JSON.parse(u));
-    // Verify token is still valid
     fetch('/api/admin/auth/me', { headers: { Authorization: `Bearer ${token}` } })
       .then(r => { if (r.status === 401) { localStorage.removeItem('waves_admin_token'); localStorage.removeItem('waves_admin_user'); navigate('/admin/login', { replace: true }); } })
       .catch(() => {});
   }, [navigate]);
+
+  // Close sidebar on route change (mobile)
+  useEffect(() => { setSidebarOpen(false); }, [location.pathname]);
+
+  // Close sidebar on desktop resize
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)');
+    const handler = (e) => { if (e.matches) setSidebarOpen(false); };
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
 
   const handleLogout = () => {
     localStorage.removeItem('waves_admin_token');
@@ -50,24 +59,61 @@ export default function AdminLayout() {
   };
 
   const userName = user ? `${user.name?.split(' ')[0]} ${user.name?.split(' ')[1]?.[0] || ''}.` : 'Staff';
+  const isDesktop = typeof window !== 'undefined' && window.innerWidth >= 768;
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: D.bg, fontFamily: "'DM Sans', sans-serif" }}>
+
+      {/* Mobile top bar */}
+      <div style={{
+        display: 'none', position: 'fixed', top: 0, left: 0, right: 0, height: 52, zIndex: 60,
+        background: D.bg, borderBottom: `1px solid ${D.border}`, padding: '0 16px',
+        alignItems: 'center', justifyContent: 'space-between',
+      }} className="mobile-topbar">
+        <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{
+          background: 'none', border: 'none', color: D.white, fontSize: 24, cursor: 'pointer', padding: 4,
+        }}>☰</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
+          <span style={{ fontSize: 13, fontWeight: 700, color: D.white }}>WAVES</span>
+        </div>
+        <div style={{ width: 32 }} />
+      </div>
+
+      {/* Sidebar overlay (mobile) */}
+      {sidebarOpen && (
+        <div onClick={() => setSidebarOpen(false)} style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 90,
+        }} className="sidebar-overlay" />
+      )}
+
       {/* Sidebar */}
       <div style={{
         width: 240, background: D.bg, borderRight: `1px solid ${D.border}`,
-        padding: '16px 12px', display: 'flex', flexDirection: 'column', flexShrink: 0,
-        position: 'fixed', left: 0, top: 0, bottom: 0, zIndex: 50,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px 24px' }}>
-          <img src="/waves-logo.png" alt="" style={{ height: 28 }} />
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.white, fontFamily: "'DM Sans', sans-serif" }}>WAVES ADMIN</div>
-            <div style={{ fontSize: 11, color: D.muted }}>{userName}</div>
+        display: 'flex', flexDirection: 'column', flexShrink: 0,
+        position: 'fixed', left: 0, top: 0, bottom: 0, zIndex: 100,
+        transform: sidebarOpen ? 'translateX(0)' : undefined,
+        transition: 'transform 0.2s ease',
+        overflowY: 'auto', overflowX: 'hidden',
+        WebkitOverflowScrolling: 'touch',
+      }} className="admin-sidebar">
+        {/* Header + close button */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 12px 12px', flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <img src="/waves-logo.png" alt="" style={{ height: 28 }} />
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>WAVES ADMIN</div>
+              <div style={{ fontSize: 11, color: D.muted }}>{userName}</div>
+            </div>
           </div>
+          <button onClick={() => setSidebarOpen(false)} style={{
+            background: 'none', border: 'none', color: D.muted, fontSize: 20, cursor: 'pointer',
+            padding: 4, lineHeight: 1, display: 'none',
+          }} className="sidebar-close">✕</button>
         </div>
 
-        <nav style={{ flex: 1 }}>
+        {/* Nav items - scrollable */}
+        <nav style={{ flex: 1, padding: '0 12px', overflowY: 'auto' }}>
           {NAV_ITEMS.map(item => {
             const isActive = location.pathname === item.path || (item.path === '/admin/dashboard' && location.pathname === '/admin');
             return (
@@ -87,25 +133,44 @@ export default function AdminLayout() {
           })}
         </nav>
 
-        <div style={{ paddingTop: 16, borderTop: `1px solid ${D.border}` }}>
+        {/* Footer */}
+        <div style={{ paddingTop: 12, padding: '12px', borderTop: `1px solid ${D.border}`, flexShrink: 0 }}>
           <Link to="/" style={{ fontSize: 12, color: D.teal, textDecoration: 'none', display: 'block', padding: '8px 12px' }}>{'←'} Customer Portal</Link>
           <div onClick={handleLogout} style={{
             fontSize: 13, color: D.red, cursor: 'pointer', padding: '10px 12px',
             borderRadius: 8, marginTop: 4, fontWeight: 600,
             display: 'flex', alignItems: 'center', gap: 8,
-            transition: 'background 0.15s',
-          }}
-            onMouseEnter={e => e.currentTarget.style.background = D.red + '15'}
-            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-          >{'🚪'} Sign Out</div>
+          }}>{'🚪'} Sign Out</div>
           <div style={{ fontSize: 10, color: D.border, padding: '4px 12px' }}>v2.0</div>
         </div>
       </div>
 
       {/* Main content */}
-      <div style={{ flex: 1, marginLeft: 240, padding: '24px 28px', overflowY: 'auto', minHeight: '100vh' }}>
+      <div style={{ flex: 1, marginLeft: 240, padding: '24px 28px', overflowY: 'auto', minHeight: '100vh' }} className="admin-main">
         <Outlet />
       </div>
+
+      {/* Mobile-responsive CSS */}
+      <style>{`
+        @media (max-width: 767px) {
+          .mobile-topbar { display: flex !important; }
+          .admin-sidebar {
+            transform: translateX(-100%);
+            box-shadow: 8px 0 32px rgba(0,0,0,0.3);
+          }
+          .admin-sidebar[style*="translateX(0)"] {
+            transform: translateX(0) !important;
+          }
+          .sidebar-close { display: block !important; }
+          .admin-main {
+            margin-left: 0 !important;
+            padding: 68px 16px 24px !important;
+          }
+        }
+        .admin-sidebar::-webkit-scrollbar { width: 4px; }
+        .admin-sidebar::-webkit-scrollbar-track { background: transparent; }
+        .admin-sidebar::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+      `}</style>
     </div>
   );
 }
