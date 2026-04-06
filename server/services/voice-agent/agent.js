@@ -319,6 +319,8 @@ async function aiResponseStream(sessionData, ws) {
     if (chunk.type === "content_block_delta") {
       if (chunk.delta.type === "text_delta" && chunk.delta.text) {
         fullResponse += chunk.delta.text;
+        // #8: Track current response for live monitoring
+        sessionData.currentResponse = fullResponse;
         ws.send(JSON.stringify({
           type: "text",
           token: chunk.delta.text,
@@ -400,6 +402,7 @@ async function aiResponseStream(sessionData, ws) {
   if (fullResponse) {
     ws.send(JSON.stringify({ type: "text", token: "", last: true }));
     sessionData.conversation.push({ role: "assistant", content: fullResponse });
+    sessionData.currentResponse = null; // #8: Clear when done
 
     // Log assistant message
     try {
@@ -443,6 +446,14 @@ async function handleVoiceWebSocket(ws, req) {
             aiConversationId = row?.id || row;
           } catch (_) { /* non-critical */ }
 
+          // #6: Build dynamic prompt for this session
+          let dynamicPrompt = SYSTEM_PROMPT;
+          try {
+            dynamicPrompt = await buildDynamicPrompt();
+          } catch (err) {
+            console.log("[VoiceAgent] Dynamic prompt build failed, using static:", err.message);
+          }
+
           // Initialize session
           const sessionData = {
             conversation: [],
@@ -455,6 +466,10 @@ async function handleVoiceWebSocket(ws, req) {
             aiConversationId,
             outcome: null,
             leadId: null,
+            dynamicPrompt,              // #6
+            languageDetected: "en",     // #7
+            currentResponse: null,      // #8
+            ws,                         // #8: keep ref for inject
           };
 
           // Auto-lookup customer by caller ID
@@ -490,6 +505,20 @@ async function handleVoiceWebSocket(ws, req) {
           }
 
           console.log(`[VoiceAgent] 💬 Caller: "${message.voicePrompt}"`);
+
+          // #7: Detect Spanish on first few messages
+          if (sessionData.languageDetected === "en" && sessionData.conversation.filter(m => m.role === "user" && typeof m.content === "string").length < 3) {
+            if (detectSpanish(message.voicePrompt)) {
+              sessionData.languageDetected = "es";
+              console.log(`[VoiceAgent] 🇪🇸 Spanish detected — switching language`);
+            }
+            // Also check Deepgram language hint if provided
+            if (message.language && message.language.startsWith("es")) {
+              sessionData.languageDetected = "es";
+              console.log(`[VoiceAgent] 🇪🇸 Spanish detected via STT provider`);
+            }
+          }
+
           sessionData.conversation.push({ role: "user", content: message.voicePrompt });
 
           // Log caller message
@@ -534,6 +563,12 @@ async function handleVoiceWebSocket(ws, req) {
                 .where({ id: sessionData.aiConversationId })
                 .update({ status: "completed", ended_at: new Date() });
             } catch (_) {}
+
+            // #5: Send post-call survey after 5 minutes
+            if (sessionData.callerPhone && !sessionData.surveySent) {
+              sessionData.surveySent = true;
+              sendPostCallSurvey(ws.callSid, sessionData.callerPhone);
+            }
           }
           sessions.delete(ws.callSid);
           break;
@@ -547,7 +582,14 @@ async function handleVoiceWebSocket(ws, req) {
   ws.on("close", () => {
     if (ws.callSid) {
       const sessionData = sessions.get(ws.callSid);
-      if (sessionData) logCallEnd(ws.callSid, sessionData).catch(() => {});
+      if (sessionData) {
+        logCallEnd(ws.callSid, sessionData).catch(() => {});
+        // #5: Send post-call survey (if not already sent via "end" message)
+        if (sessionData.callerPhone && !sessionData.surveySent) {
+          sessionData.surveySent = true;
+          sendPostCallSurvey(ws.callSid, sessionData.callerPhone);
+        }
+      }
       sessions.delete(ws.callSid);
     }
   });
@@ -571,6 +613,37 @@ function getActiveCalls() {
   return active;
 }
 
+// ── #8: Get Session by CallSid (for live monitoring) ────────
+function getSessionByCallSid(callSid) {
+  return sessions.get(callSid) || null;
+}
+
+// ── #8: Inject Admin Message into Active Call ───────────────
+async function injectMessage(callSid, message) {
+  const sessionData = sessions.get(callSid);
+  if (!sessionData) {
+    return { success: false, error: "No active session for this call" };
+  }
+
+  // Inject as a system-level user message that the AI will see
+  sessionData.conversation.push({
+    role: "user",
+    content: `[ADMIN OVERRIDE]: ${message}`,
+  });
+
+  // If the session has a WS reference, trigger a new AI response
+  if (sessionData.ws && sessionData.ws.readyState === 1) {
+    try {
+      await aiResponseStream(sessionData, sessionData.ws);
+      return { success: true, message: "Message injected and AI response triggered" };
+    } catch (err) {
+      return { success: false, error: `AI response failed: ${err.message}` };
+    }
+  }
+
+  return { success: true, message: "Message injected into conversation context" };
+}
+
 // ── Recent Calls from DB (for admin dashboard) ──────────────
 async function getRecentVoiceAgentCalls(limit = 50) {
   return db("call_log")
@@ -584,4 +657,9 @@ async function getRecentVoiceAgentCalls(limit = 50) {
     );
 }
 
-module.exports = { initVoiceAgent, shouldAgentHandle, handleVoiceWebSocket, getConfig, updateConfig, getActiveCalls, getRecentVoiceAgentCalls };
+module.exports = {
+  initVoiceAgent, shouldAgentHandle, handleVoiceWebSocket,
+  getConfig, updateConfig, getActiveCalls, getRecentVoiceAgentCalls,
+  getSessionByCallSid, injectMessage, handleSurveyReply,
+  sendPostCallSurvey,
+};

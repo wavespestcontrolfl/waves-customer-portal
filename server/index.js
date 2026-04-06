@@ -187,6 +187,7 @@ app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
 app.use('/api/admin/equipment', require('./routes/admin-equipment'));
+app.use('/api/admin/wordpress', require('./routes/admin-wordpress'));
 
 // Health check
 app.get('/api/health', (req, res) => {

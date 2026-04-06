@@ -28,6 +28,7 @@ const AdminVoiceAgentPage = lazy(() => import('./pages/admin/VoiceAgentPage'));
 const AdminBlogPage = lazy(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazy(() => import('./pages/admin/KnowledgePage'));
 const AdminSettingsPage = lazy(() => import('./pages/admin/SettingsPage'));
+const AdminWordPressSitesPage = lazy(() => import('./pages/admin/WordPressSitesPage'));
 const RatePage = lazy(() => import('./pages/RatePage'));
 const AdminSocialMediaPage = lazy(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazy(() => import('./pages/admin/TaxPage'));
@@ -110,6 +111,7 @@ export default function App() {
             <Route path="lawn-assessment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn assessment...</div>}><AdminLawnAssessmentPage /></Suspense>} />
             <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
+            <Route path="wordpress" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading WordPress...</div>}><AdminWordPressSitesPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
           </Route>
           <Route

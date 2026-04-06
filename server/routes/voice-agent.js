@@ -134,13 +134,19 @@ function voiceAgentRoutes(app, httpServer) {
     // Greeting audio — ElevenLabs Veda Sky
     const greetingAudio = 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
 
+    // #7: Check if caller prefers Spanish (via query param or Gather)
+    const language = req.body?.SpeechResult || req.query?.language || null;
+    const useSpanish = language === 'es';
+
     // Simultaneous dial to both numbers
+    // #3: Use time-aware greeting for the TwiML Say fallback
+    const greetingText = getTimeAwareGreeting();
     res.type('text/xml').send(
       `<?xml version="1.0" encoding="UTF-8"?>
        <Response>
          <Play>${greetingAudio}</Play>
          <Dial timeout="25"
-           action="https://${domain}/api/webhooks/twilio/voice-agent"
+           action="https://${domain}/api/webhooks/twilio/voice-agent${useSpanish ? '?language=es' : ''}"
            callerId="{{From}}">
            <Number>+19415993489</Number>
            <Number>+17206334021</Number>

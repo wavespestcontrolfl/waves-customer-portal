@@ -3,7 +3,9 @@
 // Voice agent personality, service knowledge, and call routing
 // ============================================================
 
-module.exports.SYSTEM_PROMPT = SYSTEM_PROMPT = `You are the AI phone assistant for Waves Pest Control, a family-owned pest control and lawn care company serving Southwest Florida — Bradenton, Parrish, Sarasota, Venice, Lakewood Ranch, North Port, and Port Charlotte.
+const db = require("../../models/db");
+
+const SYSTEM_PROMPT = `You are the AI phone assistant for Waves Pest Control, a family-owned pest control and lawn care company serving Southwest Florida — Bradenton, Parrish, Sarasota, Venice, Lakewood Ranch, North Port, and Port Charlotte.
 
 ## YOUR ROLE
 You handle missed calls and after-hours calls. You are NOT a replacement for our team — you're a smart safety net that ensures no lead is lost and no customer feels ignored. Be warm, professional, and efficient. You represent a local family business, not a call center.
@@ -140,3 +142,106 @@ Before hanging up, always:
 - If someone asks something you can't handle, say: "That's a great question — let me have our team follow up with you directly on that."
 - If escalation is needed, use the escalate tool
 `;
+
+// ── #6: Dynamic Prompt Builder ──────────────────────────────
+// Enriches the static prompt with live data from the database.
+async function buildDynamicPrompt() {
+  const sections = [];
+
+  // 1. Current WaveGuard tier pricing
+  try {
+    const tiers = await db("waveguard_tiers")
+      .select("tier_name", "monthly_base", "bundle_discount_pct", "includes")
+      .orderBy("sort_order", "asc");
+    if (tiers.length > 0) {
+      const tierInfo = tiers.map(t =>
+        `- ${t.tier_name}: $${t.monthly_base}/mo base, ${t.bundle_discount_pct}% bundle discount. Includes: ${t.includes || 'standard coverage'}`
+      ).join("\n");
+      sections.push(`## CURRENT WAVEGUARD PRICING (INTERNAL — do NOT quote to customers)\n${tierInfo}`);
+    }
+  } catch (_) {
+    // Table may not exist — use static prompt pricing knowledge
+  }
+
+  // 2. Active service types from products catalog
+  try {
+    const services = await db("products_catalog")
+      .where({ active: true })
+      .select("name", "category", "description")
+      .orderBy("category", "asc")
+      .limit(30);
+    if (services.length > 0) {
+      const svcInfo = services.map(s => `- ${s.name} (${s.category}): ${s.description || ''}`).join("\n");
+      sections.push(`## ACTIVE SERVICE CATALOG\n${svcInfo}`);
+    }
+  } catch (_) {
+    // Try alternative table name
+    try {
+      const services = await db("service_product_usage")
+        .select("service_type")
+        .distinct()
+        .limit(20);
+      if (services.length > 0) {
+        sections.push(`## ACTIVE SERVICE TYPES\n${services.map(s => `- ${s.service_type}`).join("\n")}`);
+      }
+    } catch (_) {}
+  }
+
+  // 3. Current seasonal pest pressure (month-based for SW Florida)
+  const month = new Date().getMonth(); // 0=Jan
+  const seasonalPressure = getSeasonalPressure(month);
+  sections.push(`## CURRENT SEASONAL PEST PRESSURE (${new Date().toLocaleString('en-US', { month: 'long' })})\n${seasonalPressure}`);
+
+  // 4. Active promotions
+  try {
+    const promos = await db("promotions")
+      .where("end_date", ">=", db.raw("CURRENT_DATE"))
+      .where("start_date", "<=", db.raw("CURRENT_DATE"))
+      .where({ active: true })
+      .select("name", "description", "discount_type", "discount_value", "end_date")
+      .limit(5);
+    if (promos.length > 0) {
+      const promoInfo = promos.map(p =>
+        `- ${p.name}: ${p.description || ''} (${p.discount_type === 'percent' ? p.discount_value + '% off' : '$' + p.discount_value + ' off'}, ends ${p.end_date})`
+      ).join("\n");
+      sections.push(`## ACTIVE PROMOTIONS (mention naturally if relevant)\n${promoInfo}`);
+    }
+  } catch (_) {
+    // No promotions table or no active promos
+  }
+
+  // 5. Check for any FAWN weather data or alerts
+  try {
+    const weatherAlert = await db("system_config")
+      .where({ key: "pest_pressure_alert" })
+      .first();
+    if (weatherAlert?.value) {
+      sections.push(`## PEST PRESSURE ALERT\n${weatherAlert.value}`);
+    }
+  } catch (_) {}
+
+  if (sections.length === 0) return SYSTEM_PROMPT;
+
+  return SYSTEM_PROMPT + "\n\n" + sections.join("\n\n");
+}
+
+// Month-based seasonal pest pressure for Southwest Florida
+function getSeasonalPressure(month) {
+  const pressure = {
+    0: "Moderate: Rodent activity increases. German roaches move indoors. Mole cricket damage visible. Good time for preventive termite inspections.",
+    1: "Moderate: Similar to January. Fire ant mounds start appearing. Pre-emergence weed control critical for lawns.",
+    2: "Rising: Subterranean termite swarm season begins. Fire ants very active. Chinch bug pressure starts in St. Augustine lawns.",
+    3: "High: Peak termite swarm season (subterranean). Mosquito season ramps up. Lawn pests active — chinch bugs, sod webworms. Fertilization season.",
+    4: "High: Drywood termite swarms begin. Mosquitoes in full force. Ghost ants and white-footed ants very active. Lawn growing rapidly.",
+    5: "Very High: Peak pest pressure across the board. Rainy season drives ants and roaches indoors. Mosquito breeding explodes. Chinch bug damage peaks.",
+    6: "Very High: Continued peak pressure. German roach infestations spike. Palmetto bugs highly active. Lawn fungus risk from humidity.",
+    7: "Very High: Hurricane season. Rodents seek shelter pre-storm. All pest categories at peak. Mole activity increases in wet soil.",
+    8: "High: Still peak season. Yellow jacket and wasp nests at maximum size. Fire ant mounds large. Lawn recovery treatments important.",
+    9: "Moderate-High: Pest pressure starts easing. Good time for fall fertilization. Rodent prevention for winter. WDO inspections for closings.",
+    10: "Moderate: Cooling temps. Indoor pest pressure as bugs seek warmth. Excellent time for preventive treatments. Lawn winterizer applications.",
+    11: "Low-Moderate: Lowest pest pressure of year. Good time for termite preventive treatments. Holiday season — mention gift certificates.",
+  };
+  return pressure[month] || "Moderate pest pressure typical for the season.";
+}
+
+module.exports = { SYSTEM_PROMPT, buildDynamicPrompt };

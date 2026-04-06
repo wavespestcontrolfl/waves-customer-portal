@@ -22,6 +22,7 @@ const NAV_ITEMS = [
   { path: '/admin/lawn-assessment', icon: '🌿', label: 'Lawn Assessment' },
   { path: '/admin/pricing', icon: '🎯', label: 'Pricing Strategy' },
   { path: '/admin/tax', icon: '💰', label: 'Tax' },
+  { path: '/admin/wordpress', icon: '🌐', label: 'WordPress Sites' },
   { path: '/admin/settings', icon: '⚙️', label: 'Settings' },
 ];
 

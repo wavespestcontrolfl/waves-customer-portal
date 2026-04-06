@@ -22,7 +22,50 @@ router.post('/voice', async (req, res) => {
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
     // Match caller to customer
-    const customer = await db('customers').where({ phone: From }).first();
+    let customer = await db('customers').where({ phone: From }).first();
+
+    // #4: Caller ID Enrichment via Twilio Lookup API
+    if (!customer && From) {
+      try {
+        const lookupUrl = `https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(From)}?Fields=caller_name`;
+        const twilioAuth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+        const lookupRes = await fetch(lookupUrl, { headers: { Authorization: `Basic ${twilioAuth}` } });
+        if (lookupRes.ok) {
+          const lookupData = await lookupRes.json();
+          const callerName = lookupData.caller_name?.caller_name;
+          if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 0) {
+            // Create a lightweight customer record with the caller name
+            const nameParts = callerName.trim().split(/\s+/);
+            const firstName = nameParts[0] || 'Unknown';
+            const lastName = nameParts.slice(1).join(' ') || '';
+            try {
+              const [newCust] = await db('customers').insert({
+                first_name: firstName,
+                last_name: lastName,
+                phone: From,
+                source: 'twilio_lookup',
+                pipeline_stage: 'new_lead',
+                pipeline_stage_changed_at: new Date(),
+                last_contact_date: new Date(),
+                last_contact_type: 'call_inbound',
+                member_since: new Date().toISOString().split('T')[0],
+                waveguard_tier: 'none',
+                crm_notes: `Auto-created from Twilio Lookup: ${callerName}`,
+              }).returning('*');
+              customer = newCust;
+              logger.info(`[CallerID] Created customer from lookup: ${callerName} (${From})`);
+            } catch (createErr) {
+              if (!createErr.message?.includes('duplicate') && !createErr.message?.includes('unique')) {
+                logger.error(`[CallerID] Failed to create customer: ${createErr.message}`);
+              }
+            }
+          }
+        }
+      } catch (lookupErr) {
+        // Non-critical — Twilio Lookup is a paid add-on, may not be enabled
+        logger.info(`[CallerID] Lookup skipped: ${lookupErr.message}`);
+      }
+    }
 
     // Log the inbound call
     await db('call_log').insert({
