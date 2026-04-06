@@ -179,6 +179,14 @@ router.post('/sms', async (req, res) => {
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
+    // In-app notification for inbound SMS from known customers
+    if (customer && Body && numberConfig.type === 'location') {
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyAdmin('inbound_sms', `SMS from ${customer.first_name} ${customer.last_name}`, Body?.substring(0, 200), { icon: '\u{1F4AC}', link: '/admin/communications', metadata: { customerId: customer.id, phone: From } });
+      } catch (e) { logger.error(`[notifications] Inbound SMS notification failed: ${e.message}`); }
+    }
+
     // Notify Adam of every inbound SMS (skip only if it would create a loop — same from AND to)
     if (Body && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {

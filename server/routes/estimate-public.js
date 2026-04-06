@@ -20,6 +20,12 @@ router.get('/:token', async (req, res, next) => {
     // Mark as viewed on first access
     if (!estimate.viewed_at) {
       await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
+
+      // Notify admin that estimate was viewed for the first time
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+      } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
     const data = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
@@ -164,6 +170,15 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
+    // In-app notifications for estimate accepted
+    try {
+      const NotificationService = require('../services/notification-service');
+      await NotificationService.notifyAdmin('estimate', `Estimate accepted: ${estimate.customer_name}`, `${estimate.waveguard_tier || 'Bronze'} WaveGuard $${estimate.monthly_total}/mo`, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId } });
+      if (customerId) {
+        await NotificationService.notifyCustomer(customerId, 'account', 'Estimate accepted', `Your ${estimate.waveguard_tier || 'Bronze'} WaveGuard plan is confirmed. Complete onboarding to get started.`, { icon: '\u2705', link: '/onboarding' });
+      }
+    } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
+
     // Auto-convert estimate to active customer (Feature #5)
     if (customerId) {
       try {
@@ -180,7 +195,17 @@ router.put('/:token/accept', async (req, res, next) => {
 // PUT /api/estimates/:token/decline
 router.put('/:token/decline', async (req, res, next) => {
   try {
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
     await db('estimates').where({ token: req.params.token }).update({ status: 'declined', declined_at: db.fn.now() });
+
+    // Notify admin of declined estimate
+    if (estimate) {
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+      } catch (e) { logger.error(`[notifications] Estimate declined notification failed: ${e.message}`); }
+    }
+
     res.json({ success: true });
   } catch (err) { next(err); }
 });

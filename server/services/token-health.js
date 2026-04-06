@@ -371,8 +371,18 @@ const TokenHealthService = {
     results.push(await checkDataForSEO());
 
     const healthy = results.filter(r => r.status === 'healthy').length;
-    const issues = results.filter(r => r.status === 'expired' || r.status === 'error').length;
-    logger.info(`[token-health] Check complete: ${healthy} healthy, ${issues} issues, ${results.length} total`);
+    const failures = results.filter(r => r.status === 'expired' || r.status === 'error');
+    logger.info(`[token-health] Check complete: ${healthy} healthy, ${failures.length} issues, ${results.length} total`);
+
+    // In-app notifications for credential failures
+    if (failures.length > 0) {
+      try {
+        const NotificationService = require('./notification-service');
+        for (const f of failures) {
+          await NotificationService.notifyAdmin('token_alert', `${f.platform} credential ${f.status}`, f.lastError || 'Check token health dashboard', { icon: '\u{1F511}', link: '/admin/social-media' });
+        }
+      } catch (e) { logger.error(`[notifications] Token alert notification failed: ${e.message}`); }
+    }
 
     return results;
   },

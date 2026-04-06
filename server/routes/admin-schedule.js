@@ -318,6 +318,12 @@ router.put('/:id/status', async (req, res, next) => {
           { customerId: svc.customer_id, messageType: 'en_route' }
         );
       } catch (e) { logger.error(`En route SMS failed: ${e.message}`); }
+
+      // In-app notification: technician en route
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
+      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
     } else if (status === 'on_site') {
       updates.check_in_time = db.fn.now();
     } else if (status === 'completed') {
@@ -328,6 +334,12 @@ router.put('/:id/status', async (req, res, next) => {
 
       // Schedule a review request SMS for 2 hours after completion
       scheduleReviewRequest(svc);
+
+      // In-app notification: service completed
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Service completed', `Your ${sanitizeServiceType(svc.service_type)} has been completed. View your report in Documents.`, { icon: '\u{1F3E0}', link: '/documents' });
+      } catch (e) { logger.error(`[notifications] Service completed notification failed: ${e.message}`); }
     }
 
     // Handle cancellation — notify via appointment reminders

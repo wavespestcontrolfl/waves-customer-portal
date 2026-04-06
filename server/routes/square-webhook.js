@@ -70,6 +70,13 @@ router.post('/payment', async (req, res) => {
             }
           }
 
+          // In-app notifications for payment
+          try {
+            const NotificationService = require('../services/notification-service');
+            await NotificationService.notifyAdmin('payment', `Payment received: $${amount.toFixed(2)}`, `${customer.first_name} ${customer.last_name}`, { icon: '\u{1F4B0}', link: '/admin/customers' });
+            await NotificationService.notifyCustomer(customer.id, 'billing', 'Payment processed', `Your payment of $${amount.toFixed(2)} has been received.`, { icon: '\u{1F4B3}' });
+          } catch (e) { logger.error(`[notifications] Payment notification failed: ${e.message}`); }
+
           // Log activity
           await db('activity_log').insert({
             customer_id: customer.id,
