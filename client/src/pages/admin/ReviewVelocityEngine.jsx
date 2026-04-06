@@ -12,18 +12,18 @@ function adminFetch(path, options = {}) {
   });
 }
 
-// ── Colors ──
+// ── Colors (matched to admin panel theme) ──
 const C = {
-  bg: '#0A0F13', raised: '#0F161C', surface: '#141D25', hover: '#1A2530', input: '#0C1218',
-  bdr: 'rgba(56,189,176,0.08)', bdrA: 'rgba(56,189,176,0.25)',
-  acc: '#38BDB0', accG: 'rgba(56,189,176,0.15)', accD: '#2A8A80',
-  grn: '#4ADE80', grnG: 'rgba(74,222,128,0.12)',
-  org: '#FB923C', orgG: 'rgba(251,146,60,0.12)',
-  red: '#F87171', redG: 'rgba(248,113,113,0.12)',
-  blu: '#60A5FA', bluG: 'rgba(96,165,250,0.12)',
-  pur: '#A78BFA', purG: 'rgba(167,139,250,0.12)',
-  t1: '#E8EEEC', t2: '#94A3AF', t3: '#506270',
-  mono: "'JetBrains Mono', monospace", sans: "'Outfit', sans-serif",
+  bg: '#0f1923', raised: '#1a2937', surface: '#1e293b', hover: '#253347', input: '#0f172a',
+  bdr: 'rgba(14,165,233,0.08)', bdrA: 'rgba(14,165,233,0.25)',
+  acc: '#0ea5e9', accG: 'rgba(14,165,233,0.15)', accD: '#0284c7',
+  grn: '#10b981', grnG: 'rgba(16,185,129,0.12)',
+  org: '#f59e0b', orgG: 'rgba(245,158,11,0.12)',
+  red: '#ef4444', redG: 'rgba(239,68,68,0.12)',
+  blu: '#3b82f6', bluG: 'rgba(59,130,246,0.12)',
+  pur: '#8b5cf6', purG: 'rgba(139,92,246,0.12)',
+  t1: '#e2e8f0', t2: '#94a3b8', t3: '#64748b',
+  mono: "'JetBrains Mono', monospace", sans: "'DM Sans', sans-serif",
 };
 
 // ── GBP Locations ──
