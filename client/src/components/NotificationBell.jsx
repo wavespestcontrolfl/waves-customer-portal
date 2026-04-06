@@ -14,7 +14,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const panelRef = useRef(null);
 
   const tokenKey = type === 'admin' ? 'waves_admin_token' : 'waves_token';
-  const basePath = type === 'admin' ? '/api/admin/notifications' : '/api/notifications';
+  const basePath = type === 'admin' ? '/admin/notifications' : '/customer-notifications';
 
   const getHeaders = () => ({
     Authorization: `Bearer ${localStorage.getItem(tokenKey)}`,

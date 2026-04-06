@@ -299,8 +299,7 @@ const InvoiceService = {
 
     const body = `Hey ${customer.first_name}! ${techName} just wrapped up your ${serviceType} today. ` +
       `Tap to see what was applied, tech notes & before/after photos → ${payUrl}\n\n` +
-      `Your invoice ($${invoice.total.toFixed(2)}) is ready at the bottom whenever you're set. \n\n` +
-      `— Waves Pest Control`;
+      `Your invoice ($${Number(invoice.total || 0).toFixed(2)}) is ready at the bottom whenever you're set.\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
 
     try {
       const TwilioService = require('./twilio');
