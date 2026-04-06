@@ -112,15 +112,15 @@ const SquareCustomerSync = {
             if (!phone) { skipped++; continue; }
 
             await db('customers').insert({
-              first_name: (firstName || company || 'Unknown').substring(0, 100),
-              last_name: (lastName || '').substring(0, 100),
+              first_name: (firstName || company || 'Unknown').substring(0, 50),
+              last_name: (lastName || '').substring(0, 50),
               phone,
               email: email || null,
-              address_line1: (addressLine1 || '').substring(0, 255),
-              city: (city || '').substring(0, 100),
+              address_line1: (addressLine1 || '').substring(0, 200),
+              city: (city || '').substring(0, 50),
               state: state.substring(0, 2),
               zip: (zip || '').substring(0, 10),
-              company_name: company ? company.substring(0, 200) : null,
+              company_name: company ? company.substring(0, 150) : null,
               square_customer_id: sq.id,
               referral_code: code,
               pipeline_stage: 'active_customer',
