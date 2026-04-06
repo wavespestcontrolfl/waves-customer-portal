@@ -194,6 +194,7 @@ app.use('/api/admin/equipment', require('./routes/admin-equipment'));
 app.use('/api/admin/wordpress', require('./routes/admin-wordpress'));
 app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/admin/token-health', require('./routes/admin-token-health'));
+app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 

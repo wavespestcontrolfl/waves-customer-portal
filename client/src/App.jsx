@@ -35,6 +35,7 @@ const AdminTaxPage = lazy(() => import('./pages/admin/TaxPage'));
 const AdminPricingPage = lazy(() => import('./pages/admin/PricingStrategyPage'));
 const AdminLawnAssessmentPage = lazy(() => import('./pages/admin/LawnAssessmentPanel'));
 const AdminEquipmentPage = lazy(() => import('./pages/admin/EquipmentPage'));
+const AdminKnowledgeBasePage = lazy(() => import('./pages/admin/KnowledgeBasePage'));
 import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
@@ -110,6 +111,7 @@ export default function App() {
             <Route path="pricing" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><AdminPricingPage /></Suspense>} />
             <Route path="lawn-assessment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn assessment...</div>}><AdminLawnAssessmentPage /></Suspense>} />
             <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
+            <Route path="kb" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgeBasePage /></Suspense>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
             <Route path="wordpress" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading WordPress...</div>}><AdminWordPressSitesPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />

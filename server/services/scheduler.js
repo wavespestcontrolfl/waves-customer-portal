@@ -553,6 +553,36 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // WEEKLY FRIDAY 7 AM — AI Knowledge Base Audit ("Question Your Assumptions")
+  // Reviews stale and low-confidence entries via Claude, flags anything outdated.
+  // =========================================================================
+  cron.schedule('0 7 * * 5', async () => {
+    logger.info('Running: Knowledge Base AI audit');
+    try {
+      const KBService = require('./knowledge-base');
+      const result = await KBService.runAIAudit({ maxEntries: 15 });
+      logger.info(`KB AI audit done: ${result.audited} reviewed, ${result.flagged} flagged`);
+
+      // SMS summary if anything was flagged
+      if (result.flagged > 0) {
+        try {
+          const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+          const flaggedTitles = result.results
+            .filter(r => r.status === 'flag' || r.status === 'update-needed')
+            .map(r => `- ${r.title}: ${r.summary}`)
+            .join('\n');
+          await TwilioService.sendSMS(ownerPhone,
+            `KB Audit: ${result.flagged} entries flagged for review:\n${flaggedTitles}`,
+            { messageType: 'internal_alert' }
+          );
+        } catch { /* Twilio not available */ }
+      }
+    } catch (err) {
+      logger.error(`KB AI audit failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 

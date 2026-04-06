@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { path: '/admin/social-media', icon: '📲', label: 'Social Media' },
   { path: '/admin/seo', icon: '🔍', label: 'SEO' },
   { path: '/admin/knowledge', icon: '📚', label: 'Knowledge Base' },
+  { path: '/admin/kb', icon: '🧠', label: 'Claudeopedia' },
   { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },
   { path: '/admin/equipment', icon: '🔧', label: 'Equipment' },
   { path: '/admin/inventory', icon: '📦', label: 'Inventory' },
