@@ -19,6 +19,8 @@ const SITES = [
 ];
 
 exports.up = async function (knex) {
+  if (await knex.schema.hasTable('wordpress_sites')) return;
+
   await knex.schema.createTable('wordpress_sites', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.string('domain', 200).unique().notNullable();

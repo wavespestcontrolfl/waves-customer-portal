@@ -10,96 +10,106 @@ const { v4: uuidv4 } = require('uuid');
 exports.up = async function (knex) {
 
   // ── Equipment ────────────────────────────────────────────────
-  await knex.schema.createTable('equipment', t => {
-    t.uuid('id').primary().defaultTo(knex.fn.uuid());
-    t.string('name', 150).notNullable();
-    t.string('category', 50);                          // sprayer, pump, reel, spreader, dethatcher, backpack, vehicle, other
-    t.string('make', 100);
-    t.string('model', 100);
-    t.string('serial_number', 100);
-    t.date('purchase_date');
-    t.decimal('purchase_price', 10, 2);
-    t.decimal('current_hours', 8, 1).defaultTo(0);
-    t.decimal('next_service_hours', 8, 1);
-    t.string('next_service_type', 100);
-    t.date('last_service_date');
-    t.uuid('assigned_to').nullable().references('id').inTable('technicians').onDelete('SET NULL');
-    t.string('status', 20).defaultTo('active');        // active, maintenance, retired, pending
-    t.string('depreciation_method', 20).defaultTo('section_179');
-    t.decimal('depreciation_annual', 10, 2);
-    t.decimal('book_value', 10, 2);
-    t.jsonb('specs');                                   // tank_capacity_gal, hose_length_ft, engine_model, etc.
-    t.text('notes');
-    t.timestamp('created_at').defaultTo(knex.fn.now());
-    t.timestamp('updated_at').defaultTo(knex.fn.now());
+  const equipmentExists = await knex.schema.hasTable('equipment');
+  if (!equipmentExists) {
+    await knex.schema.createTable('equipment', t => {
+      t.uuid('id').primary().defaultTo(knex.fn.uuid());
+      t.string('name', 150).notNullable();
+      t.string('category', 50);                          // sprayer, pump, reel, spreader, dethatcher, backpack, vehicle, other
+      t.string('make', 100);
+      t.string('model', 100);
+      t.string('serial_number', 100);
+      t.date('purchase_date');
+      t.decimal('purchase_price', 10, 2);
+      t.decimal('current_hours', 8, 1).defaultTo(0);
+      t.decimal('next_service_hours', 8, 1);
+      t.string('next_service_type', 100);
+      t.date('last_service_date');
+      t.uuid('assigned_to').nullable().references('id').inTable('technicians').onDelete('SET NULL');
+      t.string('status', 20).defaultTo('active');        // active, maintenance, retired, pending
+      t.string('depreciation_method', 20).defaultTo('section_179');
+      t.decimal('depreciation_annual', 10, 2);
+      t.decimal('book_value', 10, 2);
+      t.jsonb('specs');                                   // tank_capacity_gal, hose_length_ft, engine_model, etc.
+      t.text('notes');
+      t.timestamp('created_at').defaultTo(knex.fn.now());
+      t.timestamp('updated_at').defaultTo(knex.fn.now());
 
-    t.index('category');
-    t.index('status');
-    t.index('assigned_to');
-  });
+      t.index('category');
+      t.index('status');
+      t.index('assigned_to');
+    });
+  }
 
   // ── Equipment Maintenance Log ────────────────────────────────
-  await knex.schema.createTable('equipment_maintenance_log', t => {
-    t.uuid('id').primary().defaultTo(knex.fn.uuid());
-    t.uuid('equipment_id').notNullable().references('id').inTable('equipment').onDelete('CASCADE');
-    t.string('service_type', 100);                     // oil_change, nozzle_replace, calibration, pump_rebuild, filter_replace, hose_replace, general
-    t.decimal('hours_at_service', 8, 1);
-    t.decimal('cost', 8, 2);
-    t.text('parts_used');
-    t.string('performed_by', 100);
-    t.text('notes');
-    t.date('service_date').defaultTo(knex.fn.now());
-    t.timestamp('created_at').defaultTo(knex.fn.now());
+  if (!(await knex.schema.hasTable('equipment_maintenance_log'))) {
+    await knex.schema.createTable('equipment_maintenance_log', t => {
+      t.uuid('id').primary().defaultTo(knex.fn.uuid());
+      t.uuid('equipment_id').notNullable().references('id').inTable('equipment').onDelete('CASCADE');
+      t.string('service_type', 100);                     // oil_change, nozzle_replace, calibration, pump_rebuild, filter_replace, hose_replace, general
+      t.decimal('hours_at_service', 8, 1);
+      t.decimal('cost', 8, 2);
+      t.text('parts_used');
+      t.string('performed_by', 100);
+      t.text('notes');
+      t.date('service_date').defaultTo(knex.fn.now());
+      t.timestamp('created_at').defaultTo(knex.fn.now());
 
-    t.index('equipment_id');
-    t.index('service_type');
-  });
+      t.index('equipment_id');
+      t.index('service_type');
+    });
+  }
 
   // ── Tank Mixes ───────────────────────────────────────────────
-  await knex.schema.createTable('tank_mixes', t => {
-    t.uuid('id').primary().defaultTo(knex.fn.uuid());
-    t.string('name', 150).notNullable();
-    t.string('service_type', 50);                      // lawn_care, pest_control, mosquito, tree_shrub
-    t.decimal('tank_size_gal', 6, 1).defaultTo(110);
-    t.jsonb('products').defaultTo('[]');                // [{ product_id, product_name, rate_per_1000sf, rate_unit, oz_per_tank }]
-    t.decimal('water_gal', 6, 1);
-    t.integer('coverage_sqft');
-    t.decimal('cost_per_tank', 8, 2);
-    t.decimal('cost_per_1000sf', 8, 4);
-    t.text('notes');
-    t.boolean('active').defaultTo(true);
-    t.timestamp('created_at').defaultTo(knex.fn.now());
-    t.timestamp('updated_at').defaultTo(knex.fn.now());
+  if (!(await knex.schema.hasTable('tank_mixes'))) {
+    await knex.schema.createTable('tank_mixes', t => {
+      t.uuid('id').primary().defaultTo(knex.fn.uuid());
+      t.string('name', 150).notNullable();
+      t.string('service_type', 50);                      // lawn_care, pest_control, mosquito, tree_shrub
+      t.decimal('tank_size_gal', 6, 1).defaultTo(110);
+      t.jsonb('products').defaultTo('[]');                // [{ product_id, product_name, rate_per_1000sf, rate_unit, oz_per_tank }]
+      t.decimal('water_gal', 6, 1);
+      t.integer('coverage_sqft');
+      t.decimal('cost_per_tank', 8, 2);
+      t.decimal('cost_per_1000sf', 8, 4);
+      t.text('notes');
+      t.boolean('active').defaultTo(true);
+      t.timestamp('created_at').defaultTo(knex.fn.now());
+      t.timestamp('updated_at').defaultTo(knex.fn.now());
 
-    t.index('service_type');
-  });
+      t.index('service_type');
+    });
+  }
 
   // ── Job Costs ────────────────────────────────────────────────
-  await knex.schema.createTable('job_costs', t => {
-    t.uuid('id').primary().defaultTo(knex.fn.uuid());
-    t.uuid('service_record_id').nullable();
-    t.uuid('customer_id').notNullable().references('id').inTable('customers').onDelete('CASCADE');
-    t.date('service_date').notNullable();
-    t.string('service_type', 100);
-    t.decimal('products_cost', 8, 2).defaultTo(0);
-    t.decimal('labor_cost', 8, 2).defaultTo(0);
-    t.decimal('drive_cost', 8, 2).defaultTo(0);
-    t.decimal('equipment_cost', 8, 2).defaultTo(0);
-    t.decimal('total_cost', 8, 2).defaultTo(0);
-    t.decimal('revenue', 8, 2).defaultTo(0);
-    t.decimal('gross_profit', 8, 2).defaultTo(0);
-    t.decimal('margin_pct', 5, 2).defaultTo(0);
-    t.uuid('tank_mix_id').nullable().references('id').inTable('tank_mixes').onDelete('SET NULL');
-    t.integer('sqft_treated');
-    t.jsonb('products_used').defaultTo('[]');           // [{ product_id, name, amount, unit, cost }]
-    t.timestamp('created_at').defaultTo(knex.fn.now());
+  if (!(await knex.schema.hasTable('job_costs'))) {
+    await knex.schema.createTable('job_costs', t => {
+      t.uuid('id').primary().defaultTo(knex.fn.uuid());
+      t.uuid('service_record_id').nullable();
+      t.uuid('customer_id').notNullable().references('id').inTable('customers').onDelete('CASCADE');
+      t.date('service_date').notNullable();
+      t.string('service_type', 100);
+      t.decimal('products_cost', 8, 2).defaultTo(0);
+      t.decimal('labor_cost', 8, 2).defaultTo(0);
+      t.decimal('drive_cost', 8, 2).defaultTo(0);
+      t.decimal('equipment_cost', 8, 2).defaultTo(0);
+      t.decimal('total_cost', 8, 2).defaultTo(0);
+      t.decimal('revenue', 8, 2).defaultTo(0);
+      t.decimal('gross_profit', 8, 2).defaultTo(0);
+      t.decimal('margin_pct', 5, 2).defaultTo(0);
+      t.uuid('tank_mix_id').nullable().references('id').inTable('tank_mixes').onDelete('SET NULL');
+      t.integer('sqft_treated');
+      t.jsonb('products_used').defaultTo('[]');           // [{ product_id, name, amount, unit, cost }]
+      t.timestamp('created_at').defaultTo(knex.fn.now());
 
-    t.index('customer_id');
-    t.index('service_date');
-    t.index('service_type');
-  });
+      t.index('customer_id');
+      t.index('service_date');
+      t.index('service_type');
+    });
+  }
 
-  // ── Seed equipment ───────────────────────────────────────────
+  // ── Seed equipment (only if table was just created) ──────────
+  if (equipmentExists) return;
   const EQUIPMENT_SEED = [
     { name: '110-Gallon Spray Tank #1', category: 'sprayer', specs: { tank_capacity_gal: 110 } },
     { name: '110-Gallon Spray Tank #2', category: 'sprayer', specs: { tank_capacity_gal: 110 } },

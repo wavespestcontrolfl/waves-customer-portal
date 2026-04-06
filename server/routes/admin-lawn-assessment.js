@@ -22,7 +22,7 @@ router.get('/customers', async (req, res, next) => {
   try {
     const { q } = req.query;
     let query = db('customers')
-      .select('id', 'first_name as firstName', 'last_name as lastName', 'email', 'phone', 'address')
+      .select('id', 'first_name as firstName', 'last_name as lastName', 'email', 'phone', 'address_line1 as address')
       .orderBy('last_name', 'asc');
 
     if (q && q.trim()) {
@@ -30,7 +30,7 @@ router.get('/customers', async (req, res, next) => {
       query = query.where(function () {
         this.whereRaw("LOWER(first_name || ' ' || last_name) LIKE ?", [s])
           .orWhere('phone', 'like', s)
-          .orWhere('address', 'ilike', s);
+          .orWhere('address_line1', 'ilike', s);
       });
     }
 

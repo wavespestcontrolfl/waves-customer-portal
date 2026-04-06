@@ -7,6 +7,7 @@
 exports.up = async function (knex) {
 
   // ── Mileage Log ───────────────────────────────────────────────
+  if (await knex.schema.hasTable('mileage_log')) return;
   await knex.schema.createTable('mileage_log', t => {
     t.uuid('id').primary().defaultTo(knex.fn.uuid());
     t.string('vehicle_id', 100);           // Bouncie vehicle IMEI
