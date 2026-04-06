@@ -8,7 +8,11 @@ const { resolveLocation } = require('../config/locations');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-const ADMIN_PHONES = ['+19415993489', process.env.ADAM_PHONE].filter(Boolean);
+const ADMIN_PHONE_RAW = '9415993489';
+const ADMIN_PHONES = [
+  `+1${ADMIN_PHONE_RAW}`, `1${ADMIN_PHONE_RAW}`, ADMIN_PHONE_RAW,
+  ...(process.env.ADAM_PHONE ? [process.env.ADAM_PHONE] : []),
+];
 const excludeAdminPhones = (query) => {
   for (const phone of ADMIN_PHONES) {
     query = query.whereNot('sms_log.to_phone', phone).whereNot('sms_log.from_phone', phone);
