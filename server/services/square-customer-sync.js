@@ -68,7 +68,8 @@ const SquareCustomerSync = {
           const addr = sq.address || {};
           const addressLine1 = addr.addressLine1 || '';
           const city = addr.locality || '';
-          const state = addr.administrativeDistrictLevel1 || 'FL';
+          let state = (addr.administrativeDistrictLevel1 || 'FL').substring(0, 2).toUpperCase();
+          if (state === 'FL' || state === 'FO') state = 'FL'; // "Florida" → "FL"
           const zip = addr.postalCode || '';
 
           // Check if already exists by square_customer_id

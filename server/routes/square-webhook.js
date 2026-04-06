@@ -323,7 +323,7 @@ router.post('/payment', async (req, res) => {
                 first_name: firstName || company || 'Unknown', last_name: lastName || '',
                 phone: normalizedPhone, email,
                 address_line1: addr.address_line_1 || addr.addressLine1 || '',
-                city, state: addr.administrative_district_level_1 || addr.administrativeDistrictLevel1 || 'FL',
+                city, state: (addr.administrative_district_level_1 || addr.administrativeDistrictLevel1 || 'FL').substring(0, 2).toUpperCase(),
                 zip: addr.postal_code || addr.postalCode || '',
                 company_name: company, square_customer_id: sqCust.id,
                 referral_code: code, pipeline_stage: 'new_lead', pipeline_stage_changed_at: new Date(),
