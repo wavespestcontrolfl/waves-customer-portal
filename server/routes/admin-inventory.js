@@ -89,19 +89,22 @@ router.get('/', async (req, res, next) => {
     const categories = await db('products_catalog').select('category')
       .count('* as count').groupBy('category').orderBy('count', 'desc');
 
-    // Pending approvals count
-    const [{ count: pendingApprovals }] = await db('price_approvals')
-      .where({ status: 'pending' }).count('* as count');
+    // Pending approvals count (table may not exist yet)
+    let pendingApprovals = 0;
+    try {
+      const [r] = await db('price_approvals').where({ status: 'pending' }).count('* as count');
+      pendingApprovals = parseInt(r.count);
+    } catch { /* table not created yet */ }
 
     res.json({
       products: products.map(p => ({
-        id: p.id, name: p.name, category: p.category, subcategory: p.subcategory,
+        id: p.id, name: p.name, category: p.category, subcategory: p.subcategory || null,
         activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
         containerSize: p.container_size, formulation: p.formulation, sku: p.sku,
         bestPrice: p.best_price ? parseFloat(p.best_price) : null,
         bestVendor: p.best_vendor, needsPricing: p.needs_pricing,
-        unitSizeOz: p.unit_size_oz, unitType: p.unit_type,
-        monthlyCost: p.monthly_cost_estimate,
+        unitSizeOz: p.unit_size_oz || null, unitType: p.unit_type || null,
+        monthlyCost: p.monthly_cost_estimate || null,
         vendorPricing: pricingMap[p.id] || [],
       })),
       stats: {
@@ -109,7 +112,7 @@ router.get('/', async (req, res, next) => {
         priced: parseInt(stats?.priced || 0),
         needsPrice: parseInt(stats?.needs_price || 0),
         avgPrice: stats?.avg_price ? parseFloat(stats.avg_price).toFixed(2) : null,
-        pendingApprovals: parseInt(pendingApprovals),
+        pendingApprovals,
       },
       categories: categories.map(c => ({ name: c.category, count: parseInt(c.count) })),
       total: parseInt(totalCount),
@@ -187,30 +190,19 @@ router.put('/:productId/pricing', async (req, res, next) => {
     const existing = await db('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }).first();
 
     if (existing) {
-      // Record history before updating
-      await db('price_history').insert({
-        product_id: productId, vendor_id: vendorId,
-        price: existing.price, quantity: existing.quantity, source: 'manual',
-      });
+      // Record history (table may not exist yet)
+      try { await db('price_history').insert({ product_id: productId, vendor_id: vendorId, price: existing.price, quantity: existing.quantity, source: 'manual' }); } catch { /* migration pending */ }
 
-      await db('vendor_pricing').where({ id: existing.id }).update({
-        previous_price: existing.price, price, quantity, vendor_product_url: url,
-        shipping_cost: shippingCost || null, tax_rate: taxRate || null,
-        landed_cost: landed, unit_normalized: sizeOz ? 'oz' : null,
-        price_per_oz: perOz, last_checked_at: db.fn.now(),
-      });
+      // Update — use only columns that exist
+      const upd = { previous_price: existing.price, price, quantity, vendor_product_url: url, last_checked_at: db.fn.now() };
+      try { await db('vendor_pricing').where({ id: existing.id }).update({ ...upd, shipping_cost: shippingCost || null, tax_rate: taxRate || null, landed_cost: landed, unit_normalized: sizeOz ? 'oz' : null, price_per_oz: perOz }); }
+      catch { await db('vendor_pricing').where({ id: existing.id }).update(upd); }
     } else {
-      await db('vendor_pricing').insert({
-        product_id: productId, vendor_id: vendorId,
-        price, quantity, vendor_product_url: url,
-        shipping_cost: shippingCost || null, tax_rate: taxRate || null,
-        landed_cost: landed, unit_normalized: sizeOz ? 'oz' : null,
-        price_per_oz: perOz, last_checked_at: db.fn.now(),
-      });
-      // Record history for new entry
-      await db('price_history').insert({
-        product_id: productId, vendor_id: vendorId, price, quantity, source: 'manual',
-      });
+      const ins = { product_id: productId, vendor_id: vendorId, price, quantity, vendor_product_url: url, last_checked_at: db.fn.now() };
+      try { await db('vendor_pricing').insert({ ...ins, shipping_cost: shippingCost || null, tax_rate: taxRate || null, landed_cost: landed, unit_normalized: sizeOz ? 'oz' : null, price_per_oz: perOz }); }
+      catch { await db('vendor_pricing').insert(ins); }
+
+      try { await db('price_history').insert({ product_id: productId, vendor_id: vendorId, price, quantity, source: 'manual' }); } catch { /* migration pending */ }
     }
 
     // Recalculate best price
@@ -504,22 +496,32 @@ router.get('/stats', async (req, res, next) => {
       db.raw('COUNT(*) as total_vendors'),
       db.raw("COUNT(*) FILTER (WHERE price_scraping_enabled = true) as scraping_enabled"),
     );
-    const [approvalStats] = await db('price_approvals').select(
-      db.raw("COUNT(*) FILTER (WHERE status = 'pending') as pending"),
-      db.raw("COUNT(*) FILTER (WHERE status = 'approved') as approved"),
-      db.raw("COUNT(*) FILTER (WHERE status = 'rejected') as rejected"),
-    );
-    const [scrapeStats] = await db('price_scrape_jobs').select(
-      db.raw('COUNT(*) as total_jobs'),
-      db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
-      db.raw("COUNT(*) FILTER (WHERE status = 'failed') as failed"),
-    );
+
+    // These tables may not exist yet (migration 061)
+    let approvalStats = { pending: 0, approved: 0, rejected: 0 };
+    let scrapeStats = { total_jobs: 0, completed: 0, failed: 0 };
+    try {
+      const [a] = await db('price_approvals').select(
+        db.raw("COUNT(*) FILTER (WHERE status = 'pending') as pending"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'approved') as approved"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'rejected') as rejected"),
+      );
+      approvalStats = a;
+    } catch { /* table not created yet */ }
+    try {
+      const [s] = await db('price_scrape_jobs').select(
+        db.raw('COUNT(*) as total_jobs'),
+        db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'failed') as failed"),
+      );
+      scrapeStats = s;
+    } catch { /* table not created yet */ }
 
     res.json({
       products: { total: parseInt(productStats.total_products), priced: parseInt(productStats.priced), needsPrice: parseInt(productStats.needs_price), avgPrice: productStats.avg_price },
       vendors: { total: parseInt(vendorStats.total_vendors), scrapingEnabled: parseInt(vendorStats.scraping_enabled) },
-      approvals: { pending: parseInt(approvalStats.pending), approved: parseInt(approvalStats.approved), rejected: parseInt(approvalStats.rejected) },
-      scrapeJobs: { total: parseInt(scrapeStats.total_jobs), completed: parseInt(scrapeStats.completed), failed: parseInt(scrapeStats.failed) },
+      approvals: { pending: parseInt(approvalStats.pending || 0), approved: parseInt(approvalStats.approved || 0), rejected: parseInt(approvalStats.rejected || 0) },
+      scrapeJobs: { total: parseInt(scrapeStats.total_jobs || 0), completed: parseInt(scrapeStats.completed || 0), failed: parseInt(scrapeStats.failed || 0) },
     });
   } catch (err) { next(err); }
 });
