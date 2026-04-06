@@ -168,10 +168,13 @@ function initScheduledJobs() {
   cron.schedule('*/5 * * * *', async () => {
     try {
       const now = new Date();
-      const scheduled = await db('sms_log')
-        .where({ status: 'scheduled' })
-        .where('scheduled_for', '<=', now.toISOString())
-        .limit(20);
+      let scheduled = [];
+      try {
+        scheduled = await db('sms_log')
+          .where({ status: 'scheduled' })
+          .where('scheduled_for', '<=', now.toISOString())
+          .limit(20);
+      } catch { return; /* scheduled_for column may not exist yet */ }
 
       for (const msg of scheduled) {
         try {
