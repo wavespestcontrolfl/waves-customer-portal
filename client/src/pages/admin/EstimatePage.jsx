@@ -398,7 +398,9 @@ function EstimateToolView() {
           const match = custs.find(c => c.address && address.toLowerCase().includes(c.address.split(',')[0].trim().toLowerCase()));
           if (match) {
             setExistingCustomerMatch(match);
-            setForm(f => ({ ...f, isRecurringCustomer: 'YES', customerName: `${match.firstName || ''} ${match.lastName || ''}`.trim(), customerPhone: match.phone || f.customerPhone || '', customerEmail: match.email || f.customerEmail || '' }));
+            // Only apply loyalty discount if they have an active WaveGuard tier
+            const hasActivePlan = match.tier && match.tier !== 'null' && match.monthlyRate > 0;
+            setForm(f => ({ ...f, isRecurringCustomer: hasActivePlan ? 'YES' : 'NO', customerName: `${match.firstName || ''} ${match.lastName || ''}`.trim(), customerPhone: match.phone || f.customerPhone || '', customerEmail: match.email || f.customerEmail || '' }));
           } else {
             setExistingCustomerMatch(null);
           }
@@ -729,8 +731,8 @@ function EstimateToolView() {
             {existingCustomerMatch && (
               <div style={{ marginBottom: 10, padding: '10px 14px', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: 8, fontSize: 13, color: C.green }}>
                 Existing customer: <strong>{existingCustomerMatch.firstName} {existingCustomerMatch.lastName}</strong>
-                {existingCustomerMatch.tier ? ` \u00B7 ${existingCustomerMatch.tier}` : ''}
-                {' \u00B7 '}15% loyalty discount applied
+                {existingCustomerMatch.tier && existingCustomerMatch.tier !== 'null' ? ` · WaveGuard ${existingCustomerMatch.tier}` : ' · No active plan'}
+                {existingCustomerMatch.tier && existingCustomerMatch.tier !== 'null' && existingCustomerMatch.monthlyRate > 0 ? ' · 15% loyalty discount applied' : ''}
               </div>
             )}
             {satelliteData && (satelliteData.imageUrl || satelliteData.closeUrl) && (

@@ -123,14 +123,20 @@ router.post('/property-lookup', async (req, res) => {
       // Gemini Vision
       (async () => {
         const geminiKey = process.env.GEMINI_API_KEY;
-        if (!geminiKey) return null;
-        return analyzeWithGemini(
-          result.satellite._superCloseB64 || result.satellite._closeB64,
-          result.satellite._wideB64,
+        if (!geminiKey) {
+          logger.warn('[property-lookup] GEMINI_API_KEY not set — skipping Gemini analysis');
+          return null;
+        }
+        logger.info(`[property-lookup] Starting Gemini analysis with key ${geminiKey.substring(0, 8)}...`);
+        const geminiAnalysis = await analyzeWithGemini(
+          result.satellite?._superCloseB64 || result.satellite?._closeB64,
+          result.satellite?._wideB64,
           result.rentcast,
           address,
           geminiKey
         );
+        logger.info(`[property-lookup] Gemini analysis complete: confidence ${geminiAnalysis?.confidenceScore || 'N/A'}%`);
+        return geminiAnalysis;
       })(),
     ]);
 
