@@ -304,31 +304,31 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
         </div>
       )}
 
-      {/* Action buttons */}
+      {/* Action buttons — flexible flow, en route is optional */}
       <div style={{ display: 'flex', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
-        {(status === 'pending' || status === 'confirmed') && (
-          <button onClick={() => changeStatus('en_route')} disabled={updating} style={{
-            ...btnBase, background: D.teal, color: D.white,
-          }}>
-            En Route
-          </button>
-        )}
-        {status === 'en_route' && (
-          <button onClick={() => changeStatus('on_site')} disabled={updating} style={{
-            ...btnBase, background: D.blue, color: D.white,
-          }}>
-            On Site
-          </button>
-        )}
-        {status === 'on_site' && (
+        {status !== 'completed' && status !== 'skipped' && (
           <>
+            {status !== 'en_route' && status !== 'on_site' && (
+              <button onClick={() => changeStatus('en_route')} disabled={updating} style={{
+                ...btnBase, background: D.teal, color: D.white,
+              }}>
+                En Route
+              </button>
+            )}
+            {status === 'en_route' && (
+              <button onClick={() => changeStatus('on_site')} disabled={updating} style={{
+                ...btnBase, background: D.blue, color: D.white,
+              }}>
+                On Site
+              </button>
+            )}
             <button onClick={() => onComplete(service)} style={{
               ...btnBase, background: D.green, color: D.white,
             }}>
               Complete
             </button>
             <button onClick={() => changeStatus('skipped')} disabled={updating} style={{
-              ...btnBase, background: D.gray, color: D.white,
+              ...btnBase, background: 'transparent', color: D.gray, border: `1px solid ${D.border}`,
             }}>
               Skip
             </button>

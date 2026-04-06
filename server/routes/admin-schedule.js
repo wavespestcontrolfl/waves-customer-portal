@@ -293,31 +293,33 @@ router.put('/:id/status', async (req, res, next) => {
       updates.customer_confirmed = true;
       updates.customer_confirmed_at = db.fn.now();
     } else if (status === 'en_route') {
-      // Calculate ETA from Bouncie GPS or fallback
-      let etaMinutes = svc.distance_from_previous_miles ? Math.round(svc.distance_from_previous_miles * 2) : 15;
-      let etaSource = 'estimate';
+      // En route is optional — SMS + ETA are best-effort
       try {
-        const BouncieService = require('../services/bouncie');
-        if (BouncieService.configured !== false) {
-          const eta = await BouncieService.calculateETA(
-            parseFloat(svc.cust_lat || svc.lat), parseFloat(svc.cust_lng || svc.lng)
-          );
-          if (eta.etaMinutes && eta.source !== 'default') {
-            etaMinutes = eta.etaMinutes;
-            etaSource = eta.source;
-            logger.info(`[en-route] ETA via ${eta.source}: ${etaMinutes} min, ${eta.distanceMiles} mi (${eta.vehicleName || 'vehicle'})`);
+        let etaMinutes = 15;
+        try {
+          if (svc.distance_from_previous_miles) etaMinutes = Math.round(svc.distance_from_previous_miles * 2);
+          const BouncieService = require('../services/bouncie');
+          if (BouncieService.configured !== false) {
+            const custLat = parseFloat(svc.cust_lat || svc.lat || 0);
+            const custLng = parseFloat(svc.cust_lng || svc.lng || 0);
+            if (custLat && custLng) {
+              const eta = await BouncieService.calculateETA(custLat, custLng);
+              if (eta?.etaMinutes && eta.source !== 'default') {
+                etaMinutes = eta.etaMinutes;
+                logger.info(`[en-route] ETA via ${eta.source}: ${etaMinutes} min`);
+              }
+            }
           }
-        }
-      } catch (e) { logger.warn(`[en-route] Bouncie ETA failed, using fallback: ${e.message}`); }
+        } catch (e) { logger.warn(`[en-route] ETA calc failed: ${e.message}`); }
 
-      // Send en-route SMS with real ETA
-      try {
-        const custFirstName = svc.first_name || 'there';
-        await TwilioService.sendSMS(svc.cust_phone,
-          `Hello ${custFirstName}! Your Waves technician is on the way. ETA: ~${etaMinutes} minutes.`,
-          { customerId: svc.customer_id, messageType: 'en_route' }
-        );
-      } catch (e) { logger.error(`En route SMS failed: ${e.message}`); }
+        if (svc.cust_phone) {
+          const custFirstName = svc.first_name || 'there';
+          await TwilioService.sendSMS(svc.cust_phone,
+            `Hello ${custFirstName}! Your Waves technician is on the way. ETA: ~${etaMinutes} minutes.`,
+            { customerId: svc.customer_id, messageType: 'en_route' }
+          );
+        }
+      } catch (e) { logger.error(`[en-route] Failed: ${e.message}`); }
 
       // In-app notification: technician en route
       try {
