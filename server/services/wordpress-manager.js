@@ -80,60 +80,10 @@ class WordPressManager {
 
     const results = { siteId, domain: site.domain, forms: [], errors: [] };
 
-    // Strategy: fetch pages one at a time with context=edit to get _elementor_data
-    // First get the list of page/post IDs, then fetch each individually
-    let allIds = [];
-    // Fetch published pages (no auth needed for published)
-    try {
-      const pageList = await this.wpFetch(site, '/wp/v2/pages?per_page=100&_fields=id&status=publish');
-      if (Array.isArray(pageList)) allIds.push(...pageList.map(p => ({ id: p.id, type: 'pages' })));
-    } catch (e) {
-      // Fallback without status filter
-      try {
-        const pageList = await this.wpFetch(site, '/wp/v2/pages?per_page=100&_fields=id');
-        if (Array.isArray(pageList)) allIds.push(...pageList.map(p => ({ id: p.id, type: 'pages' })));
-      } catch (e2) { results.errors.push({ error: `Page list: ${e2.message}` }); }
-    }
-
-    try {
-      const postList = await this.wpFetch(site, '/wp/v2/posts?per_page=100&_fields=id&status=publish');
-      if (Array.isArray(postList)) allIds.push(...postList.map(p => ({ id: p.id, type: 'posts' })));
-    } catch (e) {
-      try {
-        const postList = await this.wpFetch(site, '/wp/v2/posts?per_page=100&_fields=id');
-        if (Array.isArray(postList)) allIds.push(...postList.map(p => ({ id: p.id, type: 'posts' })));
-      } catch (e2) { results.errors.push({ error: `Post list: ${e2.message}` }); }
-    }
-
-    console.log(`[wp-mgr] ${site.domain}: found ${allIds.length} pages+posts to check`);
-
-    // Strategy A: Try fetching with context=edit (gets _elementor_data meta)
-    let foundViaApi = false;
-    for (const { id, type } of allIds.slice(0, 10)) { // Sample first 10 to check if edit works
-      try {
-        const item = await this.wpFetch(site, `/wp/v2/${type}/${id}?context=edit`);
-        if (item.meta?._elementor_data) { foundViaApi = true; break; }
-      } catch { break; } // If edit context fails, skip to Strategy B
-    }
-
-    if (foundViaApi) {
-      // Full scan via API with edit context
-      for (const { id, type } of allIds) {
-        try {
-          const item = await this.wpFetch(site, `/wp/v2/${type}/${id}?context=edit`);
-          const found = this.extractWebhooksFromItem(item);
-          if (found.length > 0) {
-            results.forms.push(...found.map((f) => ({
-              postId: item.id, postTitle: item.title?.rendered || item.title?.raw || `(ID ${item.id})`,
-              postType: type, postUrl: item.link, webhookUrl: f.url, formId: f.formId || null, source: f.source,
-            })));
-          }
-        } catch { /* skip */ }
-      }
-    } else {
-      // Strategy B: Skip batch API — directly check common form pages via HTML
-      // The batch fetch hangs on Railway, so go straight to checking known pages
-      console.log(`[wp-mgr] Scanning ${site.domain} — checking common form pages directly`);
+    // Direct HTML scan — check common form page URLs one at a time
+    // No batch API calls (crashes Railway with SIGTERM on large sites)
+    console.log(`[wp-mgr] Scanning ${site.domain} — checking common form pages directly`);
+    {
 
       const commonPaths = ['/', '/pest-control-quote/', '/contact/', '/free-quote/', '/get-a-quote/', '/quote/', '/free-estimate/', '/lawn-care-quote/'];
       const pagesWithForms = [];
