@@ -65,7 +65,7 @@ class SiteAuditor {
             }
           }
 
-          const audit = this.auditPage(page.url, html, statusCode, responseTime, page.keyword, page.city, page.type);
+          const audit = await this.auditPage(page.url, html, statusCode, responseTime, page.keyword, page.city, page.type);
 
           await db('seo_page_audits').insert({
             ...audit, audit_date: new Date().toISOString().split('T')[0],
@@ -151,7 +151,7 @@ class SiteAuditor {
   /**
    * Audit a single page — returns full audit object.
    */
-  auditPage(url, html, statusCode, responseTime, keyword, city, pageType) {
+  async auditPage(url, html, statusCode, responseTime, keyword, city, pageType) {
     const lower = (html || '').toLowerCase();
     const issues = [];
 
@@ -226,6 +226,9 @@ class SiteAuditor {
     const infoCount = issues.filter(i => i.severity === 'info').length;
     const score = Math.max(0, Math.min(100, 100 - (criticalCount * 15) - (warningCount * 5) - (infoCount * 1)));
 
+    // Fetch PageSpeed scores (async, outside object literal)
+    const psScores = await this.getPageSpeedScores(url);
+
     return {
       url,
       status_code: statusCode,
@@ -266,7 +269,11 @@ class SiteAuditor {
       has_local_business_schema: hasLB,
       has_faq_schema: hasFAQ,
       has_service_schema: hasSvc,
-      ...await this.getPageSpeedScores(url),
+      pagespeed_mobile_score: psScores.pagespeed_mobile_score,
+      lcp_ms: psScores.lcp_ms,
+      inp_ms: psScores.inp_ms,
+      cls_numeric: psScores.cls_numeric,
+      cwv_pass: psScores.cwv_pass,
       nap_present: napPresent,
       nap_consistent: napConsistent,
       city_mentions: JSON.stringify(cityMentions),
