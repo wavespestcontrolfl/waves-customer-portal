@@ -1170,7 +1170,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         )}
         <div style={{ marginTop: 12, fontSize: 13, color: '#fff', lineHeight: 1.6 }}>
           {customer.address?.line1}, {customer.address?.city}, {customer.address?.state} {customer.address?.zip}<br/>
-          <span style={{ color: B.blueLight }}>{customer.property?.lawnType} · {customer.property?.propertySqFt?.toLocaleString()} sq ft treated</span>
+          <span style={{ color: B.blueLight }}>{(customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || 'Lawn'} · {customer.property?.propertySqFt?.toLocaleString()} sq ft · {customer.property?.lotSqFt?.toLocaleString()} sq ft lot</span>
         </div>
       </div>
 
@@ -2503,32 +2503,49 @@ function PropertyTab({ customer }) {
 
       {/* Property overview from customer profile */}
       <div style={{
-        background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-        backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-        backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
-        borderRadius: 16, padding: 20, color: '#fff',
+        borderRadius: 16, overflow: 'hidden', border: `1px solid ${B.grayLight}`,
       }}>
-        <div style={{ fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading }}>
-          {customer.address?.line1}
-        </div>
-        <div style={{ fontSize: 13, opacity: 0.8, marginTop: 4 }}>
-          {customer.address?.city}, {customer.address?.state} {customer.address?.zip}
-        </div>
-        <div style={{ display: 'flex', gap: 16, marginTop: 14, flexWrap: 'wrap' }}>
-          {[
-            { label: 'Lawn Type', value: customer.property?.lawnType || '—' },
-            { label: 'Treated Area', value: customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : '—' },
-            { label: 'Lot', value: customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft` : '—' },
-          ].map(p => (
-            <div key={p.label}>
-              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.8, color: B.blueLight }}>{p.label}</div>
-              <div style={{ fontSize: 14, fontWeight: 700, marginTop: 2 }}>{p.value}</div>
-            </div>
-          ))}
-        </div>
-        {updatedAt && (
-          <div style={{ fontSize: 11, color: B.blueLight, marginTop: 12 }}>{updatedAt}</div>
+        {/* Satellite image */}
+        {customer.address?.line1 && (
+          <div style={{ width: '100%', height: 180, overflow: 'hidden', position: 'relative' }}>
+            <img
+              src={`https://maps.googleapis.com/maps/api/staticmap?center=${encodeURIComponent(`${customer.address.line1}, ${customer.address.city}, ${customer.address.state} ${customer.address.zip}`)}&zoom=19&size=640x300&maptype=satellite&key=${import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''}`}
+              alt="Property satellite view"
+              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              onError={e => { e.target.style.display = 'none'; }}
+            />
+            <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 40, background: 'linear-gradient(transparent, rgba(0,0,0,0.5))' }} />
+          </div>
         )}
+        <div style={{
+          background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
+          backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
+          backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
+          padding: 20, color: '#fff',
+        }}>
+          <div style={{ fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading }}>
+            {customer.address?.line1}
+          </div>
+          <div style={{ fontSize: 13, opacity: 0.8, marginTop: 4 }}>
+            {customer.address?.city}, {customer.address?.state} {customer.address?.zip}
+          </div>
+          <div style={{ display: 'flex', gap: 16, marginTop: 14, flexWrap: 'wrap' }}>
+            {[
+              { label: 'Turf', value: (customer.property?.lawnType || '—').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || '—' },
+              { label: 'Home', value: customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : '—' },
+              { label: 'Treated Area', value: customer.property?.bedSqFt ? `${(customer.property.propertySqFt - (customer.property.bedSqFt || 0)).toLocaleString()} sq ft` : (customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : '—') },
+              { label: 'Lot', value: customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft` : '—' },
+            ].map(p => (
+              <div key={p.label}>
+                <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.8, color: B.blueLight }}>{p.label}</div>
+                <div style={{ fontSize: 14, fontWeight: 700, marginTop: 2 }}>{p.value}</div>
+              </div>
+            ))}
+          </div>
+          {updatedAt && (
+            <div style={{ fontSize: 11, color: B.blueLight, marginTop: 12 }}>{updatedAt}</div>
+          )}
+        </div>
       </div>
 
       {/* SECTION 1 — Access & Gate Codes */}
