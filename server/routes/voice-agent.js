@@ -138,8 +138,43 @@ function voiceAgentRoutes(app, httpServer) {
     const language = req.body?.SpeechResult || req.query?.language || null;
     const useSpanish = language === 'es';
 
-    // Simultaneous dial to both numbers
-    // #3: Use time-aware greeting for the TwiML Say fallback
+    // Check business hours (8 AM - 9 PM ET)
+    const now = new Date();
+    const etHour = parseInt(now.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/New_York' }));
+    const isBusinessHours = etHour >= 8 && etHour < 21;
+
+    if (!isBusinessHours && shouldAgentHandle()) {
+      // After hours + voice agent ON → go straight to AI agent, skip ringing
+      const wsUrl = `wss://${domain}/ws/voice-agent`;
+      const cfg = getConfig();
+      const greeting = getTimeAwareGreeting();
+
+      if (callSid) {
+        try {
+          await db('call_log')
+            .where(function () { this.where('twilio_call_sid', callSid).orWhere('call_sid', callSid); })
+            .update({ answered_by: 'voice_agent', status: 'in-progress' });
+        } catch { /* non-critical */ }
+      }
+
+      console.log(`[VoiceAgent] After hours — routing directly to AI agent`);
+      return res.type('text/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+         <Response>
+           <Connect>
+             <ConversationRelay
+               url="${wsUrl}"
+               welcomeGreeting="${greeting} How can I help you today?"
+               ttsProvider="${cfg.ttsProvider || 'ElevenLabs'}"
+               voice="${cfg.ttsVoice || 'Rachel'}"
+               transcriptionProvider="${cfg.sttProvider || 'Deepgram'}"
+             />
+           </Connect>
+         </Response>`
+      );
+    }
+
+    // Business hours OR voice agent OFF → ring admin phones first
     const greetingText = getTimeAwareGreeting();
     res.type('text/xml').send(
       `<?xml version="1.0" encoding="UTF-8"?>
