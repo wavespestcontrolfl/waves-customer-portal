@@ -304,11 +304,15 @@ const SquareService = {
       const end = new Date();
       end.setDate(end.getDate() + days);
 
-      const response = await bookingsApi.listBookings({
-        startAtMin: now.toISOString(),
-        startAtMax: end.toISOString(),
-        limit: 100,
-      });
+      const response = await bookingsApi.listBookings(
+        100,          // limit
+        undefined,    // cursor
+        undefined,    // customerId
+        undefined,    // teamMemberId
+        undefined,    // locationId
+        now.toISOString(),   // startAtMin
+        end.toISOString(),   // startAtMax
+      );
 
       const bookings = response.result?.bookings || [];
 
