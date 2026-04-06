@@ -193,6 +193,44 @@ class WordPressManager {
         }
       }
 
+      // If no forms found via batch scanning, try known common form pages directly
+      if (pagesWithForms.length === 0 && allIds.length > 0) {
+        console.log(`[wp-mgr] Batch scan found no forms, trying common form page URLs directly`);
+        const commonPaths = ['/', '/pest-control-quote/', '/contact/', '/free-quote/', '/get-a-quote/', '/quote/', '/free-estimate/'];
+        for (const path of commonPaths) {
+          try {
+            const pageUrl = `https://${site.domain}${path}`;
+            const pageRes = await fetch(pageUrl, { signal: AbortSignal.timeout(10000) });
+            if (!pageRes.ok) continue;
+            const html = await pageRes.text();
+            if (html.includes('elementor-form') || html.includes('elementor-widget-form')) {
+              console.log(`[wp-mgr]   Found form on ${pageUrl}`);
+              // Search for zapier webhook in the HTML source
+              const zapierMatches = html.match(/https?:\/\/hooks\.zapier\.com\/hooks\/catch\/[^"'\\<>\s]+/g) || [];
+              const portalMatches = html.match(/https?:\/\/[^"'\\<>\s]*webhooks\/lead/g) || [];
+              // Also search in inline JSON/script data
+              const allJsonBlocks = html.match(/\{[^{}]*webhook[^{}]*\}/gi) || [];
+              for (const block of allJsonBlocks) {
+                const wm = block.match(/https?:\/\/hooks\.zapier\.com[^"'\\<>\s]*/g) || [];
+                zapierMatches.push(...wm);
+              }
+
+              for (const url of [...new Set(zapierMatches)]) {
+                results.forms.push({ postId: null, postTitle: path, postType: 'page', postUrl: pageUrl, webhookUrl: url, formId: null, source: 'direct_html' });
+              }
+              for (const url of [...new Set(portalMatches)]) {
+                results.forms.push({ postId: null, postTitle: path, postType: 'page', postUrl: pageUrl, webhookUrl: url, formId: null, source: 'direct_html' });
+              }
+
+              if (zapierMatches.length === 0 && portalMatches.length === 0) {
+                // Form exists but webhook URL not in HTML — it's in _elementor_data
+                results.forms.push({ postId: null, postTitle: `${path} (form found, webhook in DB)`, postType: 'page', postUrl: pageUrl, webhookUrl: 'unknown — stored in _elementor_data', formId: null, source: 'needs_db_access' });
+              }
+            }
+          } catch { /* skip */ }
+        }
+      }
+
       console.log(`[wp-mgr] Scan complete for ${site.domain}: ${results.forms.length} webhooks, ${pagesWithForms.length} form pages, ${results.errors.length} errors`);
     }
 
