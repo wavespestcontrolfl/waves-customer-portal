@@ -183,6 +183,7 @@ app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 app.use('/api/admin/call-recordings', require('./routes/admin-call-recordings'));
 
 app.use('/api/rate', require('./routes/review-gate'));
+app.use('/api/admin/tax', require('./routes/admin-tax'));
 
 // Health check
 app.get('/api/health', (req, res) => {

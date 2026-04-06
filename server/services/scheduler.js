@@ -176,6 +176,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // SUNDAY 7AM — Weekly Tax Advisor report
+  // =========================================================================
+  cron.schedule('0 7 * * 0', async () => {
+    try {
+      const TaxAdvisor = require('./tax-advisor');
+      const advisor = new TaxAdvisor();
+      await advisor.generateWeeklyReport();
+      logger.info('Tax Advisor weekly report generated');
+    } catch (err) {
+      logger.error(`Tax Advisor failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // NIGHTLY 2AM — Recalculate customer health scores
   // =========================================================================
   cron.schedule('0 2 * * *', async () => {
