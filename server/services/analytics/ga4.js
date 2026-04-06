@@ -11,11 +11,16 @@
 
 const logger = require('../logger');
 
-let BetaAnalyticsDataClient;
-try {
-  BetaAnalyticsDataClient = require('@google-analytics/data').BetaAnalyticsDataClient;
-} catch {
-  BetaAnalyticsDataClient = null;
+// Lazy-load to avoid memory spike at startup
+let BetaAnalyticsDataClient = null;
+function loadGA4Client() {
+  if (BetaAnalyticsDataClient !== null) return BetaAnalyticsDataClient;
+  try {
+    BetaAnalyticsDataClient = require('@google-analytics/data').BetaAnalyticsDataClient;
+  } catch {
+    BetaAnalyticsDataClient = false;
+  }
+  return BetaAnalyticsDataClient;
 }
 
 class GA4Service {
@@ -34,7 +39,8 @@ class GA4Service {
     if (this._initAttempted) return false;
     this._initAttempted = true;
 
-    if (!BetaAnalyticsDataClient) {
+    const Client = loadGA4Client();
+    if (!Client) {
       logger.warn('@google-analytics/data not installed — GA4 disabled');
       return false;
     }
@@ -52,7 +58,7 @@ class GA4Service {
 
     try {
       const credentials = JSON.parse(saJson);
-      this.client = new BetaAnalyticsDataClient({
+      this.client = new Client({
         credentials: {
           client_email: credentials.client_email,
           private_key: credentials.private_key,
