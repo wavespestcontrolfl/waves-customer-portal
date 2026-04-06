@@ -26,7 +26,7 @@ class WordPressManager {
       ...options.headers,
     };
 
-    const res = await fetch(url, { ...options, headers, signal: AbortSignal.timeout(30000) });
+    const res = await fetch(url, { ...options, headers, signal: AbortSignal.timeout(60000) });
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -80,22 +80,34 @@ class WordPressManager {
 
     const results = { siteId, domain: site.domain, forms: [], errors: [] };
 
-    // Fetch pages + posts in parallel
-    const [pages, posts] = await Promise.all([
-      this.fetchAllPostType(site, 'pages'),
-      this.fetchAllPostType(site, 'posts'),
-    ]);
+    // Strategy: fetch pages one at a time with context=edit to get _elementor_data
+    // First get the list of page/post IDs, then fetch each individually
+    let allIds = [];
+    try {
+      const pageList = await this.wpFetch(site, '/wp/v2/pages?per_page=100&_fields=id&status=publish,draft');
+      if (Array.isArray(pageList)) allIds.push(...pageList.map(p => ({ id: p.id, type: 'pages' })));
+    } catch (e) { results.errors.push({ error: `Page list: ${e.message}` }); }
 
-    const allItems = [...pages, ...posts];
+    try {
+      const postList = await this.wpFetch(site, '/wp/v2/posts?per_page=100&_fields=id&status=publish,draft');
+      if (Array.isArray(postList)) allIds.push(...postList.map(p => ({ id: p.id, type: 'posts' })));
+    } catch (e) { results.errors.push({ error: `Post list: ${e.message}` }); }
 
-    for (const item of allItems) {
+    // Fetch each item individually with context=edit to get meta
+    for (const { id, type } of allIds) {
       try {
+        let item;
+        try {
+          item = await this.wpFetch(site, `/wp/v2/${type}/${id}?context=edit`);
+        } catch {
+          item = await this.wpFetch(site, `/wp/v2/${type}/${id}`);
+        }
         const found = this.extractWebhooksFromItem(item);
         if (found.length > 0) {
           results.forms.push(...found.map((f) => ({
             postId: item.id,
             postTitle: item.title?.rendered || item.title?.raw || `(ID ${item.id})`,
-            postType: item.type || 'page',
+            postType: type,
             postUrl: item.link,
             webhookUrl: f.url,
             formId: f.formId || null,
@@ -103,7 +115,7 @@ class WordPressManager {
           })));
         }
       } catch (err) {
-        results.errors.push({ postId: item.id, error: err.message });
+        // Skip individual page errors silently
       }
     }
 
