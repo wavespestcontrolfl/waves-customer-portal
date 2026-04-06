@@ -93,29 +93,62 @@ class WordPressManager {
       if (Array.isArray(postList)) allIds.push(...postList.map(p => ({ id: p.id, type: 'posts' })));
     } catch (e) { results.errors.push({ error: `Post list: ${e.message}` }); }
 
-    // Fetch each item individually with context=edit to get meta
-    for (const { id, type } of allIds) {
+    // Strategy A: Try fetching with context=edit (gets _elementor_data meta)
+    let foundViaApi = false;
+    for (const { id, type } of allIds.slice(0, 10)) { // Sample first 10 to check if edit works
       try {
-        let item;
+        const item = await this.wpFetch(site, `/wp/v2/${type}/${id}?context=edit`);
+        if (item.meta?._elementor_data) { foundViaApi = true; break; }
+      } catch { break; } // If edit context fails, skip to Strategy B
+    }
+
+    if (foundViaApi) {
+      // Full scan via API with edit context
+      for (const { id, type } of allIds) {
         try {
-          item = await this.wpFetch(site, `/wp/v2/${type}/${id}?context=edit`);
-        } catch {
-          item = await this.wpFetch(site, `/wp/v2/${type}/${id}`);
-        }
-        const found = this.extractWebhooksFromItem(item);
-        if (found.length > 0) {
-          results.forms.push(...found.map((f) => ({
-            postId: item.id,
-            postTitle: item.title?.rendered || item.title?.raw || `(ID ${item.id})`,
-            postType: type,
-            postUrl: item.link,
-            webhookUrl: f.url,
-            formId: f.formId || null,
-            source: f.source,
-          })));
-        }
-      } catch (err) {
-        // Skip individual page errors silently
+          const item = await this.wpFetch(site, `/wp/v2/${type}/${id}?context=edit`);
+          const found = this.extractWebhooksFromItem(item);
+          if (found.length > 0) {
+            results.forms.push(...found.map((f) => ({
+              postId: item.id, postTitle: item.title?.rendered || item.title?.raw || `(ID ${item.id})`,
+              postType: type, postUrl: item.link, webhookUrl: f.url, formId: f.formId || null, source: f.source,
+            })));
+          }
+        } catch { /* skip */ }
+      }
+    } else {
+      // Strategy B: Fetch each page's live HTML and search for webhook URLs
+      console.log(`[wp-mgr] context=edit didn't expose _elementor_data for ${site.domain}, scanning HTML`);
+      for (const { id, type } of allIds) {
+        try {
+          const item = await this.wpFetch(site, `/wp/v2/${type}/${id}?_fields=id,title,link,content`);
+          const content = item.content?.rendered || '';
+          const title = item.title?.rendered || `Page ${id}`;
+          const link = item.link || '';
+
+          // Also fetch the actual page HTML to find webhook URLs in Elementor JS/data
+          try {
+            const pageRes = await fetch(link, { signal: AbortSignal.timeout(15000) });
+            if (pageRes.ok) {
+              const html = await pageRes.text();
+              const zapierMatches = html.match(/hooks\.zapier\.com\/hooks\/catch\/[^"'\\<>\s]+/g) || [];
+              for (const match of zapierMatches) {
+                const url = 'https://' + match;
+                if (!results.forms.some(f => f.postId === id && f.webhookUrl === url)) {
+                  results.forms.push({ postId: id, postTitle: title, postType: type, postUrl: link, webhookUrl: url, formId: null, source: 'html_scan' });
+                }
+              }
+            }
+          } catch { /* timeout on individual page fetch is fine */ }
+
+          // Also check rendered content
+          const found = this.extractWebhooksFromItem(item);
+          if (found.length > 0) {
+            results.forms.push(...found.map((f) => ({
+              postId: id, postTitle: title, postType: type, postUrl: link, webhookUrl: f.url, formId: f.formId || null, source: f.source,
+            })));
+          }
+        } catch { /* skip */ }
       }
     }
 
