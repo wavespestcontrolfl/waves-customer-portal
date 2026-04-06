@@ -91,16 +91,7 @@ router.put('/:token/accept', async (req, res, next) => {
 
     await db('estimates').where({ id: estimate.id }).update({ status: 'accepted', accepted_at: db.fn.now() });
 
-    // Send acceptance SMS to customer (#5 — last Zapier zap replacement)
-    if (estimate.customer_phone) {
-      try {
-        const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
-        await TwilioService.sendSMS(estimate.customer_phone,
-          `Hey ${firstName}! Great news — your Waves Pest Control estimate has been accepted! We'll be in touch shortly to schedule your first service. Questions? Reply here or call (941) 318-7612. — Waves 🌊`
-        );
-        logger.info(`[estimate-accept] Acceptance SMS sent to ${firstName} (${estimate.customer_phone})`);
-      } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
-    }
+    const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
 
     // Create customer if doesn't exist
     let customerId = estimate.customer_id;
@@ -159,6 +150,17 @@ router.put('/:token/accept', async (req, res, next) => {
           `🎉 Estimate accepted! ${estimate.customer_name} at ${estimate.address} — ${estimate.waveguard_tier || 'Bronze'} WaveGuard $${estimate.monthly_total}/mo. Onboarding link sent.`
         );
       } catch (e) { logger.error(`Estimate accept SMS failed: ${e.message}`); }
+    }
+
+    // Send acceptance SMS to customer with onboarding link
+    if (estimate.customer_phone) {
+      try {
+        const obUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
+        await TwilioService.sendSMS(estimate.customer_phone,
+          `Welcome to Waves, ${firstName}! Your plan is locked in at $${estimate.monthly_total}/mo. Complete your setup here so we can get you on the schedule: ${obUrl}\n\nQuestions? Just reply to this text. — Adam, Waves Pest Control 🌊`
+        );
+        logger.info(`[estimate-accept] Acceptance SMS sent to ${firstName} (${estimate.customer_phone})`);
+      } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
     // Auto-convert estimate to active customer (Feature #5)
