@@ -129,8 +129,8 @@ export default function WavesVoiceAgentAdmin() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Demo data for display
-  const [demoMode] = useState(true);
+  // Demo mode — auto-detect by checking if server responds
+  const [demoMode, setDemoMode] = useState(false);
   const demoStatus = {
     agent_enabled: true,
     after_hours_only: false,
@@ -158,44 +158,47 @@ export default function WavesVoiceAgentAdmin() {
   const [afterHoursOnly, setAfterHoursOnly] = useState(false);
 
   const fetchStatus = useCallback(async () => {
-    if (demoMode) {
-      setStatus(demoStatus);
-      setCalls(demoCalls);
-      setLoading(false);
-      return;
-    }
     try {
       const [statusRes, callsRes, activeRes] = await Promise.all([
         fetch(`${API_BASE}/admin/voice-agent/status`, { headers: authHeaders() }),
         fetch(`${API_BASE}/admin/voice-agent/calls`, { headers: authHeaders() }),
         fetch(`${API_BASE}/admin/voice-agent/active`, { headers: authHeaders() }),
       ]);
-      setStatus(await statusRes.json());
+      if (!statusRes.ok) throw new Error('Server unavailable');
+      const statusData = await statusRes.json();
+      setStatus(statusData);
+      setAgentEnabled(statusData.agent_enabled || statusData.config?.enabled || false);
+      setAfterHoursOnly(statusData.after_hours_only || statusData.config?.afterHoursOnly || false);
       const callData = await callsRes.json();
       setCalls(callData.calls || []);
       const activeData = await activeRes.json();
       setActiveCalls(activeData.calls || []);
+      setDemoMode(false);
       setError(null);
     } catch (err) {
-      setError("Cannot reach voice agent server");
+      // Server not reachable — fall back to demo mode
+      setDemoMode(true);
+      setStatus(demoStatus);
+      setCalls(demoCalls);
+      setError("Server not reachable — showing demo data");
     } finally {
       setLoading(false);
     }
-  }, [demoMode]);
+  }, []);
 
   useEffect(() => { fetchStatus(); const iv = setInterval(fetchStatus, 10000); return () => clearInterval(iv); }, [fetchStatus]);
 
   const handleToggle = async (field, value) => {
     if (field === "enabled") setAgentEnabled(value);
     if (field === "afterHoursOnly") setAfterHoursOnly(value);
-    if (!demoMode) {
+    try {
       await fetch(`${API_BASE}/admin/voice-agent/toggle`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ [field]: value }),
       });
       fetchStatus();
-    }
+    } catch { /* ignore in demo mode */ }
   };
 
   // Stats
@@ -236,12 +239,19 @@ export default function WavesVoiceAgentAdmin() {
             } ET
           </div>
         </div>
-        {demoMode && (
+        {demoMode ? (
           <span style={{
             fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6,
             background: "rgba(251,191,36,0.12)", color: "#f59e0b", border: "1px solid rgba(251,191,36,0.2)",
           }}>
-            DEMO MODE — Connect server to go live
+            DEMO MODE — Set GATE_VOICE_AGENT=true in Railway to go live
+          </span>
+        ) : (
+          <span style={{
+            fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6,
+            background: "rgba(16,185,129,0.12)", color: "#10b981", border: "1px solid rgba(16,185,129,0.2)",
+          }}>
+            ● LIVE — Handling {afterHoursOnly ? 'after-hours' : 'all'} calls
           </span>
         )}
       </div>
