@@ -7,6 +7,13 @@ const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Square catalog IDs are uppercase alphanumeric, 20+ chars — replace with readable label
+function sanitizeServiceType(serviceType) {
+  if (!serviceType) return 'Service';
+  if (/^[A-Z0-9]{15,}$/.test(serviceType)) return 'Service';
+  return serviceType;
+}
+
 function getZone(city, zip) {
   const c = (city || '').toLowerCase();
   const z = zip || '';
@@ -74,7 +81,7 @@ router.get('/', async (req, res, next) => {
         customerName: `${s.first_name} ${s.last_name}`,
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
-        city: s.city, serviceType: s.service_type,
+        city: s.city, serviceType: sanitizeServiceType(s.service_type),
         windowStart: s.window_start, windowEnd: s.window_end,
         windowDisplay: s.window_display || (s.window_start ? `${fmtTime(s.window_start)}–${fmtTime(s.window_end)}` : 'Flexible'),
         status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
@@ -652,6 +659,23 @@ router.post('/cleanup-duplicates', async (req, res, next) => {
     res.json({ success: true, deleted });
   } catch (err) {
     logger.error(`[cleanup] Failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/schedule/fix-service-types — replace Square catalog IDs with "Service"
+router.post('/fix-service-types', async (req, res, next) => {
+  try {
+    const result = await db.raw(`
+      UPDATE scheduled_services
+      SET service_type = 'Service'
+      WHERE service_type ~ '^[A-Z0-9]{15,}$'
+    `);
+    const fixed = result.rowCount || 0;
+    logger.info(`[cleanup] Fixed ${fixed} Square ID service_types`);
+    res.json({ success: true, fixed });
+  } catch (err) {
+    logger.error(`[cleanup] fix-service-types failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

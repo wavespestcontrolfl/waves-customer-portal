@@ -349,12 +349,40 @@ const SquareService = {
       if (squareClient && serviceVarIds.length > 0) {
         try {
           const catRes = await squareClient.catalogApi.batchRetrieveCatalogObjects({ objectIds: serviceVarIds, includeRelatedObjects: true });
-          const objects = [...(catRes.result?.objects || []), ...(catRes.result?.relatedObjects || [])];
-          for (const obj of objects) {
-            if (obj.itemVariationData?.name) serviceNameMap[obj.id] = obj.itemVariationData.name;
-            if (obj.itemData?.name) serviceNameMap[obj.id] = obj.itemData.name;
+          const objects = catRes.result?.objects || [];
+          const related = catRes.result?.relatedObjects || [];
+
+          // Build parent item name map from related objects
+          const parentNameMap = {};
+          for (const obj of related) {
+            if (obj.type === 'ITEM' && obj.itemData?.name) {
+              parentNameMap[obj.id] = obj.itemData.name;
+            }
           }
-        } catch { /* catalog lookup failed — use IDs */ }
+
+          // Map variation IDs to readable names
+          for (const obj of objects) {
+            if (obj.type === 'ITEM_VARIATION' && obj.itemVariationData) {
+              // Prefer parent item name (e.g. "Pest Control"), fall back to variation name
+              const parentId = obj.itemVariationData.itemId;
+              const parentName = parentNameMap[parentId];
+              const varName = obj.itemVariationData.name;
+              // If variation name is generic like "Regular", use parent name
+              if (parentName && (!varName || varName === 'Regular' || varName === 'Default')) {
+                serviceNameMap[obj.id] = parentName;
+              } else if (parentName && varName) {
+                serviceNameMap[obj.id] = `${parentName} — ${varName}`;
+              } else {
+                serviceNameMap[obj.id] = varName || parentName || 'Service';
+              }
+            } else if (obj.itemData?.name) {
+              serviceNameMap[obj.id] = obj.itemData.name;
+            }
+          }
+          logger.info(`[square] Resolved ${Object.keys(serviceNameMap).length} service names from catalog`);
+        } catch (catErr) {
+          logger.warn(`[square] Catalog lookup failed: ${catErr.message}`);
+        }
       }
 
       return bookings.map(b => {
