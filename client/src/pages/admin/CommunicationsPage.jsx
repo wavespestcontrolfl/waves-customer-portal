@@ -819,10 +819,6 @@ export default function CommunicationsPage() {
         <div>
           <h1 style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 24, fontWeight: 700, color: D.white, margin: 0 }}>Communications</h1>
         </div>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <StatCard label="Sent this month" value={totalSent} color={D.green} />
-          <StatCard label="Received this month" value={totalReceived} color={D.teal} />
-        </div>
       </div>
 
       {/* --- Tabs --- */}
@@ -840,6 +836,23 @@ export default function CommunicationsPage() {
       {commsTab === 'recordings' ? <CallRecordingsPanel /> : commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'numbers' ? (
         <PhoneNumbersTab channelStats={channelStats} maxChannel={maxChannel} stats={stats} />
       ) : <>
+
+      {/* --- SMS Stats --- */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        {[
+          { label: 'Sent This Month', value: totalSent, color: D.green },
+          { label: 'Received This Month', value: totalReceived, color: D.teal },
+          { label: 'Auto-Replies', value: channelStats.find(c => c.type === 'auto_reply')?.sent || 0, color: '#0ea5e9' },
+          { label: 'Reminders', value: channelStats.find(c => c.type === 'reminder')?.sent || channelStats.find(c => c.type === 'confirmation')?.sent || 0, color: D.amber },
+          { label: 'Review Requests', value: channelStats.find(c => c.type === 'review_request')?.sent || 0, color: '#8b5cf6' },
+          { label: 'Estimates', value: channelStats.find(c => c.type === 'estimate')?.sent || 0, color: '#3b82f6' },
+        ].map((s, i) => (
+          <div key={i} style={{ flex: '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center' }}>
+            <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
 
       {/* --- Send SMS --- */}
       <div style={{ marginBottom: 28 }}>
