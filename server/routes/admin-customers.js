@@ -267,4 +267,15 @@ router.post('/:id/follow-up', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/customers/sync-square — pull all customers from Square
+router.post('/sync-square', async (req, res, next) => {
+  try {
+    const SquareCustomerSync = require('../services/square-customer-sync');
+    const result = await SquareCustomerSync.sync();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

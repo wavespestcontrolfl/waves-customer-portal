@@ -539,6 +539,7 @@ export default function CustomersPage() {
   const [sortBy, setSortBy] = useState('lastName');
   const [sortDir, setSortDir] = useState('asc');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [syncingSquare, setSyncingSquare] = useState(false);
 
   const loadCustomers = () => {
     setLoading(true);
@@ -673,6 +674,28 @@ export default function CustomersPage() {
               color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', width: 200,
             }}
           />
+          {/* Sync Square */}
+          <button onClick={async () => {
+            setSyncingSquare(true);
+            try {
+              const r = await fetch(`${API_BASE}/admin/customers/sync-square`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
+              });
+              const result = await r.json();
+              if (!r.ok) {
+                alert(`Sync failed: ${result.error}`);
+              } else {
+                alert(`Square sync: ${result.totalFetched} fetched, ${result.created} new, ${result.updated} updated, ${result.skipped} unchanged${result.errors?.length ? '\n' + result.errors.length + ' errors' : ''}`);
+                loadCustomers();
+              }
+            } catch (e) { alert('Sync failed: ' + e.message); }
+            setSyncingSquare(false);
+          }} disabled={syncingSquare} style={{
+            padding: '8px 18px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 8,
+            fontSize: 13, fontFamily: 'DM Sans, sans-serif', color: D.muted, cursor: 'pointer',
+            opacity: syncingSquare ? 0.5 : 1, whiteSpace: 'nowrap',
+          }}>{syncingSquare ? 'Syncing...' : 'Sync from Square'}</button>
           {/* Add button */}
           <button onClick={() => setShowAddModal(true)} style={{
             padding: '8px 18px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
