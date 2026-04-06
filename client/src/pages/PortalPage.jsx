@@ -1202,9 +1202,10 @@ function DashboardTab({ customer, onSwitchTab }) {
             marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
             padding: '5px 14px', borderRadius: 24, fontSize: 13, fontWeight: 700,
             fontFamily: FONTS.heading,
-            background: `linear-gradient(135deg, ${tier.gradientFrom}33, ${tier.gradientTo}22)`,
-            color: tier.darkText ? B.navy : '#fff',
-            border: `1.5px solid ${tier.color}55`,
+            background: `linear-gradient(135deg, ${tier.gradientFrom}, ${tier.gradientTo})`,
+            color: '#fff',
+            border: 'none',
+            textShadow: '0 1px 3px rgba(0,0,0,0.3)',
           }}>🛡️ WaveGuard {customer.tier}</div>
         )}
         <div style={{ marginTop: 12, fontSize: 13, color: '#fff', lineHeight: 1.6 }}>
@@ -5536,10 +5537,9 @@ function ServiceTracker() {
                     textShadow: isCurrent ? '0 1px 3px rgba(0,0,0,0.3)' : 'none',
                   }}>{isComplete ? '✓' : s.num}</div>
                   <div style={{
-                    fontSize: 6, fontWeight: 700, marginTop: 2,
+                    fontSize: isCurrent ? 8 : 6, fontWeight: 700, marginTop: 2,
                     color: isCurrent ? B.yellow : isFuture ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.85)',
                     fontFamily: FONTS.heading, letterSpacing: 0.3,
-                    display: isCurrent ? 'block' : 'none',
                   }}>{s.label}</div>
                 </div>
               </div>
@@ -7199,14 +7199,14 @@ export default function PortalPage() {
         }}>{'💬'} Text</a>
         <button onClick={() => setShowChat(true)} style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.wavesBlue, color: '#fff', fontSize: 12,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.wavesBlue}40`, minHeight: 44,
+          background: B.red, color: '#fff', fontSize: 12,
+          textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'🤖'} Chat</button>
         <a href="mailto:contact@wavespestcontrol.com" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.navy, color: '#fff', fontSize: 12,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.navy}30`, minHeight: 44,
+          background: B.red, color: '#fff', fontSize: 12,
+          textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'✉️'} Email</a>
       </div>
