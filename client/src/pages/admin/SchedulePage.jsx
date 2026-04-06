@@ -1206,6 +1206,21 @@ export default function SchedulePage() {
     setOptimizing(false);
   };
 
+  const [syncingSquare, setSyncingSquare] = useState(false);
+  const handleSyncSquare = async () => {
+    setSyncingSquare(true);
+    try {
+      const result = await adminFetch('/admin/schedule/sync-square', {
+        method: 'POST', body: JSON.stringify({ days: 14 }),
+      });
+      alert(`Square sync: ${result.created} new, ${result.updated} updated, ${result.skipped} unchanged`);
+      fetchSchedule(date);
+    } catch (e) {
+      alert('Square sync failed: ' + e.message);
+    }
+    setSyncingSquare(false);
+  };
+
   function shiftDate(days) {
     const d = new Date(date + 'T00:00:00');
     d.setDate(d.getDate() + days);
@@ -1279,6 +1294,12 @@ export default function SchedulePage() {
                 <span><strong style={{ color: D.green }}>{completedCount}</strong> completed</span>
                 <span><strong style={{ color: D.amber }}>{remainingCount}</strong> remaining</span>
               </div>
+              <button onClick={handleSyncSquare} disabled={syncingSquare} style={{
+                ...btnBase, background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, fontSize: 13, height: 38,
+                opacity: syncingSquare ? 0.6 : 1,
+              }}>
+                {syncingSquare ? 'Syncing...' : 'Sync Square'}
+              </button>
               <button onClick={handleOptimize} disabled={optimizing} style={{
                 ...btnBase, background: D.teal, color: D.white, fontSize: 13, height: 38,
                 opacity: optimizing ? 0.6 : 1,

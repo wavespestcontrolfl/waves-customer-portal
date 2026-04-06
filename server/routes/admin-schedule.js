@@ -390,4 +390,14 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/schedule/sync-square — pull Square bookings into scheduled_services
+router.post('/sync-square', async (req, res, next) => {
+  try {
+    const SquareBookingSync = require('../services/square-booking-sync');
+    const days = parseInt(req.body.days) || 14;
+    const result = await SquareBookingSync.sync(days);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

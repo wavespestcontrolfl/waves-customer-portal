@@ -84,6 +84,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY HOUR — Sync Square bookings into Schedule & Dispatch
+  // =========================================================================
+  cron.schedule('0 * * * *', async () => {
+    try {
+      const SquareBookingSync = require('./square-booking-sync');
+      const result = await SquareBookingSync.sync(14);
+      if (result.created > 0 || result.updated > 0) {
+        logger.info(`Square sync: ${result.created} created, ${result.updated} updated`);
+      }
+    } catch (err) {
+      logger.error(`Square booking sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Check for new appointments + WDO inspections
   // Replaces Zapier zaps #21, #22
   // =========================================================================
