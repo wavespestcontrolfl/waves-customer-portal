@@ -1325,6 +1325,7 @@ export default function SchedulePage() {
   const services = data.services || [];
   const techSummary = data.techSummary || [];
   const unassigned = data.unassigned || [];
+  const technicians = data.technicians || [];
   const zoneColors = data.zoneColors || {};
   const zoneLabels = data.zoneLabels || {};
 
@@ -1476,15 +1477,37 @@ export default function SchedulePage() {
           </div>
           <div style={{ paddingLeft: 20 }}>
             {unassigned.map(svc => (
-              <ServiceCard
-                key={svc.id}
-                service={svc}
-                zoneColors={zoneColors}
-                onStatusChange={handleStatusChange}
-                onComplete={handleComplete}
-                onReschedule={svc2 => setRescheduleService(svc2)}
-                onProtocol={svc2 => setProtocolService(svc2)}
-              />
+              <div key={svc.id}>
+                <div style={{ marginBottom: 8 }}>
+                  <select onChange={async (e) => {
+                    if (!e.target.value) return;
+                    try {
+                      await adminFetch(`/admin/schedule/${svc.id}/assign`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ technicianId: e.target.value }),
+                      });
+                      fetchSchedule(date);
+                    } catch (err) { alert('Assign failed: ' + err.message); }
+                  }} defaultValue="" style={{
+                    width: '100%', padding: '10px 14px', borderRadius: 10,
+                    background: D.input, color: D.text, border: `1px solid ${D.amber}`,
+                    fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  }}>
+                    <option value="">Assign to technician...</option>
+                    {technicians.map(t => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <ServiceCard
+                  service={svc}
+                  zoneColors={zoneColors}
+                  onStatusChange={handleStatusChange}
+                  onComplete={handleComplete}
+                  onReschedule={svc2 => setRescheduleService(svc2)}
+                  onProtocol={svc2 => setProtocolService(svc2)}
+                />
+              </div>
             ))}
           </div>
         </div>

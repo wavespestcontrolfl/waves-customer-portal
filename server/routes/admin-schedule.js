@@ -137,10 +137,13 @@ router.get('/', async (req, res, next) => {
       tech.loadList = Object.keys(materials);
     });
 
+    const technicians = await db('technicians').select('id', 'name').where({ active: true }).orderBy('name');
+
     res.json({
       date, services: enriched,
       techSummary: Object.values(byTech),
       unassigned,
+      technicians,
       zoneColors: ZONE_COLORS, zoneLabels: ZONE_LABELS,
     });
   } catch (err) { next(err); }
@@ -246,6 +249,18 @@ router.post('/', async (req, res, next) => {
     } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/schedule/:id/assign — assign technician
+router.put('/:id/assign', async (req, res, next) => {
+  try {
+    const { technicianId } = req.body;
+    if (!technicianId) return res.status(400).json({ error: 'technicianId required' });
+    await db('scheduled_services').where({ id: req.params.id }).update({ technician_id: technicianId });
+    const tech = await db('technicians').where({ id: technicianId }).first();
+    logger.info(`[schedule] Assigned service ${req.params.id} to ${tech?.name || technicianId}`);
+    res.json({ success: true, technicianName: tech?.name });
   } catch (err) { next(err); }
 });
 
