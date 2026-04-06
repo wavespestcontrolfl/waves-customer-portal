@@ -8,6 +8,14 @@ const { resolveLocation } = require('../config/locations');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+const ADMIN_PHONES = ['+19415993489', process.env.ADAM_PHONE].filter(Boolean);
+const excludeAdminPhones = (query) => {
+  for (const phone of ADMIN_PHONES) {
+    query = query.whereNot('sms_log.to_phone', phone).whereNot('sms_log.from_phone', phone);
+  }
+  return query;
+};
+
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   try {
@@ -80,6 +88,9 @@ router.get('/log', async (req, res, next) => {
       .select('sms_log.*', 'customers.first_name', 'customers.last_name')
       .orderBy('sms_log.created_at', 'desc');
 
+    // Exclude internal admin phone messages
+    excludeAdminPhones(query);
+
     if (customerId) query = query.where('sms_log.customer_id', customerId);
     if (direction) query = query.where('sms_log.direction', direction);
     if (messageType) query = query.where('sms_log.message_type', messageType);
@@ -122,9 +133,12 @@ router.get('/stats', async (req, res, next) => {
   try {
     const som = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
 
-    // Total sent/received this month (ALL types including manual)
-    const [sentTotal] = await db('sms_log').where('direction', 'outbound').where('created_at', '>=', som).count('* as count');
-    const [receivedTotal] = await db('sms_log').where('direction', 'inbound').where('created_at', '>=', som).count('* as count');
+    // Total sent/received this month (ALL types, excluding admin phone)
+    let sentQ = db('sms_log').where('direction', 'outbound').where('created_at', '>=', som);
+    let recvQ = db('sms_log').where('direction', 'inbound').where('created_at', '>=', som);
+    for (const phone of ADMIN_PHONES) { sentQ = sentQ.whereNot('to_phone', phone); recvQ = recvQ.whereNot('from_phone', phone); }
+    const [sentTotal] = await sentQ.count('* as count');
+    const [receivedTotal] = await recvQ.count('* as count');
 
     const stats = await db('sms_log')
       .where('direction', 'outbound')
