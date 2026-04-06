@@ -807,6 +807,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [sendSms, setSendSms] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [success, setSuccess] = useState(false);
   const [elapsed, setElapsed] = useState('0:00');
 
@@ -910,7 +911,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
             fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box',
           }} placeholder="Notes about this service..." />
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8, marginBottom: 20 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8, marginBottom: 10 }}>
             {QUICK_NOTES.map(qn => (
               <button key={qn} onClick={() => addQuickNote(qn)} style={{
                 padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
@@ -920,6 +921,34 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
               </button>
             ))}
           </div>
+          <button onClick={async () => {
+            if (!notes.trim()) { alert('Add service notes first.'); return; }
+            setGenerating(true);
+            try {
+              const productNames = selectedProducts.map(p => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : '')).join(', ');
+              const r = await adminFetch('/admin/schedule/generate-report', {
+                method: 'POST',
+                body: JSON.stringify({
+                  customerName: service.customerName,
+                  serviceType: service.serviceType,
+                  technicianName: service.technicianName || 'Waves Tech',
+                  serviceDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+                  arrivalTime: service.checkInTime ? new Date(service.checkInTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '',
+                  serviceNotes: notes,
+                  productsApplied: productNames,
+                }),
+              });
+              if (r.report) setNotes(r.report);
+            } catch (e) { alert('AI report failed: ' + e.message); }
+            setGenerating(false);
+          }} disabled={generating} style={{
+            width: '100%', padding: '10px 16px', borderRadius: 10, border: 'none',
+            background: generating ? D.card : 'linear-gradient(135deg, #8b5cf6, #6366f1)',
+            color: D.white, fontSize: 13, fontWeight: 700, cursor: generating ? 'wait' : 'pointer',
+            marginBottom: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          }}>
+            {generating ? 'Generating Report...' : 'Generate AI Service Report'}
+          </button>
 
           <label style={labelStyle}>Products Applied</label>
           <input type="text" value={productSearch} onChange={e => setProductSearch(e.target.value)}

@@ -680,4 +680,77 @@ router.post('/fix-service-types', async (req, res, next) => {
   }
 });
 
+// POST /api/admin/schedule/generate-report — AI tactical service report
+router.post('/generate-report', async (req, res) => {
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+
+    const { customerName, serviceType, technicianName, serviceDate, arrivalTime, serviceNotes, productsApplied } = req.body;
+    if (!serviceNotes) return res.status(400).json({ error: 'Service notes required' });
+
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    const prompt = `Role: You are the AI communications specialist for "Waves," a premium pest control and lawn care provider.
+Persona: You are a "Tactical Turf & Pest Specialist." You speak with the confidence of a scientist and the decisiveness of a military strategist.
+
+Tone:
+- Tactical & High-Energy: Use words like neutralize, fortify, deploy, suppression, perimeter, initiate, tactical strike, barrier, vector.
+- Scientific Authority: NEVER use commercial brand names. ALWAYS refer to the Active Ingredient (e.g., "Imidacloprid," "Bifenthrin," "Prodiamine").
+- Educational yet Gripping: Explain chemical mechanisms using "Action Metaphors" (e.g., "locking the jaw muscles," "acting like a biological trojan horse," "creating a subterranean shield").
+- Natural & Fluid: Avoid robotic repetition. Do not start every sentence with "We." Flow like a human conversation.
+
+Goal: Generate a text-only service report that sounds like a sophisticated "Mission Debrief."
+
+INPUT DATA:
+- Client Full Name: ${customerName}
+- Service Type: ${serviceType}
+- Technician Full Name: ${technicianName}
+- Service Date: ${serviceDate}
+- Arrival Time: ${arrivalTime}
+- Service Notes: ${serviceNotes}
+- Products Applied: ${productsApplied || 'Not specified'}
+
+INSTRUCTIONS:
+
+PHASE 1: THE GREETING
+Randomly select one greeting style. If Service Type already contains "Service," don't repeat it. Use regular case. If multiple services, join with "&".
+
+PHASE 2: THE TACTICAL DEBRIEF
+Based on the service type, write a flowing narrative paragraph explaining the science and strategy:
+- For pest control: describe colony collapse, barrier fortification, or crevice flush strategies
+- For lawn care: describe deep-tissue nutrition, cellular fortification, or soil activation
+- For mosquito: describe vertical suppression, lifecycle arrest, or airspace reclamation
+- For rodent: describe perimeter interception, runway denial, or structural hardening
+- For termite: describe subterranean barrier strategies
+- For weed control: describe pre-emergent shield or systemic termination
+- For tree/shrub/palm: describe vascular defense or armored pest bypass
+
+Combine the service notes naturally. VARY sentence starters — use the treatment as the subject, not "We applied..."
+
+PHASE 3: CLOSING (Strict Format)
+Line 1: "Questions or requests? Reply to this message."
+Line 2: "Thank you for choosing Waves!"
+
+FORMATTING:
+- No emojis, no bullet points
+- Three sections: Greeting, Debrief/Notes, Closing
+- Double line breaks between sections
+- Keep under 1500 characters
+- Concise and punchy`;
+
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 800,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const report = msg.content?.[0]?.text || '';
+    res.json({ report });
+  } catch (err) {
+    logger.error(`[generate-report] AI failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
