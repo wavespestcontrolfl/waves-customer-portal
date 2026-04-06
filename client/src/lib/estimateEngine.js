@@ -688,10 +688,10 @@ export function calculateEstimate(inputs) {
   if (R.tmBait) { ac++; ra += 35 * 12; }
 
   let wt = 'Bronze', wd = 0;
-  if (ac >= 4) { wt = 'Platinum'; wd = 0.30; }
-  else if (ac === 3) { wt = 'Gold'; wd = 0.20; }
-  else if (ac === 2) { wt = 'Silver'; wd = 0.15; }
-  else if (ac === 1) { wt = 'Bronze'; wd = 0.10; }
+  if (ac >= 4) { wt = 'Platinum'; wd = 0.20; }
+  else if (ac === 3) { wt = 'Gold'; wd = 0.15; }
+  else if (ac === 2) { wt = 'Silver'; wd = 0.10; }
+  else if (ac === 1) { wt = 'Bronze'; wd = 0; }
   const da = Math.round(ra * wd * 100) / 100;
   const ad = Math.round((ra - da) * 100) / 100;
   const mm = Math.round(ad / 12 * 100) / 100;

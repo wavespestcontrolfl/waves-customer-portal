@@ -42,10 +42,10 @@ const SERVICES = {
 
 const TIERS = {
   none: { discount: 0, label: 'No Bundle', minServices: 0 },
-  Bronze: { discount: 0.10, label: 'Bronze', minServices: 1 },
-  Silver: { discount: 0.15, label: 'Silver', minServices: 2 },
-  Gold: { discount: 0.20, label: 'Gold', minServices: 3 },
-  Platinum: { discount: 0.30, label: 'Platinum', minServices: 4 },
+  Bronze: { discount: 0, label: 'Bronze', minServices: 1 },
+  Silver: { discount: 0.10, label: 'Silver', minServices: 2 },
+  Gold: { discount: 0.15, label: 'Gold', minServices: 3 },
+  Platinum: { discount: 0.20, label: 'Platinum', minServices: 4 },
 };
 
 const TIER_ORDER = ['none', 'Bronze', 'Silver', 'Gold', 'Platinum'];

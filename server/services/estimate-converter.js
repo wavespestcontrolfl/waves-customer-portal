@@ -12,16 +12,16 @@ const logger = require('./logger');
 
 /**
  * Determine WaveGuard tier based on number of recurring services selected.
- * 1 service = Bronze (10% discount)
- * 2 services = Silver (15% discount)
- * 3 services = Gold (20% discount)
- * 4+ services = Platinum (30% discount)
+ * 1 service = Bronze (0% discount)
+ * 2 services = Silver (10% discount)
+ * 3 services = Gold (15% discount)
+ * 4+ services = Platinum (20% discount)
  */
 function determineTier(serviceCount) {
-  if (serviceCount >= 4) return { tier: 'Platinum', discount: 0.30 };
-  if (serviceCount >= 3) return { tier: 'Gold', discount: 0.20 };
-  if (serviceCount >= 2) return { tier: 'Silver', discount: 0.15 };
-  if (serviceCount >= 1) return { tier: 'Bronze', discount: 0.10 };
+  if (serviceCount >= 4) return { tier: 'Platinum', discount: 0.20 };
+  if (serviceCount >= 3) return { tier: 'Gold', discount: 0.15 };
+  if (serviceCount >= 2) return { tier: 'Silver', discount: 0.10 };
+  if (serviceCount >= 1) return { tier: 'Bronze', discount: 0 };
   return { tier: 'none', discount: 0 };
 }
 

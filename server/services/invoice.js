@@ -36,7 +36,7 @@ async function nextInvoiceNumber() {
 }
 
 // WaveGuard tier discount percentages
-const TIER_DISCOUNTS = { Bronze: 0.10, Silver: 0.15, Gold: 0.20, Platinum: 0.30 };
+const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE

@@ -53,7 +53,7 @@ router.get('/:token', async (req, res, next) => {
 
     // Anchor price = sum of individual service prices before WaveGuard bundle discount
     const monthlyTotal = parseFloat(estimate.monthly_total || 0);
-    const tierDiscount = { Bronze: 0.10, Silver: 0.15, Gold: 0.20, Platinum: 0.30 };
+    const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
     const discount = tierDiscount[estimate.waveguard_tier] || 0;
     const anchorPrice = discount > 0
       ? Math.round((monthlyTotal / (1 - discount)) * 100) / 100

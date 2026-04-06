@@ -113,10 +113,10 @@ export default function SettingsPage() {
             <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>WaveGuard Tiers</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
               {[
-                { tier: 'Bronze', discount: '10%', color: '#CD7F32' },
-                { tier: 'Silver', discount: '15%', color: '#90CAF9' },
-                { tier: 'Gold', discount: '20%', color: '#FDD835' },
-                { tier: 'Platinum', discount: '30%', color: '#E5E4E2' },
+                { tier: 'Bronze', discount: '0%', color: '#CD7F32' },
+                { tier: 'Silver', discount: '10%', color: '#90CAF9' },
+                { tier: 'Gold', discount: '15%', color: '#FDD835' },
+                { tier: 'Platinum', discount: '20%', color: '#E5E4E2' },
               ].map(t => (
                 <div key={t.tier} style={{ padding: 14, background: D.bg, borderRadius: 10, textAlign: 'center', borderTop: `3px solid ${t.color}` }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: t.color }}>{t.tier}</div>

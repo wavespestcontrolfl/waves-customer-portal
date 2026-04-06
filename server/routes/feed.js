@@ -272,7 +272,7 @@ const FAQ_DATA = [
   {
     category: 'Billing & Service', icon: '💳',
     questions: [
-      { q: 'How does WaveGuard bundling save me money?', a: 'The more services you bundle, the bigger the discount: Bronze (1 service) = 10% off, Silver (2 services) = 15% off, Gold (3) = 20% off, Platinum (4+) = 30% off everything. The discount applies to ALL your recurring services, not just the new one.' },
+      { q: 'How does WaveGuard bundling save me money?', a: 'The more services you bundle, the bigger the discount: Bronze (1 service) = no discount, Silver (2 services) = 10% off, Gold (3) = 15% off, Platinum (4+) = 20% off everything. The discount applies to ALL your recurring services, not just the new one.' },
       { q: 'Can I pause my service?', a: 'Yes — life happens. Text us and we can pause for up to 60 days. Just know that pest and lawn issues don\'t pause, so you may need a restart treatment when you come back.' },
       { q: 'What\'s your cancellation policy?', a: 'No contracts, no cancellation fees. We earn your business every month. If you want to cancel, just text us. We\'ll ask why (feedback helps us improve), but we won\'t make it difficult.' },
     ],
