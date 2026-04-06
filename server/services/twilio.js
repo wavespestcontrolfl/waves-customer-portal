@@ -3,6 +3,8 @@ const config = require('../config');
 const db = require('../models/db');
 const logger = require('./logger');
 
+const WAVES_LOGO_URL = 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png';
+
 // Lazy-initialize Twilio client — don't crash if creds are missing
 let _client;
 function getClient() {
@@ -123,7 +125,12 @@ const TwilioService = {
         // return { success: true, sid: 'preview-only', preview: true };
       }
 
-      const message = await c.messages.create({ body, from: fromNumber, to });
+      const msgPayload = { body, from: fromNumber, to };
+      // Include Waves logo for automated messages, not manual correspondence
+      const isManual = options.messageType === 'manual' || options.skipLogo;
+      if (options.mediaUrl) msgPayload.mediaUrl = [options.mediaUrl];
+      else if (!isManual) msgPayload.mediaUrl = [WAVES_LOGO_URL];
+      const message = await c.messages.create(msgPayload);
       logger.info(`SMS sent to ${to} from ${fromNumber}: ${message.sid}`);
 
       // Log to sms_log

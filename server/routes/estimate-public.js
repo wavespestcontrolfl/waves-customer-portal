@@ -157,7 +157,8 @@ router.put('/:token/accept', async (req, res, next) => {
       try {
         const obUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
         await TwilioService.sendSMS(estimate.customer_phone,
-          `Welcome to Waves, ${firstName}! Your plan is locked in at $${estimate.monthly_total}/mo. Complete your setup here so we can get you on the schedule: ${obUrl}\n\nQuestions? Just reply to this text. — Adam, Waves Pest Control 🌊`
+          `Hello ${firstName}! Thanks for approving your estimate. Complete your setup here so we can get you on the schedule: ${obUrl}`,
+          { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png' }
         );
         logger.info(`[estimate-accept] Acceptance SMS sent to ${firstName} (${estimate.customer_phone})`);
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
