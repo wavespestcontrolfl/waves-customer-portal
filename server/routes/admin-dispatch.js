@@ -187,11 +187,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     await db('service_status_log').insert({ scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId });
 
-    // Completion SMS
-    if (sendCompletionSms && svc.cust_phone) {
+    // Completion SMS — link to Visit Reports in portal
+    if (svc.cust_phone) {
       try {
+        const portalUrl = 'https://portal.wavespestcontrol.com';
         await TwilioService.sendSMS(svc.cust_phone,
-          `✅ All done! ${svc.tech_name} completed your ${svc.service_type}. View your full service report in your Waves portal. 🌊`
+          `Hello ${svc.first_name}! Your service report can be found under Documents > Visit Reports:\n${portalUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`,
+          { customerId: svc.customer_id, messageType: 'service_complete' }
         );
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
     }
