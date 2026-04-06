@@ -67,11 +67,25 @@ export default function WordPressSitesPage() {
   const scanSite = async (siteId) => {
     setScanning(siteId);
     try {
-      const r = await adminFetch(`/admin/wordpress/sites/${siteId}/scan`, { method: 'POST' });
-      showToast(`Scan: ${r.formsFound || 0} forms found, ${r.zapierForms || 0} still on Zapier`);
-      loadSites();
-    } catch (e) { showToast(`Scan failed: ${e.message}`); }
-    setScanning(null);
+      await adminFetch(`/admin/wordpress/sites/${siteId}/scan`, { method: 'POST' });
+      showToast('Scan started — checking pages for webhook URLs...');
+      // Poll for results every 5 seconds
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        try {
+          const d = await adminFetch('/admin/wordpress/sites');
+          setSites(d.sites || []);
+          const site = (d.sites || []).find(s => s.id === siteId || s.domain === siteId);
+          if (site && site.forms_count > 0) {
+            clearInterval(poll);
+            setScanning(null);
+            showToast(`Scan complete: ${site.forms_count} forms found (${site.webhook_status})`);
+          }
+        } catch { /* keep polling */ }
+        if (attempts >= 12) { clearInterval(poll); setScanning(null); showToast('Scan is still running — refresh page in a moment'); }
+      }, 5000);
+    } catch (e) { showToast(`Scan failed: ${e.message}`); setScanning(null); }
   };
 
   const swapSite = async (siteId) => {

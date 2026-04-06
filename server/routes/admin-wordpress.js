@@ -147,15 +147,19 @@ router.post('/sites/:id/test', async (req, res) => {
 router.post('/sites/:id/scan', async (req, res) => {
   try {
     await ensureTable();
-    const result = await wpManager.scanForms(req.params.id);
-    res.json({
-      ...result,
-      formsFound: result.forms?.length || 0,
-      zapierForms: (result.forms || []).filter(f => f.webhookUrl?.includes('zapier')).length,
+    // Return immediately, run scan in background
+    res.json({ status: 'scanning', message: 'Scan started — refresh in 30 seconds to see results' });
+
+    // Run scan async
+    wpManager.scanForms(req.params.id).then(result => {
+      console.log(`[wp-scan] ${result.domain}: ${result.forms?.length || 0} forms found`);
+    }).catch(err => {
+      console.error(`[wp-scan] Failed: ${err.message}`);
+      db('wordpress_sites').where({ id: req.params.id }).update({ last_error: err.message }).catch(() => {});
     });
   } catch (err) {
     console.error('Scan forms error:', err);
-    res.status(500).json({ error: err.message, hint: 'Check that the WP user has Administrator role and the Application Password is correct' });
+    res.status(500).json({ error: err.message });
   }
 });
 

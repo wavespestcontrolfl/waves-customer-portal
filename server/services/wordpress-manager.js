@@ -117,38 +117,46 @@ class WordPressManager {
         } catch { /* skip */ }
       }
     } else {
-      // Strategy B: Fetch each page's live HTML and search for webhook URLs
-      console.log(`[wp-mgr] context=edit didn't expose _elementor_data for ${site.domain}, scanning HTML`);
+      // Strategy B: Only scan pages that have Elementor forms
+      console.log(`[wp-mgr] Scanning ${site.domain} via HTML (${allIds.length} pages)`);
+
+      // First, quick scan: get content of all pages to find which ones have forms
+      const pagesWithForms = [];
       for (const { id, type } of allIds) {
         try {
           const item = await this.wpFetch(site, `/wp/v2/${type}/${id}?_fields=id,title,link,content`);
           const content = item.content?.rendered || '';
-          const title = item.title?.rendered || `Page ${id}`;
-          const link = item.link || '';
-
-          // Also fetch the actual page HTML to find webhook URLs in Elementor JS/data
-          try {
-            const pageRes = await fetch(link, { signal: AbortSignal.timeout(15000) });
-            if (pageRes.ok) {
-              const html = await pageRes.text();
-              const zapierMatches = html.match(/hooks\.zapier\.com\/hooks\/catch\/[^"'\\<>\s]+/g) || [];
-              for (const match of zapierMatches) {
-                const url = 'https://' + match;
-                if (!results.forms.some(f => f.postId === id && f.webhookUrl === url)) {
-                  results.forms.push({ postId: id, postTitle: title, postType: type, postUrl: link, webhookUrl: url, formId: null, source: 'html_scan' });
-                }
-              }
-            }
-          } catch { /* timeout on individual page fetch is fine */ }
-
-          // Also check rendered content
-          const found = this.extractWebhooksFromItem(item);
-          if (found.length > 0) {
-            results.forms.push(...found.map((f) => ({
-              postId: id, postTitle: title, postType: type, postUrl: link, webhookUrl: f.url, formId: f.formId || null, source: f.source,
-            })));
+          if (content.includes('elementor-form') || content.includes('webhook') || content.includes('zapier')) {
+            pagesWithForms.push({ id, type, title: item.title?.rendered || `Page ${id}`, link: item.link || '' });
           }
         } catch { /* skip */ }
+      }
+
+      console.log(`[wp-mgr] ${site.domain}: ${pagesWithForms.length} pages have forms, fetching HTML`);
+
+      // Only fetch HTML for pages with forms
+      for (const page of pagesWithForms) {
+        try {
+          const pageRes = await fetch(page.link, { signal: AbortSignal.timeout(10000) });
+          if (pageRes.ok) {
+            const html = await pageRes.text();
+            const zapierMatches = html.match(/hooks\.zapier\.com\/hooks\/catch\/[^"'\\<>\s]+/g) || [];
+            for (const match of zapierMatches) {
+              const url = 'https://' + match;
+              if (!results.forms.some(f => f.postId === page.id && f.webhookUrl === url)) {
+                results.forms.push({ postId: page.id, postTitle: page.title, postType: page.type, postUrl: page.link, webhookUrl: url, formId: null, source: 'html_scan' });
+              }
+            }
+            // Also check for portal webhook
+            const portalMatches = html.match(/waves-customer-portal[^"'\\<>\s]*webhooks\/lead/g) || [];
+            for (const match of portalMatches) {
+              const url = 'https://' + match;
+              if (!results.forms.some(f => f.postId === page.id && f.webhookUrl === url)) {
+                results.forms.push({ postId: page.id, postTitle: page.title, postType: page.type, postUrl: page.link, webhookUrl: url, formId: null, source: 'html_scan' });
+              }
+            }
+          }
+        } catch { /* timeout is fine */ }
       }
     }
 
