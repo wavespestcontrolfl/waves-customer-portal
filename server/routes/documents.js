@@ -16,11 +16,11 @@ const GREEN = '#10b981';
 const RED = '#A83B34';
 const LIGHT_BG = '#F0F7FC';
 
-function sectionHeader(doc, title, x, y) {
-  const w = 512;
+function sectionHeader(doc, title, x, y, w) {
+  const width = w || 512;
   doc.save();
-  doc.roundedRect(x, y, w, 22, 3).fill(NAVY);
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(title.toUpperCase(), x + 10, y + 6, { width: w - 20 });
+  doc.roundedRect(x, y, width, 22, 3).fill(NAVY);
+  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(title.toUpperCase(), x + 10, y + 6, { width: width - 20 });
   doc.restore();
   return y + 28;
 }
@@ -31,19 +31,66 @@ function infoRow(doc, label, value, x, y, labelW, valW) {
   return y + 14;
 }
 
+// Map product categories to customer-friendly descriptions
+function friendlyProductDescription(category) {
+  const map = {
+    'insecticide': 'Insect barrier treatment',
+    'herbicide': 'Weed control',
+    'fungicide': 'Fungus prevention',
+    'fertilizer': 'Lawn nutrition',
+    'larvicide': 'Mosquito breeding prevention',
+    'rodenticide': 'Rodent control',
+    'growth regulator': 'Growth regulation',
+    'surfactant': 'Application enhancer',
+    'adjuvant': 'Application enhancer',
+  };
+  if (!category) return '—';
+  return map[category.toLowerCase()] || category;
+}
+
+// Get aftercare tips based on service type
+function getAftercareTips(serviceType) {
+  if (!serviceType) return 'Allow treated areas to dry completely before contact. Call us with any questions.';
+  const st = serviceType.toLowerCase();
+  if (st.includes('mosquito')) {
+    return 'Barrier effective 21-30 days. Empty standing water weekly to reduce breeding sites. Reapplication recommended before outdoor events.';
+  }
+  if (st.includes('lawn') || st.includes('fertiliz') || st.includes('weed') || st.includes('turf')) {
+    return 'Avoid mowing for 48 hours. Water as usual unless otherwise noted. Greening expected in 7-10 days. Weed yellowing begins in 5-7 days.';
+  }
+  // Default to pest
+  return 'Treated areas dry in 30-45 min. Safe for pets and children once dry. Minor pest activity may continue 7-14 days as product takes full effect.';
+}
+
+// Calculate visit duration from available data
+function getVisitDuration(service) {
+  if (service.actual_duration_minutes) return service.actual_duration_minutes;
+  if (service.check_in_time && service.check_out_time) {
+    const inTime = new Date(service.check_in_time);
+    const outTime = new Date(service.check_out_time);
+    const diffMs = outTime - inTime;
+    if (diffMs > 0) return Math.round(diffMs / 60000);
+  }
+  return null;
+}
+
 function generateServiceReportPDF(customer, service, products, res) {
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
 
-  const customerName = `${customer.first_name} ${customer.last_name}`;
-  const dateSlug = formatDate(service.service_date).replace(/[^a-zA-Z0-9]/g, '');
-  const nameSlug = customerName.replace(/\s+/g, '_');
-  const fileName = `Waves_${nameSlug}_${dateSlug}.pdf`;
+  // Build filename: Waves_FirstName_LastName_MonthDay_Year.pdf
+  const svcDate = new Date(typeof service.service_date === 'string' ? service.service_date + 'T12:00:00' : service.service_date);
+  const monthDay = `${String(svcDate.getMonth() + 1).padStart(2, '0')}${String(svcDate.getDate()).padStart(2, '0')}`;
+  const year = svcDate.getFullYear();
+  const fileName = `Waves_${customer.first_name}_${customer.last_name}_${monthDay}_${year}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
   doc.pipe(res);
 
   const L = 40, R = 572, W = R - L;
+  const customerName = `${customer.first_name} ${customer.last_name}`;
+  const visitDuration = getVisitDuration(service);
+  const isCallback = service.is_callback || (service.service_type && service.service_type.toLowerCase().includes('callback'));
 
   // ══════════════════════════════════════════════════════
   // HEADER BAR — navy background with white text
@@ -57,7 +104,7 @@ function generateServiceReportPDF(customer, service, products, res) {
   // Right side — contact info
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', R - 150, 22, { width: 150, align: 'right' });
   doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('wavespestcontrol.com', R - 150, 36, { width: 150, align: 'right' });
-  doc.text('Lakewood Ranch, FL', R - 150, 48, { width: 150, align: 'right' });
+  doc.text('Bradenton, FL', R - 150, 48, { width: 150, align: 'right' });
   doc.restore();
 
   // ══════════════════════════════════════════════════════
@@ -91,12 +138,56 @@ function generateServiceReportPDF(customer, service, products, res) {
   y2 = infoRow(doc, 'Technician:', service.technician_name || 'Waves Team', colMid + 8, y2, 80, 170);
   y2 = infoRow(doc, 'Status:', service.status === 'completed' ? 'Completed' : service.status, colMid + 8, y2, 80, 170);
 
+  // Visit duration
+  if (visitDuration) {
+    y2 = infoRow(doc, 'Time on site:', `${visitDuration} minutes`, colMid + 8, y2, 80, 170);
+  }
+
   // WaveGuard tier if available
   if (customer.waveguard_tier) {
     y2 = infoRow(doc, 'Plan:', `WaveGuard ${customer.waveguard_tier}`, colMid + 8, y2, 80, 170);
   }
 
   y = Math.max(y, y2) + 12;
+
+  // ══════════════════════════════════════════════════════
+  // PROPERTY SNAPSHOT — light blue bar with key-value pairs
+  // ══════════════════════════════════════════════════════
+  const snapshotItems = [];
+  if (customer.lawn_type) snapshotItems.push({ label: 'Lawn Type', value: customer.lawn_type });
+  if (customer.property_sqft) snapshotItems.push({ label: 'Treated Area', value: `${Number(customer.property_sqft).toLocaleString()} sq ft` });
+  if (customer.waveguard_tier) snapshotItems.push({ label: 'WaveGuard', value: customer.waveguard_tier });
+  if (visitDuration) snapshotItems.push({ label: 'Visit Duration', value: `${visitDuration} min` });
+
+  if (snapshotItems.length) {
+    y = sectionHeader(doc, 'Property Snapshot', L, y);
+    doc.save();
+    doc.roundedRect(L, y, W, 24, 3).fill('#D6EAF8');
+    const snapColW = W / snapshotItems.length;
+    snapshotItems.forEach((item, i) => {
+      const xPos = L + i * snapColW + 12;
+      doc.fontSize(7).font('Helvetica').fillColor('#555').text(item.label, xPos, y + 3, { width: snapColW - 20 });
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(NAVY).text(item.value, xPos, y + 13, { width: snapColW - 20 });
+    });
+    doc.restore();
+    y += 34;
+  }
+
+  // ══════════════════════════════════════════════════════
+  // WAVEGUARD CALLBACK CALLOUT
+  // ══════════════════════════════════════════════════════
+  if (isCallback) {
+    if (y > 680) { doc.addPage(); y = 50; }
+    doc.save();
+    doc.roundedRect(L, y, W, 30, 4).fill('#E8F5E9');
+    doc.roundedRect(L, y, 4, 30, 2).fill(GREEN);
+    doc.fontSize(9).font('Helvetica-Bold').fillColor('#2E7D32').text(
+      'This callback visit was included at no additional charge with your WaveGuard membership.',
+      L + 14, y + 9, { width: W - 28 }
+    );
+    doc.restore();
+    y += 40;
+  }
 
   // ══════════════════════════════════════════════════════
   // MEASUREMENTS (if lawn)
@@ -110,25 +201,25 @@ function generateServiceReportPDF(customer, service, products, res) {
   if (measurements.length) {
     y = sectionHeader(doc, 'Lawn Measurements', L, y);
     doc.save();
-    doc.rect(L, y, W, 20).fill(LIGHT_BG);
+    doc.rect(L, y, W, 26).fill(LIGHT_BG);
     const mColW = W / measurements.length;
     measurements.forEach((m, i) => {
       doc.fontSize(8).font('Helvetica-Bold').fillColor('#555').text(m.label, L + i * mColW + 10, y + 2, { width: mColW - 20 });
       doc.fontSize(10).font('Helvetica-Bold').fillColor(NAVY).text(m.value, L + i * mColW + 10, y + 12, { width: mColW - 20 });
     });
     doc.restore();
-    y += 30;
+    y += 34;
   }
 
   // ══════════════════════════════════════════════════════
-  // PRODUCTS APPLIED — styled table
+  // PRODUCTS APPLIED — customer-friendly table
   // ══════════════════════════════════════════════════════
   if (products.length) {
     y = sectionHeader(doc, 'Products Applied', L, y);
 
-    // Table header
-    const cols = [L + 4, L + 160, L + 310, L + 400, L + 470];
-    const colLabels = ['Product', 'Active Ingredient', 'Rate', 'MOA Group', 'Method'];
+    // Table header — customer-friendly columns
+    const cols = [L + 4, L + 180, L + 350, L + 460];
+    const colLabels = ['Product Name', 'What It Does', 'Area / Method', 'Rate'];
 
     doc.save();
     doc.rect(L, y, W, 16).fill('#E8EDF2');
@@ -138,58 +229,110 @@ function generateServiceReportPDF(customer, service, products, res) {
     y += 18;
 
     products.forEach((p, i) => {
-      if (y > 700) { doc.addPage(); y = 50; }
+      if (y > 680) { doc.addPage(); y = 50; }
+      const rowH = p.active_ingredient ? 28 : 18;
       const bg = i % 2 === 0 ? '#fff' : LIGHT_BG;
       doc.save();
-      doc.rect(L, y, W, 16).fill(bg);
+      doc.rect(L, y, W, rowH).fill(bg);
+      // Product name (bold)
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#333');
+      doc.text(p.product_name || '', cols[0], y + 4, { width: 170 });
+      // Active ingredient in small text below product name
+      if (p.active_ingredient) {
+        doc.fontSize(6.5).font('Helvetica').fillColor('#888');
+        doc.text(`Active: ${p.active_ingredient}`, cols[0], y + 16, { width: 170 });
+      }
+      // What It Does — friendly description from category
       doc.fontSize(8).font('Helvetica').fillColor('#333');
-      doc.text(p.product_name || '', cols[0], y + 4, { width: 150 });
-      doc.text(p.active_ingredient || '—', cols[1], y + 4, { width: 145 });
-      doc.text(p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—', cols[2], y + 4, { width: 85 });
-      doc.text(p.moa_group || '—', cols[3], y + 4, { width: 65 });
-      doc.text(p.product_category || '—', cols[4], y + 4, { width: 90 });
+      doc.text(friendlyProductDescription(p.product_category), cols[1], y + 4, { width: 165 });
+      // Area / Method
+      doc.text(p.application_method || p.target_area || '—', cols[2], y + 4, { width: 105 });
+      // Rate
+      doc.text(p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}`.trim() : '—', cols[3], y + 4, { width: 80 });
       doc.restore();
-      y += 16;
+      y += rowH;
     });
     y += 10;
   }
 
   // ══════════════════════════════════════════════════════
-  // TECHNICIAN COMMENTS — the AI tactical debrief
+  // STRUCTURED TECH NOTES — What We Did / Found / Next
   // ══════════════════════════════════════════════════════
-  if (service.technician_notes) {
-    if (y > 620) { doc.addPage(); y = 50; }
-    y = sectionHeader(doc, 'Technician Comments', L, y);
-    doc.fontSize(10).font('Helvetica').fillColor('#333').text(service.technician_notes, L + 8, y, {
-      width: W - 16, lineGap: 4,
-    });
-    y = doc.y + 14;
-  }
-
-  // ══════════════════════════════════════════════════════
-  // FIELD OBSERVATIONS
-  // ══════════════════════════════════════════════════════
+  const notes = (service.technician_notes || '').trim();
+  let fieldObs = null;
   if (service.field_flags) {
     try {
-      const flags = typeof service.field_flags === 'string' ? JSON.parse(service.field_flags) : service.field_flags;
-      if (Object.keys(flags).length) {
-        if (y > 660) { doc.addPage(); y = 50; }
-        y = sectionHeader(doc, 'Field Observations', L, y);
-        Object.entries(flags).forEach(([key, val]) => {
-          doc.fontSize(9).font('Helvetica').fillColor('#333').text(`${key}: ${val}`, L + 8, y);
-          y += 14;
-        });
-        y += 6;
-      }
+      const parsed = typeof service.field_flags === 'string' ? JSON.parse(service.field_flags) : service.field_flags;
+      if (Object.keys(parsed).length) fieldObs = parsed;
     } catch { /* ignore */ }
   }
+
+  // "What We Did" section
+  if (notes) {
+    if (y > 620) { doc.addPage(); y = 50; }
+    y = sectionHeader(doc, 'What We Did', L, y);
+    // If notes are long (>= 100 chars), use first 2/3 for "What We Did"
+    let whatWeDid = notes;
+    if (notes.length >= 100) {
+      const splitIdx = Math.floor(notes.length * 0.67);
+      // Try to split at a sentence boundary
+      const sentenceEnd = notes.lastIndexOf('.', splitIdx);
+      whatWeDid = sentenceEnd > splitIdx * 0.5 ? notes.substring(0, sentenceEnd + 1) : notes.substring(0, splitIdx);
+    }
+    doc.fontSize(9).font('Helvetica').fillColor('#333').text(whatWeDid.trim(), L + 8, y, {
+      width: W - 16, lineGap: 3,
+    });
+    y = doc.y + 12;
+  }
+
+  // "What We Found" section — from field_flags or remaining notes
+  const hasObservations = fieldObs || (notes.length >= 100);
+  if (hasObservations) {
+    if (y > 660) { doc.addPage(); y = 50; }
+    y = sectionHeader(doc, 'What We Found', L, y);
+    if (fieldObs) {
+      Object.entries(fieldObs).forEach(([key, val]) => {
+        if (y > 700) { doc.addPage(); y = 50; }
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#555').text(`${key}:`, L + 8, y, { width: 140, continued: false });
+        doc.font('Helvetica').fillColor('#333').text(` ${val}`, L + 8 + doc.widthOfString(`${key}: `), y, { width: W - 30 });
+        y += 14;
+      });
+    }
+    // If notes were long, show the remainder here
+    if (notes.length >= 100) {
+      const splitIdx = Math.floor(notes.length * 0.67);
+      const sentenceEnd = notes.lastIndexOf('.', splitIdx);
+      const cutoff = sentenceEnd > splitIdx * 0.5 ? sentenceEnd + 1 : splitIdx;
+      const remainder = notes.substring(cutoff).trim();
+      if (remainder) {
+        doc.fontSize(9).font('Helvetica').fillColor('#333').text(remainder, L + 8, y, {
+          width: W - 16, lineGap: 3,
+        });
+        y = doc.y + 6;
+      }
+    }
+    y += 6;
+  }
+
+  // "What's Next" section — aftercare tips based on service type
+  if (y > 660) { doc.addPage(); y = 50; }
+  y = sectionHeader(doc, "What's Next", L, y);
+  doc.save();
+  doc.roundedRect(L, y, W, 36, 3).fill('#F0FAF0');
+  doc.roundedRect(L, y, 4, 36, 2).fill(GREEN);
+  doc.fontSize(9).font('Helvetica').fillColor('#333').text(
+    getAftercareTips(service.service_type),
+    L + 14, y + 6, { width: W - 28, lineGap: 3 }
+  );
+  doc.restore();
+  y += 46;
 
   // ══════════════════════════════════════════════════════
   // SAFETY NOTICE
   // ══════════════════════════════════════════════════════
   if (y > 680) { doc.addPage(); y = 50; }
   doc.save();
-  doc.rect(L, y, W, 28).fill('#FFF8E1');
+  doc.roundedRect(L, y, W, 28, 3).fill('#FFF8E1');
   doc.fontSize(8).font('Helvetica-Bold').fillColor('#B8860B').text(
     'SAFETY: Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry.',
     L + 10, y + 6, { width: W - 20 }
@@ -202,15 +345,26 @@ function generateServiceReportPDF(customer, service, products, res) {
   y += 36;
 
   // ══════════════════════════════════════════════════════
-  // FOOTER
+  // FOOTER — enhanced with full business details
   // ══════════════════════════════════════════════════════
   doc.save();
   doc.rect(0, 730, 612, 62).fill(NAVY);
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('Waves Lawn & Pest Control', L + 10, 740);
-  doc.fontSize(7).font('Helvetica').fillColor('#aaa');
-  doc.text('13649 Luxe Ave #110, Bradenton, FL 34211 | (941) 318-7612 | wavespestcontrol.com', L + 10, 754);
-  doc.text('Questions or requests? Reply to your service text or call us anytime.', L + 10, 766);
-  doc.fontSize(7).fillColor('#666').text('Thank you for choosing Waves!', R - 180, 754, { width: 168, align: 'right' });
+  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(
+    'Waves Pest Control, LLC · FL License #JF336375',
+    0, 738, { width: 612, align: 'center' }
+  );
+  doc.fontSize(7).font('Helvetica').fillColor('#ccc').text(
+    '13649 Luxe Ave #110, Bradenton, FL 34211 · (941) 318-7612',
+    0, 752, { width: 612, align: 'center' }
+  );
+  doc.text(
+    'wavespestcontrol.com · View this report in your Waves portal',
+    0, 763, { width: 612, align: 'center' }
+  );
+  doc.fontSize(7).fillColor('#999').text(
+    'National Pest Emergency Poison Control: (800) 222-1222',
+    0, 774, { width: 612, align: 'center' }
+  );
   doc.restore();
 
   doc.end();
