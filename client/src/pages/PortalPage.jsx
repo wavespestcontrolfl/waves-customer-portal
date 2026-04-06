@@ -137,48 +137,46 @@ function SocialIcon({ path, size = 20 }) {
   );
 }
 
+const GBP_LOCATIONS = [
+  { name: 'Lakewood Ranch', url: 'https://maps.google.com/?cid=14769059513826704468', reviewUrl: 'https://g.page/r/CVRc_P5butTMEBM/review' },
+  { name: 'Parrish',        url: 'https://maps.google.com/?cid=4289832891027056559',  reviewUrl: 'https://g.page/r/Ca-4KKoWwFacEBM/review' },
+  { name: 'Sarasota',       url: 'https://maps.google.com/?cid=15891900048665778201', reviewUrl: 'https://g.page/r/CRkzS6M4EpncEBM/review' },
+  { name: 'Venice',         url: 'https://maps.google.com/?cid=4727792987037655364',  reviewUrl: 'https://g.page/r/CURA5pQ1KatBEBM/review' },
+];
+
 function SocialFooter({ compact }) {
   const [hovered, setHovered] = useState(null);
+  const [hoveredCity, setHoveredCity] = useState(null);
   const circleSize = compact ? 36 : 44;
   const iconSize = compact ? 16 : 20;
 
   return (
-    <div style={{ padding: compact ? '16px 0' : '24px 0', textAlign: 'center' }}>
-      {/* Wave divider */}
+    <div style={{ padding: compact ? '16px 0' : '32px 0 16px', textAlign: 'center' }}>
       {!compact && (
-        <div style={{ height: 16, overflow: 'hidden', marginBottom: 16 }}>
+        <div style={{ height: 20, overflow: 'hidden', marginBottom: 20 }}>
           <svg viewBox="0 0 1200 40" style={{ width: '100%', height: '100%' }}>
             <path d="M0,20 C150,40 350,0 500,20 C650,40 850,0 1000,20 C1100,35 1200,10 1200,20" fill="none" stroke={B.blueLight} strokeWidth="2" strokeOpacity="0.2" />
           </svg>
         </div>
       )}
 
-      {/* Header */}
       <div style={{
         fontSize: compact ? 12 : 14, fontWeight: 600, color: B.grayDark,
         fontFamily: FONTS.heading, marginBottom: compact ? 10 : 14,
-      }}>Stay in the loop 🌊</div>
+      }}>🌊 Stay in the loop</div>
 
-      {/* Icons */}
       <div style={{ display: 'flex', gap: compact ? 10 : 14, justifyContent: 'center', flexWrap: 'wrap' }}>
         {SOCIAL_LINKS.map(s => {
           const isHov = hovered === s.name;
           return (
-            <a
-              key={s.name}
-              href={s.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={s.name}
-              onMouseEnter={() => setHovered(s.name)}
-              onMouseLeave={() => setHovered(null)}
+            <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name}
+              onMouseEnter={() => setHovered(s.name)} onMouseLeave={() => setHovered(null)}
               style={{
                 width: circleSize, height: circleSize, borderRadius: '50%',
                 background: isHov ? B.wavesBlue : B.blueSurface,
                 color: isHov ? B.white : B.wavesBlue,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                textDecoration: 'none',
-                transition: 'all 0.2s ease',
+                textDecoration: 'none', transition: 'all 0.2s ease',
                 transform: isHov ? 'scale(1.1)' : 'scale(1)',
               }}
             >
@@ -188,17 +186,31 @@ function SocialFooter({ compact }) {
         })}
       </div>
 
-      {/* Text */}
       {!compact && (
-        <div style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 13, color: B.grayMid, fontFamily: FONTS.body }}>
-            Waves Lawn & Pest — Family-owned, SWFL-based 🌴
+        <div style={{ marginTop: 20 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.heading, marginBottom: 6 }}>
+            Wave Goodbye to Pests! 🌊
           </div>
-          <div style={{ fontSize: 12, color: '#90A4AE', fontFamily: FONTS.body, marginTop: 4 }}>
-            Bradenton · Lakewood Ranch · Sarasota · Venice · North Port · Port Charlotte
+          <div style={{ fontSize: 13, color: B.grayMid, fontFamily: FONTS.body }}>Waves Pest Control, LLC</div>
+          <div style={{ fontSize: 12, color: B.grayMid, fontFamily: FONTS.body, marginTop: 2 }}>
+            Family-owned pest control & lawn care · Southwest Florida
           </div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.heading, marginTop: 6 }}>
-            Wave Goodbye to Pests!
+          <div style={{ display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center', flexWrap: 'wrap', marginTop: 10 }}>
+            {GBP_LOCATIONS.map((loc, i) => (
+              <span key={loc.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <a href={loc.url} target="_blank" rel="noopener noreferrer"
+                  onMouseEnter={() => setHoveredCity(loc.name)} onMouseLeave={() => setHoveredCity(null)}
+                  style={{
+                    fontSize: 12, fontWeight: 600, fontFamily: FONTS.body,
+                    color: hoveredCity === loc.name ? B.wavesBlue : B.grayMid,
+                    textDecoration: 'none', transition: 'color 0.2s ease',
+                  }}>{loc.name}</a>
+                {i < GBP_LOCATIONS.length - 1 && <span style={{ color: B.grayLight, fontSize: 10 }}>·</span>}
+              </span>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: B.grayMid, fontFamily: FONTS.body, marginTop: 12 }}>
+            © {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved
           </div>
         </div>
       )}
