@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
+import NotificationBell from './NotificationBell';
 
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', red: '#ef4444' };
 
@@ -77,7 +78,7 @@ export default function AdminLayout() {
           <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
           <span style={{ fontSize: 13, fontWeight: 700, color: D.white }}>WAVES</span>
         </div>
-        <div style={{ width: 32 }} />
+        <NotificationBell type="admin" />
       </div>
 
       {/* Sidebar overlay (mobile) */}
@@ -106,6 +107,9 @@ export default function AdminLayout() {
               <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>WAVES ADMIN</div>
               <div style={{ fontSize: 11, color: D.muted }}>{userName}</div>
             </div>
+          </div>
+          <div className="desktop-bell" style={{ display: 'flex', alignItems: 'center' }}>
+            <NotificationBell type="admin" />
           </div>
           <button onClick={() => setSidebarOpen(false)} style={{
             background: 'none', border: 'none', color: D.muted, fontSize: 20, cursor: 'pointer',
@@ -163,6 +167,7 @@ export default function AdminLayout() {
             transform: translateX(0) !important;
           }
           .sidebar-close { display: block !important; }
+          .desktop-bell { display: none !important; }
           .admin-main {
             margin-left: 0 !important;
             padding: 68px 16px 24px !important;

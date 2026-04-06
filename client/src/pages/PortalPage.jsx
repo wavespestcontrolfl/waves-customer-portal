@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import api from '../utils/api';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme';
+import NotificationBell from '../components/NotificationBell';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
@@ -4866,7 +4867,9 @@ export default function PortalPage() {
             <div style={{ fontSize: 9, color: B.blueLight, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>Customer Portal</div>
           </div>
         </div>
-        <div ref={menuRef} style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <NotificationBell type="customer" />
+          <div ref={menuRef} style={{ position: 'relative' }}>
           <div onClick={() => setShowMenu(!showMenu)} style={{
             width: 36, height: 36, borderRadius: '50%',
             background: B.yellow,
@@ -4910,6 +4913,7 @@ export default function PortalPage() {
               </div>
             </div>
           )}
+        </div>
         </div>
       </div>
 
