@@ -353,9 +353,11 @@ function EstimateToolView() {
       if (data.satellite) {
         setSatelliteData({
           imageUrl: data.satellite.closeUrl,
+          superCloseUrl: data.satellite.superCloseUrl,
           closeUrl: data.satellite.closeUrl,
           wideUrl: data.satellite.wideUrl,
           inServiceArea: data.satellite.inServiceArea,
+          aiSources: data.aiAnalysis?._sources,
         });
       }
 
@@ -658,18 +660,29 @@ function EstimateToolView() {
             {satelliteStatus.type && <div style={statusStyle(satelliteStatus.type)}>{satelliteStatus.msg}</div>}
             {satelliteData && (satelliteData.imageUrl || satelliteData.closeUrl) && (
               <div style={{ marginBottom: 12 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: satelliteData.wideUrl ? '1fr 1fr' : '1fr', gap: 6, marginBottom: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 8 }}>
+                  {satelliteData.superCloseUrl && (
+                    <div>
+                      <img src={satelliteData.superCloseUrl} alt="Super close" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
+                      <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Detail</div>
+                    </div>
+                  )}
                   <div>
                     <img src={satelliteData.closeUrl || satelliteData.imageUrl} alt="Close view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
-                    <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Close View</div>
+                    <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Property</div>
                   </div>
                   {satelliteData.wideUrl && (
                     <div>
                       <img src={satelliteData.wideUrl} alt="Area view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
-                      <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Area View</div>
+                      <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Area</div>
                     </div>
                   )}
                 </div>
+                {satelliteData.aiSources && (
+                  <div style={{ fontSize: 10, color: C.teal, marginBottom: 4 }}>
+                    AI Analysis: {satelliteData.aiSources.join(' + ')} {satelliteData.aiSources.length > 1 ? '(dual-model)' : ''}
+                  </div>
+                )}
                 {satelliteData.fieldVerify?.length > 0 && (
                   <div style={{ fontSize: 12, color: C.red, fontWeight: 600, padding: '6px 10px', background: 'rgba(239,68,68,0.1)', borderRadius: 6 }}>
                     Field verify: {satelliteData.fieldVerify.map(f => typeof f === 'string' ? f.replace(/_/g, ' ') : (f.field || '')).join(', ')}

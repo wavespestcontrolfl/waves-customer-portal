@@ -79,20 +79,24 @@ router.post('/property-lookup', async (req, res) => {
     if (!mapsKey) {
       result.errors.push({ source: 'satellite', message: 'No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured' });
     } else {
+      const superCloseUrl = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const closeUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=19&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const wideUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=18&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
 
-      const [closeB64, wideB64] = await Promise.all([
+      const [superCloseB64, closeB64, wideB64] = await Promise.all([
+        fetchImageAsBase64(superCloseUrl),
         fetchImageAsBase64(closeUrlWithKey),
         fetchImageAsBase64(wideUrlWithKey)
       ]);
 
       result.satellite = {
         lat, lng,
+        superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
         inServiceArea: !(lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
                          lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax),
+        _superCloseB64: superCloseB64,
         _closeB64: closeB64,
         _wideB64: wideB64
       };
@@ -101,21 +105,60 @@ router.post('/property-lookup', async (req, res) => {
     result.errors.push({ source: 'satellite', message: err.message });
   }
 
-  // ── STEP 3: Claude Vision Analysis ──
+  // ── STEP 3: Dual AI Vision Analysis (Claude + Gemini) ──
   if (result.satellite?._closeB64 && result.satellite?._wideB64) {
-    try {
-      if (!process.env.ANTHROPIC_API_KEY) {
-        result.errors.push({ source: 'ai', message: 'ANTHROPIC_API_KEY not configured' });
-      } else {
-        result.aiAnalysis = await analyzeWithClaude(
+    // Run Claude and Gemini in parallel for collaborative analysis
+    const [claudeResult, geminiResult] = await Promise.allSettled([
+      // Claude Vision
+      (async () => {
+        if (!process.env.ANTHROPIC_API_KEY) return null;
+        return analyzeWithClaude(
           result.satellite._closeB64,
           result.satellite._wideB64,
           result.rentcast,
-          address
+          address,
+          result.satellite._superCloseB64
         );
-      }
-    } catch (err) {
-      result.errors.push({ source: 'ai', message: err.message });
+      })(),
+      // Gemini Vision
+      (async () => {
+        const geminiKey = process.env.GEMINI_API_KEY;
+        if (!geminiKey) return null;
+        return analyzeWithGemini(
+          result.satellite._superCloseB64 || result.satellite._closeB64,
+          result.satellite._wideB64,
+          result.rentcast,
+          address,
+          geminiKey
+        );
+      })(),
+    ]);
+
+    const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
+    const gemini = geminiResult.status === 'fulfilled' ? geminiResult.value : null;
+
+    if (claudeResult.status === 'rejected') {
+      result.errors.push({ source: 'claude', message: claudeResult.reason?.message || 'Claude analysis failed' });
+    }
+    if (geminiResult.status === 'rejected') {
+      result.errors.push({ source: 'gemini', message: geminiResult.reason?.message || 'Gemini analysis failed' });
+    }
+
+    // Merge results — Claude is primary, Gemini fills gaps and validates
+    if (claude && gemini) {
+      result.aiAnalysis = mergeAiAnalyses(claude, gemini);
+      result.aiAnalysis._sources = ['claude', 'gemini'];
+      result.aiAnalysis._claudeConfidence = claude.confidenceScore;
+      result.aiAnalysis._geminiConfidence = gemini.confidenceScore;
+      logger.info(`[property-lookup] Dual AI analysis complete. Claude: ${claude.confidenceScore}%, Gemini: ${gemini.confidenceScore}%`);
+    } else if (claude) {
+      result.aiAnalysis = claude;
+      result.aiAnalysis._sources = ['claude'];
+    } else if (gemini) {
+      result.aiAnalysis = gemini;
+      result.aiAnalysis._sources = ['gemini'];
+    } else {
+      result.errors.push({ source: 'ai', message: 'Both AI models failed — check API keys' });
     }
   } else if (!result.satellite?._closeB64) {
     result.errors.push({ source: 'ai', message: 'Satellite images not available — cannot run AI analysis' });
@@ -126,6 +169,7 @@ router.post('/property-lookup', async (req, res) => {
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
+    delete result.satellite._superCloseB64;
     delete result.satellite._closeB64;
     delete result.satellite._wideB64;
   }
@@ -299,7 +343,7 @@ async function fetchImageAsBase64(url) {
 // ─────────────────────────────────────────────
 // CLAUDE VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithClaude(closeB64, wideB64, rentcastData, address) {
+async function analyzeWithClaude(closeB64, wideB64, rentcastData, address, superCloseB64) {
   const rcContext = rentcastData ? `
 RentCast data for this property:
 - Address: ${rentcastData.formattedAddress}
@@ -317,9 +361,10 @@ RentCast data for this property:
 
   const systemPrompt = `You are a property analysis AI for Waves Pest Control, a pest control and lawn care company in Southwest Florida. You analyze satellite imagery to extract property features that affect pest control, lawn care, tree/shrub care, mosquito control, and termite treatment pricing.
 
-You will receive two satellite images:
-1. CLOSE VIEW (zoom 19) — shows the property in detail
-2. WIDE VIEW (zoom 18) — shows the neighborhood context
+You will receive up to three satellite images:
+1. SUPER CLOSE VIEW (zoom 20) — shows fine detail: roof material, driveway surface, landscape beds, individual plants
+2. CLOSE VIEW (zoom 19) — shows the full property in context
+3. WIDE VIEW (zoom 18) — shows the neighborhood, water features, surrounding lots
 
 You also receive RentCast property record data for cross-reference.
 
@@ -410,6 +455,10 @@ Return a JSON object with exactly these fields:
       messages: [{
         role: 'user',
         content: [
+          ...(superCloseB64 ? [{
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: superCloseB64 }
+          }] : []),
           {
             type: 'image',
             source: { type: 'base64', media_type: 'image/png', data: closeB64 }
@@ -1144,5 +1193,84 @@ router.post('/calculate-estimate', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─────────────────────────────────────────────
+// GEMINI VISION ANALYSIS
+// ─────────────────────────────────────────────
+async function analyzeWithGemini(closeB64, wideB64, rentcastData, address, apiKey) {
+  const rcContext = rentcastData ? `Property: ${rentcastData.formattedAddress}, ${rentcastData.squareFootage} sf, ${rentcastData.lotSize} sf lot, built ${rentcastData.yearBuilt || 'unknown'}, ${rentcastData.stories} story, pool: ${rentcastData.hasPool ? 'YES' : 'NO'}, ${rentcastData.constructionMaterial}, ${rentcastData.foundationType} foundation` : '';
+
+  const prompt = `Analyze these satellite images of a property at ${address}. ${rcContext}
+
+Return a JSON object with these fields (same format as a property analysis):
+pool, poolCage, largeDriveway, drivewaySurfaceType, fenceType, fenceNotes, roofMaterial, roofCondition, shrubDensity (LIGHT/MODERATE/HEAVY), treeDensity, landscapeComplexity (SIMPLE/MODERATE/COMPLEX), estimatedTurfSqFt, estimatedBedSqFt, estimatedImpervious, waterProximity (NONE/CANAL/POND/LAKE/RETENTION/WETLAND), vegetationOnStructure, outbuildingCount, maintenanceCondition, overallPestPressureEstimate (LOW/MODERATE/HIGH/VERY_HIGH), confidenceScore (0-100), analysisNotes.
+
+Respond ONLY with valid JSON. No markdown, no explanation.`;
+
+  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: closeB64 } },
+          { inlineData: { mimeType: 'image/png', data: wideB64 } },
+          { text: prompt },
+        ],
+      }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2000 },
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Gemini API ${resp.status}: ${errText.substring(0, 200)}`);
+  }
+
+  const data = await resp.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('Gemini returned no valid JSON');
+  return JSON.parse(jsonMatch[0]);
+}
+
+// ─────────────────────────────────────────────
+// MERGE AI ANALYSES (Claude primary, Gemini validates)
+// ─────────────────────────────────────────────
+function mergeAiAnalyses(claude, gemini) {
+  const merged = { ...claude };
+
+  // Use higher confidence for key fields when models disagree
+  const fieldsToValidate = ['pool', 'poolCage', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'waterProximity', 'overallPestPressureEstimate'];
+
+  const divergences = [];
+  for (const field of fieldsToValidate) {
+    if (gemini[field] && claude[field] && String(gemini[field]).toUpperCase() !== String(claude[field]).toUpperCase()) {
+      divergences.push({ field, claude: claude[field], gemini: gemini[field] });
+      // If Gemini has higher confidence on this analysis, use its value
+      if ((gemini.confidenceScore || 0) > (claude.confidenceScore || 0) + 10) {
+        merged[field] = gemini[field];
+      }
+    }
+  }
+
+  // Fill gaps — if Claude returned null/undefined, use Gemini's value
+  for (const [key, val] of Object.entries(gemini)) {
+    if ((merged[key] === null || merged[key] === undefined || merged[key] === '') && val) {
+      merged[key] = val;
+    }
+  }
+
+  // Average confidence scores
+  merged.confidenceScore = Math.round(((claude.confidenceScore || 70) + (gemini.confidenceScore || 70)) / 2);
+
+  // Track divergences for field verification
+  if (divergences.length) {
+    merged.aiDivergences = divergences;
+    merged.analysisNotes = (merged.analysisNotes || '') + ` AI models diverged on: ${divergences.map(d => `${d.field} (Claude: ${d.claude}, Gemini: ${d.gemini})`).join(', ')}.`;
+  }
+
+  return merged;
+}
 
 module.exports = router;
