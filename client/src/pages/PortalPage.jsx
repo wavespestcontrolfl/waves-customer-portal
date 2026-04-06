@@ -394,6 +394,28 @@ function LawnHealthCard({ scores, initialScores }) {
         })}
       </div>
 
+      {/* What's Next */}
+      <div style={{
+        marginTop: 18, padding: '12px 16px', borderRadius: 12,
+        background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
+        <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+          Next visit we'll focus on strengthening turf density and applying preventive fungicide.
+        </div>
+      </div>
+
+      {/* Seasonal context */}
+      <div style={{
+        marginTop: 10, padding: '8px 12px', borderRadius: 8,
+        background: `${B.wavesBlue}08`, fontSize: 11, color: B.grayMid, lineHeight: 1.5,
+      }}>
+        Scores adjusted for {(() => {
+          const m = new Date().getMonth();
+          return m >= 2 && m <= 4 ? 'spring growing' : m >= 5 && m <= 8 ? 'summer peak' : m >= 9 && m <= 10 ? 'fall transition' : 'winter dormancy';
+        })()} season — typical for St. Augustine in SW Florida.
+      </div>
+
       {/* Before / After Slider */}
       <div style={{ marginTop: 20 }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8 }}>
@@ -4030,7 +4052,7 @@ const ARTICLES = [
   },
 ];
 
-function WeatherPestWidget() {
+function WeatherPestWidget({ customer, nextService }) {
   const [weather, setWeather] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -4051,10 +4073,35 @@ function WeatherPestWidget() {
 
   if (!weather) return null;
 
+  // Localized location label
+  const cityName = customer?.address?.city || '';
+  const localizedLocation = cityName ? `${cityName} Weather` : weather.location;
+
+  // Build action items per pest pressure indicator
+  const getActionItem = (type, level) => {
+    if (level === 'LOW') return null;
+    const nextDate = nextService?.date ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null;
+    const actions = {
+      mosquito: {
+        HIGH: `Empty standing water, clear gutters.${nextDate ? ` Your next barrier: ${nextDate}.` : ''}`,
+        MODERATE: `Reduce standing water sources. Treat birdbaths weekly.`,
+      },
+      fungus: {
+        HIGH: `Avoid evening irrigation. Water before 10 AM only.`,
+        MODERATE: `Avoid evening irrigation. Ensure good air circulation around turf.`,
+      },
+      chinch: {
+        HIGH: `Watch for yellowing edges in sunny spots. Water stressed areas.`,
+        MODERATE: `Monitor sunny turf edges for early yellowing.`,
+      },
+    };
+    return actions[type]?.[level] || null;
+  };
+
   const pressureItems = [
-    { label: 'Mosquito Pressure', ...weather.pestPressure.mosquito, icon: '🦟' },
-    { label: 'Fungus Risk', ...weather.pestPressure.fungus, icon: '🍄' },
-    { label: 'Chinch Bug Risk', ...weather.pestPressure.chinch, icon: '🐛' },
+    { label: 'Mosquito Pressure', ...weather.pestPressure.mosquito, icon: '🦟', type: 'mosquito' },
+    { label: 'Fungus Risk', ...weather.pestPressure.fungus, icon: '🍄', type: 'fungus' },
+    { label: 'Chinch Bug Risk', ...weather.pestPressure.chinch, icon: '🐛', type: 'chinch' },
   ];
 
   return (
@@ -4066,7 +4113,7 @@ function WeatherPestWidget() {
       <div style={{ padding: '18px 20px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.blueLight }}>
-            {weather.location}
+            {localizedLocation}
           </div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
             <span style={{ fontSize: 42, fontWeight: 800, fontFamily: FONTS.ui }}>{weather.temp}°</span>
@@ -4084,27 +4131,35 @@ function WeatherPestWidget() {
         </div>
       </div>
 
-      {/* Pest pressure bars */}
+      {/* Pest pressure bars with action items */}
       <div style={{ padding: '0 20px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {pressureItems.map(p => (
-          <div key={p.label}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-              <span style={{ fontSize: 12, opacity: 0.9 }}>{p.icon} {p.label}</span>
-              <span style={{
-                fontSize: 11, fontWeight: 800, letterSpacing: 0.5,
-                padding: '2px 8px', borderRadius: 10,
-                background: `${p.color}33`, color: p.color,
-              }}>{p.level}</span>
+        {pressureItems.map(p => {
+          const action = getActionItem(p.type, p.level);
+          return (
+            <div key={p.label}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 12, opacity: 0.9 }}>{p.icon} {p.label}</span>
+                <span style={{
+                  fontSize: 11, fontWeight: 800, letterSpacing: 0.5,
+                  padding: '2px 8px', borderRadius: 10,
+                  background: `${p.color}33`, color: p.color,
+                }}>{p.level}</span>
+              </div>
+              <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.15)' }}>
+                <div style={{
+                  height: '100%', borderRadius: 2, background: p.color,
+                  width: p.level === 'HIGH' ? '100%' : p.level === 'MODERATE' ? '60%' : '25%',
+                  transition: 'width 1s ease-out',
+                }} />
+              </div>
+              {action && (
+                <div style={{ fontSize: 11, color: B.blueLight, marginTop: 4, lineHeight: 1.4, paddingLeft: 2 }}>
+                  {action}
+                </div>
+              )}
             </div>
-            <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.15)' }}>
-              <div style={{
-                height: '100%', borderRadius: 2, background: p.color,
-                width: p.level === 'HIGH' ? '100%' : p.level === 'MODERATE' ? '60%' : '25%',
-                transition: 'width 1s ease-out',
-              }} />
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Irrigation recommendation */}
@@ -4230,7 +4285,7 @@ function ContentCard({ post, large }) {
   );
 }
 
-function LearnTab() {
+function LearnTab({ customer }) {
   const [alerts, setAlerts] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
   const [newsletterPosts, setNewsletterPosts] = useState([]);
@@ -4240,6 +4295,8 @@ function LearnTab() {
   const [monthlyTip, setMonthlyTip] = useState(null);
   const [expandedFaq, setExpandedFaq] = useState(null);
   const [faqSearch, setFaqSearch] = useState('');
+  const [showAllPosts, setShowAllPosts] = useState(false);
+  const [nextService, setNextService] = useState(null);
 
   useEffect(() => {
     api.getAlerts().then(d => setAlerts(d.alerts || [])).catch(() => {});
@@ -4249,13 +4306,20 @@ function LearnTab() {
     api.getLocalNews().then(d => setLocalNews(d.posts || [])).catch(() => {});
     api.getFaq().then(d => setFaq(d.categories || [])).catch(() => {});
     api.getMonthlyTip().then(setMonthlyTip).catch(() => {});
+    api.getNextService().then(d => setNextService(d.next || null)).catch(() => {});
   }, []);
 
   const alertColors = { urgent: B.red, seasonal: B.orange, info: B.wavesBlue };
 
-  const wavesPosts = [...blogPosts, ...newsletterPosts]
-    .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0))
-    .slice(0, 4);
+  const allWavesPosts = [...blogPosts, ...newsletterPosts]
+    .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
+  const wavesPosts = showAllPosts ? allWavesPosts : allWavesPosts.slice(0, 4);
+  const hasMorePosts = allWavesPosts.length > 4;
+
+  // Build customer plan service names for tip personalization
+  const tierName = customer?.tier || 'Bronze';
+  const numServices = TIER_SERVICES[tierName] || 1;
+  const customerServiceNames = SERVICE_CATALOG.slice(0, numServices).map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
 
   // FAQ search filter
   const filteredFaq = faqSearch.trim()
@@ -4267,12 +4331,21 @@ function LearnTab() {
       })).filter(cat => cat.questions.length > 0)
     : faq;
 
+  // Personalize FAQ answer text with tier references
+  const personalizeFaqAnswer = (answer) => {
+    if (!answer || !tierName) return answer;
+    return answer
+      .replace(/your (plan|membership|tier)/gi, `your ${tierName} WaveGuard`)
+      .replace(/unlimited callbacks/gi, `unlimited callbacks (included with ${tierName} WaveGuard)`)
+      .replace(/callback guarantee/gi, `callback guarantee (${tierName} benefit)`);
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <SectionHeading>Learn & Stay Informed</SectionHeading>
 
       {/* Weather & Pest Pressure Widget */}
-      <WeatherPestWidget />
+      <WeatherPestWidget customer={customer} nextService={nextService} />
 
       {/* SECTION 1 — SWFL Alerts */}
       {alerts.length > 0 && (
@@ -4302,14 +4375,29 @@ function LearnTab() {
       {/* SECTION 2 — From Waves */}
       {wavesPosts.length > 0 && (
         <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-            🌿 From Waves
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
+              🌿 From Waves
+            </div>
+            {hasMorePosts && !showAllPosts && (
+              <button onClick={() => setShowAllPosts(true)} style={{
+                ...BUTTON_BASE, padding: '5px 12px', fontSize: 12,
+                background: 'transparent', color: B.wavesBlue, border: `1px solid ${B.wavesBlue}`,
+              }}>View all ({allWavesPosts.length})</button>
+            )}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {wavesPosts.map((p, i) => (
               <ContentCard key={i} post={p} />
             ))}
           </div>
+          {showAllPosts && hasMorePosts && (
+            <button onClick={() => setShowAllPosts(false)} style={{
+              ...BUTTON_BASE, padding: '5px 12px', fontSize: 12, marginTop: 8,
+              background: 'transparent', color: B.grayMid, border: `1px solid ${B.grayLight}`,
+              display: 'block', margin: '8px auto 0',
+            }}>Show less</button>
+          )}
         </div>
       )}
 
@@ -4342,7 +4430,7 @@ function LearnTab() {
         </div>
       )}
 
-      {/* SECTION 5 — Monthly Tip */}
+      {/* SECTION 5 — Monthly Tip (tied to customer's plan) */}
       {monthlyTip && (
         <div style={{
           background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
@@ -4359,69 +4447,98 @@ function LearnTab() {
           <div style={{ fontSize: 14, color: '#fff', lineHeight: 1.65, marginTop: 8 }}>
             {monthlyTip.tip}
           </div>
+          {customerServiceNames.length > 0 && (
+            <div style={{
+              marginTop: 12, padding: '10px 14px', borderRadius: 10,
+              background: 'rgba(255,255,255,0.12)', fontSize: 12, color: B.blueLight, lineHeight: 1.5,
+            }}>
+              Your {tierName} plan includes {customerServiceNames.join(', ')} — we handle the heavy lifting so you can focus on these tips.
+            </div>
+          )}
         </div>
       )}
 
       {/* SECTION 6 — FAQ */}
-      <div>
-        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-          🧠 Pest & Lawn FAQ
-        </div>
-        <input
-          type="text" value={faqSearch} onChange={e => setFaqSearch(e.target.value)}
-          placeholder="Search questions..."
-          style={{
-            width: '100%', padding: '10px 14px', borderRadius: 10, marginBottom: 12,
-            border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-            color: B.navy, outline: 'none', boxSizing: 'border-box',
-          }}
-          onFocus={e => e.target.style.borderColor = B.wavesBlue}
-          onBlur={e => e.target.style.borderColor = B.grayLight}
-        />
-
-        {filteredFaq.map(cat => (
-          <div key={cat.category} style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.grayDark, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span>{cat.icon}</span> {cat.category}
-            </div>
-            {cat.questions.map((q, qi) => {
-              const faqId = `${cat.category}-${qi}`;
-              const isOpen = expandedFaq === faqId;
-              return (
-                <div key={qi} style={{
-                  background: B.white, borderRadius: 10, marginBottom: 6,
-                  border: `1px solid ${isOpen ? B.wavesBlue + '44' : B.grayLight}`,
-                  overflow: 'hidden',
-                }}>
-                  <div onClick={() => setExpandedFaq(isOpen ? null : faqId)} style={{
-                    padding: '12px 14px', cursor: 'pointer',
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, flex: 1, paddingRight: 10 }}>{q.q}</div>
-                    <span style={{ fontSize: 14, color: B.grayMid, transform: isOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
-                  </div>
-                  {isOpen && (
-                    <div style={{ padding: '0 14px 14px', borderTop: `1px solid ${B.grayLight}` }}>
-                      <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7, marginTop: 10 }}>{q.a}</div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+      {filteredFaq.length > 0 || faqSearch.trim() ? (
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
+            🧠 Pest & Lawn FAQ
           </div>
-        ))}
+          <div style={{ position: 'relative', marginBottom: 12 }}>
+            <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: B.grayMid, pointerEvents: 'none' }}>🔍</span>
+            <input
+              type="text" value={faqSearch} onChange={e => setFaqSearch(e.target.value)}
+              placeholder="Search questions..."
+              style={{
+                width: '100%', padding: '10px 14px 10px 36px', borderRadius: 10,
+                border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
+                color: B.navy, outline: 'none', boxSizing: 'border-box',
+              }}
+              onFocus={e => e.target.style.borderColor = B.wavesBlue}
+              onBlur={e => e.target.style.borderColor = B.grayLight}
+            />
+          </div>
 
-        <div style={{
-          textAlign: 'center', padding: 16, background: B.blueSurface, borderRadius: 12, marginTop: 8,
-        }}>
-          <div style={{ fontSize: 13, color: B.grayDark }}>Still have questions?</div>
-          <a href="sms:+19413187612" style={{
-            ...BUTTON_BASE, padding: '9px 18px', fontSize: 13, marginTop: 8,
-            background: B.red, color: '#fff', textDecoration: 'none',
-            display: 'inline-flex',
-          }}>💬 Text Us</a>
+          {filteredFaq.length === 0 && faqSearch.trim() && (
+            <div style={{ textAlign: 'center', padding: 20, color: B.grayMid, fontSize: 13 }}>
+              No results for "{faqSearch}". Try different keywords or text us below.
+            </div>
+          )}
+
+          {filteredFaq.map(cat => (
+            <div key={cat.category} style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: B.grayDark, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>{cat.icon}</span> {cat.category}
+              </div>
+              {cat.questions.map((q, qi) => {
+                const faqId = `${cat.category}-${qi}`;
+                const isOpen = expandedFaq === faqId;
+                return (
+                  <div key={qi} style={{
+                    background: B.white, borderRadius: 10, marginBottom: 6,
+                    border: `1px solid ${isOpen ? B.wavesBlue + '44' : B.grayLight}`,
+                    overflow: 'hidden',
+                  }}>
+                    <div onClick={() => setExpandedFaq(isOpen ? null : faqId)} style={{
+                      padding: '12px 14px', cursor: 'pointer',
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, flex: 1, paddingRight: 10 }}>{q.q}</div>
+                      <span style={{ fontSize: 14, color: B.grayMid, transform: isOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
+                    </div>
+                    {isOpen && (
+                      <div style={{ padding: '0 14px 14px', borderTop: `1px solid ${B.grayLight}` }}>
+                        <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7, marginTop: 10 }}>
+                          {personalizeFaqAnswer(q.a)}
+                        </div>
+                        {(q.a?.toLowerCase().includes('callback') || q.a?.toLowerCase().includes('guarantee')) && (
+                          <div style={{
+                            marginTop: 8, padding: '8px 12px', borderRadius: 8,
+                            background: `${B.green}10`, fontSize: 12, color: B.green, fontWeight: 600,
+                          }}>
+                            As a {tierName} member, you have unlimited callbacks between services.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+
+          <div style={{
+            textAlign: 'center', padding: 16, background: B.blueSurface, borderRadius: 12, marginTop: 8,
+          }}>
+            <div style={{ fontSize: 13, color: B.grayDark }}>Still have questions?</div>
+            <a href="sms:+19413187612" style={{
+              ...BUTTON_BASE, padding: '9px 18px', fontSize: 13, marginTop: 8,
+              background: B.red, color: '#fff', textDecoration: 'none',
+              display: 'inline-flex',
+            }}>💬 Text Us</a>
+          </div>
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }
@@ -4525,6 +4642,7 @@ function MyPlanTab({ customer }) {
   const [cancelSubmitted, setCancelSubmitted] = useState(false);
   const [upgradeRequested, setUpgradeRequested] = useState({});
   const badgeData = useBadges();
+  const lawnHealth = useLawnHealth(customer.id);
 
   useEffect(() => {
     api.getServiceStats().then(setStats).catch(console.error);
@@ -4732,6 +4850,20 @@ function MyPlanTab({ customer }) {
                   <div style={{ fontSize: 11, color: B.wavesBlue, fontWeight: 600, marginTop: 3 }}>
                     {completedVisits} of {totalVisits} visits completed this year
                   </div>
+                  {/* Inline lawn health indicator for lawn care */}
+                  {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
+                    const avg = Math.round((lawnHealth.scores.turfDensity + lawnHealth.scores.weedSuppression + lawnHealth.scores.fungusControl + lawnHealth.scores.thatchScore) / 4);
+                    const initialAvg = Math.round((lawnHealth.initialScores.turfDensity + lawnHealth.initialScores.weedSuppression + lawnHealth.initialScores.fungusControl + lawnHealth.initialScores.thatchScore) / 4);
+                    const improving = avg >= initialAvg;
+                    return (
+                      <div style={{
+                        fontSize: 11, fontWeight: 700, marginTop: 3,
+                        color: improving ? B.green : B.orange,
+                      }}>
+                        🌱 Lawn health: {avg}% {improving ? `(up from ${initialAvg}%)` : `(from ${initialAvg}%)`}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
               <div style={{ textAlign: 'right' }}>
@@ -6342,45 +6474,84 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
 // =========================================================================
 // REPORT ISSUE OVERLAY — full-screen form triggered by FAB
 // =========================================================================
-function ReportIssueOverlay({ open, onClose, onSubmitted }) {
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
   const [description, setDescription] = useState('');
-  const [subject, setSubject] = useState('');
-  const [location, setLocation] = useState('');
+  const [locations, setLocations] = useState([]); // multi-select array
   const [photos, setPhotos] = useState([]); // array of { preview, data }
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [lastService, setLastService] = useState(null);
+  const [nextService, setNextService] = useState(null);
   const fileRef = useRef(null);
 
-  const categories = [
+  useEffect(() => {
+    if (open) {
+      api.getServices({ limit: 1 }).then(d => {
+        if (d.services?.length) setLastService(d.services[0]);
+      }).catch(() => {});
+      api.getNextService().then(d => setNextService(d.next || null)).catch(() => {});
+    }
+  }, [open]);
+
+  const problemCategories = [
     { value: 'pest_issue', label: '🐜 Pest Issue' },
     { value: 'lawn_concern', label: '🌱 Lawn Problem' },
-    { value: 'billing', label: '💳 Billing' },
+    { value: 'irrigation_issue', label: '💧 Irrigation' },
     { value: 'schedule_change', label: '📅 Schedule' },
+  ];
+
+  const requestCategories = [
+    { value: 'billing', label: '💳 Billing' },
     { value: 'add_service', label: '➕ Add Service' },
     { value: 'other', label: '💬 Other' },
   ];
 
-  const locations = [
+  const locationOptions = [
     { value: 'front_yard', label: 'Front Yard' },
     { value: 'back_yard', label: 'Back Yard' },
     { value: 'side_yard', label: 'Side Yard' },
     { value: 'inside_home', label: 'Inside Home' },
     { value: 'garage_lanai', label: 'Garage / Lanai' },
     { value: 'garden_beds', label: 'Garden Beds' },
+    { value: 'perimeter_foundation', label: 'Perimeter / Foundation' },
+    { value: 'pool_lanai', label: 'Pool Area / Lanai' },
     { value: 'other', label: 'Other' },
   ];
 
+  const isProblemCategory = ['pest_issue', 'lawn_concern', 'irrigation_issue', 'schedule_change'].includes(category);
+  const isRequestCategory = ['billing', 'add_service', 'other'].includes(category);
+
+  // Callback recognition: pest/lawn issue within 30 days of last service
+  const tierName = customer?.tier || 'Bronze';
+  const isCallbackEligible = isProblemCategory && lastService && (() => {
+    const svcDate = parseDate(lastService.date);
+    const daysSince = (new Date() - svcDate) / (1000 * 60 * 60 * 24);
+    return daysSince <= 30 && daysSince >= 0;
+  })();
+
+  // Schedule awareness: next service within 3 days
+  const nextServiceSoon = nextService && (() => {
+    const nextDate = parseDate(nextService.date);
+    const daysUntil = (nextDate - new Date()) / (1000 * 60 * 60 * 24);
+    return daysUntil >= 0 && daysUntil <= 3;
+  })();
+  const nextServiceDateStr = nextService ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+
+  const toggleLocation = (val) => {
+    setLocations(prev => prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val]);
+  };
+
   const handlePhoto = (e) => {
     const file = e.target.files?.[0];
-    if (!file || photos.length >= 3) return;
+    if (!file || photos.length >= 5) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
       setPhotos(prev => [...prev, { preview: ev.target.result, data: ev.target.result }]);
     };
     reader.readAsDataURL(file);
-    e.target.value = ''; // allow re-selecting same file
+    e.target.value = '';
   };
 
   const removePhoto = (idx) => {
@@ -6388,23 +6559,23 @@ function ReportIssueOverlay({ open, onClose, onSubmitted }) {
   };
 
   const handleSubmit = async () => {
-    if (!category || !subject.trim()) return;
+    if (!category || !description.trim()) return;
     setSubmitting(true);
     try {
       await api.createRequest({
         category,
-        subject: subject.trim(),
+        subject: description.trim().slice(0, 80),
         description: description.trim(),
-        urgency,
-        locationOnProperty: location || null,
+        urgency: isProblemCategory ? urgency : 'routine',
+        locationOnProperty: locations.length ? locations.join(', ') : null,
         photos: photos.map(p => p.data),
       });
       setSubmitted(true);
       onSubmitted?.();
       setTimeout(() => {
         setSubmitted(false);
-        setCategory(''); setSubject(''); setDescription('');
-        setUrgency('routine'); setLocation(''); setPhotos([]);
+        setCategory(''); setDescription('');
+        setUrgency('routine'); setLocations([]); setPhotos([]);
         onClose();
       }, 2500);
     } catch (err) {
@@ -6421,7 +6592,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted }) {
       background: B.offWhite, overflowY: 'auto',
       animation: 'slideUp 0.3s ease-out',
     }}>
-      <style>{`@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
+      <style>{`
+        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+        @keyframes checkPop { 0% { transform: scale(0); opacity: 0; } 50% { transform: scale(1.2); } 100% { transform: scale(1); opacity: 1; } }
+      `}</style>
 
       {/* Header */}
       <div style={{
@@ -6440,97 +6614,53 @@ function ReportIssueOverlay({ open, onClose, onSubmitted }) {
 
       {submitted ? (
         <div style={{ padding: 40, textAlign: 'center' }}>
-          <div style={{ fontSize: 48 }}>✅</div>
+          <div style={{ fontSize: 64, animation: 'checkPop 0.5s ease-out' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 80, height: 80, borderRadius: '50%', background: `${B.green}15` }}>
+              <span style={{ color: B.green, fontSize: 48 }}>✓</span>
+            </span>
+          </div>
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 12 }}>Sent to Waves!</div>
           <div style={{ fontSize: 13, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
             We'll review your request and text you when it's been assigned.
-            {urgency === 'urgent' ? ' Urgent requests are prioritized — expect a response within 2 hours.' : ''}
+            {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized — expect a response within 2 hours.' : ''}
           </div>
         </div>
       ) : (
         <div style={{ padding: '16px 20px 120px', maxWidth: 600, margin: '0 auto' }}>
-          {/* Category */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>What's going on?</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {categories.map(c => (
-                <button key={c.value} onClick={() => setCategory(c.value)} style={{
-                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 13, borderRadius: 12,
-                  background: category === c.value ? B.wavesBlue : B.white,
-                  color: category === c.value ? '#fff' : B.grayDark,
-                  border: category === c.value ? 'none' : `1px solid ${B.grayLight}`,
-                }}>{c.label}</button>
-              ))}
+
+          {/* Pre-fill context */}
+          {customer && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 10, background: B.blueSurface,
+              border: `1px solid ${B.bluePale}`, marginBottom: 16,
+              fontSize: 12, color: B.grayDark, lineHeight: 1.6,
+            }}>
+              <span style={{ fontWeight: 700, color: B.navy }}>{customer.firstName} {customer.lastName}</span>
+              {customer.address?.street && <span> · {customer.address.street}</span>}
+              <span> · {tierName} WaveGuard</span>
+              {lastService && (
+                <span> · Last service: {parseDate(lastService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+              )}
             </div>
-          </div>
+          )}
 
-          {/* Urgency */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>How urgent?</div>
-            <div style={{ display: 'flex', gap: 10 }}>
-              {[
-                { value: 'routine', label: 'Routine', desc: 'Next 24 hours', color: B.wavesBlue },
-                { value: 'urgent', label: 'Urgent', desc: 'Within 2 hours', color: B.red },
-              ].map(u => (
-                <button key={u.value} onClick={() => setUrgency(u.value)} style={{
-                  flex: 1, padding: '12px 14px', borderRadius: 12, cursor: 'pointer',
-                  border: urgency === u.value ? `2px solid ${u.color}` : `1px solid ${B.grayLight}`,
-                  background: urgency === u.value ? `${u.color}10` : B.white,
-                  textAlign: 'center',
-                }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: urgency === u.value ? u.color : B.grayDark }}>{u.label}</div>
-                  <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{u.desc}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Subject */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>Brief summary</div>
-            <input
-              type="text" value={subject} onChange={e => setSubject(e.target.value)}
-              placeholder="e.g., Ants in the kitchen, Brown patch near oak tree"
-              maxLength={255}
-              style={{
-                width: '100%', padding: '12px 14px', borderRadius: 12,
-                border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                color: B.navy, outline: 'none', boxSizing: 'border-box',
-              }}
-              onFocus={e => e.target.style.borderColor = B.wavesBlue}
-              onBlur={e => e.target.style.borderColor = B.grayLight}
-            />
-          </div>
-
-          {/* Description */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy }}>Details</div>
-              <div style={{ fontSize: 11, color: description.length > 450 ? B.red : B.grayMid }}>
-                {description.length}/500
-              </div>
-            </div>
-            <textarea
-              value={description} onChange={e => { if (e.target.value.length <= 500) setDescription(e.target.value); }}
-              placeholder="Tell us what you're seeing..."
-              rows={4}
-              style={{
-                width: '100%', padding: '12px 14px', borderRadius: 12,
-                border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                color: B.navy, outline: 'none', boxSizing: 'border-box', resize: 'vertical',
-              }}
-              onFocus={e => e.target.style.borderColor = B.wavesBlue}
-              onBlur={e => e.target.style.borderColor = B.grayLight}
-            />
-          </div>
-
-          {/* Photo Upload */}
+          {/* Photo Upload — moved to top */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
-              Photos <span style={{ fontWeight: 400, color: B.grayMid }}>(optional, up to 3)</span>
+              📸 Photos <span style={{ fontWeight: 400, color: B.grayMid }}>(optional, up to 5)</span>
             </div>
             <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{ display: 'none' }} />
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {photos.length < 5 && (
+                <div onClick={() => fileRef.current?.click()} style={{
+                  width: 80, height: 80, borderRadius: 10, cursor: 'pointer',
+                  border: `2px dashed ${B.wavesBlue}`, background: `${B.wavesBlue}08`,
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <span style={{ fontSize: 24 }}>📷</span>
+                  <span style={{ fontSize: 9, color: B.wavesBlue, marginTop: 2, fontWeight: 600 }}>Add photo</span>
+                </div>
+              )}
               {photos.map((p, i) => (
                 <div key={i} style={{ position: 'relative', width: 80, height: 80 }}>
                   <img src={p.preview} alt="" style={{
@@ -6546,41 +6676,142 @@ function ReportIssueOverlay({ open, onClose, onSubmitted }) {
                   }}>✕</button>
                 </div>
               ))}
-              {photos.length < 3 && (
-                <div onClick={() => fileRef.current?.click()} style={{
-                  width: 80, height: 80, borderRadius: 10, cursor: 'pointer',
-                  border: `2px dashed ${B.grayLight}`, background: B.offWhite,
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                }}>
-                  <span style={{ fontSize: 20 }}>📸</span>
-                  <span style={{ fontSize: 9, color: B.grayMid, marginTop: 2 }}>Add photo</span>
-                </div>
-              )}
             </div>
           </div>
 
-          {/* Location on Property */}
-          <div style={{ marginBottom: 24 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>Where on your property?</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {locations.map(l => (
-                <button key={l.value} onClick={() => setLocation(location === l.value ? '' : l.value)} style={{
-                  ...BUTTON_BASE, padding: '7px 12px', fontSize: 12, borderRadius: 20,
-                  background: location === l.value ? B.teal : B.white,
-                  color: location === l.value ? '#fff' : B.grayDark,
-                  border: location === l.value ? 'none' : `1px solid ${B.grayLight}`,
-                }}>{l.label}</button>
+          {/* Category — split into "Something's wrong" and "I need something" */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, marginBottom: 12, fontFamily: FONTS.heading }}>
+              We're on it. Tell us what's happening.
+            </div>
+
+            <div style={{ fontSize: 12, fontWeight: 700, color: B.grayDark, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Something's wrong
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+              {problemCategories.map(c => (
+                <button key={c.value} onClick={() => { setCategory(c.value); if (!isProblemCategory) setUrgency('routine'); }} style={{
+                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 13, borderRadius: 12,
+                  background: category === c.value ? B.wavesBlue : B.white,
+                  color: category === c.value ? '#fff' : B.grayDark,
+                  border: category === c.value ? 'none' : `1px solid ${B.grayLight}`,
+                }}>{c.label}</button>
+              ))}
+            </div>
+
+            <div style={{ fontSize: 12, fontWeight: 700, color: B.grayDark, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              I need something
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {requestCategories.map(c => (
+                <button key={c.value} onClick={() => setCategory(c.value)} style={{
+                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 13, borderRadius: 12,
+                  background: category === c.value ? B.teal : B.white,
+                  color: category === c.value ? '#fff' : B.grayDark,
+                  border: category === c.value ? 'none' : `1px solid ${B.grayLight}`,
+                }}>{c.label}</button>
               ))}
             </div>
           </div>
 
+          {/* Callback recognition */}
+          {isCallbackEligible && (category === 'pest_issue' || category === 'lawn_concern') && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 10, marginBottom: 16,
+              background: `${B.green}10`, border: `1px solid ${B.green}30`,
+              fontSize: 12, color: B.green, fontWeight: 600, lineHeight: 1.5,
+            }}>
+              Callbacks are free with your {tierName} WaveGuard plan. We'll get this taken care of.
+            </div>
+          )}
+
+          {/* Schedule awareness */}
+          {nextServiceSoon && isProblemCategory && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 10, marginBottom: 16,
+              background: `${B.wavesBlue}10`, border: `1px solid ${B.wavesBlue}30`,
+              fontSize: 12, color: B.wavesBlue, fontWeight: 600, lineHeight: 1.5,
+            }}>
+              📅 Your next visit is {nextServiceDateStr}. Want us to address it then, or do you need us sooner?
+            </div>
+          )}
+
+          {/* Urgency — only for problem categories */}
+          {isProblemCategory && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>How urgent?</div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                {[
+                  { value: 'routine', label: 'Routine', desc: 'Next 24 hours', color: B.wavesBlue },
+                  { value: 'urgent', label: 'Urgent', desc: 'Within 2 hours', color: B.red },
+                ].map(u => (
+                  <button key={u.value} onClick={() => setUrgency(u.value)} style={{
+                    flex: 1, padding: '12px 14px', borderRadius: 12, cursor: 'pointer',
+                    border: urgency === u.value ? `2px solid ${u.color}` : `1px solid ${B.grayLight}`,
+                    background: urgency === u.value ? `${u.color}10` : B.white,
+                    textAlign: 'center',
+                  }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: urgency === u.value ? u.color : B.grayDark }}>{u.label}</div>
+                    <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{u.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Merged description field (subject + details combined) */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
+              Describe what's happening
+            </div>
+            <div style={{ fontSize: 11, color: B.grayMid, marginBottom: 6 }}>
+              The more detail, the faster we can help
+            </div>
+            <textarea
+              value={description} onChange={e => { if (e.target.value.length <= 500) setDescription(e.target.value); }}
+              placeholder={isProblemCategory
+                ? 'e.g., Seeing ants in the kitchen near the sink. Started two days ago, getting worse...'
+                : 'e.g., I\'d like to add mosquito service to my plan...'}
+              rows={5}
+              style={{
+                width: '100%', padding: '12px 14px', borderRadius: 12,
+                border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
+                color: B.navy, outline: 'none', boxSizing: 'border-box', resize: 'vertical',
+              }}
+              onFocus={e => e.target.style.borderColor = B.wavesBlue}
+              onBlur={e => e.target.style.borderColor = B.grayLight}
+            />
+            {description.length > 450 && (
+              <div style={{ fontSize: 11, color: B.red, marginTop: 4, textAlign: 'right' }}>
+                {description.length}/500
+              </div>
+            )}
+          </div>
+
+          {/* Location on Property — multi-select */}
+          {isProblemCategory && (
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>Where on your property? <span style={{ fontWeight: 400, color: B.grayMid }}>(select all that apply)</span></div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {locationOptions.map(l => (
+                  <button key={l.value} onClick={() => toggleLocation(l.value)} style={{
+                    ...BUTTON_BASE, padding: '7px 12px', fontSize: 12, borderRadius: 20,
+                    background: locations.includes(l.value) ? B.teal : B.white,
+                    color: locations.includes(l.value) ? '#fff' : B.grayDark,
+                    border: locations.includes(l.value) ? 'none' : `1px solid ${B.grayLight}`,
+                  }}>{l.label}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Submit */}
-          <button onClick={handleSubmit} disabled={!category || !subject.trim() || submitting} style={{
+          <button onClick={handleSubmit} disabled={!category || !description.trim() || submitting} style={{
             ...BUTTON_BASE, width: '100%', padding: 16, fontSize: 16,
-            background: (category && subject.trim()) ? B.red : B.grayLight,
-            color: (category && subject.trim()) ? '#fff' : B.grayMid,
+            background: (category && description.trim()) ? B.red : B.grayLight,
+            color: (category && description.trim()) ? '#fff' : B.grayMid,
             opacity: submitting ? 0.7 : 1,
-            boxShadow: (category && subject.trim()) ? `0 4px 15px ${B.teal}40` : 'none',
+            boxShadow: (category && description.trim()) ? `0 4px 15px ${B.teal}40` : 'none',
           }}>
             {submitting ? 'Sending...' : '📤 Send to Waves'}
           </button>
@@ -6939,7 +7170,7 @@ export default function PortalPage() {
         {activeTab === 'refer' && <ReferTab customer={customer} onSwitchTab={setActiveTab} />}
         {activeTab === 'documents' && <DocumentsTab customer={customer} onSwitchTab={setActiveTab} />}
         {activeTab === 'property' && <PropertyTab customer={customer} />}
-        {activeTab === 'learn' && <LearnTab />}
+        {activeTab === 'learn' && <LearnTab customer={customer} />}
       </div>
 
       {/* Social Footer */}
@@ -7014,6 +7245,7 @@ export default function PortalPage() {
         open={showReportIssue}
         onClose={() => setShowReportIssue(false)}
         onSubmitted={() => setRequestRefreshKey(k => k + 1)}
+        customer={customer}
       />
     </div>
   );
