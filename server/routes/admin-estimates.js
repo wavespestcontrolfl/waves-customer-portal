@@ -120,6 +120,7 @@ router.get('/', async (req, res, next) => {
         monthlyTotal: parseFloat(e.monthly_total || 0),
         tier: e.waveguard_tier, createdBy: e.created_by_name,
         sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,
+        declinedAt: e.declined_at,
         createdAt: e.created_at,
         source: e.source || 'manual',
         serviceInterest: e.service_interest,
@@ -127,6 +128,11 @@ router.get('/', async (req, res, next) => {
         leadSourceDetail: e.lead_source_detail,
         isPriority: e.is_priority,
         description: e.service_interest || e.notes,
+        notes: e.notes,
+        followUpCount: e.follow_up_count || 0,
+        lastFollowUpAt: e.last_follow_up_at,
+        declineReason: e.decline_reason,
+        token: e.token,
       })),
     });
   } catch (err) { next(err); }
@@ -155,6 +161,28 @@ router.post('/:id/follow-up', async (req, res, next) => {
       last_follow_up_at: db.fn.now(),
     });
 
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/estimates/:id — update priority, decline reason, status
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+
+    const updates = {};
+    if (req.body.isPriority !== undefined) updates.is_priority = req.body.isPriority;
+    if (req.body.declineReason !== undefined) updates.decline_reason = req.body.declineReason;
+    if (req.body.status !== undefined) {
+      updates.status = req.body.status;
+      if (req.body.status === 'declined') updates.declined_at = db.fn.now();
+    }
+
+    if (Object.keys(updates).length === 0) return res.json({ success: true });
+
+    await db('estimates').where({ id: req.params.id }).update(updates);
+    logger.info(`[estimates] Updated estimate ${req.params.id}: ${JSON.stringify(updates)}`);
     res.json({ success: true });
   } catch (err) { next(err); }
 });

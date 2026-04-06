@@ -1504,9 +1504,10 @@ function EstimateToolView() {
 // =========================================================================
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-function adminFetch(path) {
+function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
+    ...options,
+    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json', ...(options.headers || {}) },
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
@@ -1519,30 +1520,228 @@ const STATUS_CONFIG = {
   expired: { label: 'Expired', color: C.gray, bg: `${C.gray}15` },
 };
 
+/* ── Competitor detection for intel badge ──────────────────── */
+const COMPETITORS = ['trugreen', 'massey', 'turner', 'all u need', 'terminix', 'orkin'];
+function detectCompetitor(notes) {
+  if (!notes) return null;
+  const lower = notes.toLowerCase();
+  for (const c of COMPETITORS) {
+    if (lower.includes(c)) {
+      // Capitalize for display
+      return c.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
+    }
+  }
+  return null;
+}
+
+/* ── Urgency indicator logic based on timestamps ──────────── */
+function getUrgencyIndicator(e) {
+  const now = Date.now();
+  const HOUR = 3600000;
+
+  if (e.status === 'sent' && !e.viewedAt && e.sentAt) {
+    const hoursSinceSent = (now - new Date(e.sentAt).getTime()) / HOUR;
+    if (hoursSinceSent >= 72) return { label: 'Going cold', color: C.red, bg: `${C.red}18` };
+    if (hoursSinceSent >= 24) return { label: 'Not opened', color: C.amber, bg: `${C.amber}18` };
+  }
+
+  if (e.status === 'viewed' && e.viewedAt) {
+    const hoursSinceViewed = (now - new Date(e.viewedAt).getTime()) / HOUR;
+    if (hoursSinceViewed >= 168) return { label: 'Final follow-up', color: C.red, bg: `${C.red}18` };
+    if (hoursSinceViewed >= 48) return { label: 'Follow up', color: C.amber, bg: `${C.amber}18` };
+  }
+
+  return null;
+}
+
+/* ── Decline reason options ────────────────────────────────── */
+const DECLINE_REASONS = [
+  'Too expensive',
+  'Went with competitor',
+  'Not ready',
+  'Service not needed',
+  'No response',
+];
+
+/* ── Follow-Up Modal ──────────────────────────────────────── */
+function FollowUpModal({ estimate, onClose, onSent }) {
+  const firstName = estimate.customerName?.split(' ')[0] || 'there';
+  const addrShort = estimate.address?.split(',')[0] || 'your property';
+  const [message, setMessage] = useState(
+    `Hi ${firstName}, just checking in on the estimate I sent for ${addrShort}. Any questions? — Adam, Waves`
+  );
+  const [sending, setSending] = useState(false);
+
+  const handleSend = async () => {
+    setSending(true);
+    try {
+      await adminFetch(`/admin/estimates/${estimate.id}/follow-up`, {
+        method: 'POST',
+        body: JSON.stringify({ message }),
+      });
+      onSent();
+    } catch (err) {
+      alert('Follow-up failed: ' + err.message);
+    }
+    setSending(false);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+      onClick={onClose}>
+      <div style={{ background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, padding: 24, maxWidth: 480, width: '100%' }}
+        onClick={ev => ev.stopPropagation()}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: C.white, marginBottom: 4 }}>Follow Up — {estimate.customerName}</div>
+        <div style={{ fontSize: 12, color: C.gray, marginBottom: 16 }}>{estimate.address}</div>
+        <label style={{ fontSize: 12, fontWeight: 600, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6, display: 'block' }}>SMS Message</label>
+        <textarea value={message} onChange={ev => setMessage(ev.target.value)} rows={4}
+          style={{ ...sInput, resize: 'vertical', minHeight: 90, marginBottom: 16 }} />
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: 8, border: `1px solid ${C.border}`, background: 'transparent', color: C.gray, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+          <button onClick={handleSend} disabled={sending}
+            style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: C.amber, color: C.dark, fontSize: 13, fontWeight: 700, cursor: 'pointer', opacity: sending ? 0.6 : 1 }}>
+            {sending ? 'Sending...' : 'Send Follow-Up SMS'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Decline Reason Modal ─────────────────────────────────── */
+function DeclineModal({ estimate, onClose, onSaved }) {
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    if (!reason) return;
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/estimates/${estimate.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'declined', declineReason: reason }),
+      });
+      onSaved();
+    } catch (err) {
+      alert('Failed: ' + err.message);
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+      onClick={onClose}>
+      <div style={{ background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, padding: 24, maxWidth: 400, width: '100%' }}
+        onClick={ev => ev.stopPropagation()}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: C.white, marginBottom: 4 }}>Mark as Lost</div>
+        <div style={{ fontSize: 12, color: C.gray, marginBottom: 16 }}>{estimate.customerName} — {estimate.address?.split(',')[0]}</div>
+        <label style={{ fontSize: 12, fontWeight: 600, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8, display: 'block' }}>Reason</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 18 }}>
+          {DECLINE_REASONS.map(r => (
+            <label key={r} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 14, color: reason === r ? C.white : C.gray, padding: '8px 12px', borderRadius: 8, background: reason === r ? `${C.red}18` : 'transparent', border: `1px solid ${reason === r ? C.red : C.border}`, transition: 'all 0.15s' }}>
+              <input type="radio" name="declineReason" checked={reason === r} onChange={() => setReason(r)}
+                style={{ accentColor: C.red, width: 16, height: 16 }} />
+              {r}
+            </label>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: 8, border: `1px solid ${C.border}`, background: 'transparent', color: C.gray, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+          <button onClick={handleSave} disabled={saving || !reason}
+            style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: C.red, color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', opacity: (saving || !reason) ? 0.5 : 1 }}>
+            {saving ? 'Saving...' : 'Mark as Lost'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Action-oriented filter logic ─────────────────────────── */
+const PIPELINE_FILTERS = [
+  { key: 'all', label: 'All', color: C.white },
+  { key: 'needs_estimate', label: 'Needs Estimate', color: C.amber },
+  { key: 'ready_to_send', label: 'Ready to Send', color: C.teal },
+  { key: 'awaiting', label: 'Awaiting Response', color: C.blue },
+  { key: 'follow_up', label: 'Follow Up Now', color: C.amber },
+  { key: 'won', label: 'Won', color: C.green },
+  { key: 'lost', label: 'Lost', color: C.red },
+];
+
+function classifyEstimate(e) {
+  if (e.status === 'accepted') return 'won';
+  if (e.status === 'declined' || e.status === 'expired') return 'lost';
+  if (e.status === 'draft' && (!e.monthlyTotal || e.monthlyTotal === 0)) return 'needs_estimate';
+  if (e.status === 'draft' && e.monthlyTotal > 0) return 'ready_to_send';
+  if (e.status === 'sent' && !e.viewedAt) return 'awaiting';
+  if (e.status === 'viewed') return 'follow_up';
+  if (e.status === 'sent' && e.viewedAt) return 'follow_up';
+  return 'all';
+}
+
 function EstimatePipelineView() {
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
+  const [followUpTarget, setFollowUpTarget] = useState(null);
+  const [declineTarget, setDeclineTarget] = useState(null);
 
-  useEffect(() => {
+  const refreshEstimates = useCallback(() => {
     adminFetch('/admin/estimates')
       .then(d => { setEstimates(d.estimates || []); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
+  useEffect(() => { refreshEstimates(); }, [refreshEstimates]);
+
+  const togglePriority = useCallback(async (e) => {
+    const newVal = !e.isPriority;
+    try {
+      await adminFetch(`/admin/estimates/${e.id}`, { method: 'PATCH', body: JSON.stringify({ isPriority: newVal }) });
+      setEstimates(prev => prev.map(est => est.id === e.id ? { ...est, isPriority: newVal } : est));
+    } catch (err) { alert('Failed to update priority'); }
+  }, []);
+
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: C.gray }}>Loading estimates...</div>;
+
+  // Classify each estimate
+  const classified = estimates.map(e => ({ ...e, _class: classifyEstimate(e) }));
+
+  // Sort: priority first, then by created date desc
+  const sorted = [...classified].sort((a, b) => {
+    if (a.isPriority && !b.isPriority) return -1;
+    if (!a.isPriority && b.isPriority) return 1;
+    return new Date(b.createdAt) - new Date(a.createdAt);
+  });
 
   // Stats
   const total = estimates.length;
-  const sent = estimates.filter(e => e.status === 'sent').length;
-  const viewed = estimates.filter(e => e.status === 'viewed').length;
   const accepted = estimates.filter(e => e.status === 'accepted').length;
-  const declined = estimates.filter(e => e.status === 'declined').length;
-  const totalMonthly = estimates.filter(e => e.status === 'accepted').reduce((s, e) => s + (e.monthlyTotal || 0), 0);
-  const conversionRate = (sent + viewed + accepted + declined) > 0
-    ? Math.round(accepted / (sent + viewed + accepted + declined) * 100) : 0;
+  const sent = estimates.filter(e => ['sent', 'viewed'].includes(e.status)).length;
+  const declined = estimates.filter(e => e.status === 'declined' || e.status === 'expired').length;
+  const totalMRRWon = estimates.filter(e => e.status === 'accepted').reduce((s, e) => s + (e.monthlyTotal || 0), 0);
+  const pipelineValue = estimates.filter(e => !['accepted', 'declined', 'expired'].includes(e.status)).reduce((s, e) => s + (e.monthlyTotal || 0), 0);
+  const conversionRate = (sent + accepted + declined) > 0
+    ? Math.round(accepted / (sent + accepted + declined) * 100) : 0;
+  const avgEstimateValue = total > 0
+    ? Math.round(estimates.reduce((s, e) => s + (e.monthlyTotal || 0), 0) / total) : 0;
 
-  const filtered = filter === 'all' ? estimates : estimates.filter(e => e.status === filter);
+  // Follow-up overdue: viewed > 48h or sent > 72h without action
+  const HOUR = 3600000;
+  const now = Date.now();
+  const followUpOverdue = estimates.filter(e => {
+    if (e.status === 'sent' && !e.viewedAt && e.sentAt && (now - new Date(e.sentAt).getTime()) > 72 * HOUR) return true;
+    if (e.status === 'viewed' && e.viewedAt && (now - new Date(e.viewedAt).getTime()) > 48 * HOUR) return true;
+    return false;
+  }).length;
+
+  // Filter counts
+  const filterCounts = {};
+  for (const f of PIPELINE_FILTERS) {
+    filterCounts[f.key] = f.key === 'all' ? total : classified.filter(e => e._class === f.key).length;
+  }
+
+  const filtered = filter === 'all' ? sorted : sorted.filter(e => e._class === filter);
 
   const fmtDate = (d) => {
     if (!d) return '—';
@@ -1561,67 +1760,107 @@ function EstimatePipelineView() {
 
   return (
     <div>
-      {/* Conversion Funnel */}
+      {/* Follow-Up Modal */}
+      {followUpTarget && (
+        <FollowUpModal estimate={followUpTarget} onClose={() => setFollowUpTarget(null)}
+          onSent={() => { setFollowUpTarget(null); refreshEstimates(); }} />
+      )}
+      {/* Decline Modal */}
+      {declineTarget && (
+        <DeclineModal estimate={declineTarget} onClose={() => setDeclineTarget(null)}
+          onSaved={() => { setDeclineTarget(null); refreshEstimates(); }} />
+      )}
+
+      {/* Enhanced Stats Bar */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
         {[
-          { label: 'Total', value: total, color: C.white },
-          { label: 'Sent', value: sent, color: C.teal },
-          { label: 'Viewed', value: viewed, color: C.amber },
-          { label: 'Accepted', value: accepted, color: C.green },
-          { label: 'Declined', value: declined, color: C.red },
-          { label: 'Conversion', value: `${conversionRate}%`, color: C.green },
-          { label: 'MRR Won', value: `$${Math.round(totalMonthly)}`, color: C.green },
+          { label: 'Pipeline Value', value: `$${Math.round(pipelineValue)}`, sub: '/mo potential', color: C.teal },
+          { label: 'MRR Won', value: `$${Math.round(totalMRRWon)}`, sub: '/mo closed', color: C.green },
+          { label: 'Conversion', value: `${conversionRate}%`, sub: `${accepted} of ${sent + accepted + declined}`, color: conversionRate >= 50 ? C.green : conversionRate >= 25 ? C.amber : C.red },
+          { label: 'Avg Estimate', value: `$${avgEstimateValue}`, sub: '/mo', color: C.white },
+          { label: 'Follow-Up Overdue', value: followUpOverdue, sub: followUpOverdue > 0 ? 'need attention' : 'all clear', color: followUpOverdue > 0 ? C.red : C.green },
+          { label: 'Total', value: total, sub: `${accepted} won · ${declined} lost`, color: C.white },
         ].map((s, i) => (
           <div key={i} style={{
-            flex: '1 1 120px', background: C.card, borderRadius: 10, padding: '14px 16px',
+            flex: '1 1 140px', background: C.card, borderRadius: 10, padding: '14px 16px',
             border: `1px solid ${C.border}`, textAlign: 'center',
           }}>
             <div style={{ fontSize: 10, color: C.gray, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>{s.label}</div>
             <div style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
+            {s.sub && <div style={{ fontSize: 10, color: C.gray, marginTop: 2 }}>{s.sub}</div>}
           </div>
         ))}
       </div>
 
-      {/* Filter */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
-        {['all', 'draft', 'sent', 'viewed', 'accepted', 'declined', 'expired'].map(f => (
-          <button key={f} onClick={() => setFilter(f)} style={{
-            padding: '6px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: filter === f ? C.teal : C.card,
-            color: filter === f ? C.dark : C.gray,
-            fontSize: 12, fontWeight: 600, textTransform: 'capitalize',
-          }}>{f === 'all' ? `All (${total})` : `${f} (${estimates.filter(e => e.status === f).length})`}</button>
-        ))}
+      {/* Action-Oriented Filter Tabs */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+        {PIPELINE_FILTERS.map(f => {
+          const count = filterCounts[f.key];
+          const isActive = filter === f.key;
+          return (
+            <button key={f.key} onClick={() => setFilter(f.key)} style={{
+              padding: '7px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: isActive ? f.color : C.card,
+              color: isActive ? (f.color === C.white ? C.dark : C.dark) : f.color,
+              fontSize: 12, fontWeight: 600, transition: 'all 0.15s',
+              border: `1px solid ${isActive ? f.color : C.border}`,
+            }}>
+              {f.label} ({count})
+            </button>
+          );
+        })}
       </div>
 
       {/* Estimates List */}
       {filtered.length === 0 ? (
         <div style={{ padding: 40, textAlign: 'center', color: C.gray }}>
-          No estimates {filter !== 'all' ? `with status "${filter}"` : 'yet'}. Create one using the New Estimate tab.
+          No estimates {filter !== 'all' ? `in "${PIPELINE_FILTERS.find(f => f.key === filter)?.label}"` : 'yet'}. Create one using the Create Estimate button.
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {filtered.map(e => {
             const sc = STATUS_CONFIG[e.status] || STATUS_CONFIG.draft;
+            const urgency = getUrgencyIndicator(e);
+            const competitor = detectCompetitor(e.notes || e.description);
+
             return (
               <div key={e.id} style={{
                 background: C.card, borderRadius: 10, padding: '16px 20px',
-                border: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', gap: 16,
+                border: e.isPriority ? `2px solid ${C.red}` : `1px solid ${C.border}`,
+                display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap',
+                position: 'relative',
               }}>
+                {/* Priority flag indicator */}
+                {e.isPriority && (
+                  <div style={{ position: 'absolute', top: -1, right: 16, background: C.red, color: '#fff', fontSize: 9, fontWeight: 700, padding: '2px 8px', borderRadius: '0 0 6px 6px', textTransform: 'uppercase', letterSpacing: 0.5 }}>Urgent</div>
+                )}
+
                 {/* Status badge */}
                 <span style={{
                   padding: '4px 10px', borderRadius: 8, fontSize: 10, fontWeight: 700,
                   textTransform: 'uppercase', letterSpacing: 0.5,
-                  background: sc.bg, color: sc.color, minWidth: 70, textAlign: 'center',
+                  background: sc.bg, color: sc.color, minWidth: 70, textAlign: 'center', flexShrink: 0,
                 }}>{sc.label}</span>
 
                 {/* Customer info */}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ flex: 1, minWidth: 150 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 14, fontWeight: 600, color: C.white }}>{e.customerName || 'Unknown'}</span>
                     {e.source === 'lead_webhook' && <span title="Website lead" style={{ fontSize: 14 }}>{'🌐'}</span>}
                     {e.source === 'voice_agent' && <span title="Voice agent lead" style={{ fontSize: 14 }}>{'🎙️'}</span>}
-                    {e.isPriority && <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 3, background: C.red + '22', color: C.red, fontWeight: 700 }}>PRIORITY</span>}
+                    {e.source === 'referral' && <span title="Referral" style={{ fontSize: 14 }}>{'🤝'}</span>}
+                    {/* Urgency indicator */}
+                    {urgency && (
+                      <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 4, background: urgency.bg, color: urgency.color, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3 }}>{urgency.label}</span>
+                    )}
+                    {/* Competitor intel badge */}
+                    {competitor && (
+                      <span title={`Switching from ${competitor}`} style={{ fontSize: 9, padding: '2px 7px', borderRadius: 4, background: `${C.blue}22`, color: C.blue, fontWeight: 600 }}>Switching from: {competitor}</span>
+                    )}
+                    {/* Decline reason badge */}
+                    {e.declineReason && (
+                      <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 4, background: `${C.red}15`, color: C.red, fontWeight: 600 }}>{e.declineReason}</span>
+                    )}
                   </div>
                   <div style={{ fontSize: 12, color: C.gray, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {e.address || '—'}{e.serviceInterest ? ` · ${e.serviceInterest}` : ''}
@@ -1631,60 +1870,76 @@ function EstimatePipelineView() {
                 {/* Tier */}
                 {e.tier && (
                   <span style={{
-                    padding: '3px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700,
+                    padding: '3px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700, flexShrink: 0,
                     background: e.tier === 'Gold' ? `${C.amber}22` : e.tier === 'Platinum' ? `${C.white}15` : `${C.teal}22`,
                     color: e.tier === 'Gold' ? C.amber : e.tier === 'Platinum' ? C.white : C.teal,
                   }}>{e.tier}</span>
                 )}
 
                 {/* Monthly */}
-                <div style={{ textAlign: 'right', minWidth: 80 }}>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: C.green, fontFamily: "'JetBrains Mono', monospace" }}>
+                <div style={{ textAlign: 'right', minWidth: 80, flexShrink: 0 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: e.monthlyTotal > 0 ? C.green : C.gray, fontFamily: "'JetBrains Mono', monospace" }}>
                     ${e.monthlyTotal?.toFixed(0) || '0'}<span style={{ fontSize: 11, fontWeight: 400 }}>/mo</span>
                   </div>
                 </div>
 
                 {/* Timeline */}
-                <div style={{ textAlign: 'right', minWidth: 100 }}>
+                <div style={{ textAlign: 'right', minWidth: 100, flexShrink: 0 }}>
                   <div style={{ fontSize: 11, color: C.gray }}>Created {fmtDate(e.createdAt)}</div>
                   {e.sentAt && <div style={{ fontSize: 10, color: C.teal }}>Sent {timeAgo(e.sentAt)}</div>}
                   {e.viewedAt && <div style={{ fontSize: 10, color: C.amber }}>Viewed {timeAgo(e.viewedAt)}</div>}
                   {e.acceptedAt && <div style={{ fontSize: 10, color: C.green }}>Accepted {timeAgo(e.acceptedAt)}</div>}
+                  {e.declinedAt && <div style={{ fontSize: 10, color: C.red }}>Declined {timeAgo(e.declinedAt)}</div>}
+                  {e.followUpCount > 0 && <div style={{ fontSize: 10, color: C.gray }}>Follow-ups: {e.followUpCount}</div>}
                 </div>
 
-                {/* Created by */}
-                <div style={{ fontSize: 11, color: C.gray, minWidth: 60 }}>{e.createdBy || ''}</div>
-
                 {/* Actions */}
-                <div style={{ display: 'flex', gap: 6 }}>
-                  {e.status === 'draft' && (
+                <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' }}>
+                  {/* Priority toggle */}
+                  <button onClick={() => togglePriority(e)} title={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
+                    style={{
+                      padding: '6px 8px', borderRadius: 6, border: `1px solid ${e.isPriority ? C.red : C.border}`, cursor: 'pointer',
+                      background: e.isPriority ? `${C.red}22` : 'transparent', color: e.isPriority ? C.red : C.gray, fontSize: 13, lineHeight: 1,
+                    }}>{'⚑'}</button>
+
+                  {/* Send button for drafts with pricing */}
+                  {e.status === 'draft' && e.monthlyTotal > 0 && (
                     <button onClick={async () => {
                       await adminFetch(`/admin/estimates/${e.id}/send`, { method: 'POST' }).catch(() => {});
-                      adminFetch('/admin/estimates').then(d => setEstimates(d.estimates || []));
+                      refreshEstimates();
                     }} style={{
                       padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
                       background: C.teal, color: C.dark, fontSize: 11, fontWeight: 600,
                     }}>Send</button>
                   )}
+
+                  {/* Follow-up button for sent/viewed — opens modal with pre-filled SMS */}
                   {(e.status === 'sent' || e.status === 'viewed') && (
-                    <>
-                      <button onClick={async () => {
-                        try {
-                          await adminFetch(`/admin/estimates/${e.id}/follow-up`, { method: 'POST' });
-                          alert('Follow-up SMS sent!');
-                        } catch (err) { alert('Follow-up failed: ' + err.message); }
-                      }} style={{
-                        padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
-                        background: C.amber + '22', color: C.amber, fontSize: 11, fontWeight: 600,
-                      }}>Follow Up</button>
-                      <button onClick={() => {
-                        const link = `${window.location.origin}/estimate/${e.token || e.id}`;
-                        navigator.clipboard?.writeText(link);
-                      }} style={{
-                        padding: '6px 12px', borderRadius: 6, border: `1px solid ${C.border}`, cursor: 'pointer',
-                        background: 'transparent', color: C.gray, fontSize: 11, fontWeight: 600,
-                      }}>Copy Link</button>
-                    </>
+                    <button onClick={() => setFollowUpTarget(e)} style={{
+                      padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                      background: urgency ? `${urgency.color}22` : `${C.amber}22`,
+                      color: urgency ? urgency.color : C.amber,
+                      fontSize: 11, fontWeight: 600,
+                    }}>Follow Up</button>
+                  )}
+
+                  {/* Mark as Lost button for sent/viewed */}
+                  {(e.status === 'sent' || e.status === 'viewed') && (
+                    <button onClick={() => setDeclineTarget(e)} style={{
+                      padding: '6px 12px', borderRadius: 6, border: `1px solid ${C.border}`, cursor: 'pointer',
+                      background: 'transparent', color: C.red, fontSize: 11, fontWeight: 600,
+                    }}>Mark Lost</button>
+                  )}
+
+                  {/* Copy link for sent/viewed */}
+                  {(e.status === 'sent' || e.status === 'viewed') && (
+                    <button onClick={() => {
+                      const link = `${window.location.origin}/estimate/${e.token || e.id}`;
+                      navigator.clipboard?.writeText(link);
+                    }} style={{
+                      padding: '6px 12px', borderRadius: 6, border: `1px solid ${C.border}`, cursor: 'pointer',
+                      background: 'transparent', color: C.gray, fontSize: 11, fontWeight: 600,
+                    }}>Copy Link</button>
                   )}
                 </div>
               </div>
