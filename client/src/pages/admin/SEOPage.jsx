@@ -611,28 +611,217 @@ function SiteAuditTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [filter, setFilter] = useState('all'); // all, critical, warning, healthy
+  const [expandedPage, setExpandedPage] = useState(null);
+
   useEffect(() => { adminFetch('/admin/seo/audit').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, []);
+
+  const runAudit = async () => {
+    setRunning(true);
+    try {
+      await adminPost('/admin/seo/audit/run', {});
+      const d = await adminFetch('/admin/seo/audit');
+      setData(d);
+    } catch {}
+    setRunning(false);
+  };
+
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading site audit...</div>;
   if (!data?.hasData) return (
     <Card style={{ textAlign: 'center', padding: 60 }}>
       <div style={{ fontSize: 48, marginBottom: 16 }}>{'🩺'}</div>
       <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No Audit Data Yet</div>
-      <button onClick={async () => { setRunning(true); await adminPost('/admin/seo/audit/run', {}); const d = await adminFetch('/admin/seo/audit'); setData(d); setRunning(false); }} disabled={running} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Auditing...' : 'Run Site Audit'}</button>
+      <button onClick={runAudit} disabled={running} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Auditing...' : 'Run Site Audit'}</button>
     </Card>
   );
+
   const run = data.latestRun || {};
+  const pages = data.pages || [];
+  const issues = data.issues || [];
+  const history = data.history || [];
   const scoreColor = (s) => s >= 80 ? D.green : s >= 50 ? D.amber : D.red;
+  const severityColor = { critical: D.red, warning: D.amber, info: D.muted, healthy: D.green };
+
+  const getPageStatus = (p) => {
+    if (p.issue_count_critical > 0) return 'critical';
+    if (p.issue_count_warning > 0) return 'warning';
+    return 'healthy';
+  };
+
+  const filteredPages = pages.filter(p => {
+    if (filter === 'all') return true;
+    return getPageStatus(p) === filter;
+  });
+
+  const shortUrl = (url) => {
+    try { return new URL(url).pathname || '/'; } catch { return url; }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* KPI Row */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
         <Card style={{ padding: 16, textAlign: 'center' }}>
-          <div style={{ fontSize: 11, color: D.muted }}>Site Health</div>
-          <div style={{ fontSize: 32, fontWeight: 800, color: scoreColor(parseFloat(run.avg_health_score || 0)), fontFamily: MONO }}>{Math.round(run.avg_health_score || 0)}</div>
+          <div style={{ fontSize: 11, color: D.muted }}>Site Health Score</div>
+          <div style={{ fontSize: 36, fontWeight: 800, color: scoreColor(parseFloat(run.avg_health_score || 0)), fontFamily: MONO }}>{Math.round(run.avg_health_score || 0)}</div>
+          <div style={{ fontSize: 10, color: D.muted }}>{run.pages_crawled || 0} pages crawled</div>
         </Card>
-        <KpiCard label="Healthy" value={run.pages_healthy || 0} color={D.green} />
-        <KpiCard label="Warning" value={run.pages_warning || 0} color={D.amber} />
-        <KpiCard label="Critical" value={run.pages_critical || 0} color={D.red} />
+        {[{ label: 'Healthy', key: 'healthy', count: run.pages_healthy || 0, color: D.green },
+          { label: 'Warning', key: 'warning', count: run.pages_warning || 0, color: D.amber },
+          { label: 'Critical', key: 'critical', count: run.pages_critical || 0, color: D.red }].map(s => (
+          <Card key={s.key} onClick={() => setFilter(filter === s.key ? 'all' : s.key)}
+            style={{ padding: 16, textAlign: 'center', cursor: 'pointer', border: filter === s.key ? `2px solid ${s.color}` : `1px solid ${D.border}` }}>
+            <div style={{ fontSize: 11, color: D.muted }}>{s.label}</div>
+            <div style={{ fontSize: 28, fontWeight: 700, color: s.color, fontFamily: MONO }}>{s.count}</div>
+          </Card>
+        ))}
       </div>
+
+      {/* Re-run + last run info */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: 12, color: D.muted }}>
+          Last audit: {run.run_date ? new Date(run.run_date).toLocaleString() : 'N/A'}
+        </div>
+        <button onClick={runAudit} disabled={running} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Running...' : 'Re-run Audit'}</button>
+      </div>
+
+      {/* Top Issues Summary */}
+      {issues.length > 0 && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Top Issues</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {issues.slice(0, 15).map((iss, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: D.bg, borderRadius: 8, border: `1px solid ${D.border}` }}>
+                <span style={{
+                  width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                  background: severityColor[iss.severity] || D.muted,
+                }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, color: D.white, fontWeight: 500 }}>{iss.issue_type?.replace(/_/g, ' ')}</div>
+                  {iss.details && <div style={{ fontSize: 11, color: D.muted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iss.details}</div>}
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: severityColor[iss.severity] || D.muted, fontFamily: MONO, flexShrink: 0 }}>
+                  {iss.affected_count} page{iss.affected_count !== 1 ? 's' : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Page-by-Page Breakdown */}
+      <Card>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>
+            Pages {filter !== 'all' ? `(${filter})` : ''} — {filteredPages.length}
+          </div>
+          {filter !== 'all' && <button onClick={() => setFilter('all')} style={{ fontSize: 11, color: D.teal, background: 'none', border: 'none', cursor: 'pointer' }}>Show all</button>}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {filteredPages.slice(0, 50).map((p, i) => {
+            const status = getPageStatus(p);
+            const pageIssues = (() => { try { return JSON.parse(p.issues || '[]'); } catch { return []; } })();
+            const isExpanded = expandedPage === i;
+            return (
+              <div key={i}>
+                <div onClick={() => setExpandedPage(isExpanded ? null : i)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', background: D.bg, borderRadius: 8, border: `1px solid ${D.border}`, cursor: 'pointer' }}>
+                  {/* Score circle */}
+                  <div style={{
+                    width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+                    border: `3px solid ${scoreColor(p.technical_health_score || 0)}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 11, fontWeight: 800, color: scoreColor(p.technical_health_score || 0), fontFamily: MONO,
+                  }}>{Math.round(p.technical_health_score || 0)}</div>
+                  {/* URL + meta */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, color: D.white, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shortUrl(p.url)}</div>
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                      {p.status_code && <span style={{ marginRight: 8 }}>{p.status_code}</span>}
+                      {p.response_time_ms != null && <span style={{ marginRight: 8 }}>{p.response_time_ms}ms</span>}
+                      {p.word_count != null && <span>{p.word_count} words</span>}
+                    </div>
+                  </div>
+                  {/* Issue counts */}
+                  <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                    {p.issue_count_critical > 0 && <span style={{ fontSize: 10, fontWeight: 700, color: D.red, background: D.red + '18', padding: '2px 6px', borderRadius: 6 }}>{p.issue_count_critical} critical</span>}
+                    {p.issue_count_warning > 0 && <span style={{ fontSize: 10, fontWeight: 700, color: D.amber, background: D.amber + '18', padding: '2px 6px', borderRadius: 6 }}>{p.issue_count_warning} warning</span>}
+                    {status === 'healthy' && <span style={{ fontSize: 10, fontWeight: 700, color: D.green, background: D.green + '18', padding: '2px 6px', borderRadius: 6 }}>OK</span>}
+                  </div>
+                  <span style={{ fontSize: 12, color: D.muted, flexShrink: 0 }}>{isExpanded ? '▲' : '▼'}</span>
+                </div>
+                {/* Expanded details */}
+                {isExpanded && (
+                  <div style={{ padding: '12px 16px', background: D.bg, borderRadius: '0 0 8px 8px', borderTop: 'none', border: `1px solid ${D.border}`, borderTopColor: 'transparent', marginTop: -2 }}>
+                    {/* Meta info */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+                      {p.meta_title && (
+                        <div><div style={{ fontSize: 10, color: D.muted }}>Title ({p.meta_title_length} chars)</div><div style={{ fontSize: 12, color: D.text, marginTop: 2 }}>{p.meta_title}</div></div>
+                      )}
+                      {p.meta_description && (
+                        <div><div style={{ fontSize: 10, color: D.muted }}>Description ({p.meta_description_length} chars)</div><div style={{ fontSize: 12, color: D.text, marginTop: 2 }}>{p.meta_description?.substring(0, 160)}</div></div>
+                      )}
+                      {p.h1_text && (
+                        <div><div style={{ fontSize: 10, color: D.muted }}>H1 (count: {p.h1_count})</div><div style={{ fontSize: 12, color: D.text, marginTop: 2 }}>{p.h1_text}</div></div>
+                      )}
+                      <div>
+                        <div style={{ fontSize: 10, color: D.muted }}>Structure</div>
+                        <div style={{ fontSize: 12, color: D.text, marginTop: 2 }}>
+                          H2s: {p.h2_count || 0} | Links: {p.internal_links_count || 0} int / {p.external_links_count || 0} ext | Images: {p.total_images || 0} ({p.images_missing_alt || 0} no alt)
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10, color: D.muted }}>Schema</div>
+                        <div style={{ fontSize: 12, color: D.text, marginTop: 2 }}>
+                          {(() => { try { const s = JSON.parse(p.schema_types_found || '[]'); return s.length ? s.join(', ') : 'None found'; } catch { return 'None'; } })()}
+                          {p.has_faq_schema && <span style={{ color: D.green, marginLeft: 6 }}>FAQ</span>}
+                          {p.has_local_business_schema && <span style={{ color: D.green, marginLeft: 6 }}>LocalBusiness</span>}
+                        </div>
+                      </div>
+                      {p.canonical_url && (
+                        <div><div style={{ fontSize: 10, color: D.muted }}>Canonical</div><div style={{ fontSize: 12, color: p.canonical_mismatch ? D.red : D.green, marginTop: 2 }}>{p.canonical_self_referencing ? 'Self-referencing' : p.canonical_url}</div></div>
+                      )}
+                    </div>
+                    {/* Issue list */}
+                    {pageIssues.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>Issues</div>
+                        {pageIssues.map((iss, j) => (
+                          <div key={j} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 0', borderBottom: j < pageIssues.length - 1 ? `1px solid ${D.border}` : 'none' }}>
+                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: severityColor[iss.severity] || D.muted, marginTop: 5, flexShrink: 0 }} />
+                            <div>
+                              <div style={{ fontSize: 12, color: D.text }}>{iss.message || iss.type?.replace(/_/g, ' ')}</div>
+                              {iss.details && <div style={{ fontSize: 11, color: D.muted, marginTop: 1 }}>{iss.details}</div>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {pageIssues.length === 0 && <div style={{ fontSize: 12, color: D.green }}>No issues found — page is healthy</div>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* Audit History */}
+      {history.length > 1 && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Audit History</div>
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(history.length, 6)}, 1fr)`, gap: 8 }}>
+            {history.slice(0, 6).map((h, i) => (
+              <div key={i} style={{ textAlign: 'center', padding: 12, background: D.bg, borderRadius: 8, border: i === 0 ? `2px solid ${D.teal}` : `1px solid ${D.border}` }}>
+                <div style={{ fontSize: 10, color: D.muted }}>{new Date(h.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: scoreColor(h.score), fontFamily: MONO }}>{Math.round(h.score)}</div>
+                <div style={{ fontSize: 10, color: D.muted }}>{h.pages} pages</div>
+                {h.critical > 0 && <div style={{ fontSize: 10, color: D.red }}>{h.critical} critical</div>}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
