@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, createContext, useContext, Component } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext, Component } from 'react';
 import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
 
 class EstimateErrorBoundary extends Component {
@@ -230,6 +230,44 @@ function EstimateToolView() {
     svcFlea: false, svcWasp: false, svcRoach: false, svcBedbug: false, svcExclusion: false,
   });
 
+  /* ── live pricing preview (approximate from form state) ──── */
+  const livePreview = useMemo(() => {
+    // Count recurring services
+    const recurringKeys = ['svcLawn', 'svcPest', 'svcTs', 'svcInjection', 'svcMosquito', 'svcTermiteBait', 'svcRodentBait'];
+    const recurringCount = recurringKeys.filter(k => form[k]).length;
+
+    // Tier logic
+    const tierMap = { 0: { name: 'None', discount: 0 }, 1: { name: 'Bronze', discount: 0 }, 2: { name: 'Silver', discount: 0.10 }, 3: { name: 'Gold', discount: 0.15 } };
+    const tier = recurringCount >= 4 ? { name: 'Platinum', discount: 0.20 } : (tierMap[recurringCount] || tierMap[0]);
+
+    // Approximate monthly costs for recurring (rough averages based on typical property)
+    const sqft = Number(form.homeSqFt) || 2000;
+    const lotSqft = Number(form.lotSqFt) || 8000;
+    const approx = {};
+    if (form.svcLawn) approx.lawn = Math.max(55, Math.round(sqft * 0.028 + 10));
+    if (form.svcPest) {
+      const freqMult = { '4': 1, '6': 1.3, '12': 2.2 };
+      approx.pest = Math.max(35, Math.round((sqft * 0.022 + 20) * (freqMult[form.pestFreq] || 1)));
+    }
+    if (form.svcTs) approx.ts = Math.max(45, Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30));
+    if (form.svcInjection) approx.injection = Math.round((Number(form.palmCount) || 3) * 35 * 3 / 12);
+    if (form.svcMosquito) approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
+    if (form.svcTermiteBait) approx.termiteBait = 50;
+    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 55 : 45;
+
+    const recurringMonthlyBefore = Object.values(approx).reduce((s, v) => s + v, 0);
+    const recurringMonthly = Math.round(recurringMonthlyBefore * (1 - tier.discount));
+    const annualRecurring = recurringMonthly * 12;
+    const annualSavings = Math.round(recurringMonthlyBefore * tier.discount * 12);
+
+    // Count one-time services
+    const onetimeKeys = ['svcOnetimePest', 'svcOnetimeLawn', 'svcOnetimeMosquito', 'svcPlugging', 'svcTopdress', 'svcDethatch', 'svcTrenching', 'svcBoracare', 'svcPreslab', 'svcFoam', 'svcRodentTrap', 'svcFlea', 'svcWasp', 'svcRoach', 'svcBedbug', 'svcExclusion'];
+    const onetimeCount = onetimeKeys.filter(k => form[k]).length;
+    const anySelected = recurringCount > 0 || onetimeCount > 0;
+
+    return { recurringCount, onetimeCount, tier, recurringMonthly, annualRecurring, annualSavings, anySelected };
+  }, [form]);
+
   const [estimate, setEstimate] = useState(null);
   const [savedId, setSavedId] = useState(null);
   const [lookupStatus, setLookupStatus] = useState({ type: '', msg: '' });
@@ -300,6 +338,7 @@ function EstimateToolView() {
 
   /* ── v2 Property Lookup — RentCast + Satellite + Claude AI in one call ── */
   const [enrichedProfile, setEnrichedProfile] = useState(null);
+  const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
 
   async function doLookup() {
     const address = form.address.trim();
@@ -348,6 +387,23 @@ function EstimateToolView() {
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
 
       setForm(f => ({ ...f, ...upd, _boracareAuto: true, _preslabAuto: true }));
+
+      // Auto-detect existing customer by address
+      try {
+        const addrSearch = address.split(',')[0].trim();
+        const custR = await fetch(`/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=3`, { headers: authHeaders });
+        if (custR.ok) {
+          const custData = await custR.json();
+          const custs = custData.customers || custData || [];
+          const match = custs.find(c => c.address && address.toLowerCase().includes(c.address.split(',')[0].trim().toLowerCase()));
+          if (match) {
+            setExistingCustomerMatch(match);
+            setForm(f => ({ ...f, isRecurringCustomer: 'YES', customerName: `${match.firstName || ''} ${match.lastName || ''}`.trim(), customerPhone: match.phone || f.customerPhone || '', customerEmail: match.email || f.customerEmail || '' }));
+          } else {
+            setExistingCustomerMatch(null);
+          }
+        }
+      } catch { /* ignore customer lookup errors */ }
 
       // Satellite images
       if (data.satellite) {
@@ -623,7 +679,7 @@ function EstimateToolView() {
      ═══════════════════════════════════════════════════════════ */
   return (
     <FormCtx.Provider value={formCtx}>
-    <div style={{ background: C.dark, color: C.white, maxWidth: 1440, margin: '0 auto', padding: typeof window !== 'undefined' && window.innerWidth < 640 ? 12 : 28, minHeight: '100vh', fontSize: 16, fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ background: C.dark, color: C.white, maxWidth: 1440, margin: '0 auto', padding: typeof window !== 'undefined' && window.innerWidth < 640 ? 12 : 28, paddingBottom: livePreview.anySelected && !estimate ? 80 : (typeof window !== 'undefined' && window.innerWidth < 640 ? 12 : 28), minHeight: '100vh', fontSize: 16, fontFamily: "'DM Sans', sans-serif" }}>
       <style>{`
         @media (max-width: 640px) {
           .estimate-layout { grid-template-columns: 1fr !important; }
@@ -635,6 +691,7 @@ function EstimateToolView() {
           .estimate-summary-flex > div { min-width: 80px; }
           .estimate-actions { grid-template-columns: 1fr !important; }
           .estimate-send-grid { grid-template-columns: 1fr !important; }
+          .estimate-sticky-bar { flex-direction: column !important; gap: 8px !important; padding: 10px 16px !important; }
         }
       `}</style>
       {/* HEADER */}
@@ -658,6 +715,24 @@ function EstimateToolView() {
               <button style={sBtnSm('transparent', C.gray)} onClick={() => { setForm(f => ({ ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family', hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE', nearWater: 'NO', bedArea: '', palmCount: '', treeCount: '' })); setLookupStatus({ type: '', msg: '' }); setSatelliteStatus({ type: '', msg: '' }); setSatelliteData(null); setEstimate(null); }}>Clear All</button>
             </div>
             {satelliteStatus.type && <div style={statusStyle(satelliteStatus.type)}>{satelliteStatus.msg}</div>}
+            {/* AI analysis inline flags */}
+            {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
+              <div style={{ marginBottom: 10, padding: '8px 12px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 8 }}>
+                {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
+                  <div key={i} style={{ fontSize: 12, color: C.red, marginBottom: i < enrichedProfile.fieldVerifyFlags.length - 1 ? 4 : 0 }}>
+                    {'\u26A0\uFE0F'} {typeof flag === 'string' ? flag.replace(/_/g, ' ') : (flag.field || flag.name || '').replace(/_/g, ' ')}{flag.reason ? ` \u2014 ${flag.reason}` : ''}
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Existing customer match */}
+            {existingCustomerMatch && (
+              <div style={{ marginBottom: 10, padding: '10px 14px', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: 8, fontSize: 13, color: C.green }}>
+                Existing customer: <strong>{existingCustomerMatch.firstName} {existingCustomerMatch.lastName}</strong>
+                {existingCustomerMatch.tier ? ` \u00B7 ${existingCustomerMatch.tier}` : ''}
+                {' \u00B7 '}15% loyalty discount applied
+              </div>
+            )}
             {satelliteData && (satelliteData.imageUrl || satelliteData.closeUrl) && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 8 }}>
@@ -711,14 +786,16 @@ function EstimateToolView() {
               <Field label="Home Sq Ft"><Input k="homeSqFt" type="number" placeholder="2000" /></Field>
               <Field label="Stories"><Input k="stories" type="number" min="1" max="4" /></Field>
             </div>
-            <div style={sRow}>
-              <Field label="Lot Sq Ft"><Input k="lotSqFt" type="number" placeholder="8000" /></Field>
-              <Field label="Bed Area (optional)"><Input k="bedArea" type="number" placeholder="Auto-estimate" /></Field>
-            </div>
-            <div style={sRow}>
-              <Field label="Palm Count (optional)"><Input k="palmCount" type="number" placeholder="Auto" /></Field>
-              <Field label="Tree Count (optional)"><Input k="treeCount" type="number" placeholder="Auto" /></Field>
-            </div>
+            <Field label="Lot Sq Ft"><Input k="lotSqFt" type="number" placeholder="8000" /></Field>
+            {form.svcTs && (
+              <div style={sRow}>
+                <Field label="Bed Area (sq ft)"><Input k="bedArea" type="number" placeholder="Auto-estimate" /></Field>
+                <Field label="Palm Count"><Input k="palmCount" type="number" placeholder="Auto" /></Field>
+              </div>
+            )}
+            {form.svcTs && (
+              <Field label="Tree Count"><Input k="treeCount" type="number" placeholder="Auto" /></Field>
+            )}
           </div>
 
           {/* Property Features */}
@@ -750,6 +827,13 @@ function EstimateToolView() {
 
             <div style={sSvcSection}>Recurring Programs</div>
             <Checkbox k="svcLawn" label="Lawn Care" />
+            {form.svcLawn && (
+              <div style={sSubOpts}>
+                <Field label="Lawn Program Tier (shown in results)" style={{ marginBottom: 0 }}>
+                  <div style={{ fontSize: 12, color: C.gray }}>7-app / 9-app / 13-app options shown after generating</div>
+                </Field>
+              </div>
+            )}
             <Checkbox k="svcPest" label="Pest Control" />
             {form.svcPest && (
               <div style={sSubOpts}>
@@ -765,8 +849,21 @@ function EstimateToolView() {
             <Checkbox k="svcTermiteBait" label="Termite Bait Stations" />
             <Checkbox k="svcRodentBait" label="Rodent Bait Stations" />
 
-            <div style={sSvcSection}>One-Time Services</div>
-            <Checkbox k="svcOnetimePest" label="One-Time Pest" />
+            {/* Dynamic tier badge */}
+            {livePreview.recurringCount > 0 && (
+              <div style={{
+                margin: '12px 0 6px 0', padding: '8px 14px', borderRadius: 8,
+                background: livePreview.tier.discount > 0 ? 'rgba(16,185,129,0.08)' : 'rgba(14,165,233,0.08)',
+                border: `1px solid ${livePreview.tier.discount > 0 ? 'rgba(16,185,129,0.25)' : 'rgba(14,165,233,0.2)'}`,
+                fontSize: 13, color: livePreview.tier.discount > 0 ? C.green : C.teal,
+              }}>
+                {livePreview.recurringCount} service{livePreview.recurringCount > 1 ? 's' : ''} selected {'\u2192'} <strong>WaveGuard {livePreview.tier.name}</strong>
+                {livePreview.tier.discount > 0 ? ` (${Math.round(livePreview.tier.discount * 100)}% bundle discount)` : ' (no discount \u2014 add 1 more for Silver 10%)'}
+              </div>
+            )}
+
+            {/* -- Lawn Services -- */}
+            <div style={{ ...sSvcSection, color: C.green }}>Lawn Services</div>
             <Checkbox k="svcOnetimeLawn" label="One-Time Lawn Treatment" />
             {form.svcOnetimeLawn && (
               <div style={sSubOpts}>
@@ -775,7 +872,6 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcOnetimeMosquito" label="One-Time Mosquito" />
             <Checkbox k="svcPlugging" label="Lawn Plugging" />
             {form.svcPlugging && (
               <div style={sSubOpts}>
@@ -787,6 +883,9 @@ function EstimateToolView() {
             )}
             <Checkbox k="svcTopdress" label="Top Dressing" />
             <Checkbox k="svcDethatch" label="Dethatching" />
+
+            {/* -- Termite Services -- */}
+            <div style={{ ...sSvcSection, color: C.red }}>Termite Services</div>
             <Checkbox k="svcTrenching" label="Termite Trenching" />
             <Checkbox k="svcBoracare" label="Bora-Care Attic" />
             {form.svcBoracare && (
@@ -814,11 +913,12 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcRodentTrap" label="Rodent Trapping" />
 
-            <div style={sSvcSection}>Specialty Pest</div>
+            {/* -- Pest Services -- */}
+            <div style={{ ...sSvcSection, color: C.amber }}>Pest Services</div>
+            <Checkbox k="svcOnetimePest" label="One-Time Pest" />
+            <Checkbox k="svcOnetimeMosquito" label="One-Time Mosquito" />
             <Checkbox k="svcFlea" label="Flea (2-visit)" />
-            <Checkbox k="svcWasp" label="Wasp/Bee Removal" />
             <Checkbox k="svcRoach" label="Cockroach Treatment" />
             {form.svcRoach && (
               <div style={sSubOpts}>
@@ -827,6 +927,7 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
+            <Checkbox k="svcWasp" label="Wasp/Bee/Stinging Insect" />
             <Checkbox k="svcBedbug" label="Bed Bug Treatment" />
             {form.svcBedbug && (
               <div style={sSubOpts}>
@@ -836,6 +937,10 @@ function EstimateToolView() {
                 </div>
               </div>
             )}
+
+            {/* -- Rodent Services -- */}
+            <div style={{ ...sSvcSection, color: C.gray }}>Rodent Services</div>
+            <Checkbox k="svcRodentTrap" label="Rodent Trapping" />
             <Checkbox k="svcExclusion" label="Rodent Exclusion" />
             {form.svcExclusion && (
               <div style={sSubOpts}>
@@ -931,10 +1036,26 @@ function EstimateToolView() {
         {/* ═══ RIGHT COLUMN: RESULTS ═══ */}
         <div>
           {!estimate ? (
-            <div style={{ ...sPanel, textAlign: 'center', padding: '80px 24px' }}>
-              <div style={{ fontSize: 56, marginBottom: 18 }}>&#128203;</div>
-              <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10, color: C.white }}>No Estimate Generated</div>
-              <div style={{ fontSize: 15, color: C.gray }}>Enter property data and select services, then click Generate Estimate</div>
+            <div style={{ ...sPanel, textAlign: 'center', padding: '60px 24px' }}>
+              <div style={{ fontSize: 56, marginBottom: 18 }}>{livePreview.anySelected ? '\u26A1' : '\uD83D\uDCCB'}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10, color: C.white }}>
+                {!livePreview.anySelected ? 'Select Services to Get Started' : 'Ready to Generate'}
+              </div>
+              <div style={{ fontSize: 15, color: C.gray, marginBottom: 16 }}>
+                {!livePreview.anySelected
+                  ? 'Select at least one service to see pricing'
+                  : `${livePreview.recurringCount} recurring + ${livePreview.onetimeCount} one-time selected \u2014 click Generate Estimate`}
+              </div>
+              {/* Mini property summary if lookup done */}
+              {enrichedProfile && (
+                <div style={{ textAlign: 'left', padding: '12px 16px', background: C.navy, borderRadius: 8, border: `1px solid ${C.border}`, marginTop: 10, fontSize: 13, color: C.gray, lineHeight: 1.7 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.teal, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Property Loaded</div>
+                  <div>{form.address}</div>
+                  <div>{(Number(form.homeSqFt) || 0).toLocaleString()} sf home {'\u00B7'} {(Number(form.lotSqFt) || 0).toLocaleString()} sf lot {'\u00B7'} {form.stories || 1} story</div>
+                  {form.hasPool === 'YES' && <div>Pool: Yes{form.hasPoolCage === 'YES' ? ' (caged)' : ''}</div>}
+                  <div>Shrubs: {form.shrubDensity} {'\u00B7'} Trees: {form.treeDensity} {'\u00B7'} Complexity: {form.landscapeComplexity}</div>
+                </div>
+              )}
             </div>
           ) : (
             <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
@@ -1330,6 +1451,48 @@ function EstimateToolView() {
         </div>
       </div>
     </div>
+
+    {/* ── Sticky bottom bar — live pricing preview ──────── */}
+    {livePreview.anySelected && !estimate && (
+      <div style={{
+        position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 1000,
+        background: 'linear-gradient(135deg, #1a2937 0%, #0f1923 100%)',
+        borderTop: `2px solid ${C.teal}`,
+        padding: '12px 24px',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 20, flexWrap: 'wrap',
+        fontFamily: "'JetBrains Mono', monospace",
+        boxShadow: '0 -4px 20px rgba(0,0,0,0.5)',
+      }}>
+        <div style={{ fontSize: 11, color: C.gray, textTransform: 'uppercase', letterSpacing: 1 }}>Approx</div>
+        {livePreview.recurringCount > 0 && (
+          <>
+            <div style={{ fontSize: 15, color: C.white }}>
+              Monthly: <strong style={{ color: C.green }}>${livePreview.recurringMonthly}</strong>
+            </div>
+            <div style={{ fontSize: 13, color: C.gray }}>{'\u00B7'}</div>
+            <div style={{ fontSize: 15, color: C.white }}>
+              Annual: <strong style={{ color: C.green }}>${livePreview.annualRecurring.toLocaleString()}</strong>
+            </div>
+            {livePreview.annualSavings > 0 && (
+              <>
+                <div style={{ fontSize: 13, color: C.gray }}>{'\u00B7'}</div>
+                <div style={{ fontSize: 14, color: C.green }}>
+                  Savings: <strong>${livePreview.annualSavings}/yr</strong> ({livePreview.tier.name} {Math.round(livePreview.tier.discount * 100)}%)
+                </div>
+              </>
+            )}
+          </>
+        )}
+        {livePreview.recurringCount === 0 && livePreview.onetimeCount > 0 && (
+          <div style={{ fontSize: 14, color: C.gray }}>{livePreview.onetimeCount} one-time service{livePreview.onetimeCount > 1 ? 's' : ''} selected</div>
+        )}
+        <button onClick={doGenerate} style={{
+          marginLeft: 10, padding: '8px 20px', background: C.teal, color: C.dark,
+          border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+          fontFamily: "'DM Sans', sans-serif",
+        }}>Generate</button>
+      </div>
+    )}
     </FormCtx.Provider>
   );
 }
