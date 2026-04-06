@@ -4104,20 +4104,18 @@ function DocumentsTab({ customer }) {
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading documents...</div>;
 
   const categories = [
+    { key: 'service_report', label: '📄 Visit Reports', empty: 'Reports will auto-generate from your service history.' },
     { key: 'wdo_inspection', label: '🏠 WDO Inspection Reports', empty: 'No WDO inspections on file. Need one for a real estate transaction? Contact us to schedule.' },
     { key: 'service_agreement', label: '📋 Service Agreements & Proposals', empty: 'Your service agreement will appear here after enrollment.' },
     { key: 'annual_summary', label: '📊 Annual Summaries', empty: 'Your first annual summary will be generated at the end of the year.' },
-    { key: 'pesticide_record', label: '🧪 Pesticide Application Records', empty: 'Records will auto-generate from your service history.' },
-    { key: 'service_report', label: '📄 Visit Reports', empty: 'Reports will auto-generate from your service history.' },
     { key: 'invoice', label: '💰 Invoices & Receipts', empty: 'Invoice history coming soon — currently available in your billing tab.' },
     { key: 'insurance_cert', label: '🔒 Insurance & Licensing', empty: 'Insurance certificates will be uploaded by Waves.' },
   ];
 
   const typeFilters = [
     { value: 'all', label: 'All' },
-    { value: 'wdo_inspection', label: 'WDO' },
-    { value: 'pesticide_record', label: 'Pesticide' },
     { value: 'service_report', label: 'Reports' },
+    { value: 'wdo_inspection', label: 'WDO' },
     { value: 'service_agreement', label: 'Agreements' },
     { value: 'insurance_cert', label: 'Insurance' },
   ];
