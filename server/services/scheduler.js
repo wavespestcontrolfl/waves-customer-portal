@@ -497,6 +497,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6AM — Google Ads sync (campaigns, performance, search terms)
+  // =========================================================================
+  cron.schedule('0 6 * * *', async () => {
+    try {
+      const googleAds = require('./ads/google-ads');
+      if (!googleAds.isConfigured()) return;
+      logger.info('Running: Google Ads daily sync');
+      await googleAds.syncCampaigns();
+      await googleAds.syncDailyPerformance(7);
+      await googleAds.syncSearchTerms(30);
+      logger.info('Google Ads daily sync complete');
+    } catch (err) {
+      logger.error(`Google Ads sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM — Sync Google Search Console data
   // =========================================================================
   cron.schedule('0 6 * * *', async () => {

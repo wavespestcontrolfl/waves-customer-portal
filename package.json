@@ -29,6 +29,7 @@
     "@google-analytics/data": "^5.2.1",
     "@sentry/node": "^10.47.0",
     "csv-parse": "^6.2.1",
+    "google-ads-api": "^23.0.0",
     "imapflow": "^1.2.18",
     "nodemailer": "^8.0.4",
     "playwright": "^1.59.1",

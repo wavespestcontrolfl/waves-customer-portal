@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const BudgetManager = require('../services/ads/budget-manager');
 const CampaignAdvisor = require('../services/ads/campaign-advisor');
+const googleAds = require('../services/ads/google-ads');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -69,7 +70,81 @@ router.post('/campaigns/:id/budget', async (req, res, next) => {
   try {
     const { budget, reason } = req.body;
     const result = await BudgetManager.setBudget(req.params.id, budget, reason || 'manual');
+
+    // Also update on Google Ads if campaign is linked
+    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
+    if (campaign && campaign.platform_campaign_id && googleAds.isConfigured()) {
+      const gResult = await googleAds.updateBudget(campaign.platform_campaign_id, budget);
+      if (gResult) result.googleAdsUpdated = true;
+    }
+
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/campaigns/:id/pause
+router.post('/campaigns/:id/pause', async (req, res, next) => {
+  try {
+    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+    // Pause on Google Ads if linked
+    let googleAdsResult = null;
+    if (campaign.platform_campaign_id && googleAds.isConfigured()) {
+      googleAdsResult = await googleAds.pauseCampaign(campaign.platform_campaign_id);
+    }
+
+    // Update local DB
+    const [updated] = await db('ad_campaigns')
+      .where({ id: req.params.id })
+      .update({ status: 'paused', updated_at: new Date() })
+      .returning('*');
+
+    res.json({ campaign: updated, googleAdsUpdated: !!googleAdsResult });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/campaigns/:id/enable
+router.post('/campaigns/:id/enable', async (req, res, next) => {
+  try {
+    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+    // Enable on Google Ads if linked
+    let googleAdsResult = null;
+    if (campaign.platform_campaign_id && googleAds.isConfigured()) {
+      googleAdsResult = await googleAds.enableCampaign(campaign.platform_campaign_id);
+    }
+
+    // Update local DB
+    const [updated] = await db('ad_campaigns')
+      .where({ id: req.params.id })
+      .update({ status: 'active', updated_at: new Date() })
+      .returning('*');
+
+    res.json({ campaign: updated, googleAdsUpdated: !!googleAdsResult });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/sync — trigger full Google Ads sync
+router.post('/sync', async (req, res, next) => {
+  try {
+    if (!googleAds.isConfigured()) {
+      return res.status(400).json({ error: 'Google Ads API not configured. Set GOOGLE_ADS_* environment variables.' });
+    }
+
+    const campaigns = await googleAds.syncCampaigns();
+    const performance = await googleAds.syncDailyPerformance(7);
+    const searchTerms = await googleAds.syncSearchTerms(30);
+
+    res.json({
+      success: true,
+      synced: {
+        campaigns: campaigns.length,
+        performanceRows: performance.length,
+        searchTerms: searchTerms.length,
+      },
+    });
   } catch (err) { next(err); }
 });
 
