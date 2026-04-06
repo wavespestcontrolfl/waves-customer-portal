@@ -138,7 +138,7 @@ export default function LawnAssessmentPanel() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
           <div style={{ fontSize: 18, fontWeight: 700, color: D.white }}>Lawn Health Assessment</div>
-          <div style={{ fontSize: 12, color: D.muted }}>AI-powered lawn scoring with dual-model analysis</div>
+          <div style={{ fontSize: 12, color: D.muted }}>Today's scheduled lawn services — upload photos for AI scoring</div>
         </div>
         {step !== 'select' && <button onClick={() => { setStep('select'); setPhotos([]); setResult(null); }} style={btnOutline}>← Back</button>}
       </div>
@@ -146,14 +146,18 @@ export default function LawnAssessmentPanel() {
       {/* STEP 1: Select Customer */}
       {step === 'select' && (
         <div>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search lawn care customers..." style={inputStyle} />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search today's lawn customers..." style={inputStyle} />
           <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
             {filteredCustomers.slice(0, 20).map(c => (
               <div key={c.id} style={{ ...cardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', cursor: 'pointer' }}
                 onClick={() => { setSelectedCustomer(c); setStep('capture'); }}>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{c.firstName} {c.lastName}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>
+                    {c.windowStart && <span style={{ color: D.teal, marginRight: 8 }}>{c.windowStart}</span>}
+                    {c.firstName} {c.lastName}
+                  </div>
                   <div style={{ fontSize: 11, color: D.muted }}>{c.address} · {c.phone}</div>
+                  {c.serviceType && <div style={{ fontSize: 10, color: D.green, marginTop: 2 }}>{c.serviceType}</div>}
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   {c.lastAssessment && <span style={{ fontSize: 10, color: D.muted }}>Last: {new Date(c.lastAssessment).toLocaleDateString()}</span>}
@@ -161,7 +165,7 @@ export default function LawnAssessmentPanel() {
                 </div>
               </div>
             ))}
-            {filteredCustomers.length === 0 && <div style={{ color: D.muted, textAlign: 'center', padding: 30 }}>No lawn care customers found</div>}
+            {filteredCustomers.length === 0 && <div style={{ color: D.muted, textAlign: 'center', padding: 30 }}>No lawn services scheduled today (or all assessed)</div>}
           </div>
         </div>
       )}

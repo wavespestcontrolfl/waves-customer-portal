@@ -165,10 +165,38 @@ function PropertyAlerts({ alerts }) {
 
 /* ── Service Card ─────────────────────────────────────── */
 
-function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onReschedule, onProtocol }) {
+function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onReschedule, onProtocol, onLawnPhotos }) {
   const [updating, setUpdating] = useState(false);
+  const [lawnUploading, setLawnUploading] = useState(false);
+  const [lawnDone, setLawnDone] = useState(false);
+  const lawnFileRef = useRef(null);
   const zoneColor = zoneColors?.[service.zone] || service.zoneColor || D.blue;
   const status = service.status;
+  const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
+
+  async function handleLawnPhotos(e) {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setLawnUploading(true);
+    try {
+      const photoData = await Promise.all(files.map(f => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ data: reader.result.split(',')[1], mimeType: f.type || 'image/jpeg' });
+        reader.onerror = reject;
+        reader.readAsDataURL(f);
+      })));
+      await adminFetch('/admin/lawn-assessment/assess', {
+        method: 'POST',
+        body: JSON.stringify({ customerId: service.customerId, photos: photoData }),
+      });
+      setLawnDone(true);
+      onLawnPhotos?.(service);
+    } catch (err) {
+      alert('Lawn assessment failed: ' + err.message);
+    }
+    setLawnUploading(false);
+    if (lawnFileRef.current) lawnFileRef.current.value = '';
+  }
 
   async function changeStatus(newStatus) {
     setUpdating(true);
@@ -318,6 +346,26 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
         }}>
           📋 Protocol
         </button>
+        {/* Lawn photo upload — only for lawn services */}
+        {isLawn && !lawnDone && (
+          <>
+            <input ref={lawnFileRef} type="file" accept="image/*" multiple capture="environment"
+              onChange={handleLawnPhotos} style={{ display: 'none' }} />
+            <button onClick={() => lawnFileRef.current?.click()} disabled={lawnUploading} style={{
+              ...btnBase, background: 'transparent', color: D.green, border: `1px solid ${D.green}44`,
+            }}>
+              {lawnUploading ? '⏳ Analyzing...' : '📷 Lawn Photos'}
+            </button>
+          </>
+        )}
+        {isLawn && lawnDone && (
+          <span style={{
+            ...btnBase, background: D.green + '22', color: D.green, border: `1px solid ${D.green}44`,
+            cursor: 'default',
+          }}>
+            ✅ Lawn Assessed
+          </span>
+        )}
         {status !== 'completed' && status !== 'skipped' && (
           <button onClick={() => onReschedule?.(service)} style={{
             ...btnBase, background: 'transparent', color: D.amber, border: `1px solid ${D.amber}44`,

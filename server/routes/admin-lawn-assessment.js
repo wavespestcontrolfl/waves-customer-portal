@@ -21,20 +21,36 @@ router.use(requireTechOrAdmin);
 router.get('/customers', async (req, res, next) => {
   try {
     const { q } = req.query;
-    let query = db('customers')
-      .select('id', 'first_name as firstName', 'last_name as lastName', 'email', 'phone', 'address_line1 as address')
-      .orderBy('last_name', 'asc');
+    const today = new Date().toISOString().split('T')[0];
+
+    // Get today's scheduled lawn care services (not yet assessed)
+    let query = db('scheduled_services as ss')
+      .join('customers as c', 'ss.customer_id', 'c.id')
+      .where('ss.scheduled_date', today)
+      .whereRaw("LOWER(ss.service_type) LIKE '%lawn%'")
+      .whereNotExists(function () {
+        this.select(db.raw(1))
+          .from('lawn_assessments as la')
+          .whereRaw('la.customer_id = ss.customer_id')
+          .andWhere('la.service_date', today);
+      })
+      .select(
+        'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
+        'c.email', 'c.phone', 'c.address_line1 as address',
+        'ss.service_type as serviceType', 'ss.window_start as windowStart'
+      )
+      .orderBy('ss.window_start', 'asc');
 
     if (q && q.trim()) {
       const s = `%${q.trim().toLowerCase()}%`;
       query = query.where(function () {
-        this.whereRaw("LOWER(first_name || ' ' || last_name) LIKE ?", [s])
-          .orWhere('phone', 'like', s)
-          .orWhere('address_line1', 'ilike', s);
+        this.whereRaw("LOWER(c.first_name || ' ' || c.last_name) LIKE ?", [s])
+          .orWhere('c.phone', 'like', s)
+          .orWhere('c.address_line1', 'ilike', s);
       });
     }
 
-    const customers = await query.limit(100);
+    const customers = await query.limit(50);
     res.json({ customers });
   } catch (err) {
     next(err);
