@@ -205,6 +205,21 @@ function PostEditor({ post, onBack, onUpdate }) {
     setPublishing(false);
   };
 
+  const [sharing, setSharing] = useState(false);
+  const handleShareSocial = async () => {
+    setSharing(true);
+    try {
+      const result = await adminPost(`/admin/content/blog/${post.id}/share-social`, {});
+      const platforms = result.platforms || [];
+      const successes = platforms.filter(p => p.success).map(p => p.platform).join(', ');
+      const failures = platforms.filter(p => p.error).map(p => `${p.platform}: ${p.error}`).join('\n');
+      alert(`Shared to: ${successes || 'none'}${failures ? '\n\nFailed:\n' + failures : ''}`);
+    } catch (err) {
+      alert('Social share failed: ' + err.message);
+    }
+    setSharing(false);
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <button onClick={onBack} style={{
@@ -368,6 +383,12 @@ function PostEditor({ post, onBack, onUpdate }) {
             padding: '10px 20px', borderRadius: 8, border: `1px solid ${D.green}`, background: 'transparent',
             color: D.green, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: publishing ? 0.5 : 1,
           }}>{publishing ? 'Publishing...' : 'Publish to WordPress'}</button>
+        )}
+        {(editing.status === 'published' || editing.content) && (
+          <button onClick={handleShareSocial} disabled={sharing} style={{
+            padding: '10px 20px', borderRadius: 8, border: `1px solid ${D.purple}`, background: 'transparent',
+            color: D.purple, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: sharing ? 0.5 : 1,
+          }}>{sharing ? 'Sharing...' : '📲 Share to Social Media'}</button>
         )}
       </div>
     </div>

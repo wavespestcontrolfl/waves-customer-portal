@@ -144,6 +144,32 @@ router.post('/blog/:id/publish', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/content/blog/:id/share-social — share published post to all social platforms
+router.post('/blog/:id/share-social', async (req, res, next) => {
+  try {
+    const post = await db('blog_posts').where({ id: req.params.id }).first();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+
+    const link = post.wordpress_url || post.url || `https://www.wavespestcontrol.com/${post.slug}`;
+    const title = post.title;
+    const description = post.meta_description || (post.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300);
+
+    const SocialMediaService = require('../services/social-media');
+    const result = await SocialMediaService.publishToAll({
+      title, description, link,
+      guid: `blog_${post.id}`,
+      source: 'blog',
+    });
+
+    // Mark post as shared
+    try {
+      await db('blog_posts').where({ id: post.id }).update({ shared_to_social: true, shared_at: new Date() });
+    } catch { /* column may not exist */ }
+
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // =========================================================================
 // AUDIT
 // =========================================================================
