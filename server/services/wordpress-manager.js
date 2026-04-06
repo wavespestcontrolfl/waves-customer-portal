@@ -83,15 +83,29 @@ class WordPressManager {
     // Strategy: fetch pages one at a time with context=edit to get _elementor_data
     // First get the list of page/post IDs, then fetch each individually
     let allIds = [];
+    // Fetch published pages (no auth needed for published)
     try {
-      const pageList = await this.wpFetch(site, '/wp/v2/pages?per_page=100&_fields=id&status=publish,draft');
+      const pageList = await this.wpFetch(site, '/wp/v2/pages?per_page=100&_fields=id&status=publish');
       if (Array.isArray(pageList)) allIds.push(...pageList.map(p => ({ id: p.id, type: 'pages' })));
-    } catch (e) { results.errors.push({ error: `Page list: ${e.message}` }); }
+    } catch (e) {
+      // Fallback without status filter
+      try {
+        const pageList = await this.wpFetch(site, '/wp/v2/pages?per_page=100&_fields=id');
+        if (Array.isArray(pageList)) allIds.push(...pageList.map(p => ({ id: p.id, type: 'pages' })));
+      } catch (e2) { results.errors.push({ error: `Page list: ${e2.message}` }); }
+    }
 
     try {
-      const postList = await this.wpFetch(site, '/wp/v2/posts?per_page=100&_fields=id&status=publish,draft');
+      const postList = await this.wpFetch(site, '/wp/v2/posts?per_page=100&_fields=id&status=publish');
       if (Array.isArray(postList)) allIds.push(...postList.map(p => ({ id: p.id, type: 'posts' })));
-    } catch (e) { results.errors.push({ error: `Post list: ${e.message}` }); }
+    } catch (e) {
+      try {
+        const postList = await this.wpFetch(site, '/wp/v2/posts?per_page=100&_fields=id');
+        if (Array.isArray(postList)) allIds.push(...postList.map(p => ({ id: p.id, type: 'posts' })));
+      } catch (e2) { results.errors.push({ error: `Post list: ${e2.message}` }); }
+    }
+
+    console.log(`[wp-mgr] ${site.domain}: found ${allIds.length} pages+posts to check`);
 
     // Strategy A: Try fetching with context=edit (gets _elementor_data meta)
     let foundViaApi = false;
