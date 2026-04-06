@@ -1505,151 +1505,394 @@ function ServicesTab() {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
+  const [typeFilter, setTypeFilter] = useState('All');
+  const [yearFilter, setYearFilter] = useState(String(new Date().getFullYear()));
+  const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
-    api.getServices({ limit: 20 }).then(d => { setServices(d.services); setLoading(false); }).catch(console.error);
+    api.getServices({ limit: 100 }).then(d => { setServices(d.services || []); setLoading(false); }).catch(console.error);
   }, []);
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading service history...</div>;
 
+  // --- Helpers ---
+  const classifyType = (type) => {
+    if (!type) return 'Other';
+    const t = type.toLowerCase();
+    if (t.includes('lawn') || t.includes('fertiliz') || t.includes('weed') || t.includes('turf')) return 'Lawn Care';
+    if (t.includes('mosquito')) return 'Mosquito';
+    if (t.includes('pest') || t.includes('interior') || t.includes('exterior') || t.includes('roach') || t.includes('ant') || t.includes('spider') || t.includes('rodent')) return 'Pest Control';
+    return 'Other';
+  };
+
+  const getStatus = (s) => {
+    if (s.isCallback || s.is_callback) return 'Callback';
+    if (s.status === 'rescheduled' || s.rescheduled) return 'Rescheduled';
+    return 'Completed';
+  };
+
+  const statusBadge = (status) => {
+    const styles = {
+      Completed: { bg: '#E8F5E9', color: B.green },
+      Callback: { bg: B.blueSurface, color: B.wavesBlue },
+      Rescheduled: { bg: B.offWhite, color: B.grayMid },
+    };
+    const st = styles[status] || styles.Completed;
+    return (
+      <span style={{ fontSize: 11, padding: '3px 10px', borderRadius: 6, background: st.bg, color: st.color, fontWeight: 700, whiteSpace: 'nowrap' }}>
+        {status}{status === 'Callback' && <span style={{ fontWeight: 500, fontSize: 10 }}> — Included with WaveGuard</span>}
+      </span>
+    );
+  };
+
+  const aftercareTips = {
+    'Lawn Care': 'Avoid mowing for 48 hours. Greening expected in 7-10 days.',
+    'Pest Control': 'Keep windows closed for 2 hours. Normal insect activity may increase temporarily.',
+    'Mosquito': 'Barrier effective for 21 days. Avoid watering treated foliage for 24 hours.',
+  };
+
+  // --- Filtering ---
+  const filtered = services.filter(s => {
+    const cat = classifyType(s.type);
+    if (typeFilter !== 'All' && cat !== typeFilter) return false;
+    if (yearFilter !== 'All') {
+      const yr = parseDate(s.date).getFullYear();
+      if (String(yr) !== yearFilter) return false;
+    }
+    if (searchTerm.trim()) {
+      const q = searchTerm.toLowerCase();
+      const haystack = [s.notes, s.type, s.technician].filter(Boolean).join(' ').toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+
+  // --- Aggregate stats ---
+  const currentYear = new Date().getFullYear();
+  const thisYearServices = services.filter(s => parseDate(s.date).getFullYear() === currentYear);
+  const totalProducts = thisYearServices.reduce((sum, s) => sum + (s.products?.length || 0), 0);
+  const uniqueTechs = new Set(thisYearServices.map(s => s.technician).filter(Boolean)).size;
+  const avgMinutes = thisYearServices.length
+    ? Math.round(thisYearServices.reduce((sum, s) => sum + (s.serviceTimeMinutes || 0), 0) / thisYearServices.filter(s => s.serviceTimeMinutes).length) || 0
+    : 0;
+
+  // --- Monthly grouping ---
+  const grouped = {};
+  filtered.forEach(s => {
+    const dt = parseDate(s.date);
+    const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(s);
+  });
+  const sortedMonths = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
+
+  // --- Visit numbering ---
+  const visitCounts = {};
+  const sortedAll = [...services].sort((a, b) => parseDate(a.date) - parseDate(b.date));
+  sortedAll.forEach(s => {
+    const cat = classifyType(s.type);
+    const yr = parseDate(s.date).getFullYear();
+    const k = `${cat}-${yr}`;
+    visitCounts[k] = (visitCounts[k] || 0) + 1;
+    s._visitNum = visitCounts[k];
+    s._visitTotal = null; // will fill after
+  });
+  // fill totals
+  Object.keys(visitCounts).forEach(k => {
+    const total = visitCounts[k];
+    sortedAll.forEach(s => {
+      const cat = classifyType(s.type);
+      const yr = parseDate(s.date).getFullYear();
+      if (`${cat}-${yr}` === k) s._visitTotal = total;
+    });
+  });
+
+  // --- Available years ---
+  const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
+
   const thSt = { padding: '8px 10px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: B.grayMid, textAlign: 'left', borderBottom: `1px solid ${B.grayLight}` };
   const tdSt = { padding: '8px 10px', fontSize: 12, color: B.navy, borderBottom: `1px solid ${B.offWhite}`, verticalAlign: 'top' };
 
+  const pillStyle = (active) => ({
+    padding: '6px 14px', borderRadius: 20, border: 'none', cursor: 'pointer',
+    fontSize: 12, fontWeight: active ? 700 : 600, fontFamily: FONTS.ui,
+    background: active ? B.wavesBlue : B.offWhite,
+    color: active ? B.white : B.grayMid,
+    transition: 'all 0.2s ease',
+  });
+
+  const typeOptions = ['All', 'Pest Control', 'Lawn Care', 'Mosquito', 'Other'];
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <SectionHeading>Service Inspection Reports</SectionHeading>
-      <div style={{ fontSize: 13, color: B.grayDark }}>Detailed reports from every visit including products applied, technician observations, and conditions.</div>
+      {/* 1. Header */}
+      <SectionHeading>Your Service History</SectionHeading>
+      <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+        Every visit documented — what we applied, what we found, and what's next for your property.
+      </div>
 
-      {services.map(s => (
-        <div key={s.id} style={{
-          background: B.white, borderRadius: 14, overflow: 'hidden',
-          border: `1px solid ${expanded === s.id ? B.wavesBlue + '44' : B.grayLight}`,
-          transition: 'all 0.3s ease',
+      {/* 3. Aggregate summary */}
+      {thisYearServices.length > 0 && (
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 16px',
+          background: B.blueSurface, borderRadius: 12, border: `1px solid ${B.bluePale}`,
         }}>
-          {/* Header — always visible */}
-          <div onClick={() => setExpanded(expanded === s.id ? null : s.id)}
-            style={{ padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <div style={{
-                width: 40, height: 40, borderRadius: 10,
-                background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: '#fff', fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading,
-                flexShrink: 0,
-              }}>{(s.technician || 'W')[0]}</div>
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{s.type}</div>
-                <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-                  {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })} · {s.technician}
-                </div>
-              </div>
+          {[
+            { val: thisYearServices.length, label: `visit${thisYearServices.length !== 1 ? 's' : ''} in ${currentYear}` },
+            { val: totalProducts, label: 'products applied' },
+            { val: uniqueTechs, label: `technician${uniqueTechs !== 1 ? 's' : ''}` },
+            ...(avgMinutes > 0 ? [{ val: `${avgMinutes} min`, label: 'avg visit' }] : []),
+          ].map((stat, i, arr) => (
+            <span key={i} style={{ fontSize: 12, color: B.navy, fontFamily: FONTS.ui }}>
+              <strong style={{ fontWeight: 800, color: B.wavesBlue }}>{stat.val}</strong>{' '}{stat.label}
+              {i < arr.length - 1 && <span style={{ margin: '0 4px', color: B.grayLight }}>·</span>}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* 2. Filter row */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {/* Type pills */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {typeOptions.map(t => (
+            <button key={t} onClick={() => setTypeFilter(t)} style={pillStyle(typeFilter === t)}>{t}</button>
+          ))}
+        </div>
+        {/* Year pills + search */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+          {['All', ...years.map(String)].map(y => (
+            <button key={y} onClick={() => setYearFilter(y)} style={pillStyle(yearFilter === y)}>{y}</button>
+          ))}
+          <input
+            type="text"
+            placeholder="Search notes..."
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            style={{
+              marginLeft: 'auto', padding: '6px 12px', borderRadius: 20,
+              border: `1px solid ${B.grayLight}`, fontSize: 12, fontFamily: FONTS.ui,
+              color: B.navy, background: B.white, outline: 'none', minWidth: 120, maxWidth: 200,
+            }}
+          />
+        </div>
+      </div>
+
+      {/* Empty state */}
+      {filtered.length === 0 && (
+        <div style={{ padding: 30, textAlign: 'center', color: B.grayMid, fontSize: 13 }}>
+          No services match your filters.
+        </div>
+      )}
+
+      {/* 4. Monthly grouped list */}
+      {sortedMonths.map(monthKey => {
+        const monthServices = grouped[monthKey];
+        const [yr, mo] = monthKey.split('-');
+        const monthLabel = new Date(Number(yr), Number(mo) - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        return (
+          <div key={monthKey}>
+            {/* Month header */}
+            <div style={{
+              fontSize: 13, fontWeight: 700, color: B.grayMid, fontFamily: FONTS.heading,
+              padding: '8px 0 6px', borderBottom: `1px solid ${B.grayLight}`, marginBottom: 10,
+              letterSpacing: -0.2,
+            }}>
+              {monthLabel} — {monthServices.length} visit{monthServices.length !== 1 ? 's' : ''}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 11, padding: '3px 10px', borderRadius: 6, background: '#E8F5E9', color: B.green, fontWeight: 700 }}>Completed</span>
-              <span style={{ fontSize: 18, color: B.grayMid, transition: 'transform 0.3s', transform: expanded === s.id ? 'rotate(180deg)' : 'rotate(0)' }}>{'▾'}</span>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {monthServices.map(s => {
+                const status = getStatus(s);
+                const cat = classifyType(s.type);
+                const tip = aftercareTips[cat];
+                return (
+                  <div key={s.id} style={{
+                    background: B.white, borderRadius: 14, overflow: 'hidden',
+                    border: `1px solid ${expanded === s.id ? B.wavesBlue + '44' : B.grayLight}`,
+                    transition: 'all 0.3s ease',
+                  }}>
+                    {/* Header — always visible */}
+                    <div onClick={() => setExpanded(expanded === s.id ? null : s.id)}
+                      style={{ padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <div style={{
+                          width: 40, height: 40, borderRadius: 10,
+                          background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          color: '#fff', fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading,
+                          flexShrink: 0,
+                        }}>{(s.technician || 'W')[0]}</div>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>
+                            {s.type}
+                            {s._visitNum && <span style={{ fontSize: 11, fontWeight: 600, color: B.grayMid, marginLeft: 6 }}>#{s._visitNum}{s._visitTotal ? ` of ${s._visitTotal}` : ''}</span>}
+                          </div>
+                          <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
+                            {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })} · {s.technician}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {statusBadge(status)}
+                        <span style={{ fontSize: 18, color: B.grayMid, transition: 'transform 0.3s', transform: expanded === s.id ? 'rotate(180deg)' : 'rotate(0)' }}>{'▾'}</span>
+                      </div>
+                    </div>
+
+                    {/* Expanded detail — full service inspection report */}
+                    {expanded === s.id && (
+                      <div style={{ borderTop: `1px solid ${B.grayLight}` }}>
+
+                        {/* Technician Notes — speech bubble at top */}
+                        {s.notes && (
+                          <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
+                            <div style={{
+                              position: 'relative', padding: '12px 16px', borderRadius: 14,
+                              background: B.blueSurface, border: `1px solid ${B.bluePale}`,
+                            }}>
+                              <div style={{
+                                position: 'absolute', top: -6, left: 20, width: 12, height: 12,
+                                background: B.blueSurface, border: `1px solid ${B.bluePale}`,
+                                borderRight: 'none', borderBottom: 'none',
+                                transform: 'rotate(45deg)',
+                              }} />
+                              <div style={{ fontSize: 11, fontWeight: 700, color: B.wavesBlue, marginBottom: 4, fontFamily: FONTS.heading }}>
+                                {s.technician || 'Technician'} says:
+                              </div>
+                              <div style={{ fontSize: 13, color: B.navy, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Callback badge */}
+                        {status === 'Callback' && (
+                          <div style={{ padding: '0 18px 0', marginTop: -4 }}>
+                            <div style={{
+                              padding: '8px 14px', borderRadius: 10, background: B.blueSurface,
+                              border: `1px solid ${B.bluePale}`, fontSize: 12, color: B.wavesBlue,
+                              fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6,
+                              marginBottom: 10,
+                            }}>
+                              {'🔄'} Callback — included with your Gold WaveGuard
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Service Info Bar */}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 0, borderBottom: `1px solid ${B.grayLight}`, background: B.offWhite }}>
+                          {[
+                            { label: 'Date', value: parseDate(s.date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }) },
+                            { label: 'Technician', value: s.technician },
+                            { label: 'Duration', value: s.serviceTimeMinutes ? `${s.serviceTimeMinutes} min` : '—' },
+                            { label: 'Status', value: status },
+                          ].map((item, i) => (
+                            <div key={i} style={{ padding: '10px 14px', borderRight: i % 2 === 0 ? `1px solid ${B.grayLight}` : 'none', borderBottom: i < 2 ? `1px solid ${B.grayLight}` : 'none' }}>
+                              <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid }}>{item.label}</div>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 2, wordBreak: 'break-word' }}>{item.value}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Conditions */}
+                        {(s.soilTemp || s.soilPh || s.thatchMeasurement || s.soilMoisture) && (
+                          <div style={{ padding: '12px 18px', background: B.blueSurface, borderBottom: `1px solid ${B.grayLight}` }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 6 }}>Conditions & Measurements</div>
+                            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                              {s.soilTemp && <div style={{ fontSize: 12, color: B.navy }}>{'🌡️'} Soil Temp: <strong>{s.soilTemp}°F</strong></div>}
+                              {s.soilPh && <div style={{ fontSize: 12, color: B.navy }}>{'⚗️'} pH: <strong>{s.soilPh}</strong></div>}
+                              {s.thatchMeasurement && <div style={{ fontSize: 12, color: B.navy }}>{'📏'} Thatch: <strong>{s.thatchMeasurement}"</strong></div>}
+                              {s.soilMoisture && <div style={{ fontSize: 12, color: B.navy }}>{'💧'} Moisture: <strong>{s.soilMoisture}</strong></div>}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Products Applied — full table */}
+                        {s.products?.length > 0 && (
+                          <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 10 }}>Products Applied</div>
+                            <div style={{ overflowX: 'auto' }}>
+                              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                  <tr>
+                                    <th style={thSt}>Product</th>
+                                    <th style={thSt}>Active Ingredient</th>
+                                    <th style={thSt}>Rate</th>
+                                    <th style={thSt}>Amount</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {s.products.map((p, i) => (
+                                    <tr key={i}>
+                                      <td style={{ ...tdSt, fontWeight: 600 }}>
+                                        {p.product_name}
+                                        {p.product_category && <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'capitalize', marginTop: 1 }}>{p.product_category}</div>}
+                                      </td>
+                                      <td style={{ ...tdSt, fontSize: 11, color: B.grayDark }}>
+                                        {p.active_ingredient || '—'}
+                                        {p.moa_group && <div style={{ fontSize: 10, color: B.grayMid }}>{p.moa_group}</div>}
+                                      </td>
+                                      <td style={{ ...tdSt, fontSize: 11 }}>{p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—'}</td>
+                                      <td style={{ ...tdSt, fontSize: 11 }}>{p.total_amount ? `${p.total_amount} ${p.amount_unit || ''}` : '—'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* What's Next — aftercare tips */}
+                        {tip && (
+                          <div style={{ padding: '12px 18px', background: '#F1F8E9', borderBottom: `1px solid ${B.grayLight}` }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 6 }}>What's Next</div>
+                            <div style={{ fontSize: 13, color: B.navy, lineHeight: 1.6 }}>{tip}</div>
+                          </div>
+                        )}
+
+                        {/* Photos */}
+                        {s.hasPhotos && (
+                          <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
+                            <div style={{ padding: '10px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}`, fontSize: 12, color: B.wavesBlue, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+                              {'📷'} {s.photoCount} photo{s.photoCount > 1 ? 's' : ''} attached — tap to view
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Precautions */}
+                        <div style={{ padding: '12px 18px', background: '#FFF8E1', borderBottom: `1px solid ${B.grayLight}` }}>
+                          <div style={{ fontSize: 11, color: '#F57F17', lineHeight: 1.5 }}>
+                            {'⚠️'} Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 318-7612.
+                          </div>
+                        </div>
+
+                        {/* Footer with Download PDF */}
+                        <div style={{ padding: '12px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                          <div style={{ fontSize: 10, color: B.grayMid }}>Report generated automatically from service data</div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <a
+                              href={api.getServiceReportUrl(s.id)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                ...BUTTON_BASE, padding: '6px 14px', fontSize: 11,
+                                background: B.wavesBlue, color: B.white, textDecoration: 'none',
+                                borderRadius: 8,
+                              }}
+                            >
+                              {'📄'} Download PDF
+                            </a>
+                            <div style={{ fontSize: 10, color: B.grayMid }}>Waves Pest Control · (941) 318-7612</div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
-
-          {/* Expanded detail — full service inspection report */}
-          {expanded === s.id && (
-            <div style={{ borderTop: `1px solid ${B.grayLight}` }}>
-
-              {/* Service Info Bar */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 0, borderBottom: `1px solid ${B.grayLight}`, background: B.offWhite }}>
-                {[
-                  { label: 'Date', value: parseDate(s.date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }) },
-                  { label: 'Technician', value: s.technician },
-                  { label: 'Duration', value: s.serviceTimeMinutes ? `${s.serviceTimeMinutes} min` : '—' },
-                  { label: 'Status', value: 'Completed' },
-                ].map((item, i) => (
-                  <div key={i} style={{ padding: '10px 14px', borderRight: i % 2 === 0 ? `1px solid ${B.grayLight}` : 'none', borderBottom: i < 2 ? `1px solid ${B.grayLight}` : 'none' }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid }}>{item.label}</div>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 2, wordBreak: 'break-word' }}>{item.value}</div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Conditions */}
-              {(s.soilTemp || s.soilPh || s.thatchMeasurement || s.soilMoisture) && (
-                <div style={{ padding: '12px 18px', background: B.blueSurface, borderBottom: `1px solid ${B.grayLight}` }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 6 }}>Conditions & Measurements</div>
-                  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                    {s.soilTemp && <div style={{ fontSize: 12, color: B.navy }}>{'🌡️'} Soil Temp: <strong>{s.soilTemp}°F</strong></div>}
-                    {s.soilPh && <div style={{ fontSize: 12, color: B.navy }}>{'⚗️'} pH: <strong>{s.soilPh}</strong></div>}
-                    {s.thatchMeasurement && <div style={{ fontSize: 12, color: B.navy }}>{'📏'} Thatch: <strong>{s.thatchMeasurement}"</strong></div>}
-                    {s.soilMoisture && <div style={{ fontSize: 12, color: B.navy }}>{'💧'} Moisture: <strong>{s.soilMoisture}</strong></div>}
-                  </div>
-                </div>
-              )}
-
-              {/* Products Applied — full table */}
-              {s.products?.length > 0 && (
-                <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 10 }}>Products Applied</div>
-                  <div style={{ overflowX: 'auto' }}>
-                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                      <thead>
-                        <tr>
-                          <th style={thSt}>Product</th>
-                          <th style={thSt}>Active Ingredient</th>
-                          <th style={thSt}>Rate</th>
-                          <th style={thSt}>Amount</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {s.products.map((p, i) => (
-                          <tr key={i}>
-                            <td style={{ ...tdSt, fontWeight: 600 }}>
-                              {p.product_name}
-                              {p.product_category && <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'capitalize', marginTop: 1 }}>{p.product_category}</div>}
-                            </td>
-                            <td style={{ ...tdSt, fontSize: 11, color: B.grayDark }}>
-                              {p.active_ingredient || '—'}
-                              {p.moa_group && <div style={{ fontSize: 10, color: B.grayMid }}>{p.moa_group}</div>}
-                            </td>
-                            <td style={{ ...tdSt, fontSize: 11 }}>{p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—'}</td>
-                            <td style={{ ...tdSt, fontSize: 11 }}>{p.total_amount ? `${p.total_amount} ${p.amount_unit || ''}` : '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* Technician Notes */}
-              {s.notes && (
-                <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 8 }}>Technician Comments</div>
-                  <div style={{ fontSize: 13, color: B.navy, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
-                </div>
-              )}
-
-              {/* Photos */}
-              {s.hasPhotos && (
-                <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
-                  <div style={{ padding: '10px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}`, fontSize: 12, color: B.wavesBlue, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {'📷'} {s.photoCount} photo{s.photoCount > 1 ? 's' : ''} attached — tap to view
-                  </div>
-                </div>
-              )}
-
-              {/* Precautions */}
-              <div style={{ padding: '12px 18px', background: '#FFF8E1', borderBottom: `1px solid ${B.grayLight}` }}>
-                <div style={{ fontSize: 11, color: '#F57F17', lineHeight: 1.5 }}>
-                  {'⚠️'} Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 318-7612.
-                </div>
-              </div>
-
-              {/* Footer */}
-              <div style={{ padding: '12px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontSize: 10, color: B.grayMid }}>Report generated automatically from service data</div>
-                <div style={{ fontSize: 10, color: B.grayMid }}>Waves Pest Control · (941) 318-7612</div>
-              </div>
-            </div>
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
