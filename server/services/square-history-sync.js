@@ -68,28 +68,24 @@ const SquareHistorySync = {
         const orderId = order.id;
         const orderDate = order.createdAt ? new Date(order.createdAt).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
 
-        // Check if already synced
+        const lineItems = (order.lineItems || []).map(li => li.name).join(', ') || 'Service';
+        const totalMoney = order.totalMoney?.amount ? (Number(order.totalMoney.amount) / 100) : 0;
+
+        // Check if already synced (by customer + date + service type)
         const existingSvc = await db('service_records')
-          .where({ customer_id: customerId })
-          .whereRaw("metadata::text LIKE ?", [`%${orderId}%`])
+          .where({ customer_id: customerId, service_date: orderDate })
+          .whereILike('service_type', `%${lineItems.substring(0, 30)}%`)
           .first();
 
         if (!existingSvc) {
-          const lineItems = (order.lineItems || []).map(li => li.name).join(', ') || 'Service';
-          const totalMoney = order.totalMoney?.amount ? (Number(order.totalMoney.amount) / 100) : 0;
-
           try {
             await db('service_records').insert({
               customer_id: customerId,
               service_type: lineItems.substring(0, 100),
               service_date: orderDate,
-              status: order.state === 'COMPLETED' ? 'completed' : 'pending',
-              total_cost: totalMoney,
-              metadata: JSON.stringify({ squareOrderId: orderId, lineItems: order.lineItems?.map(li => ({ name: li.name, qty: li.quantity, amount: li.totalMoney?.amount })) }),
             });
             servicesCreated++;
           } catch (e) {
-            // service_records might not have total_cost or metadata columns
             try {
               await db('service_records').insert({
                 customer_id: customerId,
