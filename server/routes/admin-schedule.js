@@ -261,11 +261,27 @@ router.put('/:id/status', async (req, res, next) => {
       updates.customer_confirmed = true;
       updates.customer_confirmed_at = db.fn.now();
     } else if (status === 'en_route') {
-      // Send en-route SMS
-      const driveMins = svc.distance_from_previous_miles ? Math.round(svc.distance_from_previous_miles * 2) : 15;
+      // Calculate ETA from Bouncie GPS or fallback
+      let etaMinutes = svc.distance_from_previous_miles ? Math.round(svc.distance_from_previous_miles * 2) : 15;
+      let etaSource = 'estimate';
+      try {
+        const BouncieService = require('../services/bouncie');
+        if (BouncieService.configured !== false) {
+          const eta = await BouncieService.calculateETA(
+            parseFloat(svc.cust_lat || svc.lat), parseFloat(svc.cust_lng || svc.lng)
+          );
+          if (eta.etaMinutes && eta.source !== 'default') {
+            etaMinutes = eta.etaMinutes;
+            etaSource = eta.source;
+            logger.info(`[en-route] ETA via ${eta.source}: ${etaMinutes} min, ${eta.distanceMiles} mi (${eta.vehicleName || 'vehicle'})`);
+          }
+        }
+      } catch (e) { logger.warn(`[en-route] Bouncie ETA failed, using fallback: ${e.message}`); }
+
+      // Send en-route SMS with real ETA
       try {
         await TwilioService.sendSMS(svc.cust_phone,
-          `🌊 Your Waves tech is on the way! ETA: ~${driveMins} minutes. Please ensure gates are unlocked and pets are secured.`,
+          `🌊 Your Waves tech is on the way! ETA: ~${etaMinutes} minutes. Please ensure gates are unlocked and pets are secured.`,
           { customerId: svc.customer_id, messageType: 'en_route' }
         );
       } catch (e) { logger.error(`En route SMS failed: ${e.message}`); }
@@ -583,5 +599,35 @@ function scheduleReviewRequest(svc) {
     }
   }, TWO_HOURS_MS);
 }
+
+// GET /api/admin/schedule/vehicle-location — live GPS from Bouncie
+router.get('/vehicle-location', async (req, res, next) => {
+  try {
+    const BouncieService = require('../services/bouncie');
+    const location = await BouncieService.getLiveLocation();
+    if (!location) return res.json({ available: false, message: 'No vehicle location available' });
+    res.json({ available: true, ...location });
+  } catch (err) {
+    res.json({ available: false, error: err.message });
+  }
+});
+
+// GET /api/admin/schedule/eta/:serviceId — calculate ETA to a service
+router.get('/eta/:serviceId', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where('scheduled_services.id', req.params.serviceId)
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select('customers.lat', 'customers.lng')
+      .first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const BouncieService = require('../services/bouncie');
+    const eta = await BouncieService.calculateETA(parseFloat(svc.lat), parseFloat(svc.lng));
+    res.json(eta);
+  } catch (err) {
+    res.json({ etaMinutes: 15, source: 'default', error: err.message });
+  }
+});
 
 module.exports = router;

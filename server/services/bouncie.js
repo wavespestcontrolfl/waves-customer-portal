@@ -247,6 +247,73 @@ class BouncieService {
       throw err;
     }
   }
+  /**
+   * Get live vehicle location for ETA calculation.
+   * Returns { lat, lng, isRunning, speed } for the first running vehicle,
+   * or the most recently active vehicle if none are running.
+   */
+  async getLiveLocation() {
+    try {
+      const vehicles = await this.getVehicles();
+      // Prefer a running vehicle
+      const running = vehicles.find(v => v.isRunning && v.lastLocation);
+      const best = running || vehicles.find(v => v.lastLocation) || null;
+      if (!best || !best.lastLocation) return null;
+      return {
+        vehicleId: best.id,
+        vehicleName: best.nickname,
+        lat: best.lastLocation.lat,
+        lng: best.lastLocation.lon || best.lastLocation.lng,
+        isRunning: best.isRunning,
+        odometer: best.odometer,
+      };
+    } catch (err) {
+      logger.error(`[bouncie] getLiveLocation failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Calculate ETA from current vehicle location to a customer address.
+   * Uses Google Distance Matrix API if available, falls back to haversine.
+   * @returns { etaMinutes, distanceMiles, source }
+   */
+  async calculateETA(customerLat, customerLng) {
+    const loc = await this.getLiveLocation();
+    if (!loc) return { etaMinutes: 15, distanceMiles: null, source: 'default' };
+
+    // Try Google Distance Matrix API first
+    const googleKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+    if (googleKey && customerLat && customerLng) {
+      try {
+        const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${loc.lat},${loc.lng}&destinations=${customerLat},${customerLng}&key=${googleKey}&units=imperial`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          const element = data.rows?.[0]?.elements?.[0];
+          if (element?.status === 'OK') {
+            const durationMin = Math.round((element.duration?.value || 900) / 60);
+            const distanceMi = element.distance?.value ? Math.round(element.distance.value / 1609.34 * 10) / 10 : null;
+            return { etaMinutes: durationMin, distanceMiles: distanceMi, source: 'google', vehicleName: loc.vehicleName };
+          }
+        }
+      } catch { /* fall through to haversine */ }
+    }
+
+    // Fallback: haversine distance → ETA at 30mph avg
+    if (customerLat && customerLng) {
+      const R = 3959; // Earth radius in miles
+      const dLat = (customerLat - loc.lat) * Math.PI / 180;
+      const dLng = (customerLng - loc.lng) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(loc.lat * Math.PI / 180) * Math.cos(customerLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+      const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const roadDist = dist * 1.4; // road factor
+      const etaMin = Math.round((roadDist / 30) * 60); // 30 mph avg
+      return { etaMinutes: Math.max(5, etaMin), distanceMiles: Math.round(roadDist * 10) / 10, source: 'haversine', vehicleName: loc.vehicleName };
+    }
+
+    return { etaMinutes: 15, distanceMiles: null, source: 'default' };
+  }
 }
 
 module.exports = new BouncieService();
