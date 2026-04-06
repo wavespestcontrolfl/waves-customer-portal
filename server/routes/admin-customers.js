@@ -317,9 +317,16 @@ router.post('/', async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage' };
     const updates = {};
-    for (const [k, v] of Object.entries(fields)) { if (req.body[k] !== undefined) updates[v] = req.body[k]; }
+    for (const [k, v] of Object.entries(fields)) {
+      if (req.body[k] !== undefined) {
+        // Handle empty strings for numeric/date fields
+        if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
+        else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
+        else { updates[v] = req.body[k]; }
+      }
+    }
     if (Object.keys(updates).length) await db('customers').where({ id: req.params.id }).update(updates);
     res.json({ success: true });
   } catch (err) { next(err); }
