@@ -92,10 +92,11 @@ export default function AdminLayout() {
         width: 240, background: D.bg, borderRight: `1px solid ${D.border}`,
         display: 'flex', flexDirection: 'column', flexShrink: 0,
         position: 'fixed', left: 0, top: 0, bottom: 0, zIndex: 100,
-        transform: sidebarOpen ? 'translateX(0)' : undefined,
+        transform: sidebarOpen ? 'translateX(0)' : (isDesktop ? 'translateX(0)' : 'translateX(-100%)'),
         transition: 'transform 0.2s ease',
         overflowY: 'auto', overflowX: 'hidden',
         WebkitOverflowScrolling: 'touch',
+        boxShadow: sidebarOpen && !isDesktop ? '8px 0 32px rgba(0,0,0,0.3)' : 'none',
       }} className="admin-sidebar">
         {/* Header + close button */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 12px 12px', flexShrink: 0 }}>

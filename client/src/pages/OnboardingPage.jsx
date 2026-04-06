@@ -387,21 +387,21 @@ export default function OnboardingPage() {
               {/* Scheduling */}
               {sectionHead('⏰', 'Scheduling Preferences')}
               {fieldLabel('Preferred time?')}
-              <PillSelect options={[
+              <PillSelect wrap options={[
                 { value: 'early_morning', label: 'Early AM' }, { value: 'morning', label: 'Morning' },
                 { value: 'midday', label: 'Midday' }, { value: 'afternoon', label: 'Afternoon' },
                 { value: 'no_preference', label: 'Any' },
               ]} value={prefs.preferredTime} onChange={v => updatePref('preferredTime', v)} />
 
               {fieldLabel('Preferred day?')}
-              <PillSelect options={[
+              <PillSelect wrap options={[
                 { value: 'monday', label: 'Mon' }, { value: 'tuesday', label: 'Tue' },
                 { value: 'wednesday', label: 'Wed' }, { value: 'thursday', label: 'Thu' },
                 { value: 'friday', label: 'Fri' }, { value: 'no_preference', label: 'Any' },
               ]} value={prefs.preferredDay} onChange={v => updatePref('preferredDay', v)} />
 
               {fieldLabel('How should we reach you?')}
-              <PillSelect options={[
+              <PillSelect wrap options={[
                 { value: 'call', label: '📞 Call' }, { value: 'text', label: '💬 Text' }, { value: 'email', label: '📧 Email' },
               ]} value={prefs.contactPreference} onChange={v => updatePref('contactPreference', v)} />
 

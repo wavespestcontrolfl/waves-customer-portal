@@ -96,16 +96,16 @@ export default function RatePage() {
             <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: '#8FA4B8' }}>Not Great</span>
             <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: '#8FA4B8' }}>Amazing!</span>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10, 1fr)', gap: 5 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
             {[1,2,3,4,5,6,7,8,9,10].map(n => {
               const selected = score === n;
               const bg = selected ? (n <= 3 ? '#E53935' : n <= 7 ? '#F5A623' : '#00C853') : '#fff';
               return (
                 <button key={n} onClick={() => handleScore(n)} style={{
-                  aspectRatio: '1', border: `2px solid ${selected ? bg : '#D8E4EE'}`, borderRadius: 12,
+                  minHeight: 44, minWidth: 44, border: `2px solid ${selected ? bg : '#D8E4EE'}`, borderRadius: 12,
                   background: bg, fontFamily: "'Baloo 2', cursive", fontSize: 18, fontWeight: 700,
                   color: selected ? '#fff' : '#3A5068', cursor: 'pointer', display: 'flex',
-                  alignItems: 'center', justifyContent: 'center',
+                  alignItems: 'center', justifyContent: 'center', padding: 0,
                 }}>{n}</button>
               );
             })}
@@ -123,7 +123,7 @@ export default function RatePage() {
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
             {HIGHLIGHTS.map(h => (
               <button key={h} onClick={() => toggleHighlight(h)} style={{
-                padding: '8px 16px', border: `2px solid ${highlights.includes(h) ? '#1E7FD9' : '#D8E4EE'}`,
+                padding: '10px 16px', minHeight: 44, border: `2px solid ${highlights.includes(h) ? '#1E7FD9' : '#D8E4EE'}`,
                 borderRadius: 24, background: highlights.includes(h) ? '#1E7FD9' : '#fff',
                 color: highlights.includes(h) ? '#fff' : '#3A5068', fontSize: 14, fontWeight: 700, cursor: 'pointer',
               }}>{h}</button>

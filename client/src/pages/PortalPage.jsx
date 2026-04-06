@@ -1009,7 +1009,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
                   <div style={{ marginTop: 16, textAlign: 'center' }}>
                     <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 8 }}>Tap a number to rate your experience</div>
-                    <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+                    <div style={{ display: 'flex', gap: 3, justifyContent: 'center', flexWrap: 'wrap' }}>
                       {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => {
                         const isActive = n <= (satHover || satRating);
                         const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
@@ -1021,13 +1021,14 @@ function DashboardTab({ customer, onSwitchTab }) {
                             onClick={() => handleSatRating(n)}
                             disabled={satSubmitting}
                             style={{
-                              width: 32, height: 38, borderRadius: 8, border: 'none',
+                              minWidth: 28, height: 44, borderRadius: 8, border: 'none',
                               cursor: satSubmitting ? 'wait' : 'pointer',
                               background: isActive ? color : B.offWhite,
                               color: isActive ? '#fff' : B.grayMid,
                               fontSize: 14, fontWeight: 700, fontFamily: FONTS.ui,
                               transition: 'all 0.15s ease',
                               transform: isActive ? 'scale(1.1)' : 'scale(1)',
+                              flex: '1 1 0',
                             }}
                           >{n}</button>
                         );
@@ -1447,16 +1448,16 @@ function ServicesTab() {
             <div style={{ borderTop: `1px solid ${B.grayLight}` }}>
 
               {/* Service Info Bar */}
-              <div style={{ display: 'flex', gap: 0, borderBottom: `1px solid ${B.grayLight}`, background: B.offWhite }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 0, borderBottom: `1px solid ${B.grayLight}`, background: B.offWhite }}>
                 {[
                   { label: 'Date', value: parseDate(s.date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }) },
                   { label: 'Technician', value: s.technician },
                   { label: 'Duration', value: s.serviceTimeMinutes ? `${s.serviceTimeMinutes} min` : '—' },
                   { label: 'Status', value: 'Completed' },
                 ].map((item, i) => (
-                  <div key={i} style={{ flex: 1, padding: '10px 14px', borderRight: i < 3 ? `1px solid ${B.grayLight}` : 'none' }}>
+                  <div key={i} style={{ padding: '10px 14px', borderRight: i % 2 === 0 ? `1px solid ${B.grayLight}` : 'none', borderBottom: i < 2 ? `1px solid ${B.grayLight}` : 'none' }}>
                     <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid }}>{item.label}</div>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 2 }}>{item.value}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 2, wordBreak: 'break-word' }}>{item.value}</div>
                   </div>
                 ))}
               </div>
@@ -4940,28 +4941,32 @@ export default function PortalPage() {
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(12px)',
-        borderTop: `1px solid ${B.grayLight}`, padding: '10px 16px',
-        display: 'flex', gap: 8, justifyContent: 'center', zIndex: 100,
+        borderTop: `1px solid ${B.grayLight}`, padding: '10px 12px',
+        display: 'flex', gap: 6, justifyContent: 'center', zIndex: 100,
       }}>
         <a href="tel:+19413187612" style={{
-          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 8px',
-          background: B.red, color: '#fff', fontSize: 13, textAlign: 'center',
-          boxShadow: `0 4px 15px ${B.red}40`,
+          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
+          background: B.red, color: '#fff', fontSize: 12, textAlign: 'center',
+          boxShadow: `0 4px 15px ${B.red}40`, minHeight: 44,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'📞'} Call</a>
         <a href="sms:+19413187612" style={{
-          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 8px',
-          background: B.red, color: '#fff', fontSize: 13,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`,
+          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
+          background: B.red, color: '#fff', fontSize: 12,
+          textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'💬'} Text</a>
         <button onClick={() => setShowChat(true)} style={{
-          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 8px',
-          background: B.wavesBlue, color: '#fff', fontSize: 13,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.wavesBlue}40`,
+          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
+          background: B.wavesBlue, color: '#fff', fontSize: 12,
+          textAlign: 'center', boxShadow: `0 4px 15px ${B.wavesBlue}40`, minHeight: 44,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'🤖'} Chat</button>
         <a href="mailto:contact@wavespestcontrol.com" style={{
-          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 8px',
-          background: B.navy, color: '#fff', fontSize: 13,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.navy}30`,
+          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
+          background: B.navy, color: '#fff', fontSize: 12,
+          textAlign: 'center', boxShadow: `0 4px 15px ${B.navy}30`, minHeight: 44,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'✉️'} Email</a>
       </div>
 
@@ -4974,7 +4979,7 @@ export default function PortalPage() {
       )}
 
       {/* Floating Action Button — Report Issue */}
-      <div style={{ position: 'fixed', bottom: 76, right: 20, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div style={{ position: 'fixed', bottom: 76, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
         <div style={{
           background: B.navy, color: '#fff', padding: '8px 14px', borderRadius: 10,
           fontSize: 12, fontWeight: 700, fontFamily: FONTS.heading,

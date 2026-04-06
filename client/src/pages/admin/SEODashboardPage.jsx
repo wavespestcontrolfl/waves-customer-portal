@@ -85,7 +85,7 @@ function CompBar({ name, count, maxCount }) {
   const pct = (count / maxCount) * 100;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
-      <div style={{ width: 110, fontSize: 13, color: WAVES_COLORS.textSecondary, fontWeight: 500, textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</div>
+      <div style={{ width: 90, fontSize: 12, color: WAVES_COLORS.textSecondary, fontWeight: 500, textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</div>
       <div style={{ flex: 1, height: 18, background: "rgba(255,255,255,0.04)", borderRadius: 4, overflow: "hidden" }}>
         <div style={{ width: `${pct}%`, height: "100%", background: WAVES_COLORS.red, borderRadius: 4, minWidth: 8 }} />
       </div>
@@ -195,6 +195,7 @@ export default function WavesSEODashboard() {
   const [cityFilter, setCityFilter] = useState("All");
   const [catFilter, setCatFilter] = useState("All");
   const [loading, setLoading] = useState(true);
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
   // Real data from API
   const [aiData, setAiData] = useState(null);
@@ -350,7 +351,7 @@ export default function WavesSEODashboard() {
       </div>
 
       {/* Tab Switcher */}
-      <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: 4, width: "fit-content" }}>
+      <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: 4, width: isMobile ? "100%" : "fit-content" }}>
         {[
           { id: "ai", label: "AI Visibility" },
           { id: "organic", label: "Organic Rankings" },
@@ -370,7 +371,7 @@ export default function WavesSEODashboard() {
       {activeTab === "ai" && aiOverview && (
         <div>
           {/* KPI Row */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(5, 1fr)", gap: 12, marginBottom: 20 }}>
             <MetricCard value={`${aiOverview.mentionRate}%`} label="Mention Rate" sublabel="across tracked keywords" color={WAVES_COLORS.accent} />
             <MetricCard value={`${aiOverview.recommendRate}%`} label="GEO Score" sublabel="generative engine optimization" color={WAVES_COLORS.green} />
             <MetricCard value={`${aiOverview.firstPosition}%`} label="Citation Rate" sublabel="of AIO results" color={WAVES_COLORS.purple} />
@@ -379,7 +380,7 @@ export default function WavesSEODashboard() {
           </div>
 
           {/* Provider Visibility + Competitor Mentions */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginBottom: 20 }}>
             <Card>
               <SectionTitle>Provider Visibility</SectionTitle>
               {aiOverview.providerVisibility.map(p => (
@@ -476,7 +477,7 @@ export default function WavesSEODashboard() {
       {activeTab === "organic" && rankSummary && (
         <div>
           {/* KPI Row */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(5, 1fr)", gap: 12, marginBottom: 20 }}>
             <MetricCard value={rankSummary.avgPosition} label="Avg Position" color={WAVES_COLORS.accent} />
             <MetricCard value={rankSummary.top3Count} label="Top 3" sublabel="keywords in top 3" color={WAVES_COLORS.gold} />
             <MetricCard value={rankSummary.top10Count} label="Top 10" sublabel="page 1 rankings" color={WAVES_COLORS.green} />
@@ -486,7 +487,7 @@ export default function WavesSEODashboard() {
 
           {/* Movement Summary + Filters */}
           <Card style={{ marginBottom: 20 }}>
-            <div style={{ display: "flex", gap: 32, alignItems: "center" }}>
+            <div style={{ display: "flex", gap: isMobile ? 16 : 32, alignItems: "center", flexWrap: "wrap" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ width: 12, height: 12, borderRadius: "50%", background: WAVES_COLORS.green, display: "inline-block" }} />
                 <span style={{ fontSize: 14, fontWeight: 700, color: WAVES_COLORS.green }}>{rankSummary.improvingCount}</span>
@@ -502,8 +503,8 @@ export default function WavesSEODashboard() {
                 <span style={{ fontSize: 14, fontWeight: 700, color: WAVES_COLORS.textMuted }}>{rankSummary.stableCount}</span>
                 <span style={{ fontSize: 13, color: WAVES_COLORS.textSecondary }}>Stable</span>
               </div>
-              <div style={{ flex: 1 }} />
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {!isMobile && <div style={{ flex: 1 }} />}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", width: isMobile ? "100%" : "auto" }}>
                 {cities.map(c => <FilterPill key={c} label={c} active={cityFilter === c} onClick={() => setCityFilter(c)} />)}
               </div>
             </div>
@@ -563,7 +564,7 @@ export default function WavesSEODashboard() {
           </Card>
 
           {/* Top Movers */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginTop: 20 }}>
             <Card>
               <SectionTitle>Biggest Gains (7 days)</SectionTitle>
               {[...filteredKeywords]

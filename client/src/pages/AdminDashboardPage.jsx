@@ -19,9 +19,9 @@ const TIER_COLORS = { Bronze: '#CD7F32', Silver: '#C0C0C0', Gold: '#FDD835', Pla
 
 function StatCard({ label, value, color, sub }) {
   return (
-    <div style={{ background: D.card, borderRadius: 14, padding: '18px 20px', border: `1px solid ${D.border}`, flex: '1 1 200px' }}>
+    <div style={{ background: D.card, borderRadius: 14, padding: '18px 20px', border: `1px solid ${D.border}`, flex: '1 1 140px', minWidth: 0 }}>
       <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, color: D.muted, fontFamily: FONTS.ui }}>{label}</div>
-      <div style={{ fontSize: 28, fontWeight: 800, color: color || D.white, fontFamily: FONTS.ui, marginTop: 4 }}>{value}</div>
+      <div style={{ fontSize: 28, fontWeight: 800, color: color || D.white, fontFamily: FONTS.ui, marginTop: 4, wordBreak: 'break-word' }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{sub}</div>}
     </div>
   );
@@ -98,16 +98,18 @@ function CustomersView() {
     loadDetail(selected);
   };
 
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+
   return (
-    <div style={{ display: 'flex', gap: 16, height: 'calc(100vh - 80px)' }}>
+    <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 16, height: isMobile ? 'auto' : 'calc(100vh - 80px)' }}>
       {/* List */}
-      <div style={{ flex: '1 1 400px', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: '1 1 400px', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <div style={{ fontSize: 24, fontWeight: 800, color: D.white, fontFamily: FONTS.heading, marginBottom: 14 }}>Customers</div>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name, phone, address..."
-            style={{ flex: 1, padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.bg, color: D.white, fontSize: 14, fontFamily: FONTS.body, outline: 'none' }} />
+            style={{ flex: '1 1 200px', padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.bg, color: D.white, fontSize: 14, fontFamily: FONTS.body, outline: 'none', boxSizing: 'border-box', minWidth: 0 }} />
           <select value={tierFilter} onChange={e => setTierFilter(e.target.value)}
-            style={{ padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.bg, color: D.white, fontSize: 13, fontFamily: FONTS.body }}>
+            style={{ padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.bg, color: D.white, fontSize: 13, fontFamily: FONTS.body, flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
             <option value="">All Tiers</option>
             <option value="Bronze">Bronze</option><option value="Silver">Silver</option>
             <option value="Gold">Gold</option><option value="Platinum">Platinum</option>
@@ -137,7 +139,7 @@ function CustomersView() {
 
       {/* Detail panel */}
       {detail && (
-        <div style={{ flex: '1 1 400px', overflowY: 'auto', background: D.card, borderRadius: 14, border: `1px solid ${D.border}`, padding: 20 }}>
+        <div style={{ flex: '1 1 400px', overflowY: 'auto', background: D.card, borderRadius: 14, border: `1px solid ${D.border}`, padding: isMobile ? 16 : 20, minWidth: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
               <div style={{ fontSize: 20, fontWeight: 800, color: D.white, fontFamily: FONTS.heading }}>{detail.customer.firstName} {detail.customer.lastName}</div>
@@ -242,10 +244,47 @@ export default function AdminDashboardPage() {
     { id: 'settings', icon: '⚙️', label: 'Settings' },
   ];
 
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const dashIsMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: D.bg, fontFamily: FONTS.body }}>
+      {/* Mobile top bar */}
+      {dashIsMobile && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, height: 52, zIndex: 60,
+          background: D.bg, borderBottom: `1px solid ${D.border}`, padding: '0 16px',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{
+            background: 'none', border: 'none', color: D.white, fontSize: 24, cursor: 'pointer', padding: 4,
+          }}>☰</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: D.white }}>WAVES</span>
+          </div>
+          <div style={{ width: 32 }} />
+        </div>
+      )}
+
+      {/* Sidebar overlay */}
+      {dashIsMobile && sidebarOpen && (
+        <div onClick={() => setSidebarOpen(false)} style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 90,
+        }} />
+      )}
+
       {/* Sidebar */}
-      <div style={{ width: 220, background: D.card, borderRight: `1px solid ${D.border}`, padding: '16px 12px', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+      <div style={{
+        width: 220, background: D.card, borderRight: `1px solid ${D.border}`, padding: '16px 12px',
+        display: 'flex', flexDirection: 'column', flexShrink: 0,
+        ...(dashIsMobile ? {
+          position: 'fixed', left: 0, top: 0, bottom: 0, zIndex: 100,
+          transform: sidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
+          transition: 'transform 0.2s ease',
+          boxShadow: sidebarOpen ? '8px 0 32px rgba(0,0,0,0.3)' : 'none',
+        } : {}),
+      }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 8px 20px' }}>
           <img src="/waves-logo.png" alt="" style={{ height: 28 }} />
           <div>
@@ -255,7 +294,7 @@ export default function AdminDashboardPage() {
         </div>
 
         {NAV.map(n => (
-          <div key={n.id} onClick={() => setActiveView(n.id)} style={{
+          <div key={n.id} onClick={() => { setActiveView(n.id); if (dashIsMobile) setSidebarOpen(false); }} style={{
             display: 'flex', alignItems: 'center', gap: 10,
             padding: '10px 12px', borderRadius: 8, cursor: 'pointer', marginBottom: 2,
             background: activeView === n.id ? `${D.teal}15` : 'transparent',
@@ -274,7 +313,7 @@ export default function AdminDashboardPage() {
       </div>
 
       {/* Main content */}
-      <div style={{ flex: 1, padding: '20px 24px', overflowY: 'auto' }}>
+      <div style={{ flex: 1, padding: dashIsMobile ? '68px 16px 24px' : '20px 24px', overflowY: 'auto', marginLeft: dashIsMobile ? 0 : undefined, minWidth: 0 }}>
         {activeView === 'dashboard' && <DashboardView />}
         {activeView === 'customers' && <CustomersView />}
         {activeView === 'estimates' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading estimator...</div>}><EstimatePage /></Suspense>}

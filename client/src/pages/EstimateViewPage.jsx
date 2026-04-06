@@ -182,7 +182,7 @@ function PerksTable({ tier }) {
   return (
     <div style={{ borderRadius: 14, overflow: 'hidden', border: `2px solid ${B.wavesBlue}33` }}>
       <div style={{
-        display: 'grid', gridTemplateColumns: '1fr 90px 90px',
+        display: 'grid', gridTemplateColumns: '1fr 70px 70px',
         background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`, color: '#fff',
         padding: '12px 14px', alignItems: 'center',
       }}>
@@ -195,7 +195,7 @@ function PerksTable({ tier }) {
       </div>
       {PERKS.map((perk, i) => (
         <div key={i} style={{
-          display: 'grid', gridTemplateColumns: '1fr 90px 90px',
+          display: 'grid', gridTemplateColumns: '1fr 70px 70px',
           padding: '10px 14px', alignItems: 'center',
           background: i % 2 === 0 ? '#fff' : B.blueSurface,
           borderTop: `1px solid ${SAND_DARK}`,
