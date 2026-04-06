@@ -9,122 +9,209 @@ const logger = require('../services/logger');
 // =========================================================================
 // PDF GENERATION — builds a branded service report
 // =========================================================================
+// Waves brand colors
+const NAVY = '#1B2A4A';
+const TEAL = '#0ea5e9';
+const GREEN = '#10b981';
+const RED = '#A83B34';
+const LIGHT_BG = '#F0F7FC';
+
+function sectionHeader(doc, title, x, y) {
+  const w = 512;
+  doc.save();
+  doc.roundedRect(x, y, w, 22, 3).fill(NAVY);
+  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(title.toUpperCase(), x + 10, y + 6, { width: w - 20 });
+  doc.restore();
+  return y + 28;
+}
+
+function infoRow(doc, label, value, x, y, labelW, valW) {
+  doc.fontSize(9).font('Helvetica-Bold').fillColor('#555').text(label, x, y, { width: labelW });
+  doc.font('Helvetica').fillColor('#222').text(value || '—', x + labelW, y, { width: valW });
+  return y + 14;
+}
+
 function generateServiceReportPDF(customer, service, products, res) {
-  const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+  const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
+
+  const customerName = `${customer.first_name} ${customer.last_name}`;
+  const dateSlug = formatDate(service.service_date).replace(/[^a-zA-Z0-9]/g, '');
+  const nameSlug = customerName.replace(/\s+/g, '_');
+  const fileName = `Waves_${nameSlug}_${dateSlug}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="Waves_Service_Report_${service.service_date}.pdf"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
   doc.pipe(res);
 
-  // Header
-  doc.fontSize(20).font('Helvetica-Bold').text('WAVES PEST CONTROL', { align: 'center' });
-  doc.fontSize(9).font('Helvetica').text('Licensed & Insured · FL Pest Control License #JB000000', { align: 'center' });
-  doc.text('(941) 318-7612 · wavespestcontrol.com', { align: 'center' });
-  doc.moveDown(0.5);
-  doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor('#1B2A4A').lineWidth(2).stroke();
-  doc.moveDown(1);
+  const L = 40, R = 572, W = R - L;
 
-  // Report title
-  doc.fontSize(14).font('Helvetica-Bold').fillColor('#1B2A4A').text('SERVICE REPORT');
-  doc.moveDown(0.5);
+  // ══════════════════════════════════════════════════════
+  // HEADER BAR — navy background with white text
+  // ══════════════════════════════════════════════════════
+  doc.save();
+  doc.rect(0, 0, 612, 80).fill(NAVY);
+  doc.fontSize(22).font('Helvetica-Bold').fillColor('#fff').text('WAVES', L + 10, 18);
+  doc.fontSize(9).font('Helvetica').fillColor(TEAL).text('LAWN & PEST CONTROL', L + 10, 42);
+  doc.fontSize(8).fillColor('#ccc').text('Licensed & Insured | FL License #JF336375', L + 10, 56);
 
-  // Customer & service info
-  const infoY = doc.y;
-  doc.fontSize(10).font('Helvetica-Bold').fillColor('#333').text('Customer:');
-  doc.font('Helvetica').text(`${customer.first_name} ${customer.last_name}`);
-  doc.text(`${customer.address_line1}`);
-  doc.text(`${customer.city}, ${customer.state} ${customer.zip}`);
-  doc.moveDown(0.5);
+  // Right side — contact info
+  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', R - 150, 22, { width: 150, align: 'right' });
+  doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('wavespestcontrol.com', R - 150, 36, { width: 150, align: 'right' });
+  doc.text('Lakewood Ranch, FL', R - 150, 48, { width: 150, align: 'right' });
+  doc.restore();
 
-  doc.font('Helvetica-Bold').text('Service Details:');
-  doc.font('Helvetica').text(`Date: ${formatDate(service.service_date)}`);
-  doc.text(`Type: ${service.service_type}`);
-  doc.text(`Technician: ${service.technician_name || 'Waves Team'}`);
-  doc.text(`Status: ${service.status}`);
-  doc.moveDown(1);
+  // ══════════════════════════════════════════════════════
+  // TITLE BAR
+  // ══════════════════════════════════════════════════════
+  doc.save();
+  doc.rect(L, 90, W, 28).fill(TEAL);
+  doc.fontSize(13).font('Helvetica-Bold').fillColor('#fff').text('SERVICE REPORT', L + 12, 96);
+  doc.fontSize(9).font('Helvetica').fillColor('#ffffffcc').text(formatDate(service.service_date), R - 200, 98, { width: 188, align: 'right' });
+  doc.restore();
 
-  // Technician Notes
-  if (service.technician_notes) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1B2A4A').text('TECHNICIAN NOTES');
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor('#333').text(service.technician_notes, {
-      width: 512, lineGap: 3,
-    });
-    doc.moveDown(1);
+  // ══════════════════════════════════════════════════════
+  // CUSTOMER & SERVICE INFO — two-column grid
+  // ══════════════════════════════════════════════════════
+  let y = 130;
+  const colMid = L + W / 2 + 10;
+
+  // Left column — Customer
+  y = sectionHeader(doc, 'Customer Information', L, y);
+  y = infoRow(doc, 'Name:', customerName, L + 8, y, 70, 180);
+  y = infoRow(doc, 'Address:', customer.address_line1 || '', L + 8, y, 70, 180);
+  y = infoRow(doc, 'City:', `${customer.city || ''}, ${customer.state || 'FL'} ${customer.zip || ''}`, L + 8, y, 70, 180);
+  y = infoRow(doc, 'Phone:', customer.phone || '', L + 8, y, 70, 180);
+  if (customer.email) y = infoRow(doc, 'Email:', customer.email, L + 8, y, 70, 180);
+
+  // Right column — Service (placed at same starting Y as customer)
+  let y2 = 130;
+  y2 = sectionHeader(doc, 'Service Information', colMid, y2);
+  y2 = infoRow(doc, 'Date:', formatDate(service.service_date), colMid + 8, y2, 80, 170);
+  y2 = infoRow(doc, 'Service:', service.service_type, colMid + 8, y2, 80, 170);
+  y2 = infoRow(doc, 'Technician:', service.technician_name || 'Waves Team', colMid + 8, y2, 80, 170);
+  y2 = infoRow(doc, 'Status:', service.status === 'completed' ? 'Completed' : service.status, colMid + 8, y2, 80, 170);
+
+  // WaveGuard tier if available
+  if (customer.waveguard_tier) {
+    y2 = infoRow(doc, 'Plan:', `WaveGuard ${customer.waveguard_tier}`, colMid + 8, y2, 80, 170);
   }
 
-  // Measurements
+  y = Math.max(y, y2) + 12;
+
+  // ══════════════════════════════════════════════════════
+  // MEASUREMENTS (if lawn)
+  // ══════════════════════════════════════════════════════
   const measurements = [];
-  if (service.soil_temp) measurements.push(`Soil Temperature: ${service.soil_temp}°F`);
-  if (service.thatch_measurement) measurements.push(`Thatch Measurement: ${service.thatch_measurement}"`);
-  if (service.soil_ph) measurements.push(`Soil pH: ${service.soil_ph}`);
-  if (service.soil_moisture) measurements.push(`Soil Moisture: ${service.soil_moisture}`);
+  if (service.soil_temp) measurements.push({ label: 'Soil Temp', value: `${service.soil_temp}°F` });
+  if (service.thatch_measurement) measurements.push({ label: 'Thatch', value: `${service.thatch_measurement}"` });
+  if (service.soil_ph) measurements.push({ label: 'Soil pH', value: `${service.soil_ph}` });
+  if (service.soil_moisture) measurements.push({ label: 'Moisture', value: `${service.soil_moisture}` });
 
   if (measurements.length) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1B2A4A').text('MEASUREMENTS');
-    doc.moveDown(0.3);
-    measurements.forEach(m => {
-      doc.fontSize(10).font('Helvetica').fillColor('#333').text(`• ${m}`);
+    y = sectionHeader(doc, 'Lawn Measurements', L, y);
+    doc.save();
+    doc.rect(L, y, W, 20).fill(LIGHT_BG);
+    const mColW = W / measurements.length;
+    measurements.forEach((m, i) => {
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#555').text(m.label, L + i * mColW + 10, y + 2, { width: mColW - 20 });
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(NAVY).text(m.value, L + i * mColW + 10, y + 12, { width: mColW - 20 });
     });
-    doc.moveDown(1);
+    doc.restore();
+    y += 30;
   }
 
-  // Products Applied
+  // ══════════════════════════════════════════════════════
+  // PRODUCTS APPLIED — styled table
+  // ══════════════════════════════════════════════════════
   if (products.length) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1B2A4A').text('PRODUCTS APPLIED');
-    doc.moveDown(0.3);
+    y = sectionHeader(doc, 'Products Applied', L, y);
 
     // Table header
-    const tableTop = doc.y;
-    const col1 = 50, col2 = 220, col3 = 370, col4 = 470;
+    const cols = [L + 4, L + 160, L + 310, L + 400, L + 470];
+    const colLabels = ['Product', 'Active Ingredient', 'Rate', 'MOA Group', 'Method'];
 
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#666');
-    doc.text('Product', col1, tableTop);
-    doc.text('Active Ingredient', col2, tableTop);
-    doc.text('MOA Group', col3, tableTop);
-    doc.text('Category', col4, tableTop);
+    doc.save();
+    doc.rect(L, y, W, 16).fill('#E8EDF2');
+    doc.fontSize(8).font('Helvetica-Bold').fillColor('#444');
+    colLabels.forEach((lbl, i) => doc.text(lbl, cols[i], y + 4));
+    doc.restore();
+    y += 18;
 
-    doc.moveTo(50, tableTop + 14).lineTo(562, tableTop + 14).strokeColor('#ccc').lineWidth(0.5).stroke();
-
-    let rowY = tableTop + 20;
-    doc.font('Helvetica').fillColor('#333');
-    products.forEach(p => {
-      if (rowY > 700) {
-        doc.addPage();
-        rowY = 50;
-      }
-      doc.fontSize(9).text(p.product_name || '', col1, rowY, { width: 165 });
-      doc.text(p.active_ingredient || '—', col2, rowY, { width: 145 });
-      doc.text(p.moa_group || '—', col3, rowY, { width: 95 });
-      doc.text(p.product_category || '—', col4, rowY, { width: 90 });
-      rowY += 16;
+    products.forEach((p, i) => {
+      if (y > 700) { doc.addPage(); y = 50; }
+      const bg = i % 2 === 0 ? '#fff' : LIGHT_BG;
+      doc.save();
+      doc.rect(L, y, W, 16).fill(bg);
+      doc.fontSize(8).font('Helvetica').fillColor('#333');
+      doc.text(p.product_name || '', cols[0], y + 4, { width: 150 });
+      doc.text(p.active_ingredient || '—', cols[1], y + 4, { width: 145 });
+      doc.text(p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—', cols[2], y + 4, { width: 85 });
+      doc.text(p.moa_group || '—', cols[3], y + 4, { width: 65 });
+      doc.text(p.product_category || '—', cols[4], y + 4, { width: 90 });
+      doc.restore();
+      y += 16;
     });
-    doc.y = rowY;
-    doc.moveDown(1);
+    y += 10;
   }
 
-  // Field flags
+  // ══════════════════════════════════════════════════════
+  // TECHNICIAN COMMENTS — the AI tactical debrief
+  // ══════════════════════════════════════════════════════
+  if (service.technician_notes) {
+    if (y > 620) { doc.addPage(); y = 50; }
+    y = sectionHeader(doc, 'Technician Comments', L, y);
+    doc.fontSize(10).font('Helvetica').fillColor('#333').text(service.technician_notes, L + 8, y, {
+      width: W - 16, lineGap: 4,
+    });
+    y = doc.y + 14;
+  }
+
+  // ══════════════════════════════════════════════════════
+  // FIELD OBSERVATIONS
+  // ══════════════════════════════════════════════════════
   if (service.field_flags) {
     try {
       const flags = typeof service.field_flags === 'string' ? JSON.parse(service.field_flags) : service.field_flags;
       if (Object.keys(flags).length) {
-        doc.fontSize(11).font('Helvetica-Bold').fillColor('#1B2A4A').text('FIELD OBSERVATIONS');
-        doc.moveDown(0.3);
+        if (y > 660) { doc.addPage(); y = 50; }
+        y = sectionHeader(doc, 'Field Observations', L, y);
         Object.entries(flags).forEach(([key, val]) => {
-          doc.fontSize(10).font('Helvetica').fillColor('#333').text(`• ${key}: ${val}`);
+          doc.fontSize(9).font('Helvetica').fillColor('#333').text(`${key}: ${val}`, L + 8, y);
+          y += 14;
         });
-        doc.moveDown(1);
+        y += 6;
       }
-    } catch (e) { /* ignore parse errors */ }
+    } catch { /* ignore */ }
   }
 
-  // Footer
-  doc.moveDown(2);
-  doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor('#ccc').lineWidth(0.5).stroke();
-  doc.moveDown(0.5);
-  doc.fontSize(8).font('Helvetica').fillColor('#999');
-  doc.text('This report is provided for your records. For questions contact Waves Pest Control at (941) 318-7612.', { align: 'center' });
-  doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`, { align: 'center' });
+  // ══════════════════════════════════════════════════════
+  // SAFETY NOTICE
+  // ══════════════════════════════════════════════════════
+  if (y > 680) { doc.addPage(); y = 50; }
+  doc.save();
+  doc.rect(L, y, W, 28).fill('#FFF8E1');
+  doc.fontSize(8).font('Helvetica-Bold').fillColor('#B8860B').text(
+    'SAFETY: Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry.',
+    L + 10, y + 6, { width: W - 20 }
+  );
+  doc.fontSize(7).font('Helvetica').fillColor('#B8860B').text(
+    'National Pest Emergency Poison Control: (800) 222-1222',
+    L + 10, y + 18, { width: W - 20 }
+  );
+  doc.restore();
+  y += 36;
+
+  // ══════════════════════════════════════════════════════
+  // FOOTER
+  // ══════════════════════════════════════════════════════
+  doc.save();
+  doc.rect(0, 730, 612, 62).fill(NAVY);
+  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('Waves Lawn & Pest Control', L + 10, 740);
+  doc.fontSize(7).font('Helvetica').fillColor('#aaa');
+  doc.text('13649 Luxe Ave #110, Bradenton, FL 34211 | (941) 318-7612 | wavespestcontrol.com', L + 10, 754);
+  doc.text('Questions or requests? Reply to your service text or call us anytime.', L + 10, 766);
+  doc.fontSize(7).fillColor('#666').text('Thank you for choosing Waves!', R - 180, 754, { width: 168, align: 'right' });
+  doc.restore();
 
   doc.end();
 }
