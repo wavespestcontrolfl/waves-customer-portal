@@ -841,8 +841,8 @@ export default function CustomersPage() {
           {/* Table header */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: '2.5fr 1.2fr 1fr 0.8fr 0.7fr 0.7fr 0.8fr 0.5fr',
-            gap: 8, padding: '10px 16px', marginBottom: 4,
+            gridTemplateColumns: '2fr 1.1fr 0.8fr 0.7fr 0.6fr 0.6fr 0.7fr 0.9fr 0.7fr 0.4fr',
+            gap: 6, padding: '10px 16px', marginBottom: 4,
           }}>
             <SortHeader label="Name / Email" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
             <SortHeader label="Phone" sortKey="phone" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
@@ -850,7 +850,9 @@ export default function CustomersPage() {
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Stage</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Tier</div>
             <SortHeader label="$/Mo" sortKey="monthlyRate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-            <SortHeader label="Last Contact" sortKey="lastContactDate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <SortHeader label="Revenue" sortKey="revenue" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Lead Source</div>
+            <SortHeader label="Contact" sortKey="lastContactDate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
             <div />
           </div>
 
@@ -871,8 +873,8 @@ export default function CustomersPage() {
                   onClick={() => expandCustomer(c.id)}
                   style={{
                     display: 'grid',
-                    gridTemplateColumns: '2.5fr 1.2fr 1fr 0.8fr 0.7fr 0.7fr 0.8fr 0.5fr',
-                    gap: 8, padding: '12px 16px', alignItems: 'center',
+                    gridTemplateColumns: '2fr 1.1fr 0.8fr 0.7fr 0.6fr 0.6fr 0.7fr 0.9fr 0.7fr 0.4fr',
+                    gap: 6, padding: '12px 16px', alignItems: 'center',
                     background: expandedId === c.id ? `${D.teal}08` : D.card,
                     border: `1px solid ${expandedId === c.id ? D.teal : D.border}`,
                     borderRadius: expandedId === c.id ? '10px 10px 0 0' : 10,
@@ -907,11 +909,19 @@ export default function CustomersPage() {
                   {/* Tier */}
                   <div><TierBadge tier={detectTier(c)} /></div>
                   {/* Monthly rate */}
-                  <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: c.monthlyRate ? D.green : D.muted }}>
+                  <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: c.monthlyRate ? D.green : D.muted }}>
                     {c.monthlyRate ? `$${c.monthlyRate}` : '--'}
                   </div>
+                  {/* Revenue */}
+                  <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: c.lifetimeRevenue ? D.green : D.muted }}>
+                    {c.lifetimeRevenue ? `$${c.lifetimeRevenue.toFixed(0)}` : '--'}
+                  </div>
+                  {/* Lead Source */}
+                  <div style={{ fontSize: 11, color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {c.leadSource || '--'}
+                  </div>
                   {/* Last contact */}
-                  <div style={{ fontSize: 12, color: D.muted }}>{timeAgo(c.lastContactDate)}</div>
+                  <div style={{ fontSize: 11, color: D.muted }}>{timeAgo(c.lastContactDate)}</div>
                   {/* Edit */}
                   <div>
                     <button onClick={e => { e.stopPropagation(); startEdit(c); }} style={{
@@ -941,6 +951,11 @@ export default function CustomersPage() {
                             ['Company', expandedData.customer.companyName],
                             ['Member Since', expandedData.customer.memberSince],
                             ['Lead Source', expandedData.customer.leadSource],
+                            ['Lead Detail', expandedData.customer.leadSourceDetail],
+                            ['Landing URL', expandedData.customer.landingPageUrl],
+                            ['Total Revenue', expandedData.customer.lifetimeRevenue > 0 ? `$${expandedData.customer.lifetimeRevenue.toFixed(2)}` : null],
+                            ['Annual Value (ARR)', expandedData.customer.annualValue > 0 ? `$${expandedData.customer.annualValue.toFixed(2)}/yr` : null],
+                            ['Monthly Rate', expandedData.customer.monthlyRate > 0 ? `$${expandedData.customer.monthlyRate.toFixed(2)}/mo` : null],
                           ].map(([l, v]) => v && (
                             <div key={l} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 12 }}>
                               <span style={{ color: D.muted }}>{l}</span>
