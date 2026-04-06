@@ -621,6 +621,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // WEEKLY SUNDAY 6AM — Agronomic Wiki refresh (stale pages + seasonal)
+  // =========================================================================
+  cron.schedule('0 6 * * 0', async () => {
+    logger.info('Running: agronomic wiki weekly refresh');
+    try {
+      const wiki = require('./agronomic-wiki');
+      const result = await wiki.weeklyRefresh();
+      logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+    } catch (err) {
+      logger.error(`Agronomic wiki refresh failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 

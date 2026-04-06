@@ -203,6 +203,7 @@ app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
+app.use('/api/admin/wiki', require('./routes/admin-wiki'));
 
 // Health check
 app.get('/api/health', (req, res) => {

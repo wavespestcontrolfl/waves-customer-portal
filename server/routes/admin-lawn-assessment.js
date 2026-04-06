@@ -224,6 +224,14 @@ router.post('/confirm', async (req, res, next) => {
       .update(updateData)
       .returning('*');
 
+    // Agronomic Wiki: link treatment outcome after assessment confirmed
+    try {
+      const wiki = require('../services/agronomic-wiki');
+      await wiki.linkTreatmentOutcome(updated.service_record_id || updated.id);
+    } catch (wikiErr) {
+      logger.error(`[lawn-assessment] Wiki linkTreatmentOutcome failed (non-blocking): ${wikiErr.message}`);
+    }
+
     res.json({ success: true, assessment: updated });
   } catch (err) {
     next(err);
