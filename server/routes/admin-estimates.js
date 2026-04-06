@@ -13,7 +13,9 @@ router.post('/', async (req, res, next) => {
   try {
     const { customerId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl } = req.body;
 
-    const token = crypto.randomBytes(16).toString('hex');
+    const shortId = crypto.randomBytes(4).toString('hex');
+    const nameSlug = (customerName || 'customer').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const token = `${nameSlug}-${shortId}`;
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 

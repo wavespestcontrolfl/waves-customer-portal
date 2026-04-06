@@ -138,12 +138,7 @@ const FAQ_CATEGORIES = [
   },
 ];
 
-const TEAM = [
-  { name: 'Adam Benetti', role: 'Founder' },
-  { name: 'Virginia Gelser', role: 'Office Manager' },
-  { name: 'Jose Alvarado', role: 'Technician' },
-  { name: 'Jacob Heaton', role: 'Technician' },
-];
+// Team section removed per owner request
 
 const ALL_SERVICES = [
   { key: 'lawn', label: 'Lawn Care', emoji: '🌿' },
@@ -471,6 +466,20 @@ export default function EstimateViewPage() {
           </div>
         </div>
 
+        {/* Accept CTA — below Monthly Total */}
+        {e.status !== 'accepted' && (
+          <div style={{ marginTop: 12 }}>
+            <button onClick={handleAccept} disabled={accepting} style={{
+              ...BUTTON_BASE, width: '100%', padding: 18, fontSize: 17,
+              background: B.red, color: '#fff', opacity: accepting ? 0.7 : 1,
+              boxShadow: `0 4px 15px ${B.red}40`,
+              animation: 'wavesPulse 2s ease-in-out infinite',
+            }}>
+              {accepting ? 'Processing...' : 'Accept Estimate'}
+            </button>
+          </div>
+        )}
+
         {/* One-time services */}
         {otItems.length > 0 && (
           <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
@@ -538,7 +547,26 @@ export default function EstimateViewPage() {
         {/* 4. WHAT'S INCLUDED — expandable dropdowns                      */}
         {/* ============================================================= */}
         <div style={{ marginTop: 32 }}>
-          <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>What's Included</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6 }}>What's Included</div>
+          <div style={{ background: '#fff', borderRadius: 14, padding: '14px 16px', marginBottom: 14, border: `1px solid ${SAND_DARK}` }}>
+            {services.map((s, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < services.length - 1 ? `1px solid ${SAND_DARK}` : 'none' }}>
+                <span style={{ fontSize: 18 }}>{s.name.toLowerCase().includes('lawn') ? '🌿' : s.name.toLowerCase().includes('pest') ? '🐛' : s.name.toLowerCase().includes('mosquito') ? '🦟' : s.name.toLowerCase().includes('tree') || s.name.toLowerCase().includes('shrub') ? '🌳' : s.name.toLowerCase().includes('termite') ? '🏠' : s.name.toLowerCase().includes('rodent') ? '🐀' : '✅'}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{s.name}</div>
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>{fmt(s.mo)}/mo</div>
+              </div>
+            ))}
+            {otItems.length > 0 && otItems.map((item, i) => (
+              <div key={`ot-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderTop: `1px solid ${SAND_DARK}` }}>
+                <span style={{ fontSize: 18 }}>🔧</span>
+                <div style={{ flex: 1 }}><div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{item.name}</div><div style={{ fontSize: 11, color: B.grayMid }}>One-time</div></div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${Math.round(item.price)}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.grayMid, marginBottom: 10, fontFamily: FONTS.heading }}>Service Details</div>
 
           {hasLawn && (
             <ServiceDropdown title="🌿 Lawn Care Program">
@@ -660,7 +688,7 @@ export default function EstimateViewPage() {
               Don't just take our word for it 🌟
             </div>
             <div style={{ fontSize: 14, color: B.yellow, marginTop: 4 }}>
-              4.9 ★★★★★ <span style={{ color: B.grayMid, fontSize: 12 }}>on Google</span>
+              5.0 ★★★★★ <span style={{ color: B.grayMid, fontSize: 12 }}>on Google</span>
             </div>
           </div>
           <div
@@ -694,20 +722,31 @@ export default function EstimateViewPage() {
           </div>
         </div>
 
-        {/* ============================================================= */}
-        {/* 8. MEET YOUR WAVES TEAM                                        */}
-        {/* ============================================================= */}
-        <div style={{ marginTop: 32 }}>
-          <div style={{ textAlign: 'center', marginBottom: 14 }}>
-            <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
-              Local Expertise. Real People.
-            </div>
-            <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.65, marginTop: 6, fontFamily: FONTS.body, maxWidth: 420, margin: '6px auto 0' }}>
-              Waves is a family-owned lawn and pest company serving Southwest Florida. We combine modern technology with old-school accountability — every customer gets a dedicated tech, transparent pricing, and real results.
-            </div>
+        {/* Accept CTA — after reviews */}
+        {e.status !== 'accepted' && (
+          <div style={{ marginTop: 24 }}>
+            <button onClick={handleAccept} disabled={accepting} style={{
+              ...BUTTON_BASE, width: '100%', padding: 18, fontSize: 17,
+              background: B.red, color: '#fff', opacity: accepting ? 0.7 : 1,
+              boxShadow: `0 4px 15px ${B.red}40`,
+              animation: 'wavesPulse 2s ease-in-out infinite',
+            }}>
+              {accepting ? 'Processing...' : 'Accept Estimate'}
+            </button>
           </div>
+        )}
 
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+        {/* ============================================================= */}
+        {/* 8. LOCAL EXPERTISE                                             */}
+        {/* ============================================================= */}
+        <div style={{ marginTop: 32, textAlign: 'center' }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>
+            Local Expertise. Real People.
+          </div>
+          <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.65, marginTop: 6, fontFamily: FONTS.body, maxWidth: 420, margin: '6px auto 0' }}>
+            Waves is a family-owned lawn and pest company serving Southwest Florida. We combine modern technology with old-school accountability — every customer gets a dedicated tech, transparent pricing, and real results.
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', marginTop: 16 }}>
             {['✅ 100% Guaranteed', '📋 No Contracts', '⭐ 5-Star Rated'].map((badge, i) => (
               <div key={i} style={{
                 padding: '8px 14px', borderRadius: 20, background: '#fff',
@@ -718,28 +757,21 @@ export default function EstimateViewPage() {
               </div>
             ))}
           </div>
-
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 16, flexWrap: 'wrap' }}>
-            {TEAM.map((t, i) => {
-              const initials = t.name.split(' ').map(n => n[0]).join('');
-              return (
-                <div key={i} style={{ textAlign: 'center', minWidth: 70 }}>
-                  <div style={{
-                    width: 52, height: 52, borderRadius: '50%',
-                    background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDeeper})`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    color: '#fff', fontSize: 18, fontWeight: 800, fontFamily: FONTS.ui,
-                    margin: '0 auto 6px',
-                  }}>
-                    {initials}
-                  </div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{t.name}</div>
-                  <div style={{ fontSize: 11, color: B.grayMid }}>{t.role}</div>
-                </div>
-              );
-            })}
-          </div>
         </div>
+
+        {/* Accept CTA — before Local Expertise */}
+        {e.status !== 'accepted' && (
+          <div style={{ marginTop: 24 }}>
+            <button onClick={handleAccept} disabled={accepting} style={{
+              ...BUTTON_BASE, width: '100%', padding: 18, fontSize: 17,
+              background: B.red, color: '#fff', opacity: accepting ? 0.7 : 1,
+              boxShadow: `0 4px 15px ${B.red}40`,
+              animation: 'wavesPulse 2s ease-in-out infinite',
+            }}>
+              {accepting ? 'Processing...' : 'Accept Estimate'}
+            </button>
+          </div>
+        )}
 
         {/* ============================================================= */}
         {/* 9. LOCATIONS GRID                                              */}
