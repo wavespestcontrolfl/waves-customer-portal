@@ -38,13 +38,12 @@ router.post('/:id/send', async (req, res, next) => {
 
     const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
-    const monthlyLine = estimate.monthly_total > 0 ? `Monthly: $${estimate.monthly_total}/mo${estimate.waveguard_tier ? ` (${estimate.waveguard_tier} WaveGuard)` : ''}` : '';
 
     // Send SMS
     if (estimate.customer_phone) {
       try {
         await TwilioService.sendSMS(estimate.customer_phone,
-          `Hi ${firstName}! Your Waves Pest Control estimate is ready: ${viewUrl}\n\n${monthlyLine}${monthlyLine ? '. ' : ''}Questions? Reply to this text or call (941) 318-7612.`
+          `Hi ${firstName}! Your Waves Pest Control estimate is ready 🌊\n\n${viewUrl}\n\nQuestions? Reply to this text or call (941) 318-7612.`
         );
       } catch (e) { logger.error(`Estimate SMS failed: ${e.message}`); }
     }
@@ -127,6 +126,33 @@ router.get('/', async (req, res, next) => {
         description: e.service_interest || e.notes,
       })),
     });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/estimates/:id/follow-up — manually send a follow-up SMS
+router.post('/:id/follow-up', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
+    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
+
+    const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+    const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+
+    const msg = req.body.message || (
+      `Hey ${firstName}! Just following up on your Waves Pest Control estimate 🌊\n\n` +
+      `You can review it anytime here: ${viewUrl}\n\n` +
+      `We'd love to help protect your home. Reply here or call (941) 318-7612 with any questions!`
+    );
+
+    await TwilioService.sendSMS(estimate.customer_phone, msg);
+    await db('estimates').where({ id: estimate.id }).update({
+      follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
+      last_follow_up_at: db.fn.now(),
+    });
+
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 

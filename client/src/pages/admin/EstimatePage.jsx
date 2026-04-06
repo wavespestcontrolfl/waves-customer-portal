@@ -238,6 +238,15 @@ function EstimateToolView() {
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
   const [showSendForm, setShowSendForm] = useState(false);
+  const [sendSearch, setSendSearch] = useState('');
+  const [sendCustomerResults, setSendCustomerResults] = useState([]);
+  const searchSendCustomers = useCallback(async (q) => {
+    if (!q || q.length < 2) { setSendCustomerResults([]); return; }
+    try {
+      const r = await fetch(`/api/admin/customers?search=${encodeURIComponent(q)}&limit=5`, { headers: authHeaders });
+      if (r.ok) { const d = await r.json(); setSendCustomerResults(d.customers || d || []); }
+    } catch { /* ignore */ }
+  }, []);
 
   const token = localStorage.getItem('waves_admin_token');
   const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
@@ -783,6 +792,26 @@ function EstimateToolView() {
           {showSendForm && (
             <div style={{ ...sPanel, borderColor: C.teal }}>
               <div style={sPanelTitle}>Send Estimate to Customer</div>
+              {/* Customer search */}
+              <Field label="Search Existing Customer">
+                <input type="text" value={sendSearch} onChange={e => { setSendSearch(e.target.value); searchSendCustomers(e.target.value); }} placeholder="Search by name, phone, or email..." style={sInput} />
+              </Field>
+              {sendCustomerResults.length > 0 && (
+                <div style={{ marginBottom: 12, maxHeight: 150, overflowY: 'auto' }}>
+                  {sendCustomerResults.map(c => (
+                    <div key={c.id} onClick={() => {
+                      set('customerName', `${c.firstName} ${c.lastName}`);
+                      set('customerPhone', c.phone || '');
+                      set('customerEmail', c.email || '');
+                      setSendCustomerResults([]);
+                      setSendSearch(`${c.firstName} ${c.lastName}`);
+                    }} style={{ padding: '8px 12px', cursor: 'pointer', borderRadius: 6, marginBottom: 2, background: C.input, fontSize: 13, color: C.white }}>
+                      <strong>{c.firstName} {c.lastName}</strong>
+                      <span style={{ color: C.gray, marginLeft: 8 }}>{c.phone || ''} {c.email ? `· ${c.email}` : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
                 <Field label="Customer Name"><input type="text" value={form.customerName || ''} onChange={e => set('customerName', e.target.value)} placeholder="Full name" style={sInput} /></Field>
                 <Field label="Phone"><input type="tel" value={form.customerPhone || ''} onChange={e => set('customerPhone', e.target.value)} placeholder="(941) 555-1234" style={sInput} /></Field>
@@ -1355,13 +1384,24 @@ function EstimatePipelineView() {
                     }}>Send</button>
                   )}
                   {(e.status === 'sent' || e.status === 'viewed') && (
-                    <button onClick={() => {
-                      const link = `${window.location.origin}/estimate/${e.token || e.id}`;
-                      navigator.clipboard?.writeText(link);
-                    }} style={{
-                      padding: '6px 12px', borderRadius: 6, border: `1px solid ${C.border}`, cursor: 'pointer',
-                      background: 'transparent', color: C.gray, fontSize: 11, fontWeight: 600,
-                    }}>Copy Link</button>
+                    <>
+                      <button onClick={async () => {
+                        try {
+                          await adminFetch(`/admin/estimates/${e.id}/follow-up`, { method: 'POST' });
+                          alert('Follow-up SMS sent!');
+                        } catch (err) { alert('Follow-up failed: ' + err.message); }
+                      }} style={{
+                        padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                        background: C.amber + '22', color: C.amber, fontSize: 11, fontWeight: 600,
+                      }}>Follow Up</button>
+                      <button onClick={() => {
+                        const link = `${window.location.origin}/estimate/${e.token || e.id}`;
+                        navigator.clipboard?.writeText(link);
+                      }} style={{
+                        padding: '6px 12px', borderRadius: 6, border: `1px solid ${C.border}`, cursor: 'pointer',
+                        background: 'transparent', color: C.gray, fontSize: 11, fontWeight: 600,
+                      }}>Copy Link</button>
+                    </>
                   )}
                 </div>
               </div>

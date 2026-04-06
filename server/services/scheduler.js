@@ -163,6 +163,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 HOURS — Estimate follow-up SMS (unviewed, viewed-not-accepted, expiring)
+  // =========================================================================
+  cron.schedule('0 */2 * * *', async () => {
+    try {
+      const EstimateFollowUp = require('./estimate-follow-up');
+      const result = await EstimateFollowUp.checkAll();
+      if (result.sent > 0) logger.info(`Estimate follow-ups: ${result.sent} sent`);
+    } catch (err) {
+      logger.error(`Estimate follow-up job failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // NIGHTLY 2AM — Recalculate customer health scores
   // =========================================================================
   cron.schedule('0 2 * * *', async () => {
