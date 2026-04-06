@@ -46,6 +46,7 @@ const TABS = [
   { key: 'content-qa', label: 'Content QA', icon: '✅' },
   { key: 'ai-overview', label: 'AI Overview', icon: '🤖' },
   { key: 'funnel', label: 'Funnel', icon: '📈' },
+  { key: 'analytics', label: 'Analytics', icon: '📉' },
   { key: 'site-audit', label: 'Site Health', icon: '🩺' },
   { key: 'blog', label: 'Blog Content', icon: '📝' },
 ];
@@ -607,6 +608,120 @@ function CitationsTab() {
   );
 }
 
+// ── GA4 Analytics Tab ──
+function AnalyticsTab() {
+  const [overview, setOverview] = useState(null);
+  const [traffic, setTraffic] = useState(null);
+  const [pages, setPages] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState(30);
+
+  useEffect(() => {
+    setLoading(true);
+    Promise.all([
+      adminFetch(`/admin/analytics/overview?days=${days}`),
+      adminFetch(`/admin/analytics/traffic?days=${days}`),
+      adminFetch(`/admin/analytics/pages?days=${days}`),
+    ]).then(([o, t, p]) => {
+      setOverview(o); setTraffic(t); setPages(p); setLoading(false);
+    }).catch(() => setLoading(false));
+  }, [days]);
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading analytics...</div>;
+
+  if (overview?.configured === false) return (
+    <Card style={{ textAlign: 'center', padding: 60 }}>
+      <div style={{ fontSize: 48, marginBottom: 16 }}>📉</div>
+      <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>Google Analytics Not Connected</div>
+      <div style={{ fontSize: 13, color: D.muted }}>Set GOOGLE_SERVICE_ACCOUNT_JSON and GA4_PROPERTY_ID in Railway, then grant the service account Viewer access in GA4.</div>
+    </Card>
+  );
+
+  const data = overview?.data || {};
+  const sources = traffic?.data || [];
+  const topPages = pages?.data || [];
+  const fmt = (v) => v != null ? Number(v).toLocaleString() : '—';
+  const pct = (v) => v != null ? `${(Number(v) * 100).toFixed(1)}%` : '—';
+  const dur = (v) => { if (!v) return '—'; const s = Math.round(Number(v)); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Period selector */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        {[7, 14, 28, 30, 90].map(d => (
+          <button key={d} onClick={() => setDays(d)} style={{
+            padding: '6px 14px', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+            background: days === d ? D.teal : D.card, color: days === d ? D.white : D.muted,
+          }}>{d}d</button>
+        ))}
+      </div>
+
+      {/* KPI Row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+        {[
+          { label: 'Sessions', value: fmt(data.sessions) },
+          { label: 'Users', value: fmt(data.users) },
+          { label: 'New Users', value: fmt(data.newUsers) },
+        ].map(k => <KpiCard key={k.label} label={k.label} value={k.value} />)}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+        {[
+          { label: 'Bounce Rate', value: pct(data.bounceRate), color: data.bounceRate > 0.6 ? D.red : data.bounceRate > 0.4 ? D.amber : D.green },
+          { label: 'Avg Session', value: dur(data.avgSessionDuration) },
+          { label: 'Pages / Session', value: data.pageviewsPerSession ? Number(data.pageviewsPerSession).toFixed(1) : '—' },
+        ].map(k => <KpiCard key={k.label} label={k.label} value={k.value} color={k.color} />)}
+      </div>
+
+      {/* Traffic Sources */}
+      {sources.length > 0 && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Traffic Sources</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {sources.map((s, i) => {
+              const totalSessions = sources.reduce((sum, x) => sum + (parseInt(x.sessions) || 0), 0);
+              const pctOfTotal = totalSessions ? ((parseInt(s.sessions) || 0) / totalSessions * 100).toFixed(1) : 0;
+              const srcColor = { organic: D.green, paid: D.amber, direct: D.teal, referral: D.purple, social: '#ec4899' }[s.source?.toLowerCase()] || D.muted;
+              return (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: D.bg, borderRadius: 8 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: srcColor, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, color: D.white, fontWeight: 500 }}>{s.source || 'unknown'}{s.medium ? ` / ${s.medium}` : ''}</div>
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: D.white, fontFamily: MONO }}>{fmt(s.sessions)}</div>
+                  <div style={{ fontSize: 11, color: D.muted, fontFamily: MONO, width: 50, textAlign: 'right' }}>{pctOfTotal}%</div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+
+      {/* Top Pages */}
+      {topPages.length > 0 && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Top Landing Pages</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', padding: '0 12px 8px', fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              <div style={{ flex: 1 }}>Page</div>
+              <div style={{ width: 70, textAlign: 'right' }}>Sessions</div>
+              <div style={{ width: 70, textAlign: 'right' }}>Bounce</div>
+              <div style={{ width: 70, textAlign: 'right' }}>Avg Time</div>
+            </div>
+            {topPages.slice(0, 20).map((p, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', padding: '8px 12px', background: i % 2 === 0 ? D.bg : 'transparent', borderRadius: 6 }}>
+                <div style={{ flex: 1, fontSize: 12, color: D.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.page || p.pagePath}</div>
+                <div style={{ width: 70, textAlign: 'right', fontSize: 12, fontWeight: 600, color: D.white, fontFamily: MONO }}>{fmt(p.sessions)}</div>
+                <div style={{ width: 70, textAlign: 'right', fontSize: 12, color: p.bounceRate > 0.6 ? D.red : D.muted, fontFamily: MONO }}>{pct(p.bounceRate)}</div>
+                <div style={{ width: 70, textAlign: 'right', fontSize: 12, color: D.muted, fontFamily: MONO }}>{dur(p.avgSessionDuration)}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 function SiteAuditTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -852,6 +967,7 @@ export default function SEOPage() {
       {tab === 'content-qa' && <ContentQATab />}
       {tab === 'ai-overview' && <AIOverviewTab />}
       {tab === 'funnel' && <FunnelTab />}
+      {tab === 'analytics' && <AnalyticsTab />}
       {tab === 'site-audit' && <SiteAuditTab />}
       {tab === 'blog' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading blog...</div>}><BlogPage /></Suspense>}
     </div>

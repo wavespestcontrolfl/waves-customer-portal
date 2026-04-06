@@ -57,16 +57,29 @@ class SearchConsoleService {
     }
 
     try {
-      const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-      if (!keyFile) {
+      const saEnv = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+      if (!saEnv) {
         logger.warn('GOOGLE_SERVICE_ACCOUNT_JSON not set — GSC sync disabled');
         return false;
       }
 
-      this.auth = new google.auth.GoogleAuth({
-        keyFile,
-        scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
-      });
+      // Support both a JSON string (Railway) and a file path (local dev)
+      let authOptions;
+      try {
+        const credentials = JSON.parse(saEnv);
+        authOptions = {
+          credentials,
+          scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
+        };
+      } catch {
+        // Not valid JSON — treat as a file path
+        authOptions = {
+          keyFile: saEnv,
+          scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
+        };
+      }
+
+      this.auth = new google.auth.GoogleAuth(authOptions);
 
       this.webmasters = google.searchconsole({ version: 'v1', auth: this.auth });
       return true;

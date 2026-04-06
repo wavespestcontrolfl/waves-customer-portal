@@ -266,11 +266,7 @@ class SiteAuditor {
       has_local_business_schema: hasLB,
       has_faq_schema: hasFAQ,
       has_service_schema: hasSvc,
-      pagespeed_mobile_score: null, // Would need PageSpeed API call
-      lcp_ms: null,
-      inp_ms: null,
-      cls_numeric: null,
-      cwv_pass: null,
+      ...await this.getPageSpeedScores(url),
       nap_present: napPresent,
       nap_consistent: napConsistent,
       city_mentions: JSON.stringify(cityMentions),
@@ -281,6 +277,33 @@ class SiteAuditor {
       issue_count_warning: warningCount,
       issue_count_info: infoCount,
     };
+  }
+
+  async getPageSpeedScores(url) {
+    const apiKey = process.env.GOOGLE_API_KEY;
+    const defaults = { pagespeed_mobile_score: null, lcp_ms: null, inp_ms: null, cls_numeric: null, cwv_pass: null };
+    if (!apiKey) return defaults;
+    try {
+      const res = await fetch(`https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=mobile&category=performance&key=${apiKey}`);
+      if (!res.ok) return defaults;
+      const data = await res.json();
+      const lhr = data.lighthouseResult;
+      if (!lhr) return defaults;
+      const score = Math.round((lhr.categories?.performance?.score || 0) * 100);
+      const lcp = lhr.audits?.['largest-contentful-paint']?.numericValue || null;
+      const cls = lhr.audits?.['cumulative-layout-shift']?.numericValue || null;
+      const inp = lhr.audits?.['interaction-to-next-paint']?.numericValue || lhr.audits?.['total-blocking-time']?.numericValue || null;
+      return {
+        pagespeed_mobile_score: score,
+        lcp_ms: lcp ? Math.round(lcp) : null,
+        inp_ms: inp ? Math.round(inp) : null,
+        cls_numeric: cls ? parseFloat(cls.toFixed(3)) : null,
+        cwv_pass: (lcp && lcp <= 2500 && cls != null && cls <= 0.1) ? true : false,
+      };
+    } catch (err) {
+      logger.warn(`[site-audit] PageSpeed failed for ${url}: ${err.message}`);
+      return defaults;
+    }
   }
 
   findDuplicates(results, field) {
