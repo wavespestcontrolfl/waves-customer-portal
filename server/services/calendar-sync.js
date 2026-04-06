@@ -91,7 +91,8 @@ const CalendarSync = {
       for (const b of bookings) {
         try {
           const isCancelled = ['CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SELLER', 'DECLINED', 'NO_SHOW'].includes(b.status);
-          const existing = await db('scheduled_services').where({ square_booking_id: b.id }).first();
+          let existing = null;
+          try { existing = await db('scheduled_services').where({ square_booking_id: b.id }).first(); } catch { /* column may not exist */ }
 
           if (existing) {
             const newStatus = isCancelled ? 'cancelled' : mapSquareStatus(b.status);
@@ -114,16 +115,24 @@ const CalendarSync = {
           const customer = await db('customers').where({ id: customerId }).first();
           const hour = parseInt(startTime.split(':')[0]);
 
-          await db('scheduled_services').insert({
+          const ins = {
             customer_id: customerId, scheduled_date: dateStr,
             window_start: startTime, window_end: endTime,
             service_type: b.serviceName || 'Service', status: mapSquareStatus(b.status),
-            notes: b.note || null, square_booking_id: b.id, source: 'square',
-            zone: getZone(customer?.city), time_window: hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening',
-            estimated_duration_minutes: b.durationMinutes || 60,
-          });
+            notes: b.note || null,
+          };
+          // These columns from migration 062 may not exist yet
+          try {
+            await db('scheduled_services').insert({ ...ins, square_booking_id: b.id, source: 'square', zone: getZone(customer?.city), time_window: hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening', estimated_duration_minutes: b.durationMinutes || 60 });
+          } catch (colErr) {
+            // Fallback without new columns
+            await db('scheduled_services').insert(ins);
+          }
           results.square.created++;
-        } catch (err) { results.square.skipped++; }
+        } catch (err) {
+          logger.error(`[cal-sync] Square booking insert failed: ${err.message}`);
+          results.square.skipped++;
+        }
       }
     } catch (err) {
       results.square.error = err.message;
@@ -161,8 +170,10 @@ const CalendarSync = {
 
           // Deduplicate by google event ID
           const gcalId = `gcal_${ev.id}`;
-          const existing = await db('scheduled_services').where({ square_booking_id: gcalId }).first();
-          if (existing) { results.google.skipped++; continue; }
+          try {
+            const existing = await db('scheduled_services').where({ square_booking_id: gcalId }).first();
+            if (existing) { results.google.skipped++; continue; }
+          } catch { /* column may not exist yet — skip dedup */ }
 
           const email = extractEmail(ev.description);
           const phone = extractPhone(ev.description);
@@ -181,18 +192,22 @@ const CalendarSync = {
           const customer = await db('customers').where({ id: customerId }).first();
           const hour = parseInt(startTime.split(':')[0]);
 
-          await db('scheduled_services').insert({
+          const ins = {
             customer_id: customerId, scheduled_date: dateStr,
             window_start: startTime, window_end: endTime,
             service_type: serviceName, status: 'pending',
             notes: ev.description ? ev.description.substring(0, 500) : null,
-            square_booking_id: gcalId, source: 'calendar',
-            zone: getZone(customer?.city || ev.location),
-            time_window: hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening',
-            estimated_duration_minutes: durationMin,
-          });
+          };
+          try {
+            await db('scheduled_services').insert({ ...ins, square_booking_id: gcalId, source: 'calendar', zone: getZone(customer?.city || ev.location), time_window: hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening', estimated_duration_minutes: durationMin });
+          } catch {
+            await db('scheduled_services').insert(ins);
+          }
           results.google.created++;
-        } catch (err) { results.google.skipped++; }
+        } catch (err) {
+          logger.error(`[cal-sync] Google event insert failed: ${err.message}`);
+          results.google.skipped++;
+        }
       }
     } catch (err) {
       results.google.error = err.message;
