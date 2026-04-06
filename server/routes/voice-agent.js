@@ -23,6 +23,7 @@ function voiceAgentRoutes(app, httpServer) {
 
   // ── Voice Agent TwiML (action URL after dial timeout) ────
   app.all('/api/webhooks/twilio/voice-agent', async (req, res) => {
+    try {
     const domain = process.env.SERVER_DOMAIN || req.headers.host;
     const wsUrl = `wss://${domain}/ws/voice-agent`;
     const callSid = req.body?.CallSid || req.query?.CallSid;
@@ -83,10 +84,15 @@ function voiceAgentRoutes(app, httpServer) {
          </Connect>
        </Response>`
     );
+    } catch (err) {
+      console.error('[VoiceAgent] voice-agent handler CRASH:', err.message);
+      res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>We are experiencing technical difficulties. Please call back or text us at 941-318-7612.</Say></Response>');
+    }
   });
 
   // ── Ring-First TwiML (replaces Studio Flow) ────────────
   app.all('/api/webhooks/twilio/voice-ring-first', async (req, res) => {
+    try {
     const domain = process.env.SERVER_DOMAIN || req.headers.host;
     const callSid = req.body?.CallSid || req.query?.CallSid;
     const from = req.body?.From || req.query?.From;
@@ -97,7 +103,7 @@ function voiceAgentRoutes(app, httpServer) {
     // Log every inbound call immediately
     if (callSid) {
       try {
-        await db('call_log').insert({
+        const logEntry = {
           twilio_call_sid: callSid,
           call_sid: callSid,
           from_phone: from,
@@ -105,9 +111,13 @@ function voiceAgentRoutes(app, httpServer) {
           direction: 'inbound',
           status: 'ringing',
           answered_by: null,
-          caller_city: callerCity || null,
-          caller_state: callerState || null,
-        });
+        };
+        try {
+          await db('call_log').insert({ ...logEntry, caller_city: callerCity || null, caller_state: callerState || null });
+        } catch {
+          // Fallback without optional columns
+          await db('call_log').insert(logEntry);
+        }
         console.log(`[VoiceAgent] Inbound call logged: ${callSid} from ${from}`);
       } catch (err) {
         if (!err.message?.includes('duplicate') && !err.message?.includes('unique')) {
@@ -182,12 +192,25 @@ function voiceAgentRoutes(app, httpServer) {
          <Play>${greetingAudio}</Play>
          <Dial timeout="25"
            action="https://${domain}/api/webhooks/twilio/voice-agent${useSpanish ? '?language=es' : ''}"
-           callerId="{{From}}">
+           callerId="${from || to}">
            <Number>+19415993489</Number>
            <Number>+17206334021</Number>
          </Dial>
        </Response>`
     );
+    } catch (err) {
+      console.error('[VoiceAgent] voice-ring-first CRASH:', err.message, err.stack);
+      // Always return valid TwiML so caller doesn't get an error
+      res.type('text/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+         <Response>
+           <Say voice="alice">Thank you for calling Waves Pest Control. Please hold while we connect you.</Say>
+           <Dial timeout="30">
+             <Number>+19415993489</Number>
+           </Dial>
+         </Response>`
+      );
+    }
   });
 
   // ── Admin API ──────────────────────────────────────────
