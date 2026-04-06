@@ -26,15 +26,33 @@ export default function LawnAssessmentPanel() {
   const [showGuide, setShowGuide] = useState(() => !localStorage.getItem('lawn_guide_seen'));
   const fileRef = useRef(null);
 
-  // Load lawn care customers
+  // Load customers
   useEffect(() => {
     adminFetch('/admin/lawn-assessment/customers').then(d => setCustomers(d.customers || [])).catch(() => {});
   }, []);
 
+  // Server-side search when local results are empty
+  useEffect(() => {
+    if (!search.trim() || search.trim().length < 2) return;
+    const t = setTimeout(() => {
+      adminFetch(`/admin/lawn-assessment/customers?q=${encodeURIComponent(search.trim())}`)
+        .then(d => {
+          const serverResults = d.customers || [];
+          setCustomers(prev => {
+            const ids = new Set(prev.map(c => c.id));
+            return [...prev, ...serverResults.filter(c => !ids.has(c.id))];
+          });
+        }).catch(() => {});
+    }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
   const filteredCustomers = customers.filter(c => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
-    return `${c.firstName} ${c.lastName}`.toLowerCase().includes(q) || (c.phone || '').includes(q);
+    return `${c.firstName} ${c.lastName}`.toLowerCase().includes(q)
+      || (c.phone || '').includes(q)
+      || (c.address || '').toLowerCase().includes(q);
   });
 
   const handlePhotoCapture = (e) => {

@@ -20,16 +20,21 @@ router.use(requireTechOrAdmin);
 // =========================================================================
 router.get('/customers', async (req, res, next) => {
   try {
-    const customers = await db('customers')
-      .whereExists(function () {
-        this.select(db.raw(1))
-          .from('service_records')
-          .whereRaw('service_records.customer_id = customers.id')
-          .andWhere('service_records.service_type', 'ilike', '%lawn care%');
-      })
-      .select('id', 'first_name', 'last_name', 'email', 'phone', 'address')
+    const { q } = req.query;
+    let query = db('customers')
+      .select('id', 'first_name as firstName', 'last_name as lastName', 'email', 'phone', 'address')
       .orderBy('last_name', 'asc');
 
+    if (q && q.trim()) {
+      const s = `%${q.trim().toLowerCase()}%`;
+      query = query.where(function () {
+        this.whereRaw("LOWER(first_name || ' ' || last_name) LIKE ?", [s])
+          .orWhere('phone', 'like', s)
+          .orWhere('address', 'ilike', s);
+      });
+    }
+
+    const customers = await query.limit(100);
     res.json({ customers });
   } catch (err) {
     next(err);
