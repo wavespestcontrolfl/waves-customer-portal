@@ -199,4 +199,18 @@ router.get('/analytics', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /health — credential health for social media platforms
+router.get('/health', async (req, res, next) => {
+  try {
+    const tokenHealth = require('../services/token-health');
+    const platforms = ['facebook', 'instagram', 'linkedin', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
+    const results = [];
+    for (const p of platforms) {
+      const r = await tokenHealth.checkSingle(p);
+      results.push(r);
+    }
+    res.json({ credentials: results });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

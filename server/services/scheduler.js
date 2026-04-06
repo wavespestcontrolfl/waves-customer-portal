@@ -533,6 +533,26 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // DAILY 7AM — Token / Credential Health Check + SMS alert on failures
+  // =========================================================================
+  cron.schedule('0 7 * * *', async () => {
+    logger.info('Running: token credential health check');
+    try {
+      const tokenHealth = require('./token-health');
+      const results = await tokenHealth.checkAll();
+      const failures = results.filter(r => r.status === 'expired' || r.status === 'error');
+      if (failures.length > 0) {
+        const msg = `⚠️ Token Alert: ${failures.length} credential(s) need attention:\n` +
+          failures.map(f => `- ${f.platform}: ${f.status} — ${f.lastError || 'check dashboard'}`).join('\n');
+        await TwilioService.sendSMS(process.env.ADAM_PHONE || '+19415993489', msg, { messageType: 'internal_alert', skipLogo: true });
+      }
+      logger.info(`Token health check done: ${failures.length} failure(s) out of ${results.length}`);
+    } catch (err) {
+      logger.error(`Token health check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 

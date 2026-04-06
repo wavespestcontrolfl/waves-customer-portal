@@ -22,6 +22,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const gbpService = require('./google-business');
 const { WAVES_LOCATIONS } = require('../config/locations');
+const config = require('../config');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -116,6 +117,33 @@ Do NOT include any text or words in the image. Photorealistic style, well-lit, 1
     return null;
   } catch (err) {
     logger.error(`[social] Image generation failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ── S3 Image Upload (for Instagram public URL requirement) ──
+async function uploadImageToS3(base64Data, filename) {
+  if (!config.s3.accessKeyId || !config.s3.bucket) return null;
+  try {
+    const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+    const client = new S3Client({
+      region: config.s3.region,
+      credentials: { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey },
+    });
+    const buffer = Buffer.from(base64Data, 'base64');
+    const key = `social-media/${filename}`;
+    await client.send(new PutObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: 'image/png',
+      ACL: 'public-read',
+    }));
+    const url = `https://${config.s3.bucket}.s3.${config.s3.region}.amazonaws.com/${key}`;
+    logger.info(`[social] Image uploaded to S3: ${url}`);
+    return url;
+  } catch (err) {
+    logger.error(`[social] S3 upload failed: ${err.message}`);
     return null;
   }
 }
@@ -324,9 +352,13 @@ const SocialMediaService = {
     if (!generatedImageUrl && process.env.GEMINI_API_KEY) {
       try {
         const img = await generateImage(title);
-        if (img) {
-          // Store base64 temporarily — platforms that need a URL will use a placeholder
-          generatedImageUrl = img;
+        if (img && img.base64) {
+          // Upload to S3 to get a public URL (required by Instagram)
+          const filename = `post-${Date.now()}.png`;
+          const s3Url = await uploadImageToS3(img.base64, filename);
+          if (s3Url) {
+            generatedImageUrl = s3Url;
+          }
         }
       } catch { /* non-critical */ }
     }
