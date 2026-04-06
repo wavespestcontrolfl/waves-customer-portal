@@ -79,9 +79,9 @@ const sDiscBadge = { display: 'inline-block', background: 'rgba(16,185,129,0.15)
 function TierGrid({ children }) { return <div style={{ display: 'grid', gap: 10 }}>{children}</div>; }
 function TierRow({ name, detail, price, recommended, dimmed }) {
   return (
-    <div style={sTierRow(recommended, dimmed)}>
+    <div className="estimate-tier-row" style={sTierRow(recommended, dimmed)}>
       <div style={sTierName}>{name}{recommended ? ' \u2605' : ''}</div>
-      <div style={sTierDetail}>{detail}</div>
+      <div style={{ ...sTierDetail, wordWrap: 'break-word', overflowWrap: 'break-word' }}>{detail}</div>
       <div style={sTierPrice}>{price}</div>
     </div>
   );
@@ -588,14 +588,27 @@ function EstimateToolView() {
      ═══════════════════════════════════════════════════════════ */
   return (
     <FormCtx.Provider value={formCtx}>
-    <div style={{ background: C.dark, color: C.white, maxWidth: 1440, margin: '0 auto', padding: 28, minHeight: '100vh', fontSize: 16, fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ background: C.dark, color: C.white, maxWidth: 1440, margin: '0 auto', padding: typeof window !== 'undefined' && window.innerWidth < 640 ? 12 : 28, minHeight: '100vh', fontSize: 16, fontFamily: "'DM Sans', sans-serif" }}>
+      <style>{`
+        @media (max-width: 640px) {
+          .estimate-layout { grid-template-columns: 1fr !important; }
+          .estimate-header { flex-direction: column !important; align-items: flex-start !important; gap: 8px !important; }
+          .estimate-header h1 { font-size: 20px !important; }
+          .estimate-tier-row { grid-template-columns: 100px 1fr 80px !important; padding: 10px 12px !important; font-size: 13px !important; }
+          .estimate-spec-grid { grid-template-columns: 1fr !important; }
+          .estimate-summary-flex { gap: 16px !important; }
+          .estimate-summary-flex > div { min-width: 80px; }
+          .estimate-actions { grid-template-columns: 1fr !important; }
+          .estimate-send-grid { grid-template-columns: 1fr !important; }
+        }
+      `}</style>
       {/* HEADER */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28, paddingBottom: 18, borderBottom: `2px solid ${C.border}` }}>
+      <div className="estimate-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28, paddingBottom: 18, borderBottom: `2px solid ${C.border}` }}>
         <h1 style={{ fontSize: 26, fontWeight: 700, color: C.teal, margin: 0 }}>Waves Estimating Engine</h1>
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: C.gray, background: C.navy, padding: '6px 14px', borderRadius: 20 }}>v1.3 — Internal Use Only</span>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '440px 1fr', gap: 28 }}>
+      <div className="estimate-layout" style={{ display: 'grid', gridTemplateColumns: '440px 1fr', gap: 28 }}>
         {/* ═══ LEFT COLUMN: FORM ═══ */}
         <div>
           {/* Property Lookup */}
@@ -780,7 +793,7 @@ function EstimateToolView() {
           </div>
 
           {/* Action buttons */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
+          <div className="estimate-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
             <button style={{ ...sBtn(C.teal, C.dark), fontSize: 16, padding: '16px 28px' }} onClick={doGenerate}>GENERATE ESTIMATE</button>
             <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 16, padding: '16px 28px' }} onClick={() => {
               if (!estimate) { doGenerate(); }
@@ -824,7 +837,7 @@ function EstimateToolView() {
                   </div>
                 </div>
               )}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div className="estimate-send-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <button style={{ ...sBtn(C.green, 'white'), fontSize: 14, padding: '14px 20px' }} onClick={async () => {
                   if (!form.customerPhone) { alert('Enter a phone number.'); return; }
                   if (!estimate) { doGenerate(); }
@@ -863,7 +876,7 @@ function EstimateToolView() {
                       <div style={{ fontSize: 14, color: C.gray, marginTop: 4 }}>
                         Recurring monthly{E.recurring.savings > 0 ? ` (WaveGuard ${E.recurring.waveGuardTier} pricing)` : ''}
                       </div>
-                      <div style={{ display: 'flex', justifyContent: 'center', gap: 40, marginTop: 14, flexWrap: 'wrap' }}>
+                      <div className="estimate-summary-flex" style={{ display: 'flex', justifyContent: 'center', gap: 40, marginTop: 14, flexWrap: 'wrap' }}>
                         {E.oneTime.total > 0 && (
                           <div style={{ textAlign: 'center' }}>
                             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: C.white }}>{fmtInt(E.oneTime.total)}</div>
@@ -1113,7 +1126,7 @@ function EstimateToolView() {
                 {E.specItems && E.specItems.length > 0 && (
                   <>
                     <div style={sGroupHeader}>Specialty Pest</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 24 }}>
+                    <div className="estimate-spec-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 24 }}>
                       {E.specItems.map((s, i) => (
                         <div key={i} style={sSpecCard}>
                           <div style={sSpecName}>{s.name}</div>

@@ -162,7 +162,7 @@ function QuickAddModal({ onClose, onCreated }) {
           Add Customer
         </div>
         <form onSubmit={handleSubmit}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <div className="modal-grid-2col" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
             <div>
               <label style={labelStyle}>First Name *</label>
               <input value={form.firstName} onChange={e => set('firstName', e.target.value)} style={inputStyle} required />
@@ -371,7 +371,7 @@ function CustomerIntelligenceTab() {
       {/* Health Distribution */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
         <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Customer Health Overview</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
+        <div className="intel-health-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
           {['healthy', 'watch', 'at_risk', 'critical'].map(level => (
             <div key={level} style={{ padding: 14, background: D.bg, borderRadius: 10, textAlign: 'center', borderTop: `3px solid ${riskColor[level]}` }}>
               <div style={{ fontSize: 11, color: D.muted, textTransform: 'capitalize', marginBottom: 4 }}>{riskEmoji[level]} {level.replace('_', ' ')}</div>
@@ -496,7 +496,7 @@ function CustomerIntelligenceTab() {
       {data.metrics && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
           <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>📊 Retention Metrics (Last 30 Days)</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+          <div className="intel-metrics-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
             <div style={{ padding: 12, background: D.bg, borderRadius: 8, textAlign: 'center' }}>
               <div style={{ fontSize: 11, color: D.muted }}>Outreach Sent</div>
               <div style={{ fontSize: 20, fontWeight: 700, color: D.teal, fontFamily: MONO }}>{data.metrics.outreachSent}</div>
@@ -739,19 +739,37 @@ export default function CustomersPage() {
     <div>
       <style>{`
         @keyframes pulse-badge { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        @media (max-width: 640px) {
+          .customers-header { flex-direction: column !important; align-items: flex-start !important; gap: 12px !important; }
+          .customers-header-actions { flex-wrap: wrap !important; width: 100% !important; }
+          .customers-header-actions input[type="text"] { width: 100% !important; }
+          .customers-filter-bar { flex-direction: column !important; gap: 8px !important; }
+          .customers-filter-bar select { width: 100% !important; }
+          .customers-table-header { display: none !important; }
+          .customers-row-grid { display: flex !important; flex-direction: column !important; gap: 8px !important; padding: 14px 16px !important; }
+          .customers-row-grid > div { display: flex !important; }
+          .customer-expanded-detail .detail-grid-3col { grid-template-columns: 1fr !important; }
+          .customer-edit-grid { grid-template-columns: 1fr 1fr !important; }
+          .customers-pipeline-wrap { -webkit-overflow-scrolling: touch; }
+          .intel-health-grid { grid-template-columns: repeat(2, 1fr) !important; }
+          .intel-metrics-grid { grid-template-columns: repeat(2, 1fr) !important; }
+          .customers-view-toggle { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; }
+          .customers-view-toggle button { white-space: nowrap !important; font-size: 12px !important; padding: 6px 10px !important; }
+          .modal-grid-2col { grid-template-columns: 1fr !important; }
+        }
       `}</style>
 
       {/* ====================== HEADER ====================== */}
-      <div style={{
+      <div className="customers-header" style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12,
       }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
           <div style={{ fontSize: 24, fontWeight: 700, color: D.white, fontFamily: 'DM Sans, sans-serif' }}>Customers</div>
           <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14, color: D.muted }}>{totalCount}</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div className="customers-header-actions" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           {/* View toggle */}
-          <div style={{
+          <div className="customers-view-toggle" style={{
             display: 'flex', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: 'hidden',
           }}>
             {[
@@ -812,7 +830,7 @@ export default function CustomersPage() {
       {view === 'directory' && (
         <>
           {/* Filter bar */}
-          <div style={{
+          <div className="customers-filter-bar" style={{
             display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center',
             padding: '10px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
           }}>
@@ -839,7 +857,7 @@ export default function CustomersPage() {
           </div>
 
           {/* Table header */}
-          <div style={{
+          <div className="customers-table-header" style={{
             display: 'grid',
             gridTemplateColumns: '2fr 1.1fr 0.8fr 0.7fr 0.6fr 0.6fr 0.7fr 0.9fr 0.7fr 0.4fr',
             gap: 6, padding: '10px 16px', marginBottom: 4,
@@ -870,6 +888,7 @@ export default function CustomersPage() {
             sorted.map(c => (
               <div key={c.id} style={{ marginBottom: 6 }}>
                 <div
+                  className="customers-row-grid"
                   onClick={() => expandCustomer(c.id)}
                   style={{
                     display: 'grid',
@@ -910,10 +929,10 @@ export default function CustomersPage() {
                   <div><TierBadge tier={detectTier(c)} /></div>
                   {/* Monthly rate */}
                   <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: c.monthlyRate ? D.green : D.muted }}>
-                    {c.monthlyRate ? `$${c.monthlyRate}` : '--'}
+                    {c.monthlyRate ? `$${c.monthlyRate}/mo` : '--'}
                   </div>
                   {/* Revenue */}
-                  <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: c.lifetimeRevenue ? D.green : D.muted }}>
+                  <div style={{ fontSize: 12, color: c.lifetimeRevenue ? D.green : D.muted }}>
                     {c.lifetimeRevenue ? `$${c.lifetimeRevenue.toFixed(0)}` : '--'}
                   </div>
                   {/* Lead Source */}
@@ -933,13 +952,13 @@ export default function CustomersPage() {
 
                 {/* Expanded detail panel */}
                 {expandedId === c.id && (
-                  <div style={{
+                  <div className="customer-expanded-detail" style={{
                     background: D.card, border: `1px solid ${D.teal}`, borderTop: 'none',
                     borderRadius: '0 0 10px 10px', padding: 20,
                   }}>
                     {!expandedData ? <div style={{ color: D.muted, textAlign: 'center', padding: 20 }}>Loading...</div> :
                     expandedData.error ? <div style={{ color: D.red, textAlign: 'center' }}>Failed to load details</div> : (
-                      <><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+                      <><div className="detail-grid-3col" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
                         {/* Column 1: Contact Info */}
                         <div>
                           <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Contact</div>
@@ -1027,7 +1046,7 @@ export default function CustomersPage() {
                 {editingId === c.id && (
                   <div style={{ background: D.card, border: `1px solid ${D.teal}`, borderRadius: 10, padding: 20, marginTop: -2 }}>
                     <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Edit Customer</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10, marginBottom: 12 }}>
+                    <div className="customer-edit-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10, marginBottom: 12 }}>
                       {[
                         { key: 'firstName', label: 'First Name' },
                         { key: 'lastName', label: 'Last Name' },
@@ -1084,8 +1103,8 @@ export default function CustomersPage() {
 
       {/* ====================== PIPELINE VIEW ====================== */}
       {view === 'pipeline' && (
-        <div style={{
-          display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 12,
+        <div className="customers-pipeline-wrap" style={{
+          display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 12, WebkitOverflowScrolling: 'touch',
         }}>
           {KANBAN_STAGES.map(key => {
             const stage = STAGE_MAP[key];

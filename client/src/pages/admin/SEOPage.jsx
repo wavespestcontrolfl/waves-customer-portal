@@ -76,7 +76,7 @@ function DashboardTab() {
           <button key={p} onClick={() => setPeriod(p)} style={{ padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, background: period === p ? D.teal : 'transparent', color: period === p ? D.white : D.muted }}>{p === 7 ? '7 Days' : p === 28 ? '28 Days' : '90 Days'}</button>
         ))}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14 }}>
+      <div className="seo-kpi-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14 }}>
         <KpiCard label="Total Clicks" value={cur.clicks?.toLocaleString() || '0'} sub={chg.clicks ? { text: `${chg.clicks >= 0 ? '+' : ''}${chg.clicks}% vs prev`, color: posColor(chg.clicks) } : null} />
         <KpiCard label="Impressions" value={cur.impressions?.toLocaleString() || '0'} />
         <KpiCard label="Avg CTR" value={((cur.ctr || 0) * 100).toFixed(2) + '%'} />
@@ -159,7 +159,7 @@ function SimpleTableTab({ endpoint, title, columns, emptyMsg }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {data.summary && (
-        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(Object.keys(data.summary).length, 5)}, 1fr)`, gap: 12 }}>
+        <div className="seo-kpi-grid-5" style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(Object.keys(data.summary).length, 5)}, 1fr)`, gap: 12 }}>
           {Object.entries(data.summary).map(([k, v]) => <KpiCard key={k} label={k.replace(/([A-Z])/g, ' $1').trim()} value={typeof v === 'number' ? v.toLocaleString() : v} />)}
         </div>
       )}
@@ -178,7 +178,7 @@ function RankingsTab() {
   const posColor = (p) => !p ? D.muted : p <= 3 ? D.green : p <= 10 ? D.teal : p <= 20 ? D.amber : D.red;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+      <div className="seo-kpi-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
         <KpiCard label="Improving" value={s.improving || 0} color={D.green} />
         <KpiCard label="Declining" value={s.declining || 0} color={D.red} />
         <KpiCard label="Stable" value={s.stable || 0} />
@@ -225,17 +225,17 @@ function BacklinksTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* Sub-tabs */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', gap: 4 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <div className="seo-sub-tabs" style={{ display: 'flex', gap: 4, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
           {[{ key: 'overview', label: 'Overview' }, { key: 'citations', label: 'Citations' }, { key: 'gaps', label: 'Competitor Gaps' }, { key: 'llm', label: 'LLM Mentions' }, { key: 'agent', label: 'Agent' }].map(t => (
-            <button key={t.key} onClick={() => setSubTab(t.key)} style={{ padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, background: subTab === t.key ? D.teal : D.bg, color: subTab === t.key ? D.white : D.muted }}>{t.label}</button>
+            <button key={t.key} onClick={() => setSubTab(t.key)} style={{ padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, background: subTab === t.key ? D.teal : D.bg, color: subTab === t.key ? D.white : D.muted, whiteSpace: 'nowrap', flexShrink: 0 }}>{t.label}</button>
           ))}
         </div>
         <button onClick={handleScan} disabled={scanning} style={{ padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 12, cursor: 'pointer', opacity: scanning ? 0.5 : 1 }}>{scanning ? 'Scanning...' : 'Scan Backlinks'}</button>
       </div>
 
       {/* Stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+      <div className="seo-kpi-grid-5" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
         <KpiCard label="Total Links" value={data.total || 0} />
         <KpiCard label="Critical" value={data.critical || 0} color={D.red} />
         <KpiCard label="Warning" value={data.warning || 0} color={D.amber} />
@@ -431,7 +431,7 @@ function BacklinkAgentPanel() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* Stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+      <div className="seo-kpi-grid-5" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
         <KpiCard label="Total Queued" value={stats?.total || 0} />
         <KpiCard label="Pending" value={stats?.pending || 0} color={D.muted} />
         <KpiCard label="Completed" value={stats?.completed || 0} color={D.amber} />
@@ -552,7 +552,7 @@ function AIOverviewTab() {
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>;
   if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No AI Overview data yet.</div></Card>;
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+    <div className="seo-kpi-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
       <KpiCard label="Tracked" value={data.total || 0} />
       <KpiCard label="With AIO" value={data.withAIO || 0} color={D.purple} />
       <KpiCard label="Waves Cited" value={data.wavesCited || 0} color={D.green} />
@@ -569,7 +569,7 @@ function FunnelTab() {
   if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No funnel data yet.</div></Card>;
   const o = data.organic || {};
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+    <div className="seo-kpi-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
       <KpiCard label="Impressions" value={(o.impressions || 0).toLocaleString()} />
       <KpiCard label="Clicks" value={(o.clicks || 0).toLocaleString()} sub={{ text: `${o.ctr || 0}% CTR` }} />
       <KpiCard label="Booked" value={data.estimates?.booked || 0} color={D.green} />
@@ -588,7 +588,7 @@ function CitationsTab() {
   const sc = { active: D.green, inconsistent: D.red, missing: D.amber, claimed: D.teal, unchecked: D.muted };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+      <div className="seo-kpi-grid-5" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
         <KpiCard label="Active" value={bs.active || 0} color={D.green} />
         <KpiCard label="Inconsistent" value={bs.inconsistent || 0} color={D.red} />
         <KpiCard label="Missing" value={bs.missing || 0} color={D.amber} />
@@ -647,7 +647,7 @@ function AnalyticsTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* Period selector */}
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div className="seo-analytics-period" style={{ display: 'flex', gap: 8 }}>
         {[7, 14, 28, 30, 90].map(d => (
           <button key={d} onClick={() => setDays(d)} style={{
             padding: '6px 14px', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
@@ -657,14 +657,14 @@ function AnalyticsTab() {
       </div>
 
       {/* KPI Row */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+      <div className="seo-kpi-grid-3" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
         {[
           { label: 'Sessions', value: fmt(data.sessions) },
           { label: 'Users', value: fmt(data.users) },
           { label: 'New Users', value: fmt(data.newUsers) },
         ].map(k => <KpiCard key={k.label} label={k.label} value={k.value} />)}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+      <div className="seo-kpi-grid-3" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
         {[
           { label: 'Bounce Rate', value: pct(data.bounceRate), color: data.bounceRate > 0.6 ? D.red : data.bounceRate > 0.4 ? D.amber : D.green },
           { label: 'Avg Session', value: dur(data.avgSessionDuration) },
@@ -701,18 +701,18 @@ function AnalyticsTab() {
         <Card>
           <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Top Landing Pages</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{ display: 'flex', padding: '0 12px 8px', fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            <div className="seo-top-pages-header" style={{ display: 'flex', padding: '0 12px 8px', fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               <div style={{ flex: 1 }}>Page</div>
               <div style={{ width: 70, textAlign: 'right' }}>Sessions</div>
               <div style={{ width: 70, textAlign: 'right' }}>Bounce</div>
               <div style={{ width: 70, textAlign: 'right' }}>Avg Time</div>
             </div>
             {topPages.slice(0, 20).map((p, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', padding: '8px 12px', background: i % 2 === 0 ? D.bg : 'transparent', borderRadius: 6 }}>
-                <div style={{ flex: 1, fontSize: 12, color: D.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.page || p.pagePath}</div>
-                <div style={{ width: 70, textAlign: 'right', fontSize: 12, fontWeight: 600, color: D.white, fontFamily: MONO }}>{fmt(p.sessions)}</div>
-                <div style={{ width: 70, textAlign: 'right', fontSize: 12, color: p.bounceRate > 0.6 ? D.red : D.muted, fontFamily: MONO }}>{pct(p.bounceRate)}</div>
-                <div style={{ width: 70, textAlign: 'right', fontSize: 12, color: D.muted, fontFamily: MONO }}>{dur(p.avgSessionDuration)}</div>
+              <div key={i} className="seo-top-pages-row" style={{ display: 'flex', alignItems: 'center', padding: '8px 12px', background: i % 2 === 0 ? D.bg : 'transparent', borderRadius: 6 }}>
+                <div style={{ flex: 1, fontSize: 12, color: D.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', wordBreak: 'break-all' }}>{p.page || p.pagePath}</div>
+                <div style={{ width: 70, textAlign: 'right', fontSize: 12, fontWeight: 600, color: D.white, fontFamily: MONO, flexShrink: 0 }}>{fmt(p.sessions)}</div>
+                <div style={{ width: 70, textAlign: 'right', fontSize: 12, color: p.bounceRate > 0.6 ? D.red : D.muted, fontFamily: MONO, flexShrink: 0 }}>{pct(p.bounceRate)}</div>
+                <div style={{ width: 70, textAlign: 'right', fontSize: 12, color: D.muted, fontFamily: MONO, flexShrink: 0 }}>{dur(p.avgSessionDuration)}</div>
               </div>
             ))}
           </div>
@@ -775,7 +775,7 @@ function SiteAuditTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* KPI Row */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+      <div className="seo-audit-kpi-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
         <Card style={{ padding: 16, textAlign: 'center' }}>
           <div style={{ fontSize: 11, color: D.muted }}>Site Health Score</div>
           <div style={{ fontSize: 36, fontWeight: 800, color: scoreColor(parseFloat(run.avg_health_score || 0)), fontFamily: MONO }}>{Math.round(run.avg_health_score || 0)}</div>
@@ -869,7 +869,7 @@ function SiteAuditTab() {
                 {isExpanded && (
                   <div style={{ padding: '12px 16px', background: D.bg, borderRadius: '0 0 8px 8px', borderTop: 'none', border: `1px solid ${D.border}`, borderTopColor: 'transparent', marginTop: -2 }}>
                     {/* Meta info */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+                    <div className="seo-audit-expanded-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
                       {p.meta_title && (
                         <div><div style={{ fontSize: 10, color: D.muted }}>Title ({p.meta_title_length} chars)</div><div style={{ fontSize: 12, color: D.text, marginTop: 2 }}>{p.meta_title}</div></div>
                       )}
@@ -925,7 +925,7 @@ function SiteAuditTab() {
       {history.length > 1 && (
         <Card>
           <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Audit History</div>
-          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(history.length, 6)}, 1fr)`, gap: 8 }}>
+          <div className="seo-audit-history-grid" style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(history.length, 6)}, 1fr)`, gap: 8 }}>
             {history.slice(0, 6).map((h, i) => (
               <div key={i} style={{ textAlign: 'center', padding: 12, background: D.bg, borderRadius: 8, border: i === 0 ? `2px solid ${D.teal}` : `1px solid ${D.border}` }}>
                 <div style={{ fontSize: 10, color: D.muted }}>{new Date(h.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
@@ -947,15 +947,35 @@ export default function SEOPage() {
 
   return (
     <div>
+      <style>{`
+        @media (max-width: 640px) {
+          .seo-tab-bar { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; flex-wrap: nowrap !important; scrollbar-width: none; }
+          .seo-tab-bar::-webkit-scrollbar { display: none; }
+          .seo-tab-bar button { padding: 8px 12px !important; font-size: 12px !important; flex-shrink: 0 !important; }
+          .seo-kpi-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+          .seo-kpi-grid-5 { grid-template-columns: repeat(2, 1fr) !important; }
+          .seo-kpi-grid-3 { grid-template-columns: 1fr !important; }
+          .seo-sub-tabs { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; flex-wrap: nowrap !important; }
+          .seo-sub-tabs button { flex-shrink: 0 !important; }
+          .seo-top-pages-header { display: none !important; }
+          .seo-top-pages-row { flex-wrap: wrap !important; gap: 4px !important; }
+          .seo-top-pages-row > div:first-child { width: 100% !important; flex: none !important; }
+          .seo-audit-kpi-grid { grid-template-columns: repeat(2, 1fr) !important; }
+          .seo-audit-expanded-grid { grid-template-columns: 1fr !important; }
+          .seo-audit-history-grid { grid-template-columns: repeat(3, 1fr) !important; }
+          .seo-funnel-stats { grid-template-columns: 1fr 1fr 1fr !important; }
+          .seo-analytics-period { flex-wrap: wrap !important; }
+        }
+      `}</style>
       <div style={{ fontSize: 28, fontWeight: 700, color: D.white, marginBottom: 24 }}>SEO</div>
 
-      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto' }}>
+      <div className="seo-tab-bar" style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: tab === t.key ? D.teal : 'transparent',
             color: tab === t.key ? D.white : D.muted,
-            transition: 'all 0.15s', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6,
+            transition: 'all 0.15s', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
           }}><span>{t.icon}</span> {t.label}</button>
         ))}
       </div>

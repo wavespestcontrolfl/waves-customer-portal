@@ -252,10 +252,25 @@ export default function WavesPPCDashboard() {
   return (
     <div style={{ color: C.text, fontFamily: "'DM Sans',-apple-system,sans-serif" }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+      <style>{`
+        @media (max-width: 640px) {
+          .ppc-tab-bar { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; width: 100% !important; }
+          .ppc-tab-bar button { flex-shrink: 0 !important; padding: 8px 14px !important; font-size: 12px !important; }
+          .ppc-kpi-grid-6 { grid-template-columns: repeat(2, 1fr) !important; }
+          .ppc-kpi-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+          .ppc-two-col { grid-template-columns: 1fr !important; }
+          .ppc-platform-grid { grid-template-columns: 1fr !important; }
+          .ppc-funnel-grid { grid-template-columns: 1fr !important; }
+          .ppc-funnel-stats { grid-template-columns: repeat(3, 1fr) !important; }
+          .ppc-header-badge { display: flex !important; flex-wrap: wrap !important; gap: 8px !important; }
+          .ppc-filter-wrap { flex-direction: column !important; gap: 8px !important; }
+          .ppc-filter-wrap > div { flex-wrap: wrap !important; }
+        }
+      `}</style>
 
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+        <div className="ppc-header-badge" style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
           <span style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em" }}>
             <span style={{ color: C.blue }}>Waves</span> PPC Command Center
           </span>
@@ -267,7 +282,7 @@ export default function WavesPPCDashboard() {
       </div>
 
       {/* Tab Switcher */}
-      <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: 4, width: "fit-content" }}>
+      <div className="ppc-tab-bar" style={{ display: "flex", gap: 4, marginBottom: 24, background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: 4, width: "fit-content", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
         {[
           { id: "overview", label: "Overview" },
           { id: "campaigns", label: "Campaigns" },
@@ -278,6 +293,7 @@ export default function WavesPPCDashboard() {
             background: tab === t.id ? C.blue : "transparent",
             color: tab === t.id ? "#fff" : C.text3,
             fontSize: 13, fontWeight: 700, cursor: "pointer", transition: "all 0.15s", fontFamily: "'DM Sans',sans-serif",
+            flexShrink: 0, whiteSpace: "nowrap",
           }}>{t.label}</button>
         ))}
       </div>
@@ -286,7 +302,7 @@ export default function WavesPPCDashboard() {
       {tab === "overview" && (
         <div>
           {/* KPI Row */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 12, marginBottom: 20 }}>
+          <div className="ppc-kpi-grid-6" style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 12, marginBottom: 20 }}>
             <KPI value={fmtMoney(totals.spent)} label="7-Day Spend" sub={`of ${fmtMoney(totals.budget)} budget`} color={C.blue} />
             <KPI value={fmtMoney(totals.revenue)} label="7-Day Revenue" sub="attributed revenue" color={C.green} />
             <KPI value={`${overallROAS}x`} label="ROAS" sub="return on ad spend" color={parseFloat(overallROAS) >= 2 ? C.green : C.red} />
@@ -296,7 +312,7 @@ export default function WavesPPCDashboard() {
           </div>
 
           {/* Service Breakdown + Budget Donut */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 16, marginBottom: 20 }}>
+          <div className="ppc-two-col" style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 16, marginBottom: 20 }}>
             <Card>
               <SectionTitle>Revenue by Service Line (30d)</SectionTitle>
               {serviceBreakdown.length > 0 ? serviceBreakdown.map(s => (
@@ -329,7 +345,7 @@ export default function WavesPPCDashboard() {
           </div>
 
           {/* Platform Split */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+          <div className="ppc-platform-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
             {["google_search", "google_lsa"].map(type => {
               const label = type === "google_lsa" ? "Local Service Ads" : "Google Search Ads";
               const typeCamps = campaigns.filter(c => c.campaign_type === type && c.status === "active");
@@ -339,7 +355,7 @@ export default function WavesPPCDashboard() {
               return (
                 <Card key={type}>
                   <SectionTitle>{label}</SectionTitle>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
+                  <div className="ppc-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
                     <div><div style={{ fontSize: 20, fontWeight: 800, color: C.blue }}>{fmtMoney(sp)}</div><div style={{ fontSize: 11, color: C.text3 }}>SPEND</div></div>
                     <div><div style={{ fontSize: 20, fontWeight: 800, color: C.green }}>{fmtMoney(rv)}</div><div style={{ fontSize: 11, color: C.text3 }}>REVENUE</div></div>
                     <div><div style={{ fontSize: 20, fontWeight: 800, color: C.purple }}>{ld}</div><div style={{ fontSize: 11, color: C.text3 }}>CONVERSIONS</div></div>
@@ -357,7 +373,7 @@ export default function WavesPPCDashboard() {
         <div>
           {/* Filters */}
           <Card style={{ marginBottom: 20 }}>
-            <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+            <div className="ppc-filter-wrap" style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <span style={{ fontSize: 12, color: C.text3, fontWeight: 600 }}>Service:</span>
                 {services.map(s => <Pill key={s} label={s} active={serviceFilter === s} onClick={() => setServiceFilter(s)} />)}
@@ -421,7 +437,7 @@ export default function WavesPPCDashboard() {
       {/* ======= FUNNEL & ATTRIBUTION ======= */}
       {tab === "funnel" && (
         <div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+          <div className="ppc-funnel-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
             {/* Funnel */}
             <Card>
               <SectionTitle>Acquisition Funnel -- Last 30 Days</SectionTitle>
@@ -431,7 +447,7 @@ export default function WavesPPCDashboard() {
                     <FunnelBar key={stage} label={stage.replace(/_/g, ' ')} value={count} maxValue={funnelData.totalLeads || 1}
                       color={stage === 'completed' ? C.green : stage === 'booked' ? C.cyan : stage === 'lost' ? C.red : C.blue} />
                   ))}
-                  <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12, marginTop: 12, display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, textAlign: "center" }}>
+                  <div className="ppc-funnel-stats" style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12, marginTop: 12, display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, textAlign: "center" }}>
                     <div><div style={{ fontSize: 18, fontWeight: 800, color: C.blue }}>{fmt(funnelData.totalLeads)}</div><div style={{ fontSize: 10, color: C.text3 }}>TOTAL LEADS</div></div>
                     <div><div style={{ fontSize: 18, fontWeight: 800, color: C.green }}>{fmtMoney(funnelData.totalRevenue)}</div><div style={{ fontSize: 10, color: C.text3 }}>REVENUE</div></div>
                     <div><div style={{ fontSize: 18, fontWeight: 800, color: funnelData.roas >= 2 ? C.green : C.yellow }}>{funnelData.roas}x</div><div style={{ fontSize: 10, color: C.text3 }}>ROAS</div></div>
