@@ -343,12 +343,28 @@ const SquareService = {
         } catch { /* skip */ }
       }
 
+      // Look up service names from catalog
+      const serviceVarIds = [...new Set(bookings.flatMap(b => (b.appointmentSegments || []).map(s => s.serviceVariationId)).filter(Boolean))];
+      const serviceNameMap = {};
+      if (squareClient && serviceVarIds.length > 0) {
+        try {
+          const catRes = await squareClient.catalogApi.batchRetrieveCatalogObjects({ objectIds: serviceVarIds, includeRelatedObjects: true });
+          const objects = [...(catRes.result?.objects || []), ...(catRes.result?.relatedObjects || [])];
+          for (const obj of objects) {
+            if (obj.itemVariationData?.name) serviceNameMap[obj.id] = obj.itemVariationData.name;
+            if (obj.itemData?.name) serviceNameMap[obj.id] = obj.itemData.name;
+          }
+        } catch { /* catalog lookup failed — use IDs */ }
+      }
+
       return bookings.map(b => {
         const cust = customerMap[b.customerId] || {};
         const start = new Date(b.startAt);
+        const serviceVarId = b.appointmentSegments?.[0]?.serviceVariationId;
+        const serviceName = serviceNameMap[serviceVarId] || (serviceVarId?.length > 20 ? 'Service' : serviceVarId) || 'Service';
         return {
           id: b.id,
-          status: b.status, // ACCEPTED, PENDING, CANCELLED_BY_CUSTOMER, etc.
+          status: b.status,
           startAt: b.startAt,
           date: start.toISOString().split('T')[0],
           time: start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
@@ -357,7 +373,7 @@ const SquareService = {
           customerName: cust.name || 'Walk-in',
           customerPhone: cust.phone || null,
           customerEmail: cust.email || null,
-          serviceName: b.appointmentSegments?.[0]?.serviceVariationId || 'Service',
+          serviceName,
           teamMemberId: b.appointmentSegments?.[0]?.teamMemberId || null,
           locationId: b.locationId,
           note: b.customerNote || b.sellerNote || null,
