@@ -2997,7 +2997,7 @@ function LearnTab() {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {wavesPosts.map((p, i) => (
-              <ContentCard key={i} post={p} large={i === 0} />
+              <ContentCard key={i} post={p} />
             ))}
           </div>
         </div>
