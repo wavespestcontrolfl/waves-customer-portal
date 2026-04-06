@@ -165,17 +165,7 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
             const firstName = customer.first_name || 'there';
 
-            let body = `Hello ${firstName}! Your ${serviceType || 'Service'} with Waves is confirmed for ${day}, ${date} at ${time}.\n\n`;
-
-            if (techName) {
-              body += `Your technician will be ${techName}.\n\n`;
-            }
-
-            body += `A few things to help us serve you best:\n`;
-            body += `- Please ensure gates are unlocked\n`;
-            body += `- Secure pets during service\n`;
-            body += `- No need to be home for exterior-only service\n\n`;
-            body += `Need to reschedule? Just reply to this message.\nThank you for choosing Waves!`;
+            const body = `Hello ${firstName}! Your ${serviceType || 'service'} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`;
 
             const sent = await safeSend(customerId, customer.phone, body);
 
@@ -257,11 +247,7 @@ const AppointmentReminders = {
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
 
-            const body = `Hello ${firstName}! Just a heads up — your ${r.service_type} with Waves is coming up on ${day}, ${date} at ${time}.\n\n` +
-              `Quick reminders:\n` +
-              `- Unlock any gates to the backyard\n` +
-              `- Keep pets inside or secured during service\n\n` +
-              `Need to reschedule? Reply to this message and we'll find a better time.\nThank you for choosing Waves!`;
+            const body = `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. If you have any questions or need assistance, simply reply to this message.`;
 
             await safeSend(r.customer_id, customer.phone, body);
 
@@ -296,9 +282,7 @@ const AppointmentReminders = {
             const firstName = customer.first_name || 'there';
             const time = formatTime(apptTime);
 
-            const body = `Hello ${firstName}! Your ${r.service_type} with Waves is tomorrow at ${time}.\n\n` +
-              `Please make sure gates are unlocked and pets are secured before we arrive. No need to be home for exterior service.\n\n` +
-              `Need to make a last-minute change? Reply now and we'll adjust your schedule.\nThank you for choosing Waves!`;
+            const body = `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. If you have any questions or need assistance, simply reply to this message.`;
 
             await safeSend(r.customer_id, customer.phone, body);
 
