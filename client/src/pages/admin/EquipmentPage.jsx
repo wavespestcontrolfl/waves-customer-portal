@@ -20,6 +20,8 @@ const fmt = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minim
 const STATUS_COLORS = { active: D.green, maintenance: D.amber, retired: D.muted, pending: D.purple };
 const CAT_ICONS = { sprayer: '🔫', pump: '⚙️', reel: '🔄', spreader: '📦', dethatcher: '🌱', backpack: '🎒', vehicle: '🚐', other: '🔧' };
 
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+
 export default function EquipmentPage() {
   const [tab, setTab] = useState('equipment');
   const [toast, setToast] = useState('');
@@ -32,7 +34,7 @@ export default function EquipmentPage() {
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Equipment tracking, tank mixes, calibration, and service margins</div>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {[
           { key: 'equipment', label: 'Equipment' },
           { key: 'tank-mixes', label: 'Tank Mixes' },
@@ -42,6 +44,7 @@ export default function EquipmentPage() {
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
+            whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
           }}>{t.label}</button>
         ))}
       </div>
@@ -70,7 +73,7 @@ function EquipmentTab({ showToast }) {
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading equipment...</div>;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
       {items.map(e => {
         const hoursLeft = e.next_service_hours ? e.next_service_hours - (e.current_hours || 0) : null;
         const needsService = hoursLeft !== null && hoursLeft <= 10;
@@ -145,7 +148,8 @@ function TankMixTab({ showToast }) {
                 <button onClick={() => recalculate(m.id)} style={{ ...sBtn('transparent', D.muted), border: `1px solid ${D.border}`, padding: '4px 8px', fontSize: 10 }}>Recalc</button>
               </div>
             </div>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 400 : undefined }}>
               <thead><tr>
                 {['Product', 'Rate/1000sf', 'Oz/Tank', 'Cost'].map(h => <th key={h} style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '4px 8px', borderBottom: `1px solid ${D.border}22` }}>{h}</th>)}
               </tr></thead>
@@ -160,6 +164,7 @@ function TankMixTab({ showToast }) {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         );
       })}
@@ -192,8 +197,8 @@ function JobCostTab() {
             { label: 'Avg Cost/Job', value: fmt(summary.avgCost), color: D.amber },
             { label: 'Total Jobs Costed', value: summary.totalJobs || 0, color: D.white },
           ].map(s => (
-            <div key={s.label} style={{ ...sCard, flex: '1 1 140px', minWidth: 140, marginBottom: 0, textAlign: 'center' }}>
-              <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: s.color }}>{s.value}</div>
+            <div key={s.label} style={{ ...sCard, flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 140px', minWidth: isMobile ? 0 : 140, marginBottom: 0, textAlign: 'center' }}>
+              <div style={{ fontFamily: MONO, fontSize: isMobile ? 18 : 22, fontWeight: 700, color: s.color }}>{s.value}</div>
               <div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
             </div>
           ))}

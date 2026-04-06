@@ -42,6 +42,8 @@ const QUICK_NOTES = [
   'Customer not home',
 ];
 
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+
 /* ── Helpers ──────────────────────────────────────────── */
 
 function adminFetch(path, options = {}) {
@@ -522,8 +524,8 @@ function ProtocolPanel({ service, onClose }) {
 
   return (
     <div style={{
-      position: 'fixed', top: 0, right: 0, width: '60%', maxWidth: 600, minWidth: 380,
-      height: '100vh', background: D.card, borderLeft: `1px solid ${D.border}`,
+      position: 'fixed', top: 0, right: 0, width: isMobile ? '100%' : '60%', maxWidth: isMobile ? '100%' : 600, minWidth: isMobile ? 0 : 380,
+      height: '100vh', background: D.card, borderLeft: isMobile ? 'none' : `1px solid ${D.border}`,
       zIndex: 1000, display: 'flex', flexDirection: 'column',
       boxShadow: '-8px 0 32px rgba(0,0,0,0.3)',
     }}>
@@ -537,11 +539,11 @@ function ProtocolPanel({ service, onClose }) {
       </div>
 
       {/* Section tabs */}
-      <div style={{ display: 'flex', gap: 4, padding: '8px 12px', borderBottom: `1px solid ${D.border}`, overflowX: 'auto' }}>
+      <div style={{ display: 'flex', gap: 4, padding: '8px 12px', borderBottom: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {SECTIONS.map(s => (
           <button key={s.id} onClick={() => setActiveSection(s.id)} style={{
             padding: '6px 12px', borderRadius: 8, border: 'none', cursor: 'pointer', whiteSpace: 'nowrap',
-            fontSize: 11, fontWeight: 600,
+            fontSize: 11, fontWeight: 600, flexShrink: 0, minHeight: 44,
             background: activeSection === s.id ? D.teal : 'transparent',
             color: activeSection === s.id ? D.bg : D.muted,
           }}>{s.label}{s.count !== null ? ` (${s.count})` : ''}</button>
@@ -867,8 +869,8 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
     <>
       <div onClick={() => onClose(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 999 }} />
       <div style={{
-        position: 'fixed', top: 0, right: 0, bottom: 0, width: '60%', minWidth: 360, maxWidth: 640,
-        background: D.bg, borderLeft: `1px solid ${D.border}`, zIndex: 1000,
+        position: 'fixed', top: 0, right: 0, bottom: 0, width: isMobile ? '100%' : '60%', minWidth: isMobile ? 0 : 360, maxWidth: isMobile ? '100%' : 640,
+        background: D.bg, borderLeft: isMobile ? 'none' : `1px solid ${D.border}`, zIndex: 1000,
         overflowY: 'auto', display: 'flex', flexDirection: 'column',
         animation: 'slideIn 0.25s ease',
       }}>
@@ -1081,10 +1083,10 @@ function ProtocolReferenceTab() {
       <div style={{ fontSize: 14, color: D.muted }}>WaveGuard service protocols — visit-by-visit products, rates, costs, and SOPs for techs.</div>
 
       {/* Track selector */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', overflowX: isMobile ? 'auto' : undefined, WebkitOverflowScrolling: 'touch' }}>
         {programs?.lawn?.tracks?.map(t => (
           <button key={t.key} onClick={() => loadTrack(t.key)} style={{
-            padding: '10px 16px', borderRadius: 10, cursor: 'pointer', border: 'none',
+            padding: '10px 16px', borderRadius: 10, cursor: 'pointer', border: 'none', flexShrink: 0,
             background: selectedTrack === t.key ? D.teal : D.card,
             color: selectedTrack === t.key ? D.white : D.text,
             fontSize: 13, fontWeight: 600, transition: 'all 0.15s',
@@ -1414,11 +1416,11 @@ export default function SchedulePage() {
       {syncMsg && <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>{syncMsg}</div>}
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto' }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {SCHEDULE_TABS.map(t => (
           <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap',
+            fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
             background: activeTab === t.id ? D.teal : 'transparent',
             color: activeTab === t.id ? D.white : D.muted,
             transition: 'all 0.15s',

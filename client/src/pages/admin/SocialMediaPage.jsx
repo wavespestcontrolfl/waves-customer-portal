@@ -19,6 +19,8 @@ const sInput = { width: '100%', padding: '10px 12px', background: D.input, borde
 const PLATFORM_ICONS = { facebook: '📘', instagram: '📷', linkedin: '💼', gbp: '📍' };
 const PLATFORM_COLORS = { facebook: D.blue, instagram: D.purple, linkedin: D.blue, gbp: D.green };
 
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+
 export default function SocialMediaPage() {
   const [tab, setTab] = useState('compose');
   const [status, setStatus] = useState(null);
@@ -87,7 +89,7 @@ export default function SocialMediaPage() {
       )}
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {[
           { key: 'compose', label: 'Compose & Publish' },
           { key: 'rss', label: 'RSS Feed' },
@@ -99,6 +101,7 @@ export default function SocialMediaPage() {
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
+            whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
           }}>{t.label}</button>
         ))}
       </div>
@@ -160,7 +163,7 @@ function ComposeTab({ showToast, onPublished }) {
   };
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 16 }}>
       {/* Left — Input */}
       <div>
         <div style={sCard}>
@@ -298,7 +301,7 @@ function HistoryTab({ history, onRefresh }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{post.title}</div>
-                {post.source_url && <a href={post.source_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, textDecoration: 'none' }}>{post.source_url}</a>}
+                {post.source_url && <a href={post.source_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', maxWidth: isMobile ? 200 : 400 }}>{post.source_url}</a>}
               </div>
               <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                 <span style={sBadge(post.status === 'published' ? `${D.green}22` : `${D.red}22`, post.status === 'published' ? D.green : D.red)}>{post.status}</span>
@@ -311,7 +314,7 @@ function HistoryTab({ history, onRefresh }) {
                   p.success ? `${PLATFORM_COLORS[p.platform] || D.green}22` : p.skipped ? `${D.muted}22` : `${D.red}22`,
                   p.success ? PLATFORM_COLORS[p.platform] || D.green : p.skipped ? D.muted : D.red
                 )}>
-                  {PLATFORM_ICONS[p.platform] || '📌'} {p.platform}{p.location ? ` (${p.location})` : ''}: {p.success ? '✓' : p.skipped || p.error || '✗'}
+                  {PLATFORM_ICONS[p.platform] || '📌'} {p.platform}{p.location ? ` (${p.location})` : ''}: {p.success ? '✓' : p.skipped ? 'skipped' : (p.error ? (p.error.length > 30 ? p.error.substring(0, 30) + '...' : p.error) : '✗')}
                 </span>
               ))}
             </div>
@@ -422,7 +425,7 @@ function TemplatesTab({ showToast }) {
   return (
     <div>
       <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Post Templates</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
         {TEMPLATES.map(t => (
           <div key={t.id} onClick={() => setSelectedTemplate(selectedTemplate === t.id ? null : t.id)} style={{
             ...sCard, marginBottom: 0, cursor: 'pointer',

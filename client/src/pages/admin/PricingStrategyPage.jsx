@@ -17,6 +17,8 @@ const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius:
 const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
 const fmt = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : '—';
 
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+
 export default function PricingStrategyPage() {
   const [tab, setTab] = useState('money-model');
   const [dashboard, setDashboard] = useState(null);
@@ -44,11 +46,12 @@ export default function PricingStrategyPage() {
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Hormozi-style value engineering, offer architecture, and money model</div>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {tabs.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
+            whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
           }}>{t.label}</button>
         ))}
       </div>
@@ -86,8 +89,8 @@ function MoneyModelTab({ dashboard, loading }) {
           { label: 'LTV:CAC Ratio', value: d.ltvCacRatio ? `${d.ltvCacRatio.toFixed(1)}x` : '—', color: d.ltvCacRatio >= 3 ? D.green : d.ltvCacRatio >= 2 ? D.amber : D.red },
           { label: 'Monthly Recurring', value: fmt(d.mrr), color: D.teal },
         ].map(s => (
-          <div key={s.label} style={{ ...sCard, flex: '1 1 140px', minWidth: 140, marginBottom: 0, textAlign: 'center' }}>
-            <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: s.color }}>{s.value}</div>
+          <div key={s.label} style={{ ...sCard, flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 140px', minWidth: isMobile ? 0 : 140, marginBottom: 0, textAlign: 'center' }}>
+            <div style={{ fontFamily: MONO, fontSize: isMobile ? 18 : 22, fontWeight: 700, color: s.color }}>{s.value}</div>
             <div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
           </div>
         ))}
@@ -96,7 +99,7 @@ function MoneyModelTab({ dashboard, loading }) {
       {/* Hormozi Money Model Stages */}
       <div style={sCard}>
         <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>$100M Money Model — Revenue by Stage</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 12 }}>
           {[
             { stage: 'Stage I: Attraction', desc: 'First service / one-time', value: stages.attraction, color: D.blue, icon: '🧲' },
             { stage: 'Stage II: Core', desc: 'WaveGuard recurring', value: stages.core, color: D.teal, icon: '🔄' },
@@ -187,7 +190,7 @@ function ValueEquationTab() {
   );
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 20 }}>
       <div style={sCard}>
         <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 4 }}>Value Equation</div>
         <div style={{ fontSize: 12, color: D.muted, marginBottom: 20 }}>Value = (Dream Outcome × Likelihood) ÷ (Time Delay × Effort)</div>
@@ -252,7 +255,7 @@ function OfferBuilderTab({ showToast }) {
       </div>
 
       {/* Current WaveGuard tiers as offers */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
         {[
           { name: 'WaveGuard Bronze', services: 1, discount: '0%', price: '$49-89/mo', anchor: '$120+/mo', guarantee: 'Satisfaction Guarantee', bonuses: ['Digital Service Reports'] },
           { name: 'WaveGuard Silver', services: 2, discount: '10%', price: '$85-140/mo', anchor: '$190+/mo', guarantee: '100% Satisfaction + Free Re-treat', bonuses: ['Digital Reports', 'Priority Scheduling', 'Free Termite Inspection'] },
@@ -410,8 +413,8 @@ function LTVAnalysisTab() {
           { label: 'Best Channel', value: data.bestChannel || '—', color: D.teal },
           { label: '12mo Retention', value: data.retention12mo ? `${data.retention12mo}%` : '—', color: D.purple },
         ].map(s => (
-          <div key={s.label} style={{ ...sCard, flex: '1 1 130px', minWidth: 130, marginBottom: 0, textAlign: 'center' }}>
-            <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
+          <div key={s.label} style={{ ...sCard, flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 130px', minWidth: isMobile ? 0 : 130, marginBottom: 0, textAlign: 'center' }}>
+            <div style={{ fontFamily: MONO, fontSize: isMobile ? 16 : 20, fontWeight: 700, color: s.color }}>{s.value}</div>
             <div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
           </div>
         ))}

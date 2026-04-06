@@ -4,6 +4,7 @@ import GBPManagementPanel from './GBPManagement';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -46,7 +47,7 @@ function StatCard({ label, value, sub, color, highlight }) {
   return (
     <div style={{
       background: D.card, border: `1px solid ${highlight ? color : D.border}`, borderRadius: 12,
-      padding: '20px 24px', flex: '1 1 0', minWidth: 180,
+      padding: isMobile ? '14px 12px' : '20px 24px', flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 0', minWidth: isMobile ? 0 : 180,
     }}>
       <div style={{ color: D.muted, fontSize: 12, fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{label}</div>
       <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 28, fontWeight: 700, color: color || D.white }}>{value}</div>
@@ -75,7 +76,7 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
   const maxCount = breakdown ? Math.max(...Object.values(breakdown), 1) : 1;
   return (
     <div style={{
-      background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, flex: '1 1 220px', minWidth: 220,
+      background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? 14 : 20, flex: isMobile ? '1 1 100%' : '1 1 220px', minWidth: isMobile ? 0 : 220,
     }}>
       <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 4 }}>{loc.name}</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
@@ -212,7 +213,7 @@ function ReviewCard({ review, onReplySubmit }) {
             <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={() => { setEditing(true); setReplyText(review.reply); }} style={{
                 padding: '6px 14px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
-                borderRadius: 6, fontSize: 13, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
+                borderRadius: 6, fontSize: 13, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer', minHeight: 44,
               }}>Edit</button>
               <button onClick={handleAiReply} disabled={aiLoading} style={{
                 padding: '6px 14px', background: 'transparent', border: `1px solid ${D.teal}`, color: D.teal,
@@ -321,7 +322,7 @@ function GBPManagement() {
           <button key={l.id} onClick={() => { setSelectedLoc(l); setLocTab('info'); }} style={{
             padding: '12px 20px', borderRadius: 10, border: `1px solid ${selectedLoc?.id === l.id ? D.teal : D.border}`,
             background: selectedLoc?.id === l.id ? `${D.teal}15` : D.card, cursor: 'pointer',
-            display: 'flex', flexDirection: 'column', gap: 4, minWidth: 180,
+            display: 'flex', flexDirection: 'column', gap: 4, minWidth: isMobile ? 0 : 180, flex: isMobile ? '1 1 100%' : undefined,
           }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: selectedLoc?.id === l.id ? D.teal : D.white, fontFamily: 'DM Sans, sans-serif' }}>{l.name}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -341,7 +342,7 @@ function GBPManagement() {
       ) : (
         <>
           {/* Sub-tabs */}
-          <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
             {[
               { key: 'info', label: 'Location Info' },
               { key: 'hours', label: 'Hours' },
@@ -349,17 +350,17 @@ function GBPManagement() {
               { key: 'export', label: 'Export Reviews' },
             ].map(t => (
               <button key={t.key} onClick={() => setLocTab(t.key)} style={{
-                padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
+                padding: isMobile ? '10px 14px' : '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
                 background: locTab === t.key ? D.teal : 'transparent', color: locTab === t.key ? D.white : D.muted,
-                transition: 'all 0.15s', fontFamily: 'DM Sans, sans-serif',
+                transition: 'all 0.15s', fontFamily: 'DM Sans, sans-serif', whiteSpace: 'nowrap', minHeight: 44, flexShrink: 0,
               }}>{t.label}</button>
             ))}
           </div>
 
           {/* Location Info */}
           {locTab === 'info' && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-              <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 16 }}>
+              <div style={{ background: D.card, borderRadius: 12, padding: isMobile ? 14 : 20, border: `1px solid ${D.border}` }}>
                 <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16, fontFamily: 'DM Sans, sans-serif' }}>Business Information</div>
                 {[
                   { label: 'Business Name', value: loc.name },
@@ -1144,6 +1145,7 @@ function _PLACEHOLDER_REMOVED() {
 // =============================================================================
 // MAIN COMPONENT
 // =============================================================================
+
 export default function ReviewsPage() {
   const [activeTab, setActiveTab] = useState('reviews');
   const [data, setData] = useState(null);

@@ -251,6 +251,8 @@ function SectionLabel({ children }) {
   return <div style={{ fontFamily: C.mono, fontSize: 8, color: C.t3, textTransform: 'uppercase', letterSpacing: 2.5, marginBottom: 6 }}>{children}</div>;
 }
 
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+
 // ══════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ══════════════════════════════════════════════════════════════
@@ -401,12 +403,12 @@ export default function ReviewVelocityEngine() {
   return (
     <div style={{ fontFamily: C.sans, color: C.t1 }}>
       {/* Nav tabs */}
-      <div style={{ display: 'flex', gap: 2, background: C.surface, borderRadius: 8, padding: 3, border: `1px solid ${C.bdr}`, marginBottom: 20, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 2, background: C.surface, borderRadius: 8, padding: 3, border: `1px solid ${C.bdr}`, marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {tabs.map(t => (
           <button key={t.key} onClick={() => setPage(t.key)} style={{
             padding: '6px 14px', borderRadius: 6, fontFamily: C.mono, fontSize: 10, textTransform: 'uppercase',
             letterSpacing: 1.2, color: page === t.key ? C.acc : C.t3, background: page === t.key ? C.accG : 'none',
-            border: 'none', cursor: 'pointer', transition: 'all .15s', whiteSpace: 'nowrap', fontWeight: page === t.key ? 600 : 400,
+            border: 'none', cursor: 'pointer', transition: 'all .15s', whiteSpace: 'nowrap', fontWeight: page === t.key ? 600 : 400, flexShrink: 0, minHeight: 44,
           }}>
             {t.label}
             {t.count !== undefined && (
@@ -497,9 +499,9 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
           <div style={{ fontSize: 15, fontWeight: 700 }}>Review Health — All Locations</div>
           <SectionLabel>Last 30 Days</SectionLabel>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 12 }}>
           {kpis.map(k => (
-            <div key={k.label} style={{ background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: '16px 18px', position: 'relative', overflow: 'hidden' }}>
+            <div key={k.label} style={{ background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 18px', position: 'relative', overflow: 'hidden' }}>
               <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: k.accent }} />
               <div style={{ fontFamily: C.mono, fontSize: 28, fontWeight: 800, marginBottom: 2 }}>{k.value}</div>
               <div style={{ fontFamily: C.mono, fontSize: 9, color: C.t3, textTransform: 'uppercase', letterSpacing: 2 }}>{k.label}</div>
@@ -514,7 +516,7 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <div style={{ fontSize: 15, fontWeight: 700 }}>Google Business Profiles — Review Routing</div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 12 }}>
           {GBP_LOCATIONS.map(loc => {
             const locCusts = customers.filter(c => c.gbpId === loc.id);
             const locReviewed = locCusts.filter(c => c.stage === 'reviewed').length;
@@ -554,7 +556,7 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
       {/* Velocity by Service Type */}
       <div style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Velocity by Service Type</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)', gap: isMobile ? 8 : 10 }}>
           {svcTypes.map(svc => {
             const sc = customers.filter(c => c.lastSvc === svc);
             const rev = sc.filter(c => c.stage === 'reviewed').length;

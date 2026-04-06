@@ -16,7 +16,7 @@ function Badge({ children, color, small }) {
 }
 function StatCard({ label, value, color, sub, onClick }) {
   return (
-    <div onClick={onClick} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: '16px 20px', flex: '1 1 0', minWidth: 140, cursor: onClick ? 'pointer' : 'default', transition: 'border-color 0.15s' }}
+    <div onClick={onClick} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px', flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 0', minWidth: isMobile ? 0 : 140, cursor: onClick ? 'pointer' : 'default', transition: 'border-color 0.15s' }}
       onMouseEnter={e => { if (onClick) e.currentTarget.style.borderColor = color || D.teal; }} onMouseLeave={e => { e.currentTarget.style.borderColor = D.border; }}>
       <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>{label}</div>
       <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: color || D.white }}>{value}</div>
@@ -25,13 +25,14 @@ function StatCard({ label, value, color, sub, onClick }) {
   );
 }
 function TabBtn({ active, label, count, onClick, color }) {
-  return <button onClick={onClick} style={{ background: active ? D.card : 'transparent', border: active ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 8, padding: '8px 14px', color: active ? D.white : D.muted, fontSize: 12, cursor: 'pointer', fontWeight: active ? 600 : 400, transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 5 }}>{label}{count != null && <span style={{ background: `${color || D.teal}22`, color: color || D.teal, fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 9999 }}>{count}</span>}</button>;
+  return <button onClick={onClick} style={{ background: active ? D.card : 'transparent', border: active ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 8, padding: '8px 14px', color: active ? D.white : D.muted, fontSize: 12, cursor: 'pointer', fontWeight: active ? 600 : 400, transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44 }}>{label}{count != null && <span style={{ background: `${color || D.teal}22`, color: color || D.teal, fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 9999 }}>{count}</span>}</button>;
 }
 const inputStyle = { background: '#0f1923', border: `1px solid ${D.border}`, borderRadius: 6, padding: '6px 10px', color: D.text, fontSize: 12, fontFamily: 'inherit', outline: 'none' };
 const fmtD = (d) => d ? new Date(d).toLocaleDateString() : '—';
 const fmtM = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
 const fmtPct = (n) => n != null ? (n * 100).toFixed(2) + '%' : '—';
 
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 const PRIORITY_COLORS = { high: D.red, medium: D.amber, low: D.teal };
 const STATUS_COLORS = { upcoming: D.blue, prepared: D.amber, filed: D.green, paid: D.green, late: D.red, new: D.teal, reviewed: D.amber, acted_on: D.green, dismissed: D.muted };
 const FILING_STATUS_OPTIONS = ['upcoming', 'prepared', 'filed', 'paid', 'late'];
@@ -45,7 +46,7 @@ function TaxRatesTab() {
   return (
     <div>
       <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 12 }}>Florida Sales Tax Rates by County</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
         {rates.filter(r => r.active).map(r => (
           <div key={r.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: '14px 16px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -628,8 +629,8 @@ function MileageTab() {
       {entries.length === 0 ? (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 40, textAlign: 'center', color: D.muted }}>No mileage entries yet. Sync from Bouncie or add manually.</div>
       ) : (
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, overflow: 'hidden', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 600 : undefined }}>
             <thead><tr>{['Date', 'From', 'To', 'Miles', 'Purpose', 'Deduction', 'Source'].map(h => <th key={h} style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${D.border}` }}>{h}</th>)}</tr></thead>
             <tbody>
               {entries.slice(0, 50).map((e, i) => (
@@ -694,7 +695,7 @@ function RevenueTab() {
       {quarterly && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, marginBottom: 16 }}>
           <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Quarterly Estimated Tax Payment — {quarterly.quarter}</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 8, fontSize: 12 }}>
             {[
               ['YTD Revenue', fmtM(quarterly.ytdRevenue)],
               ['YTD Expenses', fmtM(quarterly.ytdExpenses)],
@@ -778,7 +779,7 @@ export default function TaxPage() {
       )}
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 16, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         <TabBtn active={activeTab === 'overview'} label="Overview" onClick={() => setActiveTab('overview')} />
         <TabBtn active={activeTab === 'rates'} label="Tax Rates" onClick={() => setActiveTab('rates')} />
         <TabBtn active={activeTab === 'services'} label="Taxability" onClick={() => setActiveTab('services')} />

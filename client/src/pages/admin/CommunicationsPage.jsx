@@ -5,6 +5,7 @@ import CallRecordingsPanel from './CallRecordingsPanel';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -89,7 +90,7 @@ function StatCard({ label, value, color }) {
   return (
     <div style={{
       background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
-      padding: '16px 20px', flex: '1 1 0', minWidth: 140,
+      padding: isMobile ? '12px 10px' : '16px 20px', flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 0', minWidth: isMobile ? 0 : 140,
     }}>
       <div style={{ color: D.muted, fontSize: 11, fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>{label}</div>
       <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 26, fontWeight: 700, color: color || D.white }}>{value}</div>
@@ -291,7 +292,7 @@ function CallLogTab() {
           { label: 'Voicemail', value: voicemail, color: D.amber },
           { label: 'Missed', value: missed, color: D.red },
         ].map((s, i) => (
-          <div key={i} style={{ flex: '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center' }}>
+          <div key={i} style={{ flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center', minWidth: 0 }}>
             <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s.label}</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
           </div>
@@ -302,7 +303,7 @@ function CallLogTab() {
       <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}`, marginBottom: 16 }}>
         <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: '0 0 14px' }}>Make a Call</h2>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12, marginBottom: 12 }}>
           <div>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>From</label>
             <select
@@ -630,7 +631,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
             {group.group}
             <span style={{ fontSize: 11, fontWeight: 500, color: D.muted, marginLeft: 8 }}>({group.numbers.length})</span>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
             {group.numbers.map((n, i) => {
               const ns = numberStats[n.number];
               return (
@@ -824,13 +825,13 @@ export default function CommunicationsPage() {
       </div>
 
       {/* --- Tabs --- */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'recordings', label: 'Call Recordings' }, { key: 'numbers', label: 'Phone Numbers' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
           <button key={t.key} onClick={() => setCommsTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
             color: commsTab === t.key ? D.white : D.muted,
-            transition: 'all 0.15s',
+            transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
           }}>{t.label}</button>
         ))}
       </div>
@@ -849,7 +850,7 @@ export default function CommunicationsPage() {
           { label: 'Review Requests', value: channelStats.find(c => c.type === 'review_request')?.sent || 0, color: '#8b5cf6' },
           { label: 'Estimates', value: channelStats.find(c => c.type === 'estimate')?.sent || 0, color: '#3b82f6' },
         ].map((s, i) => (
-          <div key={i} style={{ flex: '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center' }}>
+          <div key={i} style={{ flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center', minWidth: 0 }}>
             <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s.label}</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
           </div>

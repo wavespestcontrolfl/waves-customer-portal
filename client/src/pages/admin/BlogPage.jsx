@@ -22,8 +22,10 @@ function adminPut(path, body) {
   }).then(r => r.json());
 }
 
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+
 function Card({ children, style }) {
-  return <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24, ...style }}>{children}</div>;
+  return <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? 14 : 24, ...style }}>{children}</div>;
 }
 
 function seoColor(score) {
@@ -248,7 +250,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               background: D.bg, color: D.white, fontSize: 15, fontWeight: 600,
             }} />
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : '1fr 1fr 1fr 1fr', gap: 10 }}>
             <div>
               <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Keyword</label>
               <input value={editing.keyword || ''} onChange={e => setEditing(prev => ({ ...prev, keyword: e.target.value }))} style={{
@@ -629,14 +631,14 @@ function GenerateTab({ onGenerated }) {
   const suggestions = SUGGESTIONS[contentType] || SUGGESTIONS.blog_post;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 20, alignItems: 'start' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 340px', gap: 20, alignItems: 'start' }}>
       {/* Left — main form */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
         {/* A) Content type selector */}
         <Card>
           <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Content Type</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, 1fr)', gap: 10 }}>
             {CONTENT_TYPES.map(ct => (
               <div key={ct.id} onClick={() => setContentType(ct.id)} style={{
                 padding: '14px 16px', borderRadius: 10, cursor: 'pointer', transition: 'all 0.15s',
@@ -812,13 +814,13 @@ export default function BlogPage() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto' }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: tab === t.key ? D.teal : 'transparent',
             color: tab === t.key ? D.white : D.muted,
-            transition: 'all 0.15s', whiteSpace: 'nowrap',
+            transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
           }}>
             {t.label}
             {counts[statusMap[t.key]] != null && (
