@@ -791,35 +791,42 @@ function EstimateToolView() {
           {/* Send Estimate Form */}
           {showSendForm && (
             <div style={{ ...sPanel, borderColor: C.teal }}>
-              <div style={sPanelTitle}>Send Estimate to Customer</div>
-              {/* Customer search */}
-              <Field label="Search Existing Customer">
-                <input type="text" value={sendSearch} onChange={e => { setSendSearch(e.target.value); searchSendCustomers(e.target.value); }} placeholder="Search by name, phone, or email..." style={sInput} />
+              <div style={sPanelTitle}>Send Estimate</div>
+              <Field label="Customer Phone Number">
+                <input type="tel" value={form.customerPhone || ''} onChange={async (e) => {
+                  const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+                  set('customerPhone', digits);
+                  if (digits.length >= 7) {
+                    try {
+                      const r = await fetch(`/api/admin/customers?search=${encodeURIComponent(digits)}&limit=1`, { headers: authHeaders });
+                      if (r.ok) {
+                        const d = await r.json();
+                        const c = (d.customers || d)?.[0];
+                        if (c) {
+                          set('customerName', `${c.firstName} ${c.lastName}`);
+                          set('customerEmail', c.email || '');
+                        }
+                      }
+                    } catch { /* ignore */ }
+                  }
+                }} placeholder="9415551234" style={{ ...sInput, fontSize: 20, fontWeight: 700, letterSpacing: 1 }} />
               </Field>
-              {sendCustomerResults.length > 0 && (
-                <div style={{ marginBottom: 12, maxHeight: 150, overflowY: 'auto' }}>
-                  {sendCustomerResults.map(c => (
-                    <div key={c.id} onClick={() => {
-                      set('customerName', `${c.firstName} ${c.lastName}`);
-                      set('customerPhone', c.phone || '');
-                      set('customerEmail', c.email || '');
-                      setSendCustomerResults([]);
-                      setSendSearch(`${c.firstName} ${c.lastName}`);
-                    }} style={{ padding: '8px 12px', cursor: 'pointer', borderRadius: 6, marginBottom: 2, background: C.input, fontSize: 13, color: C.white }}>
-                      <strong>{c.firstName} {c.lastName}</strong>
-                      <span style={{ color: C.gray, marginLeft: 8 }}>{c.phone || ''} {c.email ? `· ${c.email}` : ''}</span>
-                    </div>
-                  ))}
+              {form.customerName && (
+                <div style={{ fontSize: 14, color: C.green, marginBottom: 12, padding: '8px 12px', background: 'rgba(16,185,129,0.1)', borderRadius: 8 }}>
+                  Found: <strong>{form.customerName}</strong>{form.customerEmail ? ` · ${form.customerEmail}` : ''}
                 </div>
               )}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-                <Field label="Customer Name"><input type="text" value={form.customerName || ''} onChange={e => set('customerName', e.target.value)} placeholder="Full name" style={sInput} /></Field>
-                <Field label="Phone"><input type="tel" value={form.customerPhone || ''} onChange={e => set('customerPhone', e.target.value)} placeholder="(941) 555-1234" style={sInput} /></Field>
-              </div>
-              <Field label="Email"><input type="email" value={form.customerEmail || ''} onChange={e => set('customerEmail', e.target.value)} placeholder="email@example.com" style={sInput} /></Field>
+              {!form.customerName && form.customerPhone?.length >= 7 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <Field label="Name"><input type="text" value={form.customerName || ''} onChange={e => set('customerName', e.target.value)} placeholder="Full name" style={sInput} /></Field>
+                    <Field label="Email"><input type="email" value={form.customerEmail || ''} onChange={e => set('customerEmail', e.target.value)} placeholder="email@example.com" style={sInput} /></Field>
+                  </div>
+                </div>
+              )}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <button style={{ ...sBtn(C.green, 'white'), fontSize: 14, padding: '14px 20px' }} onClick={async () => {
-                  if (!form.customerPhone && !form.customerEmail) { alert('Enter a phone number or email.'); return; }
+                  if (!form.customerPhone) { alert('Enter a phone number.'); return; }
                   if (!estimate) { doGenerate(); }
                   await doSave();
                   setTimeout(() => doSend(), 500);
