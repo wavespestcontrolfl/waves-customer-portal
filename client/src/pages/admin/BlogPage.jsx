@@ -254,10 +254,15 @@ function PostEditor({ post, onBack, onUpdate }) {
             </div>
             <div>
               <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Tag</label>
-              <input value={editing.tag || ''} readOnly style={{
+              <select value={editing.tag || ''} onChange={e => setEditing(prev => ({ ...prev, tag: e.target.value }))} style={{
                 width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
-                background: D.bg, color: D.muted, fontSize: 12,
-              }} />
+                background: D.bg, color: D.text, fontSize: 12, cursor: 'pointer',
+              }}>
+                <option value="">Select tag...</option>
+                {['Ants','Bed Bugs','Cockroaches','Fleas','Flying Insects','Insects','Lawn Care','Lawn Pests','Mosquitoes','Pest Control','Rodents','Spiders','Termites'].map(t => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
             </div>
             <div>
               <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Status</label>
@@ -302,6 +307,14 @@ function PostEditor({ post, onBack, onUpdate }) {
             )}
           </div>
         </div>
+
+        {/* Featured Image */}
+        {editing.featured_image_url && (
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Featured Image (AI-generated)</label>
+            <img src={editing.featured_image_url} alt="Featured" style={{ width: '100%', maxHeight: 300, objectFit: 'cover', borderRadius: 10, border: `1px solid ${D.border}` }} />
+          </div>
+        )}
 
         {editing.content ? (
           <textarea value={editing.content} onChange={e => setEditing(prev => ({ ...prev, content: e.target.value }))} style={{

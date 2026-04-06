@@ -444,24 +444,97 @@ Then a blank line, then the full content.`
       logger.warn(`Content generation AI unavailable: ${aiErr.message}`);
     }
 
+    // Auto-detect tag from content
+    const TAG_RULES = [
+      { tag: 'Lawn Pests', patterns: ['chinch bug', 'grub', 'sod webworm', 'mole cricket', 'armyworm', 'lawn pest'] },
+      { tag: 'Lawn Care', patterns: ['lawn care', 'fertiliz', 'mowing', 'irrigation', 'turf', 'grass', 'aeration', 'weed control', 'herbicide', 'st. augustine', 'sod'] },
+      { tag: 'Termites', patterns: ['termite', 'wdo', 'wood-destroying', 'subterranean', 'drywood'] },
+      { tag: 'Mosquitoes', patterns: ['mosquito'] },
+      { tag: 'Rodents', patterns: ['rodent', 'rat', 'mouse', 'mice'] },
+      { tag: 'Ants', patterns: ['ant ', 'ants', 'fire ant', 'carpenter ant', 'ghost ant'] },
+      { tag: 'Cockroaches', patterns: ['cockroach', 'roach'] },
+      { tag: 'Bed Bugs', patterns: ['bed bug', 'bedbug'] },
+      { tag: 'Spiders', patterns: ['spider', 'arachnid', 'brown recluse', 'black widow'] },
+      { tag: 'Fleas', patterns: ['flea', 'tick'] },
+      { tag: 'Flying Insects', patterns: ['fly ', 'flies', 'wasp', 'bee ', 'hornet', 'yellow jacket', 'flying insect'] },
+      { tag: 'Insects', patterns: ['insect', 'bug'] },
+      { tag: 'Pest Control', patterns: ['pest control', 'exterminator', 'pest management', 'ipm'] },
+    ];
+
+    const combined = `${title} ${keyword} ${topic} ${(content || '').substring(0, 500)}`.toLowerCase();
+    let autoTag = null;
+    for (const rule of TAG_RULES) {
+      if (rule.patterns.some(p => combined.includes(p))) {
+        autoTag = rule.tag;
+        break;
+      }
+    }
+    if (!autoTag && contentType === 'pest_pressure') autoTag = 'Pest Control';
+
+    // Generate featured image via Gemini
+    let featuredImageUrl = null;
+    if (process.env.GEMINI_API_KEY && content) {
+      try {
+        const imgPrompt = `Create a high-quality, photorealistic hero image for a pest control blog article.
+Title: "${title}"
+Topic: ${keyword || topic}
+Style: Bright, professional, clean. Southwest Florida setting (palm trees, tropical landscaping, sunny).
+DO NOT include any text, words, or watermarks in the image.
+The image should feel like a professional stock photo that could be a WordPress featured image.
+Landscape orientation, 1200x630px aspect ratio.`;
+
+        const imgRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${process.env.GEMINI_API_KEY}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: imgPrompt }] }],
+              generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+            }),
+          }
+        );
+        if (imgRes.ok) {
+          const imgData = await imgRes.json();
+          const imagePart = imgData.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+          if (imagePart?.inlineData) {
+            featuredImageUrl = `data:${imagePart.inlineData.mimeType || 'image/png'};base64,${imagePart.inlineData.data}`;
+            logger.info(`[content] Generated featured image for "${title}"`);
+          }
+        }
+      } catch (imgErr) {
+        logger.warn(`[content] Featured image generation failed: ${imgErr.message}`);
+      }
+    }
+
     // Create the blog post record
     const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 80);
     const wordCount = content ? content.split(/\s+/).filter(Boolean).length : 0;
 
-    const [post] = await db('blog_posts').insert({
+    const insertData = {
       title,
       keyword,
       meta_description: metaDesc,
       slug,
       city: targetCity,
-      tag: contentType === 'pest_pressure' ? 'Pest Control' : null,
+      tag: autoTag,
       status: content ? 'draft' : 'queued',
       content,
       word_count: wordCount,
       source: 'ai_generated',
-    }).returning('*');
+    };
+    if (featuredImageUrl) insertData.featured_image_url = featuredImageUrl;
 
-    res.json({ post, wordCount, contentType, hasContent: !!content });
+    let post;
+    try {
+      [post] = await db('blog_posts').insert(insertData).returning('*');
+    } catch (insErr) {
+      // featured_image_url column may not exist
+      delete insertData.featured_image_url;
+      [post] = await db('blog_posts').insert(insertData).returning('*');
+    }
+
+    res.json({ post, wordCount, contentType, hasContent: !!content, tag: autoTag, hasImage: !!featuredImageUrl });
   } catch (err) { next(err); }
 });
 
