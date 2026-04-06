@@ -32,6 +32,7 @@ const RatePage = lazy(() => import('./pages/RatePage'));
 const AdminSocialMediaPage = lazy(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazy(() => import('./pages/admin/TaxPage'));
 const AdminPricingPage = lazy(() => import('./pages/admin/PricingStrategyPage'));
+const AdminLawnAssessmentPage = lazy(() => import('./pages/admin/LawnAssessmentPanel'));
 import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
@@ -105,6 +106,7 @@ export default function App() {
             <Route path="social-media" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social media...</div>}><AdminSocialMediaPage /></Suspense>} />
             <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
             <Route path="pricing" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><AdminPricingPage /></Suspense>} />
+            <Route path="lawn-assessment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn assessment...</div>}><AdminLawnAssessmentPage /></Suspense>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
           </Route>

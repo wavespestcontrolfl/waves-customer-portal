@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const lawnAssessment = require('../services/lawn-assessment');
 
 router.use(authenticate);
 
@@ -96,6 +97,60 @@ router.get('/:customerId/history', async (req, res, next) => {
         overallScore: row.overall_score,
         notes: row.notes,
       })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// GET /api/lawn-health — AI assessment data for logged-in customer
+// Returns { baseline, latest, history, hasLawnService }
+// =========================================================================
+router.get('/', async (req, res, next) => {
+  try {
+    const customerId = req.customerId;
+
+    // Check if customer has any lawn care service records
+    const lawnCareRecord = await db('service_records')
+      .where({ customer_id: customerId })
+      .andWhere('service_type', 'ilike', '%lawn care%')
+      .first();
+
+    if (!lawnCareRecord) {
+      return res.json({ hasLawnService: false, baseline: null, latest: null, history: [] });
+    }
+
+    const baseline = await lawnAssessment.getBaseline(customerId);
+    const history = await lawnAssessment.getCustomerHistory(customerId);
+
+    const latest = history.length ? history[history.length - 1] : null;
+
+    // Format for customer display — use seasonally adjusted scores and include photo URLs
+    const formatAssessment = (a) => {
+      if (!a) return null;
+      return {
+        id: a.id,
+        serviceDate: a.service_date,
+        season: a.season,
+        turfDensity: a.turf_density,
+        weedSuppression: a.weed_suppression,
+        colorHealth: a.color_health,
+        fungusControl: a.fungus_control,
+        thatchLevel: a.thatch_level,
+        observations: a.observations,
+        isBaseline: a.is_baseline,
+        confirmedByTech: a.confirmed_by_tech,
+        photos: a.photos || [],
+        adjustedScores: a.adjusted_scores,
+      };
+    };
+
+    res.json({
+      hasLawnService: true,
+      baseline: formatAssessment(baseline),
+      latest: formatAssessment(latest),
+      history: history.map(formatAssessment),
     });
   } catch (err) {
     next(err);
