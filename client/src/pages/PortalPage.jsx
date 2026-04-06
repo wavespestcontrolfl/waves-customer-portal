@@ -1242,11 +1242,12 @@ function DashboardTab({ customer, onSwitchTab }) {
                   Communication Timeline
                 </div>
                 {[
+                  { icon: '📲', label: '72-hour reminder', desc: 'SMS 3 days before your visit', done: diffHrs <= 72, active: diffHrs <= 72 && diffHrs > 24 },
                   { icon: '📲', label: '24-hour reminder', desc: 'SMS the day before your visit', done: diffHrs <= 24, active: diffHrs <= 24 && diffHrs > 1 },
                   { icon: '🚐', label: 'Tech en route alert', desc: 'Live GPS tracking via Bouncie', done: false, active: isToday },
                   { icon: '✅', label: 'Service complete summary', desc: 'Products applied + tech notes', done: false, active: false },
                 ].map((step, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: i < 2 ? 10 : 0 }}>
+                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: i < 3 ? 10 : 0 }}>
                     <div style={{
                       width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
                       background: step.done ? `${B.green}18` : step.active ? `${B.orange}18` : B.grayLight,
@@ -1657,11 +1658,12 @@ function ScheduleTab({ customer }) {
                 You'll hear from us
               </div>
               {[
+                { icon: '📲', label: '72-hour SMS reminder', time: '3 days before your visit', done: nextUp.diffHrs <= 72 },
                 { icon: '📲', label: '24-hour SMS reminder', time: 'Day before your visit', done: nextUp.diffHrs <= 24 },
                 { icon: '🚐', label: 'Tech en route', time: '~1 hour before arrival · Live Bouncie GPS', done: false, active: nextUp.isToday },
                 { icon: '✅', label: 'Service complete report', time: 'Products used + tech notes texted to you', done: false },
               ].map((step, i) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < 2 ? 8 : 0 }}>
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < 3 ? 8 : 0 }}>
                   <div style={{
                     width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
                     background: step.done ? `${B.green}18` : step.active ? `${B.orange}18` : B.grayLight,
@@ -1759,6 +1761,7 @@ function ScheduleTab({ customer }) {
           <div style={{ padding: '6px 20px 16px' }}>
             <div style={{ fontSize: 11, color: B.grayMid, padding: '10px 0 6px' }}>Messages sent to {customer.phone}</div>
             {[
+              { key: 'serviceReminder72h', label: '72-Hour Appointment Reminder', desc: 'Get a text 3 days before every visit', icon: '📲' },
               { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: '📲' },
               { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: '🚐' },
               { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: '✅' },
