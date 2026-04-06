@@ -226,13 +226,10 @@ const TwilioService = {
 
     const productList = products.map(p => p.product_name).join(', ');
 
-    const body = `✅ Waves Pest Control — Service Complete\n\n` +
-      `Hi ${customer.first_name}! ${service.tech_name} just completed your ${service.service_type}.\n\n` +
-      `Products applied: ${productList}\n\n` +
-      `View full details and tech notes in your customer portal. ` +
-      `Questions? Reply to this text or call (941) 555-0100.`;
+    const portalUrl = 'https://portal.wavespestcontrol.com';
+    const body = `Hello ${customer.first_name}! Your service report can be found under Documents > Visit Reports:\n${portalUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
 
-    return this.sendSMS(customer.phone, body);
+    return this.sendSMS(customer.phone, body, { customerId: customerId, messageType: 'service_complete' });
   },
 
   /**

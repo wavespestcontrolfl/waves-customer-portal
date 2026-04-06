@@ -300,6 +300,30 @@ router.put('/:id/status', async (req, res, next) => {
         updates.actual_duration_minutes = Math.round((Date.now() - new Date(svc.check_in_time)) / 60000);
       }
 
+      // Create service_record from completed scheduled_service
+      try {
+        const customer = await db('customers').where({ id: svc.customer_id }).first();
+        const [serviceRecord] = await db('service_records').insert({
+          customer_id: svc.customer_id,
+          technician_id: svc.technician_id,
+          service_date: svc.scheduled_date,
+          service_type: svc.service_type,
+          status: 'completed',
+          technician_notes: notes || null,
+        }).returning('*');
+
+        // Send Visit Report SMS to customer
+        if (customer?.phone) {
+          const firstName = customer.first_name || 'there';
+          const portalUrl = 'https://portal.wavespestcontrol.com';
+          await TwilioService.sendSMS(customer.phone,
+            `Hello ${firstName}! Your service report can be found under Documents > Visit Reports:\n${portalUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`,
+            { customerId: svc.customer_id, messageType: 'service_complete' }
+          );
+          logger.info(`[schedule] Visit report SMS sent to ${firstName} for ${svc.service_type}`);
+        }
+      } catch (e) { logger.error(`[schedule] Service record/SMS failed: ${e.message}`); }
+
       // Schedule a review request SMS for 2 hours after completion
       scheduleReviewRequest(svc);
     }
