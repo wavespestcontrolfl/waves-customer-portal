@@ -27,6 +27,9 @@ exports.up = async function (knex) {
   });
 
   // Referrals: every referral submission
+  if (await knex.schema.hasTable('referrals')) {
+    // Table already exists from migration 007 — skip creation
+  } else {
   await knex.schema.createTable('referrals', t => {
     t.increments('id').primary();
     t.string('referral_first_name', 100).notNullable();
@@ -53,6 +56,7 @@ exports.up = async function (knex) {
     t.index('status');
     t.index('promoter_id');
   });
+  } // end if/else for referrals table
 
   // Click log
   await knex.schema.createTable('referral_clicks', t => {

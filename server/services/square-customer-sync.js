@@ -108,14 +108,19 @@ const SquareCustomerSync = {
             const loc = resolveLocation(city);
             const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
+            // Skip customers with no phone (phone is NOT NULL in DB)
+            if (!phone) { skipped++; continue; }
+
             await db('customers').insert({
-              first_name: firstName || company || 'Unknown',
-              last_name: lastName || '',
-              phone: phone || null,
+              first_name: (firstName || company || 'Unknown').substring(0, 100),
+              last_name: (lastName || '').substring(0, 100),
+              phone,
               email: email || null,
-              address_line1: addressLine1,
-              city, state, zip,
-              company_name: company,
+              address_line1: (addressLine1 || '').substring(0, 255),
+              city: (city || '').substring(0, 100),
+              state: state.substring(0, 2),
+              zip: (zip || '').substring(0, 10),
+              company_name: company ? company.substring(0, 200) : null,
               square_customer_id: sq.id,
               referral_code: code,
               pipeline_stage: 'active_customer',
