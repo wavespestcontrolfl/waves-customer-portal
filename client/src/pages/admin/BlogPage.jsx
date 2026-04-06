@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', orange: '#f97316', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
@@ -762,11 +762,13 @@ function GenerateTab({ onGenerated }) {
 // =========================================================================
 // MAIN PAGE
 // =========================================================================
+const ContentCalendar = lazy(() => import('./ContentCalendar'));
 const TABS = [
   { key: 'generate', label: 'Generate' },
   { key: 'published', label: 'Published' },
   { key: 'drafts', label: 'Drafts' },
-  { key: 'queued', label: 'Calendar' },
+  { key: 'queued', label: 'Queued' },
+  { key: 'calendar', label: 'Calendar' },
   { key: 'ideas', label: 'Ideas' },
   { key: 'audit', label: 'Audit' },
 ];
@@ -830,6 +832,8 @@ export default function BlogPage() {
         <GenerateTab onGenerated={() => setTab('drafts')} />
       ) : tab === 'audit' ? (
         <AuditTab />
+      ) : tab === 'calendar' ? (
+        <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading calendar...</div>}><ContentCalendar /></Suspense>
       ) : (
         <PostList status={statusMap[tab]} onSelectPost={setSelectedPost} />
       )}

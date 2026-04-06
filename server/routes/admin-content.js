@@ -538,4 +538,71 @@ Landscape orientation, 1200x630px aspect ratio.`;
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// CONTENT CALENDAR + SCHEDULING
+// =========================================================================
+
+const ContentScheduler = require('../services/content-scheduler');
+
+// GET /api/admin/content/calendar?start=2026-04-01&end=2026-04-30
+router.get('/calendar', async (req, res, next) => {
+  try {
+    const { start, end } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'start and end query params required' });
+    const calendar = await ContentScheduler.getCalendar(start, end);
+    res.json({ calendar, count: calendar.length });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/content/schedule-blog/:id — schedule a blog post for auto-publish
+router.post('/schedule-blog/:id', async (req, res, next) => {
+  try {
+    const { publishAt, autoShareSocial } = req.body;
+    if (!publishAt) return res.status(400).json({ error: 'publishAt is required' });
+    const post = await ContentScheduler.scheduleBlogPost(req.params.id, publishAt, autoShareSocial !== false);
+    res.json({ success: true, post });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/content/schedule-social — schedule a new social media post
+router.post('/schedule-social', async (req, res, next) => {
+  try {
+    const { title, description, link, platforms, scheduledFor, customContent } = req.body;
+    if (!title || !scheduledFor) return res.status(400).json({ error: 'title and scheduledFor are required' });
+    const post = await ContentScheduler.scheduleSocialPost({ title, description, link, platforms, scheduledFor, customContent });
+    res.json({ success: true, post });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/admin/content/schedule/:id — unschedule a post (blog or social)
+router.delete('/schedule/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    // Try blog first
+    const blog = await db('blog_posts').where('id', id).first();
+    if (blog) {
+      await db('blog_posts').where('id', id).update({
+        scheduled_publish_at: null,
+        publish_status: null,
+        updated_at: new Date(),
+      });
+      return res.json({ success: true, type: 'blog', id });
+    }
+
+    // Try social
+    const social = await db('social_media_posts').where('id', id).first();
+    if (social) {
+      await db('social_media_posts').where('id', id).update({
+        scheduled_for: null,
+        publish_status: null,
+        status: 'draft',
+      });
+      return res.json({ success: true, type: 'social', id });
+    }
+
+    return res.status(404).json({ error: 'Post not found' });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

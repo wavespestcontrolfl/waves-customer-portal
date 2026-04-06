@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
+const ContentCalendar = lazy(() => import('./ContentCalendar'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', blue: '#2563eb', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
@@ -86,10 +87,13 @@ export default function SocialMediaPage() {
       )}
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
         {[
           { key: 'compose', label: 'Compose & Publish' },
           { key: 'rss', label: 'RSS Feed' },
+          { key: 'calendar', label: 'Calendar' },
+          { key: 'analytics', label: 'Analytics' },
+          { key: 'templates', label: 'Templates' },
           { key: 'history', label: 'Post History' },
         ].map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
@@ -101,6 +105,9 @@ export default function SocialMediaPage() {
 
       {tab === 'compose' && <ComposeTab showToast={showToast} onPublished={loadData} />}
       {tab === 'rss' && <RSSTab showToast={showToast} onPublished={loadData} />}
+      {tab === 'calendar' && <CalendarTab />}
+      {tab === 'analytics' && <AnalyticsTab />}
+      {tab === 'templates' && <TemplatesTab showToast={showToast} />}
       {tab === 'history' && <HistoryTab history={history} onRefresh={loadData} />}
 
       <div style={{
@@ -311,6 +318,134 @@ function HistoryTab({ history, onRefresh }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// ── Calendar Tab ──
+function CalendarTab() {
+  return <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading calendar...</div>}><ContentCalendar /></Suspense>;
+}
+
+// ── Analytics Tab ──
+function AnalyticsTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    adminFetch('/admin/social-media/analytics').then(setData).catch(() => {}).finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading analytics...</div>;
+  if (!data) return <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No analytics data yet</div>;
+
+  const { byPlatform = {}, weeklyTrend = [], summary = {} } = data;
+
+  return (
+    <div>
+      {/* Summary */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        {[
+          { label: 'Total Posts', value: summary.totalPosts || 0, color: D.white },
+          { label: 'Published', value: summary.published || 0, color: D.green },
+          { label: 'Success Rate', value: `${summary.successRate || 0}%`, color: summary.successRate >= 80 ? D.green : D.amber },
+          { label: 'Posts/Week', value: summary.postsPerWeek || 0, color: D.teal },
+          { label: 'Most Active', value: summary.mostActivePlatform || '—', color: D.purple },
+        ].map(s => (
+          <div key={s.label} style={{ ...sCard, flex: '1 1 120px', minWidth: 120, marginBottom: 0, textAlign: 'center' }}>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* By Platform */}
+      <div style={{ ...sCard, marginBottom: 16 }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Performance by Platform</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
+          {Object.entries(byPlatform).map(([platform, stats]) => (
+            <div key={platform} style={{ padding: 14, background: D.input, borderRadius: 8, textAlign: 'center' }}>
+              <div style={{ fontSize: 18, marginBottom: 4 }}>{PLATFORM_ICONS[platform] || '📌'}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.white, textTransform: 'capitalize' }}>{platform}</div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 8, fontSize: 11 }}>
+                <span style={{ color: D.green }}>{stats.success} ✓</span>
+                <span style={{ color: D.red }}>{stats.failed} ✗</span>
+                <span style={{ color: D.muted }}>{stats.total} total</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Weekly Trend */}
+      {weeklyTrend.length > 0 && (
+        <div style={{ ...sCard }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Weekly Posting Trend</div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 100 }}>
+            {weeklyTrend.map((w, i) => {
+              const max = Math.max(...weeklyTrend.map(x => x.total), 1);
+              const h = Math.max(4, (w.total / max) * 80);
+              return (
+                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                  <div style={{ fontSize: 9, color: D.muted }}>{w.total}</div>
+                  <div style={{ width: '100%', height: h, background: w.published > 0 ? D.green : D.border, borderRadius: 3 }} />
+                  <div style={{ fontSize: 8, color: D.muted, transform: 'rotate(-45deg)', transformOrigin: 'center', whiteSpace: 'nowrap' }}>{w.week?.substring(5)}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Templates Tab ──
+function TemplatesTab({ showToast }) {
+  const TEMPLATES = [
+    { id: 'seasonal_tip', name: 'Seasonal Pest Tip', icon: '🐛', platforms: ['facebook', 'instagram', 'gbp'],
+      template: 'SW Florida pest alert: {topic}. Here\'s what homeowners need to know to protect their property this season. 🌊\n\n#wavespestcontrol #pestcontrol #swfl' },
+    { id: 'review_highlight', name: 'Review Highlight', icon: '⭐', platforms: ['facebook', 'instagram'],
+      template: '⭐⭐⭐⭐⭐ "{review_text}"\n\nThank you {customer_name} for trusting Waves! We love protecting SWFL homes. 🌊\n\n#5starreview #wavespestcontrol' },
+    { id: 'before_after', name: 'Before & After', icon: '📸', platforms: ['facebook', 'instagram'],
+      template: 'Transformation Tuesday! Check out these results from our {service} treatment in {city}. 🌊\n\nSwipe to see the before → after!\n\n#wavespestcontrol #transformation #{city_tag}' },
+    { id: 'team_spotlight', name: 'Team Spotlight', icon: '👨‍🔧', platforms: ['facebook', 'linkedin'],
+      template: 'Meet {tech_name}, one of our certified technicians! {tech_name} has been keeping SWFL homes pest-free for {years} years. 🌊\n\n#meettheteam #wavespestcontrol' },
+    { id: 'local_tip', name: 'Local Area Tip', icon: '🏠', platforms: ['facebook', 'gbp'],
+      template: '{city} homeowners: {tip}. Our techs serve {city} daily — call (941) 318-7612 for a free estimate! 🌊' },
+    { id: 'blog_promo', name: 'Blog Promotion', icon: '📝', platforms: ['facebook', 'instagram', 'linkedin', 'gbp'],
+      template: 'New on the blog: {blog_title} 🌊\n\nRead the full article: {link}\n\n#wavespestcontrol #pestcontrol #swfl' },
+  ];
+
+  const [selectedTemplate, setSelectedTemplate] = useState(null);
+
+  return (
+    <div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Post Templates</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+        {TEMPLATES.map(t => (
+          <div key={t.id} onClick={() => setSelectedTemplate(selectedTemplate === t.id ? null : t.id)} style={{
+            ...sCard, marginBottom: 0, cursor: 'pointer',
+            borderColor: selectedTemplate === t.id ? D.teal : D.border,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 20 }}>{t.icon}</span>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{t.name}</div>
+            </div>
+            <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+              {t.platforms.map(p => <span key={p} style={sBadge(`${PLATFORM_COLORS[p] || D.muted}22`, PLATFORM_COLORS[p] || D.muted)}>{p}</span>)}
+            </div>
+            {selectedTemplate === t.id && (
+              <div style={{ padding: 10, background: D.input, borderRadius: 8, fontSize: 12, color: D.muted, lineHeight: 1.6, whiteSpace: 'pre-wrap', marginTop: 8 }}>
+                {t.template}
+                <div style={{ marginTop: 8 }}>
+                  <button onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(t.template); showToast('Template copied!'); }} style={sBtn(D.teal, D.white)}>Copy Template</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

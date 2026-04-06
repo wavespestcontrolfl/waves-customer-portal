@@ -217,6 +217,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Process scheduled content (blog + social auto-publish)
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const ContentScheduler = require('./content-scheduler');
+      const result = await ContentScheduler.processScheduledPosts();
+      if (result.blogCount > 0 || result.socialCount > 0) {
+        logger.info(`Content scheduler: ${result.blogCount} blog(s), ${result.socialCount} social post(s) published`);
+      }
+    } catch (err) {
+      logger.error(`Content scheduler failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 4 HOURS — Check RSS feed for new blog posts → auto-post to social
   // =========================================================================
   cron.schedule('0 */4 * * *', async () => {

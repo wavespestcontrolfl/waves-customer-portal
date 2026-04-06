@@ -111,4 +111,92 @@ router.get('/stats', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/social-media/analytics — aggregated analytics
+router.get('/analytics', async (req, res, next) => {
+  try {
+    // Posts grouped by platform
+    const posts = await db('social_media_posts').orderBy('created_at', 'desc');
+
+    const byPlatform = {};
+    const weeklyBuckets = {};
+
+    for (const post of posts) {
+      const platforms = post.platforms_posted || [];
+      const platformList = Array.isArray(platforms) ? platforms : (typeof platforms === 'string' ? JSON.parse(platforms) : []);
+
+      // If no platform info, use a generic bucket
+      const effectivePlatforms = platformList.length > 0
+        ? platformList.map(p => typeof p === 'string' ? p : (p.platform || 'unknown'))
+        : ['unknown'];
+
+      for (const platform of effectivePlatforms) {
+        if (!byPlatform[platform]) {
+          byPlatform[platform] = { total: 0, success: 0, failed: 0, draft: 0, scheduled: 0 };
+        }
+        byPlatform[platform].total++;
+        if (post.status === 'published') byPlatform[platform].success++;
+        else if (post.status === 'failed') byPlatform[platform].failed++;
+        else if (post.status === 'draft') byPlatform[platform].draft++;
+        else if (post.status === 'scheduled') byPlatform[platform].scheduled++;
+      }
+
+      // Weekly trend — bucket by ISO week
+      const created = new Date(post.created_at);
+      const weekStart = new Date(created);
+      weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+      const weekKey = weekStart.toISOString().split('T')[0];
+      if (!weeklyBuckets[weekKey]) weeklyBuckets[weekKey] = { week: weekKey, total: 0, published: 0, failed: 0 };
+      weeklyBuckets[weekKey].total++;
+      if (post.status === 'published') weeklyBuckets[weekKey].published++;
+      if (post.status === 'failed') weeklyBuckets[weekKey].failed++;
+    }
+
+    // Calculate overall stats
+    const totalPosts = posts.length;
+    const published = posts.filter(p => p.status === 'published').length;
+    const successRate = totalPosts > 0 ? Math.round((published / totalPosts) * 100) : 0;
+
+    // Posts per week (last 12 weeks)
+    const twelveWeeksAgo = Date.now() - 12 * 7 * 86400000;
+    const recentPosts = posts.filter(p => new Date(p.created_at).getTime() > twelveWeeksAgo);
+    const postsPerWeek = recentPosts.length > 0 ? parseFloat((recentPosts.length / 12).toFixed(1)) : 0;
+
+    // Most active platform
+    let mostActivePlatform = null;
+    let maxCount = 0;
+    for (const [platform, stats] of Object.entries(byPlatform)) {
+      if (stats.total > maxCount) { maxCount = stats.total; mostActivePlatform = platform; }
+    }
+
+    // Top posts (most recent published)
+    const topPosts = posts
+      .filter(p => p.status === 'published')
+      .slice(0, 10)
+      .map(p => ({
+        id: p.id,
+        title: p.title,
+        platforms: p.platforms_posted,
+        publishedAt: p.published_at,
+        sourceUrl: p.source_url,
+      }));
+
+    const weeklyTrend = Object.values(weeklyBuckets)
+      .sort((a, b) => a.week.localeCompare(b.week))
+      .slice(-12);
+
+    res.json({
+      byPlatform,
+      weeklyTrend,
+      topPosts,
+      summary: {
+        totalPosts,
+        published,
+        successRate,
+        postsPerWeek,
+        mostActivePlatform,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

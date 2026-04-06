@@ -479,4 +479,364 @@ router.post('/audit/run', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// CONTENT QA DETAIL — deep analysis for a single blog post
+// =========================================================================
+
+// GET /api/admin/seo/qa/:blogPostId
+router.get('/qa/:blogPostId', async (req, res, next) => {
+  try {
+    const post = await db('blog_posts').where('id', req.params.blogPostId).first();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+
+    const content = post.content || '';
+    const html = post.content_html || content;
+    const wordCount = post.word_count || content.split(/\s+/).filter(Boolean).length;
+    const issues = [];
+
+    // Word count checks
+    if (wordCount < 300) {
+      issues.push({ type: 'word_count', severity: 'critical', message: `Content is only ${wordCount} words (minimum 300)`, fix: 'Expand the article to at least 800 words with additional sections, examples, and local context' });
+    } else if (wordCount < 500) {
+      issues.push({ type: 'word_count', severity: 'warning', message: `Content is ${wordCount} words — thin content risk`, fix: 'Add 300+ more words: consider FAQ section, local tips, or seasonal notes' });
+    }
+
+    // Meta description
+    const metaLen = (post.meta_description || '').length;
+    if (!post.meta_description) {
+      issues.push({ type: 'meta_description', severity: 'critical', message: 'No meta description set', fix: 'Write a 130-160 character meta description with the target keyword and a CTA' });
+    } else if (metaLen < 130) {
+      issues.push({ type: 'meta_description', severity: 'warning', message: `Meta description too short (${metaLen} chars, ideal 130-160)`, fix: 'Expand meta description to 130-160 characters' });
+    } else if (metaLen > 160) {
+      issues.push({ type: 'meta_description', severity: 'warning', message: `Meta description too long (${metaLen} chars, ideal 130-160)`, fix: 'Trim meta description to 160 characters to avoid truncation in SERPs' });
+    }
+
+    // Keyword
+    if (!post.keyword) {
+      issues.push({ type: 'keyword', severity: 'critical', message: 'No target keyword set', fix: 'Set a primary keyword for this post' });
+    }
+
+    // Heading structure
+    const h2Count = (html.match(/<h2[\s>]/gi) || []).length;
+    const h3Count = (html.match(/<h3[\s>]/gi) || []).length;
+    if (h2Count === 0) {
+      issues.push({ type: 'headings', severity: 'warning', message: 'No H2 headings found', fix: 'Add at least 2-3 H2 subheadings to structure the content' });
+    }
+
+    // Internal links
+    const internalLinks = (html.match(/href=["']https?:\/\/(www\.)?wavespestcontrol\.com[^"']*/gi) || []);
+    if (internalLinks.length === 0) {
+      issues.push({ type: 'internal_links', severity: 'warning', message: 'No internal links to wavespestcontrol.com', fix: 'Add 2-3 internal links to relevant service or city pages' });
+    }
+
+    // External links
+    const allLinks = (html.match(/href=["']https?:\/\/[^"']*/gi) || []);
+    const externalLinks = allLinks.filter(l => !/wavespestcontrol\.com/i.test(l));
+
+    // FAQ section
+    const hasFAQ = /faq|frequently asked|common question/i.test(content);
+    if (!hasFAQ) {
+      issues.push({ type: 'faq', severity: 'warning', message: 'No FAQ section detected', fix: 'Add a FAQ section with 3-5 questions — helps win People Also Ask boxes' });
+    }
+
+    // Image alt text
+    const images = html.match(/<img[^>]*>/gi) || [];
+    const imagesWithoutAlt = images.filter(img => !(/alt=["'][^"']+["']/i.test(img)));
+    if (imagesWithoutAlt.length > 0) {
+      issues.push({ type: 'image_alt', severity: 'warning', message: `${imagesWithoutAlt.length} image(s) missing alt text`, fix: 'Add descriptive alt text to all images including the target keyword where natural' });
+    }
+
+    // Calculate score
+    const maxIssues = 7; // total check categories
+    const criticalCount = issues.filter(i => i.severity === 'critical').length;
+    const warningCount = issues.filter(i => i.severity === 'warning').length;
+    const deduction = (criticalCount * 20) + (warningCount * 8);
+    const score = Math.max(0, Math.min(100, 100 - deduction));
+
+    res.json({
+      score,
+      issues,
+      post: {
+        id: post.id,
+        title: post.title,
+        slug: post.slug,
+        keyword: post.keyword,
+        city: post.city,
+        status: post.status,
+        wordCount,
+        metaDescriptionLength: metaLen,
+        h2Count,
+        h3Count,
+        internalLinkCount: internalLinks.length,
+        externalLinkCount: externalLinks.length,
+        hasFAQ,
+        imageCount: images.length,
+        imagesWithoutAlt: imagesWithoutAlt.length,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// CORE WEB VITALS DETAIL — PageSpeed Insights for homepage + top pages
+// =========================================================================
+
+// GET /api/admin/seo/cwv/detail
+router.get('/cwv/detail', async (req, res, next) => {
+  try {
+    const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+    if (!GOOGLE_API_KEY) {
+      return res.status(500).json({ error: 'GOOGLE_API_KEY not configured' });
+    }
+
+    const homepage = 'https://www.wavespestcontrol.com';
+    const topPages = [];
+
+    // Get top 5 blog posts by SEO score or most recent published
+    try {
+      const blogs = await db('blog_posts')
+        .where('status', 'published')
+        .whereNotNull('slug')
+        .orderByRaw('seo_score DESC NULLS LAST')
+        .limit(5);
+      for (const b of blogs) {
+        topPages.push(`${homepage}/${b.slug}/`);
+      }
+    } catch (e) {
+      logger.warn('Could not fetch blog pages for CWV detail:', e.message);
+    }
+
+    const urls = [homepage, ...topPages];
+    const pages = [];
+
+    for (const url of urls) {
+      try {
+        const apiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&key=${GOOGLE_API_KEY}&category=PERFORMANCE`;
+        const response = await fetch(apiUrl);
+        const data = await response.json();
+
+        if (data.error) {
+          pages.push({ url, error: data.error.message });
+          continue;
+        }
+
+        const metrics = data.lighthouseResult?.audits || {};
+        const categories = data.lighthouseResult?.categories || {};
+
+        const lcp = metrics['largest-contentful-paint']?.numericValue || null;
+        const fid = metrics['max-potential-fid']?.numericValue || null;
+        const cls = metrics['cumulative-layout-shift']?.numericValue || null;
+        const perfScore = categories.performance?.score != null ? Math.round(categories.performance.score * 100) : null;
+
+        // Extract top opportunities
+        const opportunities = [];
+        const audits = data.lighthouseResult?.audits || {};
+        for (const [key, audit] of Object.entries(audits)) {
+          if (audit.details?.type === 'opportunity' && audit.details?.overallSavingsMs > 100) {
+            opportunities.push({
+              id: key,
+              title: audit.title,
+              savingsMs: Math.round(audit.details.overallSavingsMs),
+              score: audit.score,
+            });
+          }
+        }
+        opportunities.sort((a, b) => b.savingsMs - a.savingsMs);
+
+        pages.push({
+          url,
+          lcp: lcp != null ? Math.round(lcp) : null,
+          fid: fid != null ? Math.round(fid) : null,
+          cls: cls != null ? parseFloat(cls.toFixed(3)) : null,
+          score: perfScore,
+          opportunities: opportunities.slice(0, 5),
+        });
+      } catch (fetchErr) {
+        pages.push({ url, error: fetchErr.message });
+      }
+    }
+
+    res.json({ pages });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// OPPORTUNITIES — low-hanging fruit keywords + underperforming content
+// =========================================================================
+
+// Note: the basic /opportunities route already exists above (positions 4-15 from GSC).
+// This enhanced version at /opportunities/detail also checks blog_posts with low seo_score.
+
+router.get('/opportunities/detail', async (req, res, next) => {
+  try {
+    const opportunities = [];
+
+    // 1) Try seo_rank_history for keywords in positions 4-20
+    try {
+      const rankData = await db('seo_rank_history as rh')
+        .join('seo_target_keywords as kw', 'rh.keyword_id', 'kw.id')
+        .whereBetween('rh.organic_position', [4, 20])
+        .whereNotNull('rh.organic_position')
+        .select(
+          'kw.keyword', 'kw.target_url', 'kw.monthly_volume', 'kw.primary_city', 'kw.service_category',
+          'rh.organic_position as position'
+        )
+        .orderBy('rh.organic_position', 'asc')
+        .limit(30);
+
+      for (const r of rankData) {
+        let suggestedAction = 'Optimize content and build internal links';
+        if (r.position <= 6) suggestedAction = 'Add FAQ schema + internal links — very close to top 3';
+        else if (r.position <= 10) suggestedAction = 'Improve content depth and add supporting pages';
+        else suggestedAction = 'Build topic cluster + get backlinks to push onto page 1';
+
+        opportunities.push({
+          keyword: r.keyword,
+          position: r.position,
+          url: r.target_url,
+          searchVolume: r.monthly_volume,
+          city: r.primary_city,
+          service: r.service_category,
+          difficulty: null,
+          suggestedAction,
+          source: 'rank_tracking',
+        });
+      }
+    } catch (e) {
+      logger.warn('Rank history query failed (table may not exist):', e.message);
+    }
+
+    // 2) Blog posts with keyword set but low seo_score
+    try {
+      const lowScorePosts = await db('blog_posts')
+        .whereNotNull('keyword')
+        .where(function () {
+          this.where('seo_score', '<', 60).orWhereNull('seo_score');
+        })
+        .whereIn('status', ['published', 'draft'])
+        .orderByRaw('seo_score ASC NULLS FIRST')
+        .limit(20);
+
+      for (const p of lowScorePosts) {
+        opportunities.push({
+          keyword: p.keyword,
+          position: null,
+          url: p.slug ? `https://wavespestcontrol.com/${p.slug}/` : null,
+          searchVolume: null,
+          difficulty: null,
+          seoScore: p.seo_score,
+          suggestedAction: !p.seo_score
+            ? 'Run Content QA scoring — no SEO score yet'
+            : p.seo_score < 30
+              ? 'Major rewrite needed — thin content or missing key elements'
+              : 'Improve: add FAQ, internal links, and local context',
+          source: 'content_qa',
+        });
+      }
+    } catch (e) {
+      logger.warn('Blog posts opportunity query failed:', e.message);
+    }
+
+    res.json({ opportunities });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// KEYWORD MANAGEMENT — full CRUD for seo_target_keywords
+// =========================================================================
+
+// GET /api/admin/seo/keywords/manage — list all with status
+router.get('/keywords/manage', async (req, res, next) => {
+  try {
+    const { status, priority, city, service } = req.query;
+    let query = db('seo_target_keywords');
+    if (status) query = query.where('status', status);
+    if (priority) query = query.where('priority', parseInt(priority));
+    if (city) query = query.where('primary_city', city);
+    if (service) query = query.where('service_category', service);
+    const keywords = await query.orderBy('priority').orderBy('keyword');
+
+    // Enrich with latest rank data
+    const enriched = [];
+    for (const kw of keywords) {
+      let latestRank = null;
+      try {
+        latestRank = await db('seo_rank_history')
+          .where('keyword_id', kw.id)
+          .orderBy('check_date', 'desc')
+          .first();
+      } catch (_) { /* rank table may not have data */ }
+
+      enriched.push({
+        ...kw,
+        latestPosition: latestRank?.organic_position || kw.current_position || null,
+        mapPackPosition: latestRank?.map_pack_position || null,
+        lastChecked: latestRank?.check_date || null,
+      });
+    }
+
+    res.json({ keywords: enriched, total: enriched.length });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/seo/keywords/manage — add new keyword
+router.post('/keywords/manage', async (req, res, next) => {
+  try {
+    const { keyword, city, service, priority = 2, search_volume, difficulty, notes } = req.body;
+    if (!keyword) return res.status(400).json({ error: 'keyword is required' });
+
+    const [created] = await db('seo_target_keywords').insert({
+      keyword: keyword.trim(),
+      primary_city: city || null,
+      service_category: service || null,
+      priority: Math.max(1, Math.min(3, parseInt(priority))),
+      monthly_volume: search_volume || null,
+      search_volume: search_volume || null,
+      difficulty: difficulty != null ? Math.max(0, Math.min(100, parseInt(difficulty))) : null,
+      status: 'new',
+      has_content: false,
+      notes: notes || null,
+    }).returning('*');
+
+    res.json({ keyword: created });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/seo/keywords/manage/:id — update keyword
+router.put('/keywords/manage/:id', async (req, res, next) => {
+  try {
+    const { keyword, city, service, priority, search_volume, difficulty, status, notes, content_url, has_content, current_position, best_position, target_url } = req.body;
+
+    const updates = {};
+    if (keyword !== undefined) updates.keyword = keyword.trim();
+    if (city !== undefined) updates.primary_city = city;
+    if (service !== undefined) updates.service_category = service;
+    if (priority !== undefined) updates.priority = Math.max(1, Math.min(3, parseInt(priority)));
+    if (search_volume !== undefined) { updates.monthly_volume = search_volume; updates.search_volume = search_volume; }
+    if (difficulty !== undefined) updates.difficulty = Math.max(0, Math.min(100, parseInt(difficulty)));
+    if (status !== undefined) updates.status = status;
+    if (notes !== undefined) updates.notes = notes;
+    if (content_url !== undefined) updates.content_url = content_url;
+    if (has_content !== undefined) updates.has_content = has_content;
+    if (current_position !== undefined) updates.current_position = current_position;
+    if (best_position !== undefined) updates.best_position = best_position;
+    if (target_url !== undefined) updates.target_url = target_url;
+    updates.updated_at = db.fn.now();
+
+    const [updated] = await db('seo_target_keywords').where('id', req.params.id).update(updates).returning('*');
+    if (!updated) return res.status(404).json({ error: 'Keyword not found' });
+
+    res.json({ keyword: updated });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/admin/seo/keywords/manage/:id — delete keyword
+router.delete('/keywords/manage/:id', async (req, res, next) => {
+  try {
+    const deleted = await db('seo_target_keywords').where('id', req.params.id).del();
+    if (!deleted) return res.status(404).json({ error: 'Keyword not found' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
