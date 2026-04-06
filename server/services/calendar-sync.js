@@ -91,8 +91,24 @@ const CalendarSync = {
       for (const b of bookings) {
         try {
           const isCancelled = ['CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SELLER', 'DECLINED', 'NO_SHOW'].includes(b.status);
+
+          // Dedup: check by square_booking_id OR by customer+date+time
           let existing = null;
           try { existing = await db('scheduled_services').where({ square_booking_id: b.id }).first(); } catch { /* column may not exist */ }
+
+          if (!existing) {
+            // Fallback dedup: match by customer + date + time window
+            const start = new Date(b.startAt);
+            const dateStr = start.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            const startTime = start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' });
+
+            const customerId = await findOrCreateCustomer({ name: b.customerName, phone: b.customerPhone, email: b.customerEmail, source: 'square_booking' });
+            if (customerId) {
+              existing = await db('scheduled_services')
+                .where({ customer_id: customerId, scheduled_date: dateStr, window_start: startTime })
+                .first();
+            }
+          }
 
           if (existing) {
             const newStatus = isCancelled ? 'cancelled' : mapSquareStatus(b.status);

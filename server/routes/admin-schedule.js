@@ -630,4 +630,22 @@ router.get('/eta/:serviceId', async (req, res, next) => {
   }
 });
 
+// POST /api/admin/schedule/cleanup-duplicates — remove duplicate scheduled_services
+router.post('/cleanup-duplicates', async (req, res, next) => {
+  try {
+    // Find duplicates: same customer + date + window_start
+    const dupes = await db.raw(`
+      DELETE FROM scheduled_services
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM scheduled_services
+        GROUP BY customer_id, scheduled_date, window_start
+      )
+      AND customer_id IS NOT NULL
+    `);
+    const deleted = dupes.rowCount || 0;
+    logger.info(`[cleanup] Removed ${deleted} duplicate scheduled_services`);
+    res.json({ success: true, deleted });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
