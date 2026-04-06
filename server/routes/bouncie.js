@@ -122,21 +122,48 @@ router.get('/callback', async (req, res, next) => {
     const { code } = req.query;
     if (!code) return res.status(400).json({ error: 'Authorization code required' });
 
-    const tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: config.bouncie.clientId,
-        client_secret: config.bouncie.clientSecret,
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: config.bouncie.redirectUri,
-      }),
+    const clientId = config.bouncie.clientId;
+    const clientSecret = config.bouncie.clientSecret;
+    const redirectUri = config.bouncie.redirectUri || `${process.env.SERVER_DOMAIN || 'https://portal.wavespestcontrol.com'}/api/bouncie/callback`;
+
+    logger.info(`[bouncie] Token exchange: client_id=${clientId}, redirect_uri=${redirectUri}, code=${code?.substring(0, 8)}...`);
+
+    // Try form-encoded first (most OAuth servers prefer this)
+    const params = new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
     });
+
+    let tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+
+    // Fallback to JSON if form-encoded fails
+    if (!tokenRes.ok) {
+      const errBody = await tokenRes.text();
+      logger.warn(`[bouncie] Form-encoded failed (${tokenRes.status}): ${errBody} — trying JSON...`);
+
+      tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: clientId,
+          client_secret: clientSecret,
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: redirectUri,
+        }),
+      });
+    }
 
     if (!tokenRes.ok) {
       const body = await tokenRes.text();
-      logger.error(`Bouncie token exchange failed: ${tokenRes.status} ${body}`);
+      logger.error(`[bouncie] Token exchange failed: ${tokenRes.status} ${body}`);
       return res.status(400).json({ error: 'Token exchange failed', details: body });
     }
 
