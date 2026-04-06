@@ -189,9 +189,20 @@ function PostEditor({ post, onBack, onUpdate }) {
       content: editing.content,
       meta_description: editing.meta_description,
       keyword: editing.keyword,
+      tag: editing.tag,
       status: editing.status,
     });
     if (onUpdate) onUpdate(updated.post);
+  };
+
+  const applyOptimization = () => {
+    if (!optimization) return;
+    setEditing(prev => ({
+      ...prev,
+      meta_description: optimization.suggestedMeta || prev.meta_description,
+      keyword: optimization.suggestedKeyword || prev.keyword,
+    }));
+    alert('Applied suggested meta + keyword. Review the SEO improvements and apply them to the content manually.');
   };
 
   const handlePublish = async () => {
@@ -382,6 +393,10 @@ function PostEditor({ post, onBack, onUpdate }) {
               Estimated new SEO score: {optimization.estimated_new_score}/100
             </div>
           )}
+          <button onClick={applyOptimization} style={{
+            padding: '8px 16px', borderRadius: 6, border: 'none', background: D.amber,
+            color: D.bg, fontSize: 12, fontWeight: 600, cursor: 'pointer', marginTop: 12,
+          }}>Apply Meta + Keyword to Draft</button>
         </Card>
       )}
 
