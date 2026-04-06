@@ -584,6 +584,16 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY HOUR — Process any pending call recordings (batch catch-up)
+  // =========================================================================
+  cron.schedule('0 * * * *', async () => {
+    try {
+      const processor = require('./call-recording-processor');
+      if (processor.processAllPending) await processor.processAllPending();
+    } catch (e) { logger.error(`Recording batch process failed: ${e.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Send scheduled review request SMS
   // Picks up review requests whose scheduled_for has passed.
   // =========================================================================

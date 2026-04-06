@@ -337,7 +337,17 @@ const CallRecordingProcessor = {
       db.raw("COUNT(*) FILTER (WHERE processing_status = 'spam') as spam"),
       db.raw("COUNT(*) FILTER (WHERE ai_extraction IS NOT NULL AND ai_extraction::text LIKE '%appointment_confirmed\": true%') as appointments"),
       db.raw("COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND recording_url IS NOT NULL) as last_7d"),
+      db.raw("COUNT(*) FILTER (WHERE processing_status = 'processed' AND customer_id IS NOT NULL AND ai_extraction IS NOT NULL AND ai_extraction::text NOT LIKE '%\"is_spam\": true%' AND ai_extraction::text NOT LIKE '%\"is_voicemail\": true%') as leads_extracted"),
     );
+
+    // Source analytics: calls grouped by receiving number
+    const sourceBreakdown = await db('call_log')
+      .select('to_phone')
+      .count('* as call_count')
+      .whereNotNull('recording_url')
+      .groupBy('to_phone')
+      .orderBy('call_count', 'desc');
+
     return {
       totalRecordings: parseInt(totals.total_recordings || 0),
       processed: parseInt(totals.processed || 0),
@@ -346,6 +356,8 @@ const CallRecordingProcessor = {
       spam: parseInt(totals.spam || 0),
       appointments: parseInt(totals.appointments || 0),
       last7d: parseInt(totals.last_7d || 0),
+      leadsExtracted: parseInt(totals.leads_extracted || 0),
+      sourceBreakdown: sourceBreakdown.map(s => ({ number: s.to_phone, count: parseInt(s.call_count) })),
     };
   },
 };

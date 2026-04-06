@@ -160,16 +160,16 @@ router.post('/recording-status', async (req, res) => {
 
       logger.info(`Recording saved: ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
 
-      // Trigger async call recording processing (transcription + AI extraction + customer creation)
+      // Auto-process recording when ready
       try {
-        const CallRecordingProcessor = require('../services/call-recording-processor');
-        // Delay processing to allow Twilio transcription to arrive first
-        setTimeout(() => {
-          CallRecordingProcessor.processRecording(CallSid).catch(err => {
-            logger.error(`[call-proc] Async processing failed for ${CallSid}: ${err.message}`);
-          });
-        }, 60000); // 60s delay to wait for Twilio transcription
-      } catch (e) { logger.error(`[call-proc] Failed to queue processing: ${e.message}`); }
+        const processor = require('../services/call-recording-processor');
+        // Queue for processing (don't block the webhook response)
+        setTimeout(async () => {
+          try {
+            await processor.processRecording(CallSid);
+          } catch (e) { logger.error(`Auto-process recording failed: ${e.message}`); }
+        }, 5000); // 5 second delay to ensure recording is fully available
+      } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
     }
 
     res.sendStatus(200);
