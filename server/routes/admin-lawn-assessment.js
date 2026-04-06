@@ -23,23 +23,34 @@ router.get('/customers', async (req, res, next) => {
     const { q } = req.query;
     const today = new Date().toISOString().split('T')[0];
 
-    // Get today's scheduled lawn care services (not yet assessed)
-    let query = db('scheduled_services as ss')
-      .join('customers as c', 'ss.customer_id', 'c.id')
-      .where('ss.scheduled_date', today)
-      .whereRaw("LOWER(ss.service_type) LIKE '%lawn%'")
-      .whereNotExists(function () {
-        this.select(db.raw(1))
-          .from('lawn_assessments as la')
-          .whereRaw('la.customer_id = ss.customer_id')
-          .andWhere('la.service_date', today);
-      })
-      .select(
-        'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
-        'c.email', 'c.phone', 'c.address_line1 as address',
-        'ss.service_type as serviceType', 'ss.window_start as windowStart'
-      )
-      .orderBy('ss.window_start', 'asc');
+    // Try today's scheduled services first, fall back to all customers if none found
+    let query;
+    const hasScheduled = await db('scheduled_services')
+      .where('scheduled_date', today)
+      .whereNotIn('status', ['cancelled', 'completed'])
+      .first();
+
+    if (hasScheduled) {
+      // Show today's scheduled services (any type, not just lawn)
+      query = db('scheduled_services as ss')
+        .join('customers as c', 'ss.customer_id', 'c.id')
+        .where('ss.scheduled_date', today)
+        .whereNotIn('ss.status', ['cancelled', 'completed'])
+        .select(
+          'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
+          'c.email', 'c.phone', 'c.address_line1 as address',
+          'ss.service_type as serviceType', 'ss.window_start as windowStart'
+        )
+        .orderBy('ss.window_start', 'asc');
+    } else {
+      // No services today — show all customers for manual assessment
+      query = db('customers as c')
+        .select(
+          'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
+          'c.email', 'c.phone', 'c.address_line1 as address'
+        )
+        .orderBy('c.last_name', 'asc');
+    }
 
     if (q && q.trim()) {
       const s = `%${q.trim().toLowerCase()}%`;
