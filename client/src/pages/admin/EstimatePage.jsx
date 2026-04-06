@@ -575,26 +575,26 @@ function EstimateToolView() {
           const p = result.property || profile || {};
           const mods = [];
           const add = (svc, label, impact, type) => mods.push({ service: svc, label, impact, type });
-          add('property', `Home: ${(p.homeSqFt || p.squareFootage || 0).toLocaleString()} sq ft · ${p.stories || 1} story`, null, 'info');
-          add('property', `Footprint: ${(p.footprint || Math.round((p.homeSqFt || 0) / (p.stories || 1))).toLocaleString()} sq ft`, null, 'info');
-          add('property', `Lot: ${(p.lotSqFt || p.lotSize || 0).toLocaleString()} sq ft`, null, 'info');
-          if (p.pool === 'YES' || p.pool === true || p.hasPool) add('pest', p.poolCage === 'YES' || p.hasPoolCage ? 'Pool cage: +$22/visit' : 'Pool: +$5/visit', null, 'up');
-          else add('pest', 'No pool: $0 adjustment', null, 'info');
+          add('property', `Home: ${(p.homeSqFt || p.squareFootage || 0).toLocaleString()} sq ft · ${p.stories || 1} story`, 0, 'info');
+          add('property', `Footprint: ${(p.footprint || Math.round((p.homeSqFt || 0) / (p.stories || 1))).toLocaleString()} sq ft`, 0, 'info');
+          add('property', `Lot: ${(p.lotSqFt || p.lotSize || 0).toLocaleString()} sq ft`, 0, 'info');
+          if (p.pool === 'YES' || p.pool === true || p.hasPool) add('pest', p.poolCage === 'YES' || p.hasPoolCage ? 'Pool cage: +$22/visit' : 'Pool: +$5/visit', p.poolCage === 'YES' || p.hasPoolCage ? 22 : 5, 'up');
+          else add('pest', 'No pool: $0/visit', 0, 'info');
           const sd = p.shrubDensity || p.shrubs;
           if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$25/visit', 25, 'up');
           else if (sd === 'LIGHT') add('pest', 'Light shrubs: -$5/visit', -5, 'down');
-          else add('pest', `${sd || 'Moderate'} shrubs: $0`, null, 'info');
+          else add('pest', `${sd || 'Moderate'} shrubs: $0/visit`, 0, 'info');
           const td = p.treeDensity || p.trees;
           if (td === 'HEAVY') add('pest', 'Heavy trees: +$15/visit', 15, 'up');
           else if (td === 'LIGHT') add('pest', 'Light trees: -$3/visit', -3, 'down');
-          else add('pest', `${td || 'Moderate'} trees: $0`, null, 'info');
+          else add('pest', `${td || 'Moderate'} trees: $0/visit`, 0, 'info');
           const lc = p.landscapeComplexity || p.complexity;
           if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$8/visit', 8, 'up');
-          else add('pest', `${lc || 'Simple'} landscape: $0`, null, 'info');
+          else add('pest', `${lc || 'Simple'} landscape: $0/visit`, 0, 'info');
           const nw = p.nearWater || p.waterProximity;
-          if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('mosquito', `Near water (${String(nw).replace(/_/g, ' ')}): higher pressure`, null, 'up');
-          else add('mosquito', 'No water nearby: standard pricing', null, 'info');
-          if (p.yearBuilt) add('property', `Built: ${p.yearBuilt} · ${p.constructionMaterial || 'CBS'} · ${p.foundationType || 'Slab'} · ${p.roofType || 'Shingle'}`, null, 'info');
+          if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('mosquito', `Near water (${String(nw).replace(/_/g, ' ')}): +$15/visit`, 15, 'up');
+          else add('mosquito', 'No water nearby: $0/visit', 0, 'info');
+          if (p.yearBuilt) add('property', `Built: ${p.yearBuilt} · ${p.constructionMaterial || 'CBS'} · ${p.foundationType || 'Slab'} · ${p.roofType || 'Shingle'}`, 0, 'info');
           result.modifiers = mods;
         }
 
