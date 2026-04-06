@@ -560,6 +560,166 @@ function ExemptionsTab() {
 // ═══════════════════════════════════════════════════════════════
 // MAIN PAGE
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// MILEAGE TAB
+// ═══════════════════════════════════════════════════════════════
+function MileageTab() {
+  const [entries, setEntries] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [form, setForm] = useState({ trip_date: new Date().toISOString().split('T')[0], start_address: '', end_address: '', distance_miles: '', purpose: 'business', notes: '' });
+
+  const load = () => {
+    Promise.all([
+      adminFetch('/admin/tax/mileage').catch(() => ({ entries: [] })),
+      adminFetch('/admin/tax/mileage/stats').catch(() => null),
+    ]).then(([m, s]) => { setEntries(m.entries || m || []); setStats(s); setLoading(false); });
+  };
+  useEffect(load, []);
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      const r = await adminFetch('/admin/tax/mileage/sync-bouncie', { method: 'POST' });
+      alert(`Bouncie sync: ${r.tripsImported || 0} trips imported, ${r.totalMiles?.toFixed(1) || 0} miles, ${fmtM(r.deductionAmount)} deduction`);
+      load();
+    } catch (e) { alert(`Sync failed: ${e.message}`); }
+    setSyncing(false);
+  };
+
+  const handleAdd = async () => {
+    if (!form.distance_miles) return;
+    try {
+      await adminFetch('/admin/tax/mileage', { method: 'POST', body: JSON.stringify(form) });
+      setForm(f => ({ ...f, start_address: '', end_address: '', distance_miles: '', notes: '' }));
+      load();
+    } catch (e) { alert(`Failed: ${e.message}`); }
+  };
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading mileage...</div>;
+
+  return (
+    <div>
+      {/* Stats */}
+      {stats && (
+        <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+          <StatCard label="YTD Business Miles" value={`${(stats.totalMiles || 0).toLocaleString()} mi`} color={D.green} />
+          <StatCard label="YTD Deduction" value={fmtM(stats.totalDeduction)} color={D.green} sub={`@ $${stats.irsRate || 0.70}/mile`} />
+          <StatCard label="Total Trips" value={stats.totalTrips || 0} color={D.teal} />
+          <StatCard label="Avg Trip" value={`${(stats.avgDistance || 0).toFixed(1)} mi`} color={D.muted} />
+        </div>
+      )}
+
+      {/* Sync + Add */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <button onClick={handleSync} disabled={syncing} style={{ padding: '8px 16px', background: D.teal, color: D.white, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: syncing ? 0.5 : 1 }}>{syncing ? 'Syncing Bouncie...' : '🚗 Sync from Bouncie'}</button>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end' }}>
+          <div><label style={{ fontSize: 10, color: D.muted, display: 'block' }}>Date</label><input type="date" value={form.trip_date} onChange={e => setForm(f => ({ ...f, trip_date: e.target.value }))} style={{ ...inputStyle, width: 130 }} /></div>
+          <div><label style={{ fontSize: 10, color: D.muted, display: 'block' }}>From</label><input value={form.start_address} onChange={e => setForm(f => ({ ...f, start_address: e.target.value }))} placeholder="Start" style={{ ...inputStyle, width: 140 }} /></div>
+          <div><label style={{ fontSize: 10, color: D.muted, display: 'block' }}>To</label><input value={form.end_address} onChange={e => setForm(f => ({ ...f, end_address: e.target.value }))} placeholder="End" style={{ ...inputStyle, width: 140 }} /></div>
+          <div><label style={{ fontSize: 10, color: D.muted, display: 'block' }}>Miles</label><input type="number" value={form.distance_miles} onChange={e => setForm(f => ({ ...f, distance_miles: e.target.value }))} placeholder="0.0" step="0.1" style={{ ...inputStyle, width: 70 }} /></div>
+          <select value={form.purpose} onChange={e => setForm(f => ({ ...f, purpose: e.target.value }))} style={{ ...inputStyle, cursor: 'pointer' }}><option value="business">Business</option><option value="personal">Personal</option><option value="commute">Commute</option></select>
+          <button onClick={handleAdd} style={{ padding: '6px 14px', background: D.green, color: D.white, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>+ Add</button>
+        </div>
+      </div>
+
+      {/* Entries */}
+      {entries.length === 0 ? (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 40, textAlign: 'center', color: D.muted }}>No mileage entries yet. Sync from Bouncie or add manually.</div>
+      ) : (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr>{['Date', 'From', 'To', 'Miles', 'Purpose', 'Deduction', 'Source'].map(h => <th key={h} style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${D.border}` }}>{h}</th>)}</tr></thead>
+            <tbody>
+              {entries.slice(0, 50).map((e, i) => (
+                <tr key={e.id || i} style={{ borderBottom: `1px solid ${D.border}22` }}>
+                  <td style={{ padding: '8px 10px', fontSize: 12 }}>{fmtD(e.trip_date)}</td>
+                  <td style={{ padding: '8px 10px', fontSize: 11, color: D.muted, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.start_address || '—'}</td>
+                  <td style={{ padding: '8px 10px', fontSize: 11, color: D.muted, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.end_address || '—'}</td>
+                  <td style={{ padding: '8px 10px', fontFamily: MONO, fontSize: 12, color: D.white }}>{parseFloat(e.distance_miles || 0).toFixed(1)}</td>
+                  <td style={{ padding: '8px 10px' }}><Badge color={e.purpose === 'business' ? D.green : D.muted}>{e.purpose}</Badge></td>
+                  <td style={{ padding: '8px 10px', fontFamily: MONO, fontSize: 12, color: D.green }}>{fmtM(e.deduction_amount)}</td>
+                  <td style={{ padding: '8px 10px' }}><Badge color={e.source === 'bouncie' ? D.teal : D.muted} small>{e.source || 'manual'}</Badge></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// REVENUE TAB (Square Reconciliation)
+// ═══════════════════════════════════════════════════════════════
+function RevenueTab() {
+  const [month, setMonth] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; });
+  const [reconcile, setReconcile] = useState(null);
+  const [quarterly, setQuarterly] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    const q = new Date().getMonth() < 3 ? 'Q1' : new Date().getMonth() < 6 ? 'Q2' : new Date().getMonth() < 9 ? 'Q3' : 'Q4';
+    Promise.all([
+      adminFetch(`/admin/tax/revenue/reconcile?month=${month}`).catch(() => null),
+      adminFetch(`/admin/tax/revenue/quarterly-estimate?quarter=${q}`).catch(() => null),
+    ]).then(([r, qe]) => { setReconcile(r); setQuarterly(qe); setLoading(false); });
+  };
+  useEffect(load, [month]);
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading revenue data...</div>;
+
+  return (
+    <div>
+      {/* Month selector */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16 }}>
+        <label style={{ fontSize: 12, color: D.muted }}>Month:</label>
+        <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={{ ...inputStyle, width: 160 }} />
+      </div>
+
+      {/* Reconciliation */}
+      {reconcile && (
+        <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+          <StatCard label="Revenue" value={fmtM(reconcile.totalRevenue)} color={D.green} />
+          <StatCard label="Tax Collected" value={fmtM(reconcile.taxCollected)} color={D.amber} />
+          <StatCard label="Tax Owed" value={fmtM(reconcile.taxOwed)} color={D.red} />
+          <StatCard label="Difference" value={fmtM((reconcile.taxCollected || 0) - (reconcile.taxOwed || 0))} color={(reconcile.taxCollected || 0) >= (reconcile.taxOwed || 0) ? D.green : D.red} sub={(reconcile.taxCollected || 0) >= (reconcile.taxOwed || 0) ? 'Over-collected' : 'Under-collected'} />
+        </div>
+      )}
+
+      {/* Quarterly Estimate */}
+      {quarterly && (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, marginBottom: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Quarterly Estimated Tax Payment — {quarterly.quarter}</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 12 }}>
+            {[
+              ['YTD Revenue', fmtM(quarterly.ytdRevenue)],
+              ['YTD Expenses', fmtM(quarterly.ytdExpenses)],
+              ['Estimated Net Income', fmtM(quarterly.estimatedNetIncome)],
+              ['Self-Employment Tax (15.3%)', fmtM(quarterly.seTax)],
+              ['Estimated Income Tax', fmtM(quarterly.incomeTax)],
+              ['Total Quarterly Payment', fmtM(quarterly.quarterlyPayment)],
+            ].map(([l, v]) => (
+              <div key={l} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: `1px solid ${D.border}22` }}>
+                <span style={{ color: D.muted }}>{l}</span>
+                <span style={{ color: D.white, fontFamily: MONO }}>{v}</span>
+              </div>
+            ))}
+          </div>
+          {quarterly.dueDate && <div style={{ marginTop: 12, fontSize: 12, color: D.amber }}>Due: {fmtD(quarterly.dueDate)}</div>}
+        </div>
+      )}
+
+      {!reconcile && !quarterly && (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 40, textAlign: 'center', color: D.muted }}>No revenue data available. Square integration will populate this automatically.</div>
+      )}
+    </div>
+  );
+}
+
 export default function TaxPage() {
   const [activeTab, setActiveTab] = useState('overview');
   const [dashboard, setDashboard] = useState(null);
@@ -625,6 +785,8 @@ export default function TaxPage() {
         <TabBtn active={activeTab === 'exemptions'} label="Exemptions" onClick={() => setActiveTab('exemptions')} />
         <TabBtn active={activeTab === 'equipment'} label="Equipment" onClick={() => setActiveTab('equipment')} />
         <TabBtn active={activeTab === 'expenses'} label="Expenses" onClick={() => setActiveTab('expenses')} />
+        <TabBtn active={activeTab === 'mileage'} label="Mileage" onClick={() => setActiveTab('mileage')} color={D.green} />
+        <TabBtn active={activeTab === 'revenue'} label="Revenue" onClick={() => setActiveTab('revenue')} color={D.green} />
         <TabBtn active={activeTab === 'filings'} label="Filing Calendar" onClick={() => setActiveTab('filings')} color={D.blue} />
         <TabBtn active={activeTab === 'advisor'} label="AI Advisor" onClick={() => setActiveTab('advisor')} color={D.purple} count={d?.pendingAlerts?.high} />
       </div>
@@ -634,6 +796,8 @@ export default function TaxPage() {
       {activeTab === 'exemptions' && <ExemptionsTab />}
       {activeTab === 'equipment' && <EquipmentTab />}
       {activeTab === 'expenses' && <ExpensesTab />}
+      {activeTab === 'mileage' && <MileageTab />}
+      {activeTab === 'revenue' && <RevenueTab />}
       {activeTab === 'filings' && <FilingCalendarTab />}
       {activeTab === 'advisor' && <AdvisorTab />}
     </div>

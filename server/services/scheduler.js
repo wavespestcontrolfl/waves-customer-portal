@@ -176,6 +176,60 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 8AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
+  // =========================================================================
+  cron.schedule('0 8 * * *', async () => {
+    logger.info('Running: tax deadline alert check');
+    try {
+      const now = new Date();
+      const in14Days = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+      const today = now.toISOString().split('T')[0];
+      const futureDate = in14Days.toISOString().split('T')[0];
+
+      // Find filings due in the next 14 days that haven't been reminded yet
+      const upcomingFilings = await db('tax_filing_calendar')
+        .where('due_date', '>=', today)
+        .where('due_date', '<=', futureDate)
+        .whereNot('status', 'filed')
+        .whereNot('status', 'paid')
+        .where(function () {
+          this.whereNull('reminder_sent_at')
+            .orWhere('reminder_sent', false);
+        })
+        .orderBy('due_date');
+
+      if (upcomingFilings.length === 0) {
+        return;
+      }
+
+      // Build reminder message
+      const lines = upcomingFilings.map(f => {
+        const dueDate = new Date(f.due_date);
+        const daysUntil = Math.ceil((dueDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
+        const amountStr = f.amount_due ? ` ($${parseFloat(f.amount_due).toLocaleString()})` : '';
+        return `- ${f.title}${amountStr} — due ${dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} (${daysUntil} day${daysUntil !== 1 ? 's' : ''})`;
+      });
+
+      const message = `Tax Deadline Alert:\n\n${lines.join('\n')}\n\nReview in the admin portal.`;
+
+      // Send SMS to admin
+      if (process.env.ADAM_PHONE) {
+        await TwilioService.sendSMS(process.env.ADAM_PHONE, message, { messageType: 'internal_alert' });
+        logger.info(`[tax-alerts] Sent ${upcomingFilings.length} deadline reminder(s) via SMS`);
+      }
+
+      // Mark reminders as sent
+      const ids = upcomingFilings.map(f => f.id);
+      await db('tax_filing_calendar')
+        .whereIn('id', ids)
+        .update({ reminder_sent: true, reminder_sent_at: new Date() });
+
+    } catch (err) {
+      logger.error(`Tax deadline alert failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // SUNDAY 7AM — Weekly Tax Advisor report
   // =========================================================================
   cron.schedule('0 7 * * 0', async () => {

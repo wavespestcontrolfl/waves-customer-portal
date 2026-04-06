@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -327,19 +328,44 @@ router.get('/expenses', async (req, res, next) => {
 
 router.post('/expenses', async (req, res, next) => {
   try {
-    const { categoryId, description, amount, deductibleAmount, expenseDate, vendorName,
+    let { categoryId, description, amount, deductibleAmount, expenseDate, vendorName,
       paymentMethod, isRecurring, recurrencePeriod, notes } = req.body;
     const date = new Date(expenseDate);
     const taxYear = String(date.getFullYear());
     const quarter = `Q${Math.ceil((date.getMonth() + 1) / 3)}`;
-    await db('expenses').insert({
+
+    // Auto-categorize with Claude if no category provided
+    let aiCategory = null;
+    if (!categoryId && (vendorName || description)) {
+      try {
+        aiCategory = await autoCategorizeExpense(vendorName, description, amount);
+        if (aiCategory?.categoryId) {
+          categoryId = aiCategory.categoryId;
+          // If AI says partially deductible, adjust
+          if (aiCategory.deductiblePercent !== undefined && aiCategory.deductiblePercent < 100) {
+            deductibleAmount = deductibleAmount ?? parseFloat((amount * aiCategory.deductiblePercent / 100).toFixed(2));
+          }
+        }
+      } catch (err) {
+        logger.warn(`[tax] AI expense categorization failed: ${err.message}`);
+        // Continue without categorization — don't block the insert
+      }
+    }
+
+    const [inserted] = await db('expenses').insert({
       category_id: categoryId, description, amount,
       tax_deductible_amount: deductibleAmount ?? amount,
       expense_date: expenseDate, vendor_name: vendorName,
       payment_method: paymentMethod, is_recurring: isRecurring || false,
       recurrence_period: recurrencePeriod, tax_year: taxYear, quarter, notes,
+    }).returning('*');
+
+    res.json({
+      success: true,
+      expense: inserted,
+      aiCategorized: !!aiCategory,
+      aiCategory: aiCategory || null,
     });
-    res.json({ success: true });
   } catch (err) { next(err); }
 });
 
@@ -450,6 +476,261 @@ router.post('/advisor/run', async (req, res, next) => {
     const TaxAdvisor = require('../services/tax-advisor');
     const report = await TaxAdvisor.generateWeeklyReport();
     res.json({ success: true, grade: report.grade, summary: report.executive_summary });
+  } catch (err) { next(err); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// AI EXPENSE AUTO-CATEGORIZATION
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Use Claude to auto-categorize an expense into an IRS Schedule C category.
+ * Returns { categoryId, categoryName, irsLine, deductiblePercent, reasoning }
+ */
+async function autoCategorizeExpense(vendorName, description, amount) {
+  const Anthropic = require('@anthropic-ai/sdk');
+  const client = new Anthropic();
+
+  // Get expense categories from the DB to match against
+  const categories = await db('expense_categories').orderBy('sort_order');
+  const categoryList = categories.map(c =>
+    `- ${c.name} (IRS Line ${c.irs_line}): ${c.irs_description}${c.notes ? ` — ${c.notes}` : ''}`
+  ).join('\n');
+
+  const prompt = `You are a tax categorization assistant for a pest control / lawn care business in Florida.
+
+Given this expense, categorize it into the correct IRS Schedule C category and determine deductibility.
+
+Expense details:
+- Vendor: ${vendorName || 'Unknown'}
+- Description: ${description || 'None provided'}
+- Amount: $${amount}
+
+Available categories:
+${categoryList}
+
+Respond ONLY with valid JSON (no markdown, no explanation):
+{
+  "categoryName": "exact category name from the list above",
+  "irsLine": "the IRS line number",
+  "deductiblePercent": 100,
+  "reasoning": "one sentence why"
+}
+
+Rules:
+- Business meals are 50% deductible
+- Vehicle expenses: use "Vehicle Expenses" category
+- Software, SaaS, hosting: use "Software & Technology"
+- Chemicals, PPE, equipment supplies: use "Supplies"
+- If truly unclear, use "Office Expenses" as default`;
+
+  const response = await client.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 200,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const text = response.content[0]?.text || '{}';
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Try extracting JSON from response
+    const match = text.match(/\{[\s\S]*\}/);
+    parsed = match ? JSON.parse(match[0]) : {};
+  }
+
+  // Match the AI's category name to an actual DB record
+  if (parsed.categoryName) {
+    const match = categories.find(c =>
+      c.name.toLowerCase() === parsed.categoryName.toLowerCase()
+    );
+    if (match) {
+      parsed.categoryId = match.id;
+    }
+  }
+
+  return parsed;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MILEAGE LOG (Bouncie GPS Integration)
+// ═══════════════════════════════════════════════════════════════
+
+// GET /mileage — list mileage entries with date range filter
+router.get('/mileage', async (req, res, next) => {
+  try {
+    const { startDate, endDate, purpose, page = 1, limit = 50 } = req.query;
+    let query = db('mileage_log').orderBy('trip_date', 'desc');
+
+    if (startDate) query = query.where('trip_date', '>=', startDate);
+    if (endDate) query = query.where('trip_date', '<=', endDate);
+    if (purpose) query = query.where('purpose', purpose);
+
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const entries = await query.limit(parseInt(limit)).offset(offset);
+
+    res.json({
+      entries: entries.map(e => ({
+        id: e.id,
+        vehicleId: e.vehicle_id,
+        vehicleName: e.vehicle_name,
+        tripDate: e.trip_date,
+        startAddress: e.start_address,
+        endAddress: e.end_address,
+        distanceMiles: parseFloat(e.distance_miles),
+        durationMinutes: e.duration_minutes,
+        purpose: e.purpose,
+        irsRate: parseFloat(e.irs_rate),
+        deductionAmount: parseFloat(e.deduction_amount),
+        source: e.source,
+        notes: e.notes,
+        createdAt: e.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /mileage — manual mileage entry
+router.post('/mileage', async (req, res, next) => {
+  try {
+    const { vehicleName, tripDate, startAddress, endAddress, distanceMiles,
+      durationMinutes, purpose, notes } = req.body;
+
+    if (!tripDate || !distanceMiles) {
+      return res.status(400).json({ error: 'tripDate and distanceMiles are required' });
+    }
+
+    const year = new Date(tripDate).getFullYear();
+    // IRS rates by year
+    const rateMap = { 2024: 0.67, 2025: 0.70, 2026: 0.70 };
+    const irsRate = rateMap[year] || 0.70;
+    const deductionAmount = parseFloat((distanceMiles * irsRate).toFixed(2));
+
+    const [inserted] = await db('mileage_log').insert({
+      vehicle_name: vehicleName || 'Manual Entry',
+      trip_date: tripDate,
+      start_address: startAddress || null,
+      end_address: endAddress || null,
+      distance_miles: distanceMiles,
+      duration_minutes: durationMinutes || null,
+      purpose: purpose || 'business',
+      irs_rate: irsRate,
+      deduction_amount: deductionAmount,
+      source: 'manual',
+      notes,
+    }).returning('*');
+
+    res.json({ success: true, entry: inserted });
+  } catch (err) { next(err); }
+});
+
+// POST /mileage/sync-bouncie — pull from Bouncie API
+router.post('/mileage/sync-bouncie', async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.body;
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    const BouncieService = require('../services/bouncie');
+    const result = await BouncieService.syncMileage(startDate, endDate);
+
+    res.json({
+      success: true,
+      tripsImported: result.tripsImported,
+      totalMiles: result.totalMiles,
+      deductionAmount: result.deductionAmount,
+      skipped: result.skipped,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /mileage/stats — YTD totals
+router.get('/mileage/stats', async (req, res, next) => {
+  try {
+    const year = req.query.year || String(new Date().getFullYear());
+    const startDate = `${year}-01-01`;
+    const endDate = `${year}-12-31`;
+
+    const totals = await db('mileage_log')
+      .where('trip_date', '>=', startDate)
+      .where('trip_date', '<=', endDate)
+      .select(
+        db.raw('COALESCE(SUM(distance_miles), 0) as total_miles'),
+        db.raw('COALESCE(SUM(deduction_amount), 0) as total_deduction'),
+        db.raw('COUNT(*) as trip_count'),
+      ).first();
+
+    const byPurpose = await db('mileage_log')
+      .where('trip_date', '>=', startDate)
+      .where('trip_date', '<=', endDate)
+      .select('purpose')
+      .sum('distance_miles as miles')
+      .sum('deduction_amount as deduction')
+      .count('* as count')
+      .groupBy('purpose');
+
+    const byMonth = await db('mileage_log')
+      .where('trip_date', '>=', startDate)
+      .where('trip_date', '<=', endDate)
+      .select(db.raw("TO_CHAR(trip_date, 'YYYY-MM') as month"))
+      .sum('distance_miles as miles')
+      .sum('deduction_amount as deduction')
+      .count('* as count')
+      .groupBy(db.raw("TO_CHAR(trip_date, 'YYYY-MM')"))
+      .orderBy('month');
+
+    res.json({
+      year,
+      totalMiles: parseFloat(totals.total_miles),
+      totalDeduction: parseFloat(totals.total_deduction),
+      tripCount: parseInt(totals.trip_count),
+      byPurpose: byPurpose.map(p => ({
+        purpose: p.purpose,
+        miles: parseFloat(p.miles),
+        deduction: parseFloat(p.deduction),
+        count: parseInt(p.count),
+      })),
+      byMonth: byMonth.map(m => ({
+        month: m.month,
+        miles: parseFloat(m.miles),
+        deduction: parseFloat(m.deduction),
+        count: parseInt(m.count),
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// REVENUE RECONCILIATION (Square Integration)
+// ═══════════════════════════════════════════════════════════════
+
+// GET /revenue/reconcile?month=2026-04 — Square tax reconciliation
+router.get('/revenue/reconcile', async (req, res, next) => {
+  try {
+    const { month } = req.query;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ error: 'month parameter required in YYYY-MM format' });
+    }
+
+    const SquareTaxReconciliation = require('../services/square-tax-reconciliation');
+    const result = await SquareTaxReconciliation.reconcileSalesTax(month);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /revenue/quarterly-estimate?quarter=Q2 — estimated quarterly payment
+router.get('/revenue/quarterly-estimate', async (req, res, next) => {
+  try {
+    const { quarter } = req.query;
+    if (!quarter || !/^Q[1-4]$/.test(quarter)) {
+      return res.status(400).json({ error: 'quarter parameter required (Q1, Q2, Q3, or Q4)' });
+    }
+
+    const SquareTaxReconciliation = require('../services/square-tax-reconciliation');
+    const result = await SquareTaxReconciliation.calculateQuarterlyEstimate(quarter);
+    res.json(result);
   } catch (err) { next(err); }
 });
 
