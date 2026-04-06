@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 
 import EmailAutomationsPanel from './EmailAutomationsPanel';
 import CallRecordingsPanel from './CallRecordingsPanel';
@@ -31,14 +31,30 @@ function timeAgo(dateStr) {
   return d.toLocaleDateString();
 }
 
+function formatTimestamp(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+  if (isToday) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (isYesterday) return 'Yesterday ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
 const TEMPLATES = [
   { label: 'Service reminder', body: 'Hi! This is Waves Pest Control. Just a reminder that your service is scheduled for tomorrow. Reply CONFIRM to confirm or call us to reschedule.' },
   { label: 'Running late', body: 'Hi! This is Waves Pest Control. Our technician is running a bit behind schedule. We estimate arrival in about 15-20 minutes. Sorry for the delay!' },
   { label: 'Review request', body: 'Thanks for choosing Waves Pest Control! We\'d love your feedback. Please leave us a quick review: [LINK]' },
+  { label: 'Confirm scheduling', body: 'Hi {name}, your service is scheduled for {date}. Reply CONFIRM.' },
+  { label: 'Service complete', body: 'All done! Your report is in your portal.' },
+  { label: 'Follow-up', body: 'Following up on your request. Adam will address this at your next visit.' },
+  { label: 'Quick acknowledge', body: 'We received your message and will respond within 1 hour.' },
 ];
 
 const ALL_NUMBERS = [
-  { group: 'Location Lines', numbers: [
+  { group: 'GBP Locations', numbers: [
     { number: '+19412975749', formatted: '(941) 297-5749', label: 'wavespestcontrol.com (main)' },
     { number: '+19413187612', formatted: '(941) 318-7612', label: 'Waves Pest Control Lakewood Ranch' },
     { number: '+19412972606', formatted: '(941) 297-2606', label: 'Waves Pest Control Sarasota' },
@@ -64,7 +80,7 @@ const ALL_NUMBERS = [
     { number: '+19414131227', formatted: '(941) 413-1227', label: 'venicelawncare.com' },
     { number: '+19412413824', formatted: '(941) 241-3824', label: 'waveslawncare.com' },
   ]},
-  { group: 'Other', numbers: [
+  { group: 'Operations', numbers: [
     { number: '+18559260203', formatted: '(855) 926-0203', label: 'AI Agent' },
     { number: '+19412412459', formatted: '(941) 241-2459', label: 'Waves Van' },
   ]},
@@ -73,6 +89,10 @@ const ALL_NUMBERS = [
     { number: '+19412411388', formatted: '(941) 241-1388', label: 'Unassigned' },
   ]},
 ];
+
+// Flat lookup: number -> label
+const NUMBER_LABEL_MAP = {};
+ALL_NUMBERS.forEach(g => g.numbers.forEach(n => { NUMBER_LABEL_MAP[n.number] = n.label; }));
 
 const TYPE_META = {
   reminder: { icon: '🔔', color: D.amber },
@@ -85,6 +105,15 @@ const TYPE_META = {
   inbound: { icon: '📥', color: D.teal },
 };
 
+const CALL_DISPOSITIONS = [
+  { value: '', label: 'Tag call...' },
+  { value: 'new_lead_booked', label: 'New lead — booked' },
+  { value: 'new_lead_no_booking', label: 'New lead — no booking' },
+  { value: 'existing_service_q', label: 'Existing — service Q' },
+  { value: 'existing_complaint', label: 'Existing — complaint' },
+  { value: 'spam', label: 'Spam / wrong number' },
+];
+
 // --- Stat Card ---
 function StatCard({ label, value, color }) {
   return (
@@ -94,6 +123,29 @@ function StatCard({ label, value, color }) {
     }}>
       <div style={{ color: D.muted, fontSize: 11, fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>{label}</div>
       <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 26, fontWeight: 700, color: color || D.white }}>{value}</div>
+    </div>
+  );
+}
+
+// --- Stat Card with health indicator ---
+function StatCardWithHealth({ label, value, color, shouldHaveActivity }) {
+  const isHealthy = value > 0;
+  const showDot = shouldHaveActivity !== false;
+  const dotColor = isHealthy ? D.green : D.red;
+  return (
+    <div style={{
+      background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center', minWidth: 0,
+      flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 100px',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 4 }}>
+        <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+        {showDot && (
+          <span title={isHealthy ? 'Active' : 'No activity detected'} style={{
+            width: 7, height: 7, borderRadius: '50%', background: dotColor, display: 'inline-block', flexShrink: 0,
+          }} />
+        )}
+      </div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: color, fontFamily: "'JetBrains Mono', monospace" }}>{value}</div>
     </div>
   );
 }
@@ -238,6 +290,58 @@ function ChannelBar({ type, count, max }) {
 }
 
 // =========================================================================
+// CONVERSATION THREAD VIEW
+// =========================================================================
+function ConversationView({ thread, messages, onReply, onBack }) {
+  const contactPhone = thread.contactPhone;
+  const contactName = thread.customerName || contactPhone;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Thread header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, paddingBottom: 12, borderBottom: `1px solid ${D.border}` }}>
+        <button onClick={onBack} style={{
+          background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.muted,
+          fontSize: 13, padding: '6px 12px', cursor: 'pointer', fontFamily: 'DM Sans, sans-serif',
+        }}>Back</button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: D.white }}>{contactName}</div>
+          <div style={{ fontSize: 12, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>{contactPhone}</div>
+        </div>
+        <button onClick={() => onReply(contactPhone, thread.ourNumber)} style={{
+          padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: D.white,
+          fontSize: 13, fontWeight: 600, cursor: 'pointer',
+        }}>Reply</button>
+      </div>
+
+      {/* Messages */}
+      <div style={{ flex: 1, maxHeight: 500, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {messages.map(m => {
+          const isOutbound = m.direction === 'outbound';
+          return (
+            <div key={m.id} style={{ display: 'flex', justifyContent: isOutbound ? 'flex-end' : 'flex-start' }}>
+              <div style={{
+                maxWidth: '75%', padding: '10px 14px', borderRadius: 12,
+                background: isOutbound ? D.teal + '22' : D.card,
+                border: `1px solid ${isOutbound ? D.teal + '44' : D.border}`,
+                borderBottomRightRadius: isOutbound ? 4 : 12,
+                borderBottomLeftRadius: isOutbound ? 12 : 4,
+              }}>
+                <div style={{ fontSize: 13, color: D.text, lineHeight: 1.5, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>{m.body}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, justifyContent: isOutbound ? 'flex-end' : 'flex-start' }}>
+                  <span style={{ fontSize: 10, color: D.muted }}>{formatTimestamp(m.createdAt)}</span>
+                  {m.messageType && <TypeBadge type={m.messageType} />}
+                  <StatusBadge status={m.status} />
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // =========================================================================
 // CALL LOG TAB
 // =========================================================================
@@ -248,6 +352,8 @@ function CallLogTab() {
   const [callFrom, setCallFrom] = useState('+19413187612');
   const [calling, setCalling] = useState(false);
   const [callResult, setCallResult] = useState(null);
+  const [dispositions, setDispositions] = useState({}); // { callId: value }
+  const [savingDisp, setSavingDisp] = useState(null);
 
   const loadCalls = () => {
     adminFetch('/ai/admin/calls?days=365&limit=200').then(d => { setCalls(d.calls || []); setLoading(false); }).catch(() => setLoading(false));
@@ -274,12 +380,54 @@ function CallLogTab() {
     }
   };
 
+  const handleDisposition = async (callId, value) => {
+    setDispositions(prev => ({ ...prev, [callId]: value }));
+    setSavingDisp(callId);
+    try {
+      await adminFetch(`/ai/admin/calls/${callId}/disposition`, {
+        method: 'PUT',
+        body: JSON.stringify({ disposition: value }),
+      });
+    } catch {
+      // Silently keep the local state even if save fails
+    } finally {
+      setSavingDisp(null);
+    }
+  };
+
+  const handleCallBack = (phone) => {
+    setCallTo(phone);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleCreateLead = (phone, city, state) => {
+    // Navigate to customer creation with pre-filled phone
+    const params = new URLSearchParams({ phone: phone || '' });
+    if (city) params.set('city', city);
+    if (state) params.set('state', state);
+    window.open(`/admin/customers/new?${params.toString()}`, '_blank');
+  };
+
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading calls...</div>;
 
   const answered = calls.filter(c => c.answered_by === 'human').length;
   const aiHandled = calls.filter(c => c.answered_by === 'voice_agent').length;
   const voicemail = calls.filter(c => c.answered_by === 'voicemail').length;
   const missed = calls.filter(c => !c.answered_by || c.answered_by === 'missed').length;
+
+  // Source number analytics — calls per source number this month
+  const now = new Date();
+  const thisMonthCalls = calls.filter(c => {
+    const cd = new Date(c.created_at);
+    return cd.getMonth() === now.getMonth() && cd.getFullYear() === now.getFullYear();
+  });
+  const sourceNumberCounts = {};
+  thisMonthCalls.forEach(c => {
+    const num = c.to_phone || 'Unknown';
+    const label = NUMBER_LABEL_MAP[num] || num;
+    sourceNumberCounts[label] = (sourceNumberCounts[label] || 0) + 1;
+  });
+  const sortedSources = Object.entries(sourceNumberCounts).sort((a, b) => b[1] - a[1]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -298,6 +446,24 @@ function CallLogTab() {
           </div>
         ))}
       </div>
+
+      {/* Source Number Analytics */}
+      {sortedSources.length > 0 && (
+        <div style={{ background: D.card, borderRadius: 12, padding: '16px 20px', border: `1px solid ${D.border}` }}>
+          <h2 style={{ fontSize: 13, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: '0 0 12px' }}>Calls Per Source (This Month)</h2>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {sortedSources.slice(0, 12).map(([label, count]) => (
+              <div key={label} style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px',
+                background: D.bg, borderRadius: 8, border: `1px solid ${D.border}`,
+              }}>
+                <span style={{ fontSize: 12, color: D.text, fontFamily: 'DM Sans, sans-serif' }}>{label}</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: D.teal, fontFamily: "'JetBrains Mono', monospace" }}>{count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Make a Call panel */}
       <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}`, marginBottom: 16 }}>
@@ -369,12 +535,20 @@ function CallLogTab() {
         ) : (
           <div style={{ maxHeight: 600, overflowY: 'auto' }}>
             {calls.map(c => {
+              const isMissed = !c.answered_by || c.answered_by === 'missed';
               const answeredColor = c.answered_by === 'human' ? D.green : c.answered_by === 'voice_agent' ? D.teal : c.answered_by === 'voicemail' ? D.amber : D.red;
               const answeredLabel = c.answered_by === 'human' ? 'Answered' : c.answered_by === 'voice_agent' ? 'AI Agent' : c.answered_by === 'voicemail' ? 'Voicemail' : 'Missed';
               const dur = c.duration_seconds ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, '0')}` : '--';
+              const isUnknown = !c.first_name && !c.customer_id;
+              const currentDisp = dispositions[c.id] || c.disposition || '';
 
               return (
-                <div key={c.id} style={{ padding: '12px 0', borderBottom: `1px solid ${D.border}` }}>
+                <div key={c.id} style={{
+                  padding: '12px 0', borderBottom: `1px solid ${D.border}`,
+                  background: isMissed ? D.red + '08' : 'transparent',
+                  borderLeft: isMissed ? `3px solid ${D.red}` : '3px solid transparent',
+                  paddingLeft: 10,
+                }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <span style={{ fontSize: 16, width: 20, textAlign: 'center', color: c.direction === 'inbound' ? D.teal : D.green }}>{c.direction === 'inbound' ? '↓' : '↑'}</span>
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -392,6 +566,41 @@ function CallLogTab() {
                       <span style={{ fontSize: 10, color: D.muted }}>{timeAgo(c.created_at)}</span>
                     </div>
                   </div>
+
+                  {/* Action row: disposition, missed call-back, create lead */}
+                  <div style={{ marginTop: 8, marginLeft: 30, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {/* Disposition tag */}
+                    <select
+                      value={currentDisp}
+                      onChange={e => handleDisposition(c.id, e.target.value)}
+                      style={{
+                        background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: currentDisp ? D.text : D.muted,
+                        fontSize: 11, padding: '4px 8px', fontFamily: 'DM Sans, sans-serif', outline: 'none',
+                        opacity: savingDisp === c.id ? 0.5 : 1, cursor: 'pointer',
+                      }}
+                    >
+                      {CALL_DISPOSITIONS.map(d => (
+                        <option key={d.value} value={d.value}>{d.label}</option>
+                      ))}
+                    </select>
+
+                    {/* Missed call — Call Back button */}
+                    {isMissed && c.from_phone && (
+                      <button onClick={() => handleCallBack(c.from_phone)} style={{
+                        padding: '4px 12px', borderRadius: 6, border: 'none', background: D.red, color: D.white,
+                        fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                      }}>Call Back</button>
+                    )}
+
+                    {/* Unknown caller — Create Lead button */}
+                    {isUnknown && c.from_phone && (
+                      <button onClick={() => handleCreateLead(c.from_phone, c.caller_city, c.caller_state)} style={{
+                        padding: '4px 12px', borderRadius: 6, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal,
+                        fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                      }}>Create Lead</button>
+                    )}
+                  </div>
+
                   {/* Recording player */}
                   {c.recording_url && (
                     <div style={{ marginTop: 8, marginLeft: 30, padding: '8px 12px', background: D.bg, borderRadius: 8, border: `1px solid ${D.border}` }}>
@@ -618,10 +827,10 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
       {/* Summary */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         <StatCard label="Total Numbers" value={totalNumbers} color={D.white} />
-        <StatCard label="Location Lines" value={ALL_NUMBERS[0].numbers.length} color={D.green} />
+        <StatCard label="GBP Locations" value={ALL_NUMBERS[0].numbers.length} color={D.green} />
         <StatCard label="Pest Domains" value={ALL_NUMBERS[1].numbers.length} color={D.teal} />
         <StatCard label="Lawn Domains" value={ALL_NUMBERS[2].numbers.length} color={D.green} />
-        <StatCard label="Other" value={ALL_NUMBERS[3].numbers.length + ALL_NUMBERS[4].numbers.length} color={D.muted} />
+        <StatCard label="Operations" value={ALL_NUMBERS[3].numbers.length + ALL_NUMBERS[4].numbers.length} color={D.muted} />
       </div>
 
       {/* Number Groups */}
@@ -721,6 +930,11 @@ export default function CommunicationsPage() {
   const [dirFilter, setDirFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
 
+  // Conversation threading state
+  const [smsView, setSmsView] = useState('threads'); // 'threads' | 'log' | 'conversation'
+  const [activeThread, setActiveThread] = useState(null);
+  const [threadFilter, setThreadFilter] = useState('all'); // 'all' | 'unanswered'
+
   const loadData = useCallback(() => {
     Promise.all([
       adminFetch('/admin/communications/log').catch(() => ({ messages: [] })),
@@ -786,6 +1000,85 @@ export default function CommunicationsPage() {
     }
   };
 
+  // Build conversation threads from messages
+  const threads = useMemo(() => {
+    const threadMap = {};
+    // Sort messages oldest first to build threads correctly
+    const sorted = [...messages].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    sorted.forEach(m => {
+      // Determine the contact phone (the non-Waves number)
+      const allNums = new Set();
+      ALL_NUMBERS.forEach(g => g.numbers.forEach(n => allNums.add(n.number)));
+
+      let contactPhone, ourNumber;
+      if (m.direction === 'inbound') {
+        contactPhone = m.from;
+        ourNumber = m.to;
+      } else {
+        contactPhone = m.to;
+        ourNumber = m.from;
+      }
+      // Normalize
+      const key = contactPhone?.replace(/\D/g, '').slice(-10) || 'unknown';
+
+      if (!threadMap[key]) {
+        threadMap[key] = {
+          contactPhone,
+          ourNumber,
+          customerName: m.customerName || null,
+          messages: [],
+          lastMessage: null,
+          lastTimestamp: null,
+          lastDirection: null,
+          unread: false,
+        };
+      }
+      const thread = threadMap[key];
+      thread.messages.push(m);
+      // Update with the latest name we find
+      if (m.customerName) thread.customerName = m.customerName;
+      // Keep ourNumber updated to the last one used
+      if (ourNumber && allNums.has(ourNumber)) thread.ourNumber = ourNumber;
+      // Update last message info
+      thread.lastMessage = m.body;
+      thread.lastTimestamp = m.createdAt;
+      thread.lastDirection = m.direction;
+    });
+
+    // Convert to array, determine unanswered status
+    const threadList = Object.values(threadMap).map(t => {
+      // Sort thread messages newest first for display
+      t.messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      // Unanswered = last message was inbound (customer wrote, no reply)
+      t.unanswered = t.lastDirection === 'inbound';
+      return t;
+    });
+
+    // Sort by most recent first
+    threadList.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp));
+    return threadList;
+  }, [messages]);
+
+  const unansweredCount = threads.filter(t => t.unanswered).length;
+
+  const filteredThreads = threadFilter === 'unanswered'
+    ? threads.filter(t => t.unanswered)
+    : threads;
+
+  // Handle reply from thread — auto-set From to the number customer texted
+  const handleThreadReply = (contactPhone, ourNumber) => {
+    setToNumber(contactPhone);
+    if (ourNumber) setFromNumber(ourNumber);
+    setSmsView('threads');
+    setActiveThread(null);
+    // Scroll to compose area
+    setTimeout(() => {
+      const el = document.getElementById('sms-compose');
+      if (el) el.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+  };
+
   // Derived data — use server-provided totals (includes ALL message types)
   const totalSent = stats?.totalSent || stats?.channelStats?.reduce((s, c) => s + (c.sent || 0), 0) || 0;
   const totalReceived = stats?.totalReceived || stats?.locationStats?.reduce((s, l) => s + (l.received || 0), 0) || 0;
@@ -840,25 +1133,18 @@ export default function CommunicationsPage() {
         <PhoneNumbersTab channelStats={channelStats} maxChannel={maxChannel} stats={stats} />
       ) : <>
 
-      {/* --- SMS Stats --- */}
+      {/* --- SMS Stats with health indicators --- */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
-        {[
-          { label: 'Sent This Month', value: totalSent, color: D.green },
-          { label: 'Received This Month', value: totalReceived, color: D.teal },
-          { label: 'Auto-Replies', value: channelStats.find(c => c.type === 'auto_reply')?.sent || 0, color: '#0ea5e9' },
-          { label: 'Reminders', value: channelStats.find(c => c.type === 'reminder')?.sent || channelStats.find(c => c.type === 'confirmation')?.sent || 0, color: D.amber },
-          { label: 'Review Requests', value: channelStats.find(c => c.type === 'review_request')?.sent || 0, color: '#8b5cf6' },
-          { label: 'Estimates', value: channelStats.find(c => c.type === 'estimate')?.sent || 0, color: '#3b82f6' },
-        ].map((s, i) => (
-          <div key={i} style={{ flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center', minWidth: 0 }}>
-            <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s.label}</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
-          </div>
-        ))}
+        <StatCardWithHealth label="Sent This Month" value={totalSent} color={D.green} shouldHaveActivity={false} />
+        <StatCardWithHealth label="Received This Month" value={totalReceived} color={D.teal} shouldHaveActivity={false} />
+        <StatCardWithHealth label="Auto-Replies" value={channelStats.find(c => c.type === 'auto_reply')?.sent || 0} color="#0ea5e9" shouldHaveActivity={true} />
+        <StatCardWithHealth label="Reminders" value={channelStats.find(c => c.type === 'reminder')?.sent || channelStats.find(c => c.type === 'confirmation')?.sent || 0} color={D.amber} shouldHaveActivity={true} />
+        <StatCardWithHealth label="Review Requests" value={channelStats.find(c => c.type === 'review_request')?.sent || 0} color="#8b5cf6" shouldHaveActivity={true} />
+        <StatCardWithHealth label="Estimates" value={channelStats.find(c => c.type === 'estimate')?.sent || 0} color="#3b82f6" shouldHaveActivity={true} />
       </div>
 
       {/* --- Send SMS --- */}
-      <div style={{ marginBottom: 28 }}>
+      <div id="sms-compose" style={{ marginBottom: 28 }}>
         <div style={{
           background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
           padding: 20,
@@ -1003,53 +1289,171 @@ export default function CommunicationsPage() {
         </div>
       </div>
 
-      {/* --- SMS Log --- */}
-      <div style={{
-        background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
-          <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>SMS Log</h2>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {/* Direction filter */}
-            <select
-              value={dirFilter}
-              onChange={e => setDirFilter(e.target.value)}
-              style={{
-                background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text,
-                fontSize: 12, padding: '5px 8px', fontFamily: 'DM Sans, sans-serif', outline: 'none',
-              }}
-            >
-              <option value="all">All directions</option>
-              <option value="inbound">Inbound</option>
-              <option value="outbound">Outbound</option>
-            </select>
-            {/* Type filter */}
-            <select
-              value={typeFilter}
-              onChange={e => setTypeFilter(e.target.value)}
-              style={{
-                background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text,
-                fontSize: 12, padding: '5px 8px', fontFamily: 'DM Sans, sans-serif', outline: 'none',
-              }}
-            >
-              <option value="all">All types</option>
-              {messageTypes.map(t => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-          </div>
+      {/* --- SMS View Toggle: Threads vs Log --- */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 4, background: D.card, borderRadius: 8, padding: 3, border: `1px solid ${D.border}` }}>
+          <button onClick={() => { setSmsView('threads'); setActiveThread(null); }} style={{
+            padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 500,
+            background: smsView === 'threads' || smsView === 'conversation' ? D.teal : 'transparent',
+            color: smsView === 'threads' || smsView === 'conversation' ? D.white : D.muted,
+          }}>Conversations</button>
+          <button onClick={() => { setSmsView('log'); setActiveThread(null); }} style={{
+            padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 500,
+            background: smsView === 'log' ? D.teal : 'transparent',
+            color: smsView === 'log' ? D.white : D.muted,
+          }}>Log View</button>
         </div>
 
-        <div style={{ maxHeight: 600, overflowY: 'auto' }}>
-          {filtered.length === 0 ? (
-            <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No messages found.</div>
-          ) : (
-            filtered.map(m => (
-              <SmsLogItem key={m.id} msg={m} onReply={(phone, from) => { setToNumber(phone); setFromNumber(from); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />
-            ))
-          )}
-        </div>
+        {/* Unanswered badge/filter */}
+        {(smsView === 'threads') && (
+          <button
+            onClick={() => setThreadFilter(threadFilter === 'unanswered' ? 'all' : 'unanswered')}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '6px 14px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+              background: threadFilter === 'unanswered' ? D.red + '22' : D.card,
+              color: threadFilter === 'unanswered' ? D.red : (unansweredCount > 0 ? D.red : D.muted),
+              border: `1px solid ${threadFilter === 'unanswered' ? D.red + '44' : D.border}`,
+            }}
+          >
+            Unanswered
+            {unansweredCount > 0 && (
+              <span style={{
+                background: D.red, color: D.white, fontSize: 10, fontWeight: 700,
+                padding: '1px 7px', borderRadius: 10, minWidth: 18, textAlign: 'center',
+              }}>{unansweredCount}</span>
+            )}
+          </button>
+        )}
       </div>
+
+      {/* --- Conversation Thread View --- */}
+      {smsView === 'conversation' && activeThread ? (
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20 }}>
+          <ConversationView
+            thread={activeThread}
+            messages={activeThread.messages.slice().reverse()}
+            onReply={handleThreadReply}
+            onBack={() => { setSmsView('threads'); setActiveThread(null); }}
+          />
+        </div>
+      ) : smsView === 'threads' ? (
+        /* --- Thread List --- */
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+            <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>
+              Conversations
+              <span style={{ fontSize: 12, fontWeight: 400, marginLeft: 8, color: D.muted }}>({filteredThreads.length})</span>
+            </h2>
+          </div>
+
+          <div style={{ maxHeight: 600, overflowY: 'auto' }}>
+            {filteredThreads.length === 0 ? (
+              <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>
+                {threadFilter === 'unanswered' ? 'No unanswered conversations.' : 'No conversations found.'}
+              </div>
+            ) : (
+              filteredThreads.map((t, i) => {
+                const preview = t.lastMessage ? (t.lastMessage.length > 60 ? t.lastMessage.slice(0, 60) + '...' : t.lastMessage) : '';
+                return (
+                  <div
+                    key={i}
+                    onClick={() => { setActiveThread(t); setSmsView('conversation'); }}
+                    style={{
+                      padding: '12px 14px', borderBottom: `1px solid ${D.border}`, cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', gap: 12,
+                      background: t.unanswered ? D.red + '08' : 'transparent',
+                      borderLeft: t.unanswered ? `3px solid ${D.red}` : '3px solid transparent',
+                      transition: 'background 0.15s',
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = D.bg}
+                    onMouseLeave={e => e.currentTarget.style.background = t.unanswered ? D.red + '08' : 'transparent'}
+                  >
+                    {/* Unread dot */}
+                    <div style={{ width: 10, flexShrink: 0 }}>
+                      {t.unanswered && (
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: D.red, display: 'block' }} />
+                      )}
+                    </div>
+
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: D.white }}>
+                          {t.customerName || t.contactPhone}
+                        </span>
+                        <span style={{ fontSize: 10, color: D.muted, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>
+                          {timeAgo(t.lastTimestamp)}
+                        </span>
+                      </div>
+                      {t.customerName && (
+                        <div style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace", marginBottom: 2 }}>{t.contactPhone}</div>
+                      )}
+                      <div style={{ fontSize: 12, color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <span style={{ color: t.lastDirection === 'inbound' ? D.teal : D.green, marginRight: 4 }}>
+                          {t.lastDirection === 'inbound' ? '↓' : '↑'}
+                        </span>
+                        {preview}
+                      </div>
+                    </div>
+
+                    <div style={{ flexShrink: 0, fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                      {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      ) : (
+        /* --- Classic SMS Log --- */
+        <div style={{
+          background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+            <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>SMS Log</h2>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {/* Direction filter */}
+              <select
+                value={dirFilter}
+                onChange={e => setDirFilter(e.target.value)}
+                style={{
+                  background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text,
+                  fontSize: 12, padding: '5px 8px', fontFamily: 'DM Sans, sans-serif', outline: 'none',
+                }}
+              >
+                <option value="all">All directions</option>
+                <option value="inbound">Inbound</option>
+                <option value="outbound">Outbound</option>
+              </select>
+              {/* Type filter */}
+              <select
+                value={typeFilter}
+                onChange={e => setTypeFilter(e.target.value)}
+                style={{
+                  background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text,
+                  fontSize: 12, padding: '5px 8px', fontFamily: 'DM Sans, sans-serif', outline: 'none',
+                }}
+              >
+                <option value="all">All types</option>
+                {messageTypes.map(t => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ maxHeight: 600, overflowY: 'auto' }}>
+            {filtered.length === 0 ? (
+              <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No messages found.</div>
+            ) : (
+              filtered.map(m => (
+                <SmsLogItem key={m.id} msg={m} onReply={(phone, from) => { setToNumber(phone); setFromNumber(from); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       </>}
     </div>
