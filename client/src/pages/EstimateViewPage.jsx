@@ -149,6 +149,59 @@ const ALL_SERVICES = [
 ];
 
 // =========================================================================
+// VALUE STACK — dollar-denominated value mapping
+// =========================================================================
+const VALUE_MAP = {
+  'lawn9':      { label: '9 professional lawn treatments', value: 675 },
+  'lawn6':      { label: '6 professional lawn treatments', value: 540 },
+  'lawn4':      { label: '4 professional lawn treatments', value: 420 },
+  'lawn':       { label: 'Professional lawn care program', value: 540 },
+  'pest_q':     { label: '4 quarterly pest perimeter treatments', value: 528 },
+  'pest_bm':    { label: '6 bi-monthly pest treatments', value: 672 },
+  'pest':       { label: 'Year-round pest control program', value: 528 },
+  'mosquito':   { label: 'Seasonal mosquito barrier program', value: 350 },
+  'treeShrub':  { label: '6 tree & shrub care applications', value: 390 },
+  'termite':    { label: 'Termite bait station monitoring', value: 600 },
+};
+const ALWAYS_INCLUDED = [
+  { label: 'Unlimited pest callbacks between visits', value: 200, suffix: '+' },
+  { label: 'Priority scheduling & 24-hour response', value: 150 },
+  { label: 'Dedicated technician', value: 100 },
+  { label: 'Digital portal with service reports', value: 120 },
+];
+
+function buildValueStack(services, tier) {
+  const items = [];
+  services.forEach(s => {
+    const n = s.name.toLowerCase();
+    if (n.includes('lawn')) {
+      const freq = s.frequency || s.visits || 0;
+      if (freq >= 9) items.push(VALUE_MAP['lawn9']);
+      else if (freq >= 6) items.push(VALUE_MAP['lawn6']);
+      else if (freq >= 4) items.push(VALUE_MAP['lawn4']);
+      else items.push(VALUE_MAP['lawn']);
+    } else if (n.includes('pest')) {
+      if (n.includes('bi-month') || n.includes('bimonth') || (s.frequency && s.frequency >= 6)) {
+        items.push(VALUE_MAP['pest_bm']);
+      } else {
+        items.push(VALUE_MAP['pest']);
+      }
+    } else if (n.includes('mosquito')) {
+      items.push(VALUE_MAP['mosquito']);
+    } else if (n.includes('tree') || n.includes('shrub')) {
+      items.push(VALUE_MAP['treeShrub']);
+    } else if (n.includes('termite')) {
+      items.push(VALUE_MAP['termite']);
+    }
+  });
+  // Always-included perks
+  ALWAYS_INCLUDED.forEach(item => items.push(item));
+  // Add tier membership line
+  if (tier) items.push({ label: `WaveGuard ${tier} membership`, value: 0, included: true });
+  return items;
+}
+
+// =========================================================================
 // COMPONENTS
 // =========================================================================
 function ServiceDropdown({ title, children }) {
@@ -357,7 +410,18 @@ export default function EstimateViewPage() {
   if (hasTS) includedKeys.push('treeShrub');
   if (hasTermite) includedKeys.push('termite');
 
-  const missingServices = ALL_SERVICES.filter(s => !includedKeys.includes(s.key));
+  const missingServices = ALL_SERVICES.filter(svc => {
+    if (includedKeys.includes(svc.key)) return false;
+    // Double-check against actual service names for edge cases
+    return !svcNames.some(n => {
+      if (svc.key === 'lawn') return n.includes('lawn');
+      if (svc.key === 'pest') return n.includes('pest') && !n.includes('termite');
+      if (svc.key === 'mosquito') return n.includes('mosquito');
+      if (svc.key === 'treeShrub') return n.includes('tree') || n.includes('shrub');
+      if (svc.key === 'termite') return n.includes('termite');
+      return false;
+    });
+  });
 
   const firstName = (e.customerName || '').split(' ')[0] || 'there';
   const monthlyTotal = Number(e.monthlyTotal) || 0;
@@ -435,9 +499,90 @@ export default function EstimateViewPage() {
       <div style={{ maxWidth: 560, margin: '0 auto', padding: '0 16px 40px' }}>
 
         {/* ============================================================= */}
+        {/* VALUE STACK — Hormozi Grand Slam Offer                         */}
+        {/* ============================================================= */}
+        {(() => {
+          const stackItems = buildValueStack(services, e.tier);
+          const totalValue = stackItems.reduce((sum, it) => sum + (it.value || 0), 0);
+          const annualRate = monthlyTotal * 12;
+          const savings = totalValue - annualRate;
+          return (
+            <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 16, border: `1px solid ${SAND_DARK}` }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
+                What You're Getting
+              </div>
+              <div style={{ height: 2, background: `linear-gradient(90deg, ${B.green}, ${B.wavesBlue})`, borderRadius: 1, marginBottom: 16 }} />
+
+              {stackItems.map((item, i) => (
+                <div key={i} style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '7px 0',
+                  borderBottom: i < stackItems.length - 1 ? `1px solid ${SAND_DARK}` : 'none',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1 }}>
+                    <span style={{ color: B.green, fontSize: 16, flexShrink: 0 }}>✓</span>
+                    <span style={{ fontSize: 14, color: B.navy, fontWeight: 600, fontFamily: FONTS.body }}>{item.label}</span>
+                  </div>
+                  <span style={{
+                    fontSize: 14, fontWeight: 700, fontFamily: FONTS.ui, color: B.grayMid,
+                    whiteSpace: 'nowrap', marginLeft: 8,
+                  }}>
+                    {item.included ? 'Included' : `$${item.value}${item.suffix || ''} value`}
+                  </span>
+                </div>
+              ))}
+
+              <div style={{ height: 2, background: `linear-gradient(90deg, ${B.green}, ${B.wavesBlue})`, borderRadius: 1, marginTop: 16, marginBottom: 14 }} />
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Total value:</span>
+                <span style={{ fontSize: 22, fontWeight: 800, color: B.green, fontFamily: FONTS.ui }}>${totalValue.toLocaleString()}+</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Your rate:</span>
+                <span style={{ fontSize: 16, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>
+                  ${annualRate.toLocaleString()}/year ({fmt(monthlyTotal)}/mo)
+                </span>
+              </div>
+              {savings > 0 && (
+                <div style={{
+                  background: `${B.green}15`, borderRadius: 10, padding: '10px 14px', marginTop: 6,
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                }}>
+                  <span style={{ fontSize: 15, fontWeight: 800, color: B.green, fontFamily: FONTS.heading }}>You save:</span>
+                  <span style={{ fontSize: 18, fontWeight: 800, color: B.green, fontFamily: FONTS.ui }}>${savings.toLocaleString()}+ per year</span>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* ============================================================= */}
+        {/* GUARANTEE BLOCK                                                */}
+        {/* ============================================================= */}
+        <div style={{
+          background: '#fff', borderRadius: 16, padding: 20, marginTop: 12,
+          border: `1px solid ${SAND_DARK}`, borderLeft: `4px solid ${B.green}`,
+        }}>
+          <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
+            Our Promise to You
+          </div>
+          <div style={{ fontSize: 14, color: B.navy, lineHeight: 1.7, fontFamily: FONTS.body }}>
+            <span role="img" aria-label="shield" style={{ fontSize: 20, marginRight: 6 }}>🛡️</span>
+            If pests return between treatments, we come back free — within 24 hours.
+          </div>
+          <div style={{ fontSize: 14, color: B.navy, lineHeight: 1.7, fontFamily: FONTS.body, marginTop: 8 }}>
+            If you're not satisfied after 90 days, we'll refund every penny. No questions, no hassle, no fine print.
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, lineHeight: 1.7, fontFamily: FONTS.body, marginTop: 10 }}>
+            That's the Waves guarantee. We earn your trust every visit.
+          </div>
+        </div>
+
+        {/* ============================================================= */}
         {/* 2. SERVICE LINE ITEMS                                          */}
         {/* ============================================================= */}
-        <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 16, border: `1px solid ${SAND_DARK}` }}>
+        <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
           <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>Your Services</div>
           {services.map((s, i) => (
             <div key={i} style={{
@@ -480,19 +625,30 @@ export default function EstimateViewPage() {
           </div>
         )}
 
-        {/* One-time services */}
+        {/* One-time services — value framed */}
         {otItems.length > 0 && (
           <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>One-Time Services</div>
-            {otItems.map((item, i) => (
-              <div key={i} style={{
-                display: 'flex', justifyContent: 'space-between', padding: '8px 0',
-                borderBottom: i < otItems.length - 1 ? `1px solid ${SAND_DARK}` : 'none',
-              }}>
-                <span style={{ fontSize: 14, color: B.grayDark }}>{item.name}</span>
-                <span style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${Math.round(item.price)}</span>
-              </div>
-            ))}
+            <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
+              Your Initial Service Visit
+            </div>
+            {otItems.map((item, i) => {
+              const price = Math.round(item.price);
+              const retailValue = Math.round(price * 1.57);
+              return (
+                <div key={i} style={{ padding: '10px 0', borderBottom: i < otItems.length - 1 ? `1px solid ${SAND_DARK}` : 'none' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{item.name}</span>
+                    <span style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui }}>${price}</span>
+                  </div>
+                  <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6, marginTop: 4, fontFamily: FONTS.body }}>
+                    Includes: comprehensive property assessment, full interior + exterior treatment, granular lawn application, and baseline pest monitoring setup.
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: B.green, marginTop: 4, fontFamily: FONTS.body }}>
+                    A ${retailValue} value — yours for ${price}.
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -631,7 +787,7 @@ export default function EstimateViewPage() {
         {missingServices.length > 0 && (
           <div style={{ marginTop: 32 }}>
             <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>
-              Also Available — Add to Your Plan
+              Enhance Your Plan
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {missingServices.slice(0, 2).map((svc, i) => (
@@ -644,7 +800,7 @@ export default function EstimateViewPage() {
                     <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
                       {svc.emoji} {svc.label}
                     </div>
-                    <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Ask us to add this to your plan</div>
+                    <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Upgrade your protection — unlock additional savings</div>
                   </div>
                   <a
                     href={`sms:+19413187612?body=${encodeURIComponent(`Hi! I'd like to add ${svc.label} to my estimate for ${e.address}.`)}`}
@@ -683,23 +839,36 @@ export default function EstimateViewPage() {
         {/* 7. REVIEWS CAROUSEL                                            */}
         {/* ============================================================= */}
         <div style={{ marginTop: 32 }}>
-          <div style={{ textAlign: 'center', marginBottom: 14 }}>
-            <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
-              Don't just take our word for it 🌟
-            </div>
-            <div style={{ fontSize: 14, color: B.yellow, marginTop: 4 }}>
-              5.0 ★★★★★ <span style={{ color: B.grayMid, fontSize: 12 }}>on Google</span>
-            </div>
-          </div>
-          <div
-            ref={reviewsRef}
-            style={{
-              display: 'flex', gap: 14, overflowX: 'auto', scrollSnapType: 'x mandatory',
-              WebkitOverflowScrolling: 'touch', paddingBottom: 8,
-              msOverflowStyle: 'none', scrollbarWidth: 'none',
-            }}
-          >
-            {REVIEWS.map((r, i) => (
+          {(() => {
+            // Sort reviews so location-relevant ones appear first
+            const addr = (e.address || '').toLowerCase();
+            const sortedReviews = [...REVIEWS].sort((a, b) => {
+              const aMatch = addr.includes(a.location.toLowerCase()) ? 1 : 0;
+              const bMatch = addr.includes(b.location.toLowerCase()) ? 1 : 0;
+              return bMatch - aMatch;
+            });
+            // Detect city for neighbor note
+            const knownCities = ['Bradenton', 'Lakewood Ranch', 'Parrish', 'Sarasota', 'Venice', 'Palmetto', 'Ellenton', 'Anna Maria'];
+            const matchedCity = knownCities.find(c => addr.includes(c.toLowerCase()));
+            return (
+              <>
+                <div style={{ textAlign: 'center', marginBottom: 14 }}>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
+                    Don't just take our word for it
+                  </div>
+                  <div style={{ fontSize: 14, color: B.yellow, marginTop: 4 }}>
+                    5.0 ★★★★★ <span style={{ color: B.grayMid, fontSize: 12 }}>on Google</span>
+                  </div>
+                </div>
+                <div
+                  ref={reviewsRef}
+                  style={{
+                    display: 'flex', gap: 14, overflowX: 'auto', scrollSnapType: 'x mandatory',
+                    WebkitOverflowScrolling: 'touch', paddingBottom: 8,
+                    msOverflowStyle: 'none', scrollbarWidth: 'none',
+                  }}
+                >
+                  {sortedReviews.map((r, i) => (
               <div key={i} style={{
                 minWidth: 280, maxWidth: 320, flexShrink: 0, scrollSnapAlign: 'start',
                 background: '#fff', borderRadius: 16, padding: 18,
@@ -719,7 +888,18 @@ export default function EstimateViewPage() {
                 <div style={{ fontSize: 12, color: B.grayMid }}>{r.location}</div>
               </div>
             ))}
-          </div>
+                </div>
+                {matchedCity && (
+                  <div style={{
+                    textAlign: 'center', marginTop: 12, fontSize: 13, color: B.grayDark,
+                    fontFamily: FONTS.body, lineHeight: 1.5,
+                  }}>
+                    Your neighbors trust Waves — join 200+ homeowners in {matchedCity} protected by WaveGuard.
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
 
         {/* Accept CTA — after reviews */}
@@ -865,8 +1045,13 @@ export default function EstimateViewPage() {
           )}
 
           {e.expiresAt && (
-            <div style={{ textAlign: 'center', fontSize: 11, color: B.grayMid, marginTop: 12 }}>
-              Estimate valid until {new Date(e.expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+            <div style={{ textAlign: 'center', marginTop: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: B.red, fontFamily: FONTS.heading, marginBottom: 4 }}>
+                Pre-summer pricing — lock in {fmt(monthlyTotal)}/mo before peak pest season rates.
+              </div>
+              <div style={{ fontSize: 11, color: B.grayMid }}>
+                Estimate valid until {new Date(e.expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+              </div>
             </div>
           )}
         </div>
