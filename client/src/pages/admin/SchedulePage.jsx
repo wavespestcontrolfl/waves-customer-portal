@@ -1206,28 +1206,33 @@ export default function SchedulePage() {
     setOptimizing(false);
   };
 
-  const [syncingSquare, setSyncingSquare] = useState(false);
-  const handleSyncSquare = async () => {
-    setSyncingSquare(true);
+  const [syncingCal, setSyncingCal] = useState(false);
+  const handleSyncCalendar = async () => {
+    setSyncingCal(true);
     try {
-      const r = await fetch(`${API_BASE}/admin/schedule/sync-square`, {
+      const r = await fetch(`${API_BASE}/admin/schedule/sync-calendar`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ days: 14 }),
       });
       const result = await r.json();
       if (!r.ok) {
-        alert(`Square sync error: ${result.error || r.status}${result.hint ? '\n\n' + result.hint : ''}`);
-      } else if (result.message) {
-        alert(result.message);
+        alert(`Sync error: ${result.error || r.status}`);
       } else {
-        alert(`Square sync: ${result.created} new, ${result.updated} updated, ${result.skipped} unchanged`);
-        fetchSchedule(date);
+        const sq = result.square || {};
+        const gc = result.google || {};
+        const lines = [];
+        lines.push(`Square: ${sq.found || 0} found, ${sq.created || 0} new, ${sq.updated || 0} updated`);
+        if (sq.error) lines.push(`  ⚠ ${sq.error}`);
+        lines.push(`Google Calendar: ${gc.found || 0} found, ${gc.created || 0} new`);
+        if (gc.error) lines.push(`  ⚠ ${gc.error}`);
+        alert(lines.join('\n'));
+        if (sq.created > 0 || gc.created > 0) fetchSchedule(date);
       }
     } catch (e) {
-      alert('Square sync failed: ' + e.message);
+      alert('Calendar sync failed: ' + e.message);
     }
-    setSyncingSquare(false);
+    setSyncingCal(false);
   };
 
   function shiftDate(days) {
@@ -1303,11 +1308,11 @@ export default function SchedulePage() {
                 <span><strong style={{ color: D.green }}>{completedCount}</strong> completed</span>
                 <span><strong style={{ color: D.amber }}>{remainingCount}</strong> remaining</span>
               </div>
-              <button onClick={handleSyncSquare} disabled={syncingSquare} style={{
+              <button onClick={handleSyncCalendar} disabled={syncingCal} style={{
                 ...btnBase, background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, fontSize: 13, height: 38,
-                opacity: syncingSquare ? 0.6 : 1,
+                opacity: syncingCal ? 0.6 : 1,
               }}>
-                {syncingSquare ? 'Syncing...' : 'Sync Square'}
+                {syncingCal ? 'Syncing...' : 'Sync Calendar'}
               </button>
               <button onClick={handleOptimize} disabled={optimizing} style={{
                 ...btnBase, background: D.teal, color: D.white, fontSize: 13, height: 38,

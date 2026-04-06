@@ -390,21 +390,29 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/schedule/sync-square — pull Square bookings into scheduled_services
+// POST /api/admin/schedule/sync-square — kept for backwards compat, redirects to sync-calendar
 router.post('/sync-square', async (req, res, next) => {
   try {
-    const SquareBookingSync = require('../services/square-booking-sync');
+    const CalendarSync = require('../services/calendar-sync');
     const days = parseInt(req.body.days) || 14;
-    const result = await SquareBookingSync.sync(days);
+    const result = await CalendarSync.syncAll(days);
     res.json(result);
   } catch (err) {
-    logger.error(`[sync-square] ${err.message}`);
-    res.status(500).json({
-      error: err.message,
-      hint: err.message.includes('not onboarded') ? 'Square Appointments may not be enabled for this account' :
-            err.message.includes('401') ? 'Check SQUARE_ACCESS_TOKEN and SQUARE_ENVIRONMENT=production in Railway env vars' :
-            'Check server logs for details',
-    });
+    logger.error(`[cal-sync] ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/schedule/sync-calendar — unified sync from Square + Google Calendar
+router.post('/sync-calendar', async (req, res, next) => {
+  try {
+    const CalendarSync = require('../services/calendar-sync');
+    const days = parseInt(req.body.days) || 14;
+    const result = await CalendarSync.syncAll(days);
+    res.json(result);
+  } catch (err) {
+    logger.error(`[cal-sync] ${err.message}`);
+    res.status(500).json({ error: err.message });
   }
 });
 

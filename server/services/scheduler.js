@@ -84,17 +84,18 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY HOUR — Sync Square bookings into Schedule & Dispatch
+  // EVERY HOUR — Sync Square + Google Calendar into Schedule & Dispatch
   // =========================================================================
   cron.schedule('0 * * * *', async () => {
     try {
-      const SquareBookingSync = require('./square-booking-sync');
-      const result = await SquareBookingSync.sync(14);
-      if (result.created > 0 || result.updated > 0) {
-        logger.info(`Square sync: ${result.created} created, ${result.updated} updated`);
+      const CalendarSync = require('./calendar-sync');
+      const result = await CalendarSync.syncAll(14);
+      const sq = result.square, gc = result.google;
+      if (sq.created > 0 || gc.created > 0) {
+        logger.info(`Calendar sync: Square ${sq.created} new, Google ${gc.created} new`);
       }
     } catch (err) {
-      logger.error(`Square booking sync failed: ${err.message}`);
+      logger.error(`Calendar sync failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
