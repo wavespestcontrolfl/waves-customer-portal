@@ -178,6 +178,42 @@ router.get('/relevant', async (req, res, next) => {
     const month = new Date().getMonth();
     const seasonalPromos = getSeasonalPromotions(month);
 
+    // ── Property-Aware Intelligence ──
+    // Use customer's property data to score relevance of each service
+    const property = {
+      sqft: customer.property_sqft || 0,
+      lotSqft: customer.lot_sqft || 0,
+      constructionMaterial: customer.construction_material || null,
+      yearBuilt: customer.year_built || null,
+      palmCount: customer.palm_count || 0,
+      poolCage: customer.pool_cage || false,
+      nearWater: customer.near_water || false,
+      treeDensity: customer.tree_density || 'MODERATE',
+    };
+
+    // Property-based relevance scoring
+    const propertyRelevance = {};
+    // Wood frame or older home → termite protection critical
+    if (property.constructionMaterial === 'WOOD_FRAME' || (property.yearBuilt && property.yearBuilt < 1990)) {
+      propertyRelevance.termite = { boost: 3, reason: `Your ${property.constructionMaterial === 'WOOD_FRAME' ? 'wood frame' : 'pre-1990'} home has elevated termite risk` };
+    }
+    // Large lot or treatable area → lawn care
+    if (property.lotSqft > 8000) {
+      propertyRelevance.lawn_care = { boost: 2, reason: `Your ${Math.round(property.lotSqft / 1000)}K sq ft lot is ideal for our lawn program` };
+    }
+    // Many palms or heavy tree density → tree & shrub
+    if (property.palmCount >= 4 || property.treeDensity === 'HEAVY') {
+      propertyRelevance.tree_shrub = { boost: 2, reason: `With ${property.palmCount || 'multiple'} palms and ${property.treeDensity?.toLowerCase()} vegetation, professional tree & shrub care protects your investment` };
+    }
+    // Pool cage or near water → mosquito
+    if (property.poolCage || property.nearWater) {
+      propertyRelevance.mosquito = { boost: 2, reason: `${property.nearWater ? 'Your proximity to water' : 'Your pool/lanai area'} creates prime mosquito breeding conditions` };
+    }
+    // Larger home → pest control priority
+    if (property.sqft > 2500) {
+      propertyRelevance.pest_control = { boost: 1, reason: `Larger homes have more entry points — quarterly treatments keep your ${Math.round(property.sqft / 1000)}K sq ft home sealed` };
+    }
+
     // Filter: only services they DON'T have, not dismissed
     const relevant = [];
     for (const promo of seasonalPromos) {
@@ -214,10 +250,16 @@ router.get('/relevant', async (req, res, next) => {
       const socialBase = { peak: 15, high: 10, moderate: 6 };
       const socialNum = (socialBase[promo.urgency] || 5) + Math.floor(Math.random() * 8);
 
+      // Property-specific enhancement
+      const propBoost = propertyRelevance[promo.service];
+      const description = propBoost
+        ? `${propBoost.reason}. ${promo.reason}`
+        : promo.reason;
+
       relevant.push({
         id: promoId,
         title: promo.title,
-        description: promo.reason,
+        description,
         serviceType: promo.service,
         serviceName: svc.name,
         originalMonthlyPrice: originalPrice,
@@ -235,19 +277,22 @@ router.get('/relevant', async (req, res, next) => {
             : null,
         seasonalUrgency: promo.urgency,
         urgencyReason: promo.reason,
+        propertyRelevance: propBoost ? propBoost.reason : null,
+        relevanceScore: (propBoost?.boost || 0) + ({ peak: 3, high: 2, moderate: 1 }[promo.urgency] || 0) + (tierUpgrade ? 2 : 0),
         socialProof: `${socialNum} ${promo.social}`,
         ctaText: `Add ${svc.name.split(' (')[0]}`,
       });
-
-      if (relevant.length >= 2) break;
     }
+
+    // Sort by relevance score (property match + seasonal urgency + tier upgrade potential)
+    relevant.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
     res.json({
       fullyProtected: false,
       tier: currentTier,
       discount: `${currentDiscount * 100}%`,
       serviceCount: currentServiceCount,
-      promotions: relevant,
+      promotions: relevant.slice(0, 2), // Top 2 most relevant
     });
   } catch (err) {
     next(err);
