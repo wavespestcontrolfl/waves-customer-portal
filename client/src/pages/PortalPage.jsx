@@ -1803,11 +1803,16 @@ function ScheduleTab({ customer }) {
 // =========================================================================
 // BILLING TAB
 // =========================================================================
-function BillingTab() {
+function BillingTab({ customer }) {
   const [payments, setPayments] = useState([]);
   const [balance, setBalance] = useState(null);
   const [cards, setCards] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [yearFilter, setYearFilter] = useState('All');
+  const [typeFilter, setTypeFilter] = useState('All');
+  const [billingEmail, setBillingEmail] = useState('');
+  const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
+  const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
 
   useEffect(() => {
     Promise.all([api.getPayments(), api.getBalance(), api.getCards()])
@@ -1825,38 +1830,184 @@ function BillingTab() {
   const daysUntilDue = Math.max(0, Math.ceil((dueDate - new Date()) / 86400000));
   const defaultCard = cards.find(c => c.isDefault) || cards[0];
   const hasAutoPay = defaultCard?.autopayEnabled !== false;
+  const lastPaymentFailed = balance?.lastPaymentFailed || false;
+  const tierName = customer?.tier || 'Bronze';
+  const tier = TIER[tierName];
+  const monthlyRate = customer?.monthlyRate || 0;
+  const numServices = TIER_SERVICES[tierName] || 1;
+  const discount = TIER_DISCOUNTS[tierName] || 0;
+
+  // Card expiry check — within 60 days
+  const cardExpiringSoon = (() => {
+    if (!defaultCard) return null;
+    const now = new Date();
+    const expDate = new Date(defaultCard.expYear, defaultCard.expMonth, 0); // last day of exp month
+    const diffMs = expDate - now;
+    const diffDays = Math.ceil(diffMs / 86400000);
+    if (diffDays > 0 && diffDays <= 60) {
+      const months = Math.ceil(diffDays / 30);
+      return { last4: defaultCard.lastFour, months };
+    }
+    return null;
+  })();
+
+  // Banner state: red (failed) > amber (expiring) > green (all good)
+  const bannerState = lastPaymentFailed ? 'failed' : cardExpiringSoon ? 'expiring' : 'active';
+  const bannerConfig = {
+    failed: {
+      bg: '#FFEBEE', border: '#FFCDD2', iconBg: B.red,
+      icon: '!', titleColor: '#C62828', subtitleColor: '#D32F2F',
+    },
+    expiring: {
+      bg: '#FFF8E1', border: '#FFE082', iconBg: B.orange,
+      icon: '!', titleColor: '#E65100', subtitleColor: '#F57C00',
+    },
+    active: {
+      bg: '#E8F5E9', border: '#C8E6C9', iconBg: B.green,
+      icon: '\u2713', titleColor: '#2E7D32', subtitleColor: '#558B2F',
+    },
+  }[bannerState];
+
+  // Payment status badge helper
+  const statusBadge = (status) => {
+    const map = {
+      paid: { bg: '#E8F5E9', color: B.green },
+      upcoming: { bg: '#FFF8E1', color: B.orange },
+      processing: { bg: B.blueSurface, color: B.wavesBlue },
+      failed: { bg: '#FFEBEE', color: B.red },
+      refunded: { bg: B.offWhite, color: B.grayMid },
+    };
+    const s = map[status] || map.paid;
+    return { background: s.bg, color: s.color };
+  };
+
+  // Year-to-date summary
+  const currentYear = new Date().getFullYear();
+  const ytdPayments = payments.filter(p => {
+    const yr = parseDate(p.date).getFullYear();
+    return yr === currentYear && p.status === 'paid';
+  });
+  const ytdTotal = ytdPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+  const ytdRecurring = ytdPayments.filter(p => p.type === 'recurring').reduce((sum, p) => sum + (p.amount || 0), 0);
+  const ytdOneTime = ytdPayments.filter(p => p.type === 'one_time').reduce((sum, p) => sum + (p.amount || 0), 0);
+
+  // Filtered payments
+  const filteredPayments = payments.filter(p => {
+    const yr = parseDate(p.date).getFullYear();
+    if (yearFilter !== 'All' && yr !== parseInt(yearFilter)) return false;
+    if (typeFilter === 'Recurring' && p.type !== 'recurring') return false;
+    if (typeFilter === 'One-Time' && p.type !== 'one_time') return false;
+    return true;
+  });
+
+  // Credits
+  const credits = customer?.credits || [];
+  const referralCredits = credits.filter(c => c.type === 'referral');
+  const serviceCredits = credits.filter(c => c.type === 'service');
+  const promoCredits = credits.filter(c => c.type === 'promo');
+  const totalCredits = credits.reduce((sum, c) => sum + (c.amount || 0), 0);
+
+  // WaveGuard membership — services & upsell
+  const includedServices = SERVICE_CATALOG.slice(0, numServices);
+  const totalFullPrice = includedServices.reduce((sum, s) => sum + s.basePrice * 12, 0);
+  const annualSavings = totalFullPrice * discount;
+  const platinumDiscount = TIER_DISCOUNTS.Platinum || 0.30;
+  const platinumSavings = totalFullPrice * platinumDiscount;
+  const additionalSavings = platinumSavings - annualSavings;
+
+  // Pill filter helper
+  const PillFilter = ({ options, value, onChange }) => (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      {options.map(opt => (
+        <button key={opt} onClick={() => onChange(opt)} style={{
+          padding: '6px 14px', borderRadius: 20, border: `1px solid ${value === opt ? B.wavesBlue : B.grayLight}`,
+          background: value === opt ? `${B.wavesBlue}15` : 'transparent',
+          color: value === opt ? B.wavesBlue : B.grayMid,
+          fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONTS.heading,
+          transition: 'all 0.2s ease',
+        }}>{opt}</button>
+      ))}
+    </div>
+  );
+
+  const saveBillingPrefs = () => {
+    setBillingPrefsSaving(true);
+    api.updateNotificationPrefs?.({ billing_email: billingEmail || null, payment_confirmation_sms: paymentSmsEnabled })
+      .then(() => setBillingPrefsSaving(false))
+      .catch(() => setBillingPrefsSaving(false));
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <SectionHeading>Billing</SectionHeading>
 
-      {/* ── Payment Summary Banner ── */}
+      {/* ── 1. Status Banner — conditional states ── */}
       <div style={{
-        background: '#E8F5E9', borderRadius: 14, padding: '16px 20px',
-        border: '1px solid #C8E6C9', display: 'flex', alignItems: 'center', gap: 14,
+        background: bannerConfig.bg, borderRadius: 14, padding: '16px 20px',
+        border: `1px solid ${bannerConfig.border}`, display: 'flex', alignItems: 'center', gap: 14,
       }}>
         <div style={{
-          width: 40, height: 40, borderRadius: 20, background: B.green,
+          width: 40, height: 40, borderRadius: 20, background: bannerConfig.iconBg,
           display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
         }}>
-          <span style={{ color: '#fff', fontSize: 18 }}>{'✓'}</span>
+          <span style={{ color: '#fff', fontSize: 18, fontWeight: 700 }}>{bannerConfig.icon}</span>
         </div>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: '#2E7D32' }}>
-            Your automatic payment will be processed in {daysUntilDue} day{daysUntilDue !== 1 ? 's' : ''}
-          </div>
-          <div style={{ fontSize: 13, color: '#558B2F', marginTop: 2 }}>
-            Amount due: <strong>${amountDue.toFixed(2)}</strong> · Due {dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
-          </div>
+          {bannerState === 'failed' && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
+                Payment failed — please update your payment method
+              </div>
+              <div style={{ fontSize: 13, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+                Your last payment could not be processed. Update your card to avoid service interruption.
+              </div>
+            </>
+          )}
+          {bannerState === 'expiring' && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
+                Your card ending in {cardExpiringSoon.last4} expires in {cardExpiringSoon.months} month{cardExpiringSoon.months !== 1 ? 's' : ''} — update now
+              </div>
+              <div style={{ fontSize: 13, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+                Update your payment method to avoid any disruption to your service.
+              </div>
+            </>
+          )}
+          {bannerState === 'active' && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
+                {daysUntilDue === 0
+                  ? 'Auto Pay is active — your payment is processing today'
+                  : `Auto Pay is active — your next charge of $${amountDue.toFixed(2)} processes on ${dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`
+                }
+              </div>
+              <div style={{ fontSize: 13, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+                {daysUntilDue === 0
+                  ? `Amount: $${amountDue.toFixed(2)}`
+                  : `Amount due: $${amountDue.toFixed(2)} · Due ${dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`
+                }
+              </div>
+            </>
+          )}
         </div>
       </div>
 
-      {/* ── Balance Card ── */}
+      {/* ── 2. Balance Card with context ── */}
       {balance && (
         <div style={{ background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`, borderRadius: 16, padding: 22, color: '#fff' }}>
           <div style={{ fontSize: 12, color: B.blueLight, fontFamily: FONTS.body }}>Current Balance</div>
           <div style={{ fontSize: 36, fontWeight: 700, fontFamily: FONTS.ui }}>${balance.currentBalance.toFixed(2)}</div>
-          {nextCharge && (
+          {balance.currentBalance === 0 ? (
+            <div style={{ fontSize: 13, color: '#81C784', marginTop: 4, fontWeight: 600 }}>
+              All payments current — you're in good standing
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4 }}>
+              {balance.balanceDescription || `Balance for WaveGuard ${tierName} membership`}
+              {balance.dueDate && ` · Due ${parseDate(balance.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
+            </div>
+          )}
+          {nextCharge && balance.currentBalance === 0 && (
             <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4 }}>
               Next charge: ${nextCharge.amount.toFixed(2)} on {parseDate(nextCharge.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
             </div>
@@ -1864,18 +2015,60 @@ function BillingTab() {
         </div>
       )}
 
-      {/* ── Manage Auto Pay ── */}
+      {/* ── 7. WaveGuard Membership Summary Card ── */}
+      <div style={{
+        background: `linear-gradient(135deg, ${tier?.gradientFrom || B.navy}22, ${tier?.gradientTo || B.navyLight}15)`,
+        borderRadius: 16, padding: 20, border: `1.5px solid ${tier?.color || B.navy}44`,
+        position: 'relative', overflow: 'hidden',
+      }}>
+        <div style={{ position: 'absolute', top: -20, right: -20, fontSize: 80, opacity: 0.08 }}>🛡️</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <span style={{
+            fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
+            padding: '4px 12px', borderRadius: 20,
+            background: `${tier?.color || B.navy}22`,
+            color: tier?.darkText ? B.navy : (tier?.color || B.navy),
+          }}>{tierName} WaveGuard</span>
+          <span style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${monthlyRate}/mo</span>
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginBottom: 8, fontFamily: FONTS.heading }}>Included Services</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {includedServices.map(svc => (
+            <div key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: B.grayDark }}>
+              <span>{svc.icon}</span>
+              <span>{svc.name}</span>
+              {discount > 0 && (
+                <span style={{ fontSize: 11, color: B.green, fontWeight: 600, marginLeft: 'auto' }}>
+                  ${(svc.basePrice * (1 - discount)).toFixed(0)}/mo <span style={{ textDecoration: 'line-through', color: B.grayMid }}>${svc.basePrice}</span>
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+        {annualSavings > 0 && (
+          <div style={{ marginTop: 12, padding: '8px 12px', background: `${B.green}12`, borderRadius: 8, fontSize: 12, color: B.green, fontWeight: 600 }}>
+            Saving ${annualSavings.toFixed(0)}/year with your {tierName} bundle
+          </div>
+        )}
+        {tierName !== 'Platinum' && additionalSavings > 0 && (
+          <div style={{ marginTop: 10, fontSize: 12, color: B.wavesBlue, fontWeight: 600, cursor: 'pointer' }}>
+            Explore Platinum — save {Math.round(((platinumDiscount - discount) / (1 - discount)) * 100)}% more on services
+          </div>
+        )}
+      </div>
+
+      {/* ── 3. Manage Auto Pay ── */}
       <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
         <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Manage Auto Pay</div>
 
         {/* Enrollment status */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 16px', background: B.offWhite, borderRadius: 10, marginBottom: 10,
+          padding: '14px 16px', background: B.offWhite, borderRadius: 10,
         }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Auto Pay Enrollment</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Automatic payments are required with your payment plan</div>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free.</div>
           </div>
           <span style={{
             fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
@@ -1883,20 +2076,6 @@ function BillingTab() {
             background: hasAutoPay ? '#E8F5E9' : '#FFF3E0',
             color: hasAutoPay ? B.green : B.orange,
           }}>{hasAutoPay ? 'Enrolled' : 'Not Enrolled'}</span>
-        </div>
-
-        {/* Adjust upcoming payment link */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 16px', background: B.offWhite, borderRadius: 10, cursor: 'pointer',
-        }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Adjust Upcoming Payment</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-              Make changes before your next Auto Pay processes on {dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-            </div>
-          </div>
-          <span style={{ color: B.wavesBlue, fontSize: 18 }}>{'›'}</span>
         </div>
       </div>
 
@@ -1944,13 +2123,78 @@ function BillingTab() {
         )}
       </div>
 
-      {/* ── Payment History ── */}
+      {/* ── 8. Credits & Adjustments ── */}
+      {(totalCredits > 0 || credits.length > 0) && (
+        <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Credits & Adjustments</div>
+          {totalCredits > 0 && (
+            <div style={{
+              padding: '10px 14px', background: `${B.green}10`, borderRadius: 10, marginBottom: 12,
+              fontSize: 14, fontWeight: 700, color: B.green, display: 'flex', justifyContent: 'space-between',
+            }}>
+              <span>Total Account Credit</span>
+              <span>${totalCredits.toFixed(2)}</span>
+            </div>
+          )}
+          {[
+            { label: 'Referral Credits', items: referralCredits, icon: '🤝' },
+            { label: 'Service Credits', items: serviceCredits, icon: '🔧' },
+            { label: 'Promo Credits', items: promoCredits, icon: '🎉' },
+          ].filter(g => g.items.length > 0).map(group => (
+            <div key={group.label} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+                {group.icon} {group.label}
+              </div>
+              {group.items.map((cr, i) => (
+                <div key={i} style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '8px 14px', background: B.offWhite, borderRadius: 8, marginBottom: 4,
+                }}>
+                  <span style={{ fontSize: 13, color: B.grayDark }}>{cr.description || group.label}</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>${(cr.amount || 0).toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          {credits.length === 0 && (
+            <div style={{ padding: 16, textAlign: 'center', color: B.grayMid, fontSize: 13 }}>No credits on your account</div>
+          )}
+        </div>
+      )}
+
+      {/* ── 4. Year-to-Date Summary ── */}
+      <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
+          {currentYear} Summary
+        </div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>
+          ${ytdTotal.toFixed(2)} <span style={{ fontSize: 13, fontWeight: 500, color: B.grayMid }}>across {ytdPayments.length} payment{ytdPayments.length !== 1 ? 's' : ''}</span>
+        </div>
+        <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4 }}>
+          ${ytdRecurring.toFixed(2)} WaveGuard {tierName} · ${ytdOneTime.toFixed(2)} one-time services
+        </div>
+      </div>
+
+      {/* ── 5. Payment History with filters ── */}
       <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
         <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Payment History</div>
-        {payments.length === 0 && (
-          <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 13 }}>No payments yet</div>
+
+        {/* Filters */}
+        <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Year</span>
+            <PillFilter options={['2025', '2026', 'All']} value={yearFilter} onChange={setYearFilter} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Type</span>
+            <PillFilter options={['All', 'Recurring', 'One-Time']} value={typeFilter} onChange={setTypeFilter} />
+          </div>
+        </div>
+
+        {filteredPayments.length === 0 && (
+          <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 13 }}>No payments match your filters</div>
         )}
-        {payments.map(p => (
+        {filteredPayments.map(p => (
           <div key={p.id} style={{
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
             padding: '12px 0', borderBottom: `1px solid ${B.grayLight}`,
@@ -1961,18 +2205,81 @@ function BillingTab() {
                 {parseDate(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 {p.lastFour && ` · ${p.cardBrand} ••••${p.lastFour}`}
               </div>
+              {/* 6. Failed payments inline action */}
+              {p.status === 'failed' && (
+                <button style={{
+                  marginTop: 6, padding: '4px 12px', borderRadius: 6, border: `1px solid ${B.red}`,
+                  background: 'transparent', color: B.red, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                }}>Update Payment Method</button>
+              )}
             </div>
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${p.amount.toFixed(2)}</div>
               <span style={{
                 fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
                 padding: '3px 8px', borderRadius: 20,
-                background: p.status === 'paid' ? '#E8F5E9' : '#FFF3E0',
-                color: p.status === 'paid' ? B.green : B.orange,
+                ...statusBadge(p.status),
               }}>{p.status}</span>
             </div>
           </div>
         ))}
+      </div>
+
+      {/* ── 9. Billing Preferences ── */}
+      <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Billing Preferences</div>
+
+        {/* Billing email */}
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, display: 'block', marginBottom: 6 }}>
+            Billing Email (optional — separate from account email)
+          </label>
+          <input
+            type="email"
+            value={billingEmail}
+            onChange={e => setBillingEmail(e.target.value)}
+            placeholder={customer?.email || 'billing@example.com'}
+            style={{
+              width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${B.grayLight}`,
+              fontSize: 14, fontFamily: FONTS.body, color: B.navy, background: B.offWhite,
+              outline: 'none', boxSizing: 'border-box',
+            }}
+          />
+        </div>
+
+        {/* SMS toggle */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '14px 16px', background: B.offWhite, borderRadius: 10, marginBottom: 14,
+        }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Payment confirmation texts</div>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Get a text when your payment processes</div>
+          </div>
+          <button
+            onClick={() => setPaymentSmsEnabled(!paymentSmsEnabled)}
+            style={{
+              width: 48, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
+              background: paymentSmsEnabled ? B.green : B.grayLight,
+              position: 'relative', transition: 'background 0.2s ease',
+            }}
+          >
+            <div style={{
+              width: 22, height: 22, borderRadius: 11, background: '#fff',
+              position: 'absolute', top: 2,
+              left: paymentSmsEnabled ? 24 : 2,
+              transition: 'left 0.2s ease',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+            }} />
+          </button>
+        </div>
+
+        <button onClick={saveBillingPrefs} disabled={billingPrefsSaving} style={{
+          ...BUTTON_BASE, padding: '10px 20px', background: B.wavesBlue, color: '#fff',
+          fontSize: 13, opacity: billingPrefsSaving ? 0.6 : 1, width: '100%',
+        }}>
+          {billingPrefsSaving ? 'Saving...' : 'Save Billing Preferences'}
+        </button>
       </div>
     </div>
   );
@@ -3372,11 +3679,42 @@ const ADD_ONS = [
   { id: 'top_dressing', name: 'Top Dressing / Dethatching', icon: '🏖️', price: 150, unit: '/service', min: 'Seasonal (fall recommended)', desc: 'Sand top-dressing to improve soil structure + mechanical dethatching when thatch exceeds 0.5"' },
   { id: 'fire_ant', name: 'Fire Ant Treatment', icon: '🔥', price: 40, unit: '/treatment', min: 'As needed', desc: 'Broadcast granular bait + individual mound drench for aggressive colonies' },
   { id: 'rodent', name: 'Rodent Bait Stations', icon: '🐀', price: 30, unit: '/month', min: 'Monthly monitoring', desc: 'Tamper-resistant exterior bait stations, monthly monitoring and reporting' },
+  { id: 'wdo_inspection', name: 'WDO Inspection', icon: '📋', price: 250, unit: '', min: 'Real estate transaction?', desc: 'Wood-destroying organism inspection report for real estate closings. FL Form 13645 compliant. Includes full attic, crawl space, and exterior assessment.' },
 ];
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 const TIER_SERVICES = { Bronze: 1, Silver: 2, Gold: 3, Platinum: 4 };
 const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.20, Platinum: 0.30 };
+
+const TIER_SERVICE_NAMES = {
+  Bronze: ['Quarterly Pest Control'],
+  Silver: ['Quarterly Pest Control', 'Lawn Care Program'],
+  Gold: ['Quarterly Pest Control', 'Lawn Care Program', 'Mosquito Barrier Treatment'],
+  Platinum: ['Quarterly Pest Control', 'Lawn Care Program', 'Mosquito Barrier Treatment', 'Tree & Shrub Program'],
+};
+
+// Coverage details for each included service
+const SERVICE_COVERAGE = {
+  pest_control: { summary: 'Unlimited callbacks within 30 days. Interior re-treatment included.', details: ['Interior + exterior perimeter treatment', 'Granular bait band around foundation', 'Bait station monitoring', 'Cobweb sweep on all eaves', 'Free callback if pests return within 30 days'] },
+  lawn_care: { summary: 'Fertilization, weed control, fungicide. Callbacks for breakthrough weeds.', details: ['Custom fertilization for your turf type', 'Pre-emergent and post-emergent weed control', 'Fungicide treatments as needed', 'Soil testing and thatch monitoring', 'Callback for breakthrough weeds between visits'] },
+  mosquito: { summary: 'Barrier treatments Apr-Oct. Re-spray within 14 days of heavy rain.', details: ['Monthly perimeter barrier spray (Apr-Oct)', 'Standing water treatment with larvicide', 'Foliage and shrub line application', 'Free re-spray within 14 days of heavy rain', 'Event spray available on request'] },
+  tree_shrub: { summary: 'Deep root feeding, insect & disease treatment, palm injections.', details: ['Deep root fertilization', 'Insect and disease treatment', 'Palm trunk injections (Arborjet)', 'Seasonal monitoring and reporting'] },
+  termite: { summary: 'Bait station installation and monitoring with damage warranty.', details: ['Bait station installation around perimeter', 'Quarterly monitoring inspections', 'Damage warranty (Premier tier)', 'Annual re-certification report'] },
+};
+
+// Service schedule months for calendar view
+const SERVICE_SCHEDULE_MONTHS = {
+  pest_control: [0, 3, 6, 9],        // Jan, Apr, Jul, Oct (quarterly)
+  lawn_care: [0, 2, 5, 8],            // Jan, Mar, Jun, Sep (4x/year)
+  mosquito: [3, 4, 5, 6, 7, 8, 9],   // Apr-Oct
+  tree_shrub: [1, 4, 7, 10],          // Feb, May, Aug, Nov
+  termite: [0, 3, 6, 9],              // Quarterly
+};
+
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Hidden badge types (engagement-tracking ones we don't show)
+const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer'];
 
 // =========================================================================
 // MY PLAN TAB
@@ -5146,7 +5484,7 @@ export default function PortalPage() {
         {activeTab === 'plan' && <MyPlanTab customer={customer} />}
         {activeTab === 'services' && <ServicesTab />}
         {activeTab === 'schedule' && <ScheduleTab customer={customer} />}
-        {activeTab === 'billing' && <BillingTab />}
+        {activeTab === 'billing' && <BillingTab customer={customer} />}
         {activeTab === 'request' && <RequestTab customer={customer} />}
         {activeTab === 'refer' && <ReferTab customer={customer} />}
         {activeTab === 'documents' && <DocumentsTab customer={customer} />}
