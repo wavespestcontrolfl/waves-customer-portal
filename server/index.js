@@ -1,3 +1,7 @@
+// Sentry must be initialized before all other imports
+require("./instrument.js");
+const Sentry = require("@sentry/node");
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -257,6 +261,14 @@ if (voiceAgentModule) {
 // =========================================================================
 // ERROR HANDLING
 // =========================================================================
+
+// Sentry debug/test route
+app.get("/debug-sentry", function mainHandler(req, res) {
+  throw new Error("My first Sentry error!");
+});
+
+// Sentry error handler — must be before other error middleware
+Sentry.setupExpressErrorHandler(app);
 
 app.use(notFound);
 app.use(errorHandler);
