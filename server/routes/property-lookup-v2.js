@@ -72,24 +72,31 @@ router.post('/property-lookup', async (req, res) => {
 
     // Generate satellite image URLs (not fetched — frontend displays them,
     // but we also fetch as base64 for Claude analysis)
-    const closeUrl = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=19&size=640x640&maptype=satellite&format=png&key=${process.env.GOOGLE_MAPS_API_KEY}`;
-    const wideUrl = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=18&size=640x640&maptype=satellite&format=png&key=${process.env.GOOGLE_MAPS_API_KEY}`;
+    // URLs generated below with validated key
 
     // Fetch satellite images as base64 for Claude
-    const [closeB64, wideB64] = await Promise.all([
-      fetchImageAsBase64(closeUrl),
-      fetchImageAsBase64(wideUrl)
-    ]);
+    const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!mapsKey) {
+      result.errors.push({ source: 'satellite', message: 'No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured' });
+    } else {
+      const closeUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=19&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
+      const wideUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=18&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
 
-    result.satellite = {
-      lat, lng,
-      closeUrl,
-      wideUrl,
-      inServiceArea: !(lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
-                       lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax),
-      _closeB64: closeB64, // internal — not sent to client
-      _wideB64: wideB64    // internal — not sent to client
-    };
+      const [closeB64, wideB64] = await Promise.all([
+        fetchImageAsBase64(closeUrlWithKey),
+        fetchImageAsBase64(wideUrlWithKey)
+      ]);
+
+      result.satellite = {
+        lat, lng,
+        closeUrl: closeUrlWithKey,
+        wideUrl: wideUrlWithKey,
+        inServiceArea: !(lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
+                         lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax),
+        _closeB64: closeB64,
+        _wideB64: wideB64
+      };
+    }
   } catch (err) {
     result.errors.push({ source: 'satellite', message: err.message });
   }
@@ -97,15 +104,21 @@ router.post('/property-lookup', async (req, res) => {
   // ── STEP 3: Claude Vision Analysis ──
   if (result.satellite?._closeB64 && result.satellite?._wideB64) {
     try {
-      result.aiAnalysis = await analyzeWithClaude(
-        result.satellite._closeB64,
-        result.satellite._wideB64,
-        result.rentcast,
-        address
-      );
+      if (!process.env.ANTHROPIC_API_KEY) {
+        result.errors.push({ source: 'ai', message: 'ANTHROPIC_API_KEY not configured' });
+      } else {
+        result.aiAnalysis = await analyzeWithClaude(
+          result.satellite._closeB64,
+          result.satellite._wideB64,
+          result.rentcast,
+          address
+        );
+      }
     } catch (err) {
       result.errors.push({ source: 'ai', message: err.message });
     }
+  } else if (!result.satellite?._closeB64) {
+    result.errors.push({ source: 'ai', message: 'Satellite images not available — cannot run AI analysis' });
   }
 
   // ── STEP 4: Enrich — merge all data sources ──
