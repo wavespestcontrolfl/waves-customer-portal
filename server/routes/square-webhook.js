@@ -59,12 +59,11 @@ router.post('/payment', async (req, res) => {
           // Send thank-you SMS (#14)
           if (customer.phone) {
             try {
-              const body = `Hello ${customer.first_name}! Thank you for your payment of $${amount.toFixed(2)} — we truly appreciate your business. 🌊\n\n` +
-                (receiptUrl ? `View your receipt: ${receiptUrl}\n\n` : '') +
-                `If you have any questions, reply here or call (941) 318-7612.\n\n` +
-                `— Waves Pest Control`;
+              const body = `Hello ${customer.first_name}! Thank you for your payment — we truly appreciate your business.` +
+                (receiptUrl ? ` You can view your receipt here: ${receiptUrl}` : '') +
+                `\n\nIf you have any questions or need assistance, simply reply to this message. Thanks again for choosing Waves!`;
 
-              await TwilioService.sendSMS(customer.phone, body);
+              await TwilioService.sendSMS(customer.phone, body, { messageType: 'payment_confirmation' });
               logger.info(`[square-webhook] Payment SMS sent to ${customer.first_name} (${customer.phone}) for $${amount.toFixed(2)}`);
             } catch (smsErr) {
               logger.error(`[square-webhook] Payment SMS failed: ${smsErr.message}`);
@@ -132,13 +131,11 @@ router.post('/payment', async (req, res) => {
         try {
           const body = `Hello ${customerName}! Your invoice for ${invoiceTitle}` +
             (formattedDate ? ` completed on ${formattedDate}` : '') +
-            ` is ready.\n\n` +
-            (totalAmount > 0 ? `Amount due: $${totalAmount.toFixed(2)}\n` : '') +
-            (publicUrl ? `\nView & pay here: ${publicUrl}\n` : '') +
-            `\nIf you have any questions, reply here or call (941) 318-7612.\n\n` +
-            `— Waves Pest Control 🌊`;
+            ` is ready.` +
+            (publicUrl ? `\n\nPlease review it here: ${publicUrl}` : '') +
+            `\n\nThank you for choosing Waves!`;
 
-          await TwilioService.sendSMS(customerPhone, body);
+          await TwilioService.sendSMS(customerPhone, body, { messageType: 'invoice' });
           logger.info(`[square-webhook] Invoice SMS sent to ${customerName} (${customerPhone}) for "${invoiceTitle}"`);
         } catch (smsErr) {
           logger.error(`[square-webhook] Invoice SMS failed: ${smsErr.message}`);
