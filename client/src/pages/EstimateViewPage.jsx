@@ -113,6 +113,7 @@ const FAQ_CATEGORIES = [
       { q: "Do I need to be home for every visit?", a: "Nope — about 80% of our services are exterior-only. For interior pest (typically quarterly), we coordinate access through your portal. You can leave a gate code, garage code, or lockbox info in your property preferences. You get a text when your tech is on the way and another when service is complete." },
       { q: "What if I need to skip a visit or go on vacation?", a: "Just let us know through the portal or text us. We'll reschedule around your travel. Your monthly rate stays the same since it's averaged over 12 months — skipping one visit doesn't change your billing." },
       { q: "How quickly can you start?", a: "Usually within 3-5 business days of accepting your estimate. For urgent pest issues (stinging insects, major infestations), we can often get a tech out same-day or next-day." },
+      { q: "Do you service my gated community?", a: "Yes — we service every gated community in our coverage area. Just add your gate code in your portal preferences and your tech will have access." },
     ],
   },
   {
@@ -120,6 +121,7 @@ const FAQ_CATEGORIES = [
       { q: "Is there a contract? What if I want to cancel?", a: "No long-term contracts. Your WaveGuard plan bills monthly and you can cancel anytime through your portal or by texting us. No cancellation fees — we earn your business every visit." },
       { q: "Why is there an initial pest control fee?", a: "The first visit is a full property inspection + heavy treatment — takes 45-60 minutes compared to a normal 25-30 minute quarterly. We're establishing a baseline, hitting every entry point, treating the full interior and exterior. After that, quarterly visits maintain what we set up." },
       { q: "How does billing work?", a: "Simple: your card is charged on the 1st of each month, automatically. You get a receipt in your portal. No surprises, no price increases without notice. If you ever have a billing question, text us at (941) 318-7612 and we'll sort it out same day." },
+      { q: "What happens if I sell my house?", a: "Your service transfers to the new owner if they want it, or you can cancel with no penalty. We'll even help the new owner get set up." },
     ],
   },
   {
@@ -127,6 +129,7 @@ const FAQ_CATEGORIES = [
       { q: "What if pests come back between visits?", a: "That's what WaveGuard is for. Unlimited callbacks between scheduled visits — no charge. If you see ants, roaches, or anything else between quarterly treatments, text us and we'll send a tech back out. Most callbacks are handled within 24-48 hours." },
       { q: "How long until I see results on my lawn?", a: "Most customers see noticeable improvement within 2-3 visits (6-8 weeks). Weed reduction is usually visible after the first application. Full turf density takes one growing season — about 6-8 months. We track your lawn health metrics in the portal so you can see the progress over time." },
       { q: "My last lawn company burned my grass.", a: "That's usually from over-application or wrong product for the turf type. We start every lawn program with a full assessment — grass type confirmation, soil pH test, thatch measurement, irrigation check. Every product application is logged in your portal with the tech's notes. If we ever cause damage, we fix it — that's part of the guarantee." },
+      { q: "What if my neighbor doesn't treat and pests keep coming from their yard?", a: "Our perimeter barrier treatment creates a protective zone around YOUR property regardless of what your neighbors do. We can't control their yard, but we can make sure nothing crosses into yours." },
     ],
   },
   {
@@ -194,18 +197,37 @@ function buildValueStack(services, tier) {
       items.push(VALUE_MAP['termite']);
     }
   });
+  // Core service deliverables based on included services
+  const svcNames = services.map(s => s.name.toLowerCase());
+  if (svcNames.some(n => n.includes('pest'))) {
+    items.push({ label: '4 quarterly interior + exterior pest treatments', value: 0, included: true });
+  }
+  if (svcNames.some(n => n.includes('lawn'))) {
+    items.push({ label: '6-12 professional lawn applications per year', value: 0, included: true });
+  }
+  if (svcNames.some(n => n.includes('mosquito'))) {
+    items.push({ label: 'Monthly mosquito barrier treatments (peak season)', value: 0, included: true });
+  }
+  if (svcNames.some(n => n.includes('tree') || n.includes('shrub'))) {
+    items.push({ label: '6-8 tree & shrub care applications per year', value: 0, included: true });
+  }
+  if (svcNames.some(n => n.includes('termite'))) {
+    items.push({ label: 'Quarterly termite bait station monitoring', value: 0, included: true });
+  }
   // Always-included perks
   ALWAYS_INCLUDED.forEach(item => items.push(item));
   // Add tier membership line
   if (tier) items.push({ label: `WaveGuard ${tier} membership`, value: 0, included: true });
+  // Guarantee as final item
+  items.push({ label: '90-day money-back guarantee', value: 0, included: true, suffix: '', guarantee: true });
   return items;
 }
 
 // =========================================================================
 // COMPONENTS
 // =========================================================================
-function ServiceDropdown({ title, children }) {
-  const [open, setOpen] = useState(false);
+function ServiceDropdown({ title, children, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <div style={{ borderRadius: 16, overflow: 'hidden', border: `1px solid ${SAND_DARK}`, marginBottom: 10, background: '#fff' }}>
       <div onClick={() => setOpen(!open)} style={{
@@ -423,6 +445,9 @@ export default function EstimateViewPage() {
     });
   });
 
+  // Determine which service dropdown opens first
+  const firstOpenService = hasLawn ? 'lawn' : hasPest ? 'pest' : hasMosquito ? 'mosquito' : hasTS ? 'treeShrub' : hasTermite ? 'termite' : null;
+
   const firstName = (e.customerName || '').split(' ')[0] || 'there';
   const monthlyTotal = Number(e.monthlyTotal) || 0;
   const preDiscountMonthly = recurring.savings > 0 ? monthlyTotal + (recurring.savings / 12) : 0;
@@ -447,7 +472,7 @@ export default function EstimateViewPage() {
           Hey {firstName}, here's your custom plan.
         </div>
 
-        <div style={{ fontSize: 14, color: B.blueLight, marginTop: 8, fontWeight: 600 }}>{e.address}</div>
+        <div style={{ fontSize: 14, color: B.blueLight, marginTop: 8, fontWeight: 600 }}>{(e.address || '').replace(/, USA$/i, '')}</div>
 
         {(property.homeSqFt || property.lotSqFt) && (
           <div style={{ fontSize: 13, color: B.blueLight, marginTop: 4 }}>
@@ -478,6 +503,10 @@ export default function EstimateViewPage() {
           That's just ${dailyCost}/day for complete home protection
         </div>
 
+        <div style={{ fontSize: 12, color: '#ffffffaa', marginTop: 8, fontStyle: 'italic', fontFamily: FONTS.body }}>
+          Try us risk-free — 90-day money-back guarantee
+        </div>
+
         {e.tier && (
           <div style={{
             display: 'inline-block', marginTop: 12, padding: '6px 16px', borderRadius: 20,
@@ -497,6 +526,18 @@ export default function EstimateViewPage() {
       </div>
 
       <div style={{ maxWidth: 560, margin: '0 auto', padding: '0 16px 40px' }}>
+
+        {/* ============================================================= */}
+        {/* DREAM OUTCOME                                                  */}
+        {/* ============================================================= */}
+        <div style={{ textAlign: 'center', marginTop: 20, marginBottom: 4, padding: '0 16px' }}>
+          <div style={{
+            fontSize: 14, fontStyle: 'italic', color: B.grayDark, lineHeight: 1.7,
+            fontFamily: FONTS.body, maxWidth: 440, margin: '0 auto',
+          }}>
+            Imagine walking barefoot in your yard without worrying about fire ants. Leaving your patio lights on without a mosquito cloud. Opening your door to a green, thick lawn that makes your neighbors jealous. That's what WaveGuard delivers.
+          </div>
+        </div>
 
         {/* ============================================================= */}
         {/* VALUE STACK — Hormozi Grand Slam Offer                         */}
@@ -521,13 +562,13 @@ export default function EstimateViewPage() {
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1 }}>
                     <span style={{ color: B.green, fontSize: 16, flexShrink: 0 }}>✓</span>
-                    <span style={{ fontSize: 14, color: B.navy, fontWeight: 600, fontFamily: FONTS.body }}>{item.label}</span>
+                    <span style={{ fontSize: 14, color: B.navy, fontWeight: item.guarantee ? 700 : 600, fontFamily: FONTS.body }}>{item.label}</span>
                   </div>
                   <span style={{
-                    fontSize: 14, fontWeight: 700, fontFamily: FONTS.ui, color: B.grayMid,
+                    fontSize: 14, fontWeight: 700, fontFamily: FONTS.ui, color: item.guarantee ? B.green : B.grayMid,
                     whiteSpace: 'nowrap', marginLeft: 8,
                   }}>
-                    {item.included ? 'Included' : `$${item.value}${item.suffix || ''} value`}
+                    {item.guarantee ? 'Peace of mind' : item.included ? 'Included' : `$${item.value}${item.suffix || ''} value`}
                   </span>
                 </div>
               ))}
@@ -576,6 +617,39 @@ export default function EstimateViewPage() {
           </div>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, lineHeight: 1.7, fontFamily: FONTS.body, marginTop: 10 }}>
             That's the Waves guarantee. We earn your trust every visit.
+          </div>
+        </div>
+
+        {/* ============================================================= */}
+        {/* FIRST 90 DAYS TIMELINE                                         */}
+        {/* ============================================================= */}
+        <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
+          <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>
+            Your First 90 Days
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+            {[
+              { period: 'Week 1', text: 'Initial treatment — dramatic reduction in visible pests within 48 hours' },
+              { period: 'Month 1', text: 'Perimeter barrier established, interior activity drops significantly' },
+              { period: 'Month 2', text: 'Follow-up treatment reinforces barrier, remaining harborage addressed' },
+              { period: 'Month 3', text: 'Full protection in place. Not satisfied? Full refund.' },
+            ].map((step, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 10 }}>
+                  <div style={{
+                    width: 10, height: 10, borderRadius: '50%',
+                    background: i === 3 ? B.green : B.wavesBlue, flexShrink: 0, marginTop: 4,
+                  }} />
+                  {i < 3 && (
+                    <div style={{ width: 2, height: 28, background: `${B.wavesBlue}33` }} />
+                  )}
+                </div>
+                <div style={{ paddingBottom: i < 3 ? 8 : 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{step.period}</div>
+                  <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.5, fontFamily: FONTS.body, marginTop: 1 }}>{step.text}</div>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
@@ -725,7 +799,7 @@ export default function EstimateViewPage() {
           <div style={{ fontSize: 14, fontWeight: 700, color: B.grayMid, marginBottom: 10, fontFamily: FONTS.heading }}>Service Details</div>
 
           {hasLawn && (
-            <ServiceDropdown title="🌿 Lawn Care Program">
+            <ServiceDropdown title="🌿 Lawn Care Program" defaultOpen={firstOpenService === 'lawn'}>
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.lawn.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 14 }}>{SERVICE_DETAILS.lawn.subheader}</div>
               {SERVICE_DETAILS.lawn.sections.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
@@ -737,14 +811,14 @@ export default function EstimateViewPage() {
           )}
 
           {hasPest && (
-            <ServiceDropdown title="🐛 Pest Control">
+            <ServiceDropdown title="🐛 Pest Control" defaultOpen={firstOpenService === 'pest'}>
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>{SERVICE_DETAILS.pest.header}</div>
               {SERVICE_DETAILS.pest.sections.map((s, i) => <DetailSection key={i} title={s.title} sub={s.sub} text={s.text} />)}
             </ServiceDropdown>
           )}
 
           {hasMosquito && (
-            <ServiceDropdown title="🦟 Mosquito Control">
+            <ServiceDropdown title="🦟 Mosquito Control" defaultOpen={firstOpenService === 'mosquito'}>
               <DetailSection
                 title="Mosquito Control"
                 sub="Bite-free yards start here."
@@ -754,7 +828,7 @@ export default function EstimateViewPage() {
           )}
 
           {hasTS && (
-            <ServiceDropdown title="🌳 Tree & Shrub Care">
+            <ServiceDropdown title="🌳 Tree & Shrub Care" defaultOpen={firstOpenService === 'treeShrub'}>
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>{SERVICE_DETAILS.treeShrub.header}</div>
               <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.treeShrub.intro}</div>
               {SERVICE_DETAILS.treeShrub.services.map((s, i) => (
@@ -771,7 +845,7 @@ export default function EstimateViewPage() {
           )}
 
           {hasTermite && (
-            <ServiceDropdown title="🏠 Termite Protection">
+            <ServiceDropdown title="🏠 Termite Protection" defaultOpen={firstOpenService === 'termite'}>
               <DetailSection
                 title="Termite Protection"
                 sub="Stop termites before they cause damage."
@@ -784,39 +858,61 @@ export default function EstimateViewPage() {
         {/* ============================================================= */}
         {/* 5. ALSO AVAILABLE section                                      */}
         {/* ============================================================= */}
-        {missingServices.length > 0 && (
-          <div style={{ marginTop: 32 }}>
-            <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>
-              Enhance Your Plan
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {missingServices.slice(0, 2).map((svc, i) => (
-                <div key={i} style={{
-                  background: '#fff', borderRadius: 16, padding: '16px 18px',
-                  border: `1px solid ${SAND_DARK}`,
-                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                }}>
-                  <div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
-                      {svc.emoji} {svc.label}
+        {missingServices.length > 0 && (() => {
+          const APPROX_MONTHLY = { lawn: 85, pest: 45, mosquito: 35, treeShrub: 55, termite: 50 };
+          const TIER_THRESHOLDS = [
+            { count: 4, name: 'Platinum', discount: '20%' },
+            { count: 3, name: 'Gold', discount: '15%' },
+            { count: 2, name: 'Silver', discount: '10%' },
+          ];
+          const currentCount = includedKeys.length;
+          const currentTier = e.tier || 'Bronze';
+          return (
+            <div style={{ marginTop: 32 }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>
+                Enhance Your Plan
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {missingServices.slice(0, 2).map((svc, i) => {
+                  const approx = APPROX_MONTHLY[svc.key] || 50;
+                  const newCount = currentCount + 1 + i;
+                  const nextTier = TIER_THRESHOLDS.find(t => newCount >= t.count);
+                  return (
+                    <div key={i} style={{
+                      background: '#fff', borderRadius: 16, padding: '16px 18px',
+                      border: `1px solid ${SAND_DARK}`,
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
+                          {svc.emoji} {svc.label}
+                        </div>
+                        <div style={{ fontSize: 13, color: B.grayDark, marginTop: 3 }}>
+                          ~${approx}/mo standalone
+                        </div>
+                        {nextTier && nextTier.name !== currentTier && (
+                          <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginTop: 2 }}>
+                            Unlocks {nextTier.name} tier ({nextTier.discount} off everything)
+                          </div>
+                        )}
+                      </div>
+                      <a
+                        href={`sms:+19413187612?body=${encodeURIComponent(`Hi! I'd like to add ${svc.label} to my estimate for ${e.address}.`)}`}
+                        style={{
+                          ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
+                          background: B.wavesBlue, color: '#fff', textDecoration: 'none',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Text Us
+                      </a>
                     </div>
-                    <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Upgrade your protection — unlock additional savings</div>
-                  </div>
-                  <a
-                    href={`sms:+19413187612?body=${encodeURIComponent(`Hi! I'd like to add ${svc.label} to my estimate for ${e.address}.`)}`}
-                    style={{
-                      ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
-                      background: B.wavesBlue, color: '#fff', textDecoration: 'none',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    Text Us
-                  </a>
-                </div>
-              ))}
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ============================================================= */}
         {/* 6. PERKS THAT ACTUALLY MATTER — comparison table               */}
@@ -857,7 +953,7 @@ export default function EstimateViewPage() {
                     Don't just take our word for it
                   </div>
                   <div style={{ fontSize: 14, color: B.yellow, marginTop: 4 }}>
-                    5.0 ★★★★★ <span style={{ color: B.grayMid, fontSize: 12 }}>on Google</span>
+                    5.0 ★★★★★
                   </div>
                 </div>
                 <div
@@ -1021,6 +1117,10 @@ export default function EstimateViewPage() {
               }}>
                 {accepting ? 'Processing...' : 'Accept Estimate'}
               </button>
+
+              <div style={{ textAlign: 'center', marginTop: 8, fontSize: 12, color: B.grayMid, lineHeight: 1.5, fontFamily: FONTS.body }}>
+                First month charged on signup. Auto-pay via card on file. Cancel anytime — no fees.
+              </div>
 
               <a href={`sms:+19413187612?body=${encodeURIComponent(`Hi, I have a question about my Waves estimate for ${e.address}`)}`} style={{
                 ...BUTTON_BASE, width: '100%', padding: 14, fontSize: 14, marginTop: 10,
