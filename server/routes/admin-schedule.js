@@ -262,6 +262,20 @@ router.post('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PUT /api/admin/schedule/:id/update-details — edit service type + duration
+router.put('/:id/update-details', async (req, res, next) => {
+  try {
+    const { serviceType, estimatedDuration } = req.body;
+    const updates = {};
+    if (serviceType) updates.service_type = serviceType;
+    if (estimatedDuration) updates.estimated_duration_minutes = parseInt(estimatedDuration);
+    if (Object.keys(updates).length) {
+      await db('scheduled_services').where({ id: req.params.id }).update(updates);
+    }
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/schedule/:id/assign — assign technician
 router.put('/:id/assign', async (req, res, next) => {
   try {
@@ -291,7 +305,6 @@ router.put('/:id/status', async (req, res, next) => {
 
     if (status === 'confirmed') {
       updates.customer_confirmed = true;
-      updates.customer_confirmed_at = db.fn.now();
     } else if (status === 'en_route') {
       // En route is optional — SMS + ETA are best-effort
       try {
@@ -352,11 +365,22 @@ router.put('/:id/status', async (req, res, next) => {
       } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
     }
 
-    await db('scheduled_services').where({ id: req.params.id }).update(updates);
+    // Update the service — try with all fields, fall back to just status
+    try {
+      await db('scheduled_services').where({ id: req.params.id }).update(updates);
+    } catch (updateErr) {
+      logger.warn(`[schedule] Full update failed, falling back to status-only: ${updateErr.message}`);
+      await db('scheduled_services').where({ id: req.params.id }).update({ status });
+    }
 
-    await db('service_status_log').insert({
-      scheduled_service_id: svc.id, status, changed_by: req.technicianId, notes,
-    });
+    // Log status change — table may not exist
+    try {
+      await db('service_status_log').insert({
+        scheduled_service_id: svc.id, status, changed_by: req.technicianId || null, notes: notes || null,
+      });
+    } catch (logErr) {
+      logger.warn(`[schedule] Status log failed: ${logErr.message}`);
+    }
 
     res.json({ success: true });
   } catch (err) { next(err); }

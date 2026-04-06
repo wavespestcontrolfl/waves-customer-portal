@@ -31,15 +31,29 @@ const TIER_COLORS = {
   Platinum: { bg: '#E5E4E2', text: '#0f1923' },
 };
 
-const QUICK_NOTES = [
-  'Applied perimeter band',
-  'Interior — baseboards, kitchen, baths',
-  'Cobweb sweep',
-  'Granular in beds',
-  'Spot-treated weeds',
-  'Checked bait stations',
-  'Pre-emergent applied',
-  'Customer not home',
+const CHIP_ACTIONS = [
+  'Applied perimeter band', 'Interior — baseboards/kitchen/baths', 'Cobweb sweep',
+  'Granular in beds', 'Spot-treated weeds', 'Checked bait stations',
+  'Pre-emergent applied', 'Barrier treatment', 'Larvicide applied', 'De-webbed eaves',
+];
+const CHIP_OBSERVATIONS = [
+  'Pest activity noted', 'Standing water found', 'Irrigation issue',
+  'Rodent signs', 'Lawn stress/dry patches', 'Fungus visible',
+  'Weeds spreading', 'Property access issue', 'Customer concern discussed',
+];
+const CHIP_RECOMMENDATIONS = [
+  'Callback recommended', 'Irrigation adjustment needed', 'Follow-up in 2 weeks',
+  'Schedule interior next visit', 'Bait station replacement', 'Customer wants estimate',
+];
+const AREAS_SERVICED_OPTIONS = [
+  'Front Yard', 'Back Yard', 'Side Yards', 'Interior', 'Garage',
+  'Lanai/Pool Cage', 'Perimeter', 'Fence Line', 'Beds',
+];
+const CUSTOMER_INTERACTION_OPTIONS = [
+  { value: 'spoke', label: 'Customer home — spoke with them' },
+  { value: 'not_home_full', label: 'Customer not home — full access' },
+  { value: 'not_home_partial', label: 'Customer not home — partial access' },
+  { value: 'concern', label: 'Customer had specific concern' },
 ];
 
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
@@ -262,18 +276,48 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
         </a>
       </div>
 
-      {/* Service type + duration */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-        <span style={{
-          fontSize: 13, fontWeight: 600, color: D.text,
-          padding: '4px 10px', borderRadius: 8, background: zoneColor + '18', display: 'inline-block',
-        }}>
-          {service.serviceType}
-        </span>
-        {service.estimatedDuration && (
-          <span style={{ fontSize: 12, color: D.muted }}>
-            ~{service.estimatedDuration} min
-          </span>
+      {/* Service type + duration — editable */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+        {service._editing ? (
+          <>
+            <input value={service._editType || service.serviceType} onChange={e => {
+              service._editType = e.target.value;
+              setUpdating(u => !u); // force re-render
+            }} style={{ fontSize: 13, fontWeight: 600, color: D.text, padding: '4px 10px', borderRadius: 8, background: D.input, border: `1px solid ${D.border}`, width: 160, outline: 'none' }} />
+            <input type="number" value={service._editDuration || service.estimatedDuration || 30} onChange={e => {
+              service._editDuration = e.target.value;
+              setUpdating(u => !u);
+            }} style={{ fontSize: 12, color: D.text, padding: '4px 8px', borderRadius: 8, background: D.input, border: `1px solid ${D.border}`, width: 50, outline: 'none' }} />
+            <span style={{ fontSize: 11, color: D.muted }}>min</span>
+            <button onClick={async () => {
+              try {
+                await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+                  method: 'PUT',
+                  body: JSON.stringify({ serviceType: service._editType || service.serviceType, estimatedDuration: parseInt(service._editDuration || service.estimatedDuration || 30) }),
+                });
+                service.serviceType = service._editType || service.serviceType;
+                service.estimatedDuration = parseInt(service._editDuration || service.estimatedDuration || 30);
+                service._editing = false;
+                setUpdating(u => !u);
+              } catch (e) { alert('Save failed: ' + e.message); }
+            }} style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: 'none', background: D.green, color: D.white, cursor: 'pointer' }}>Save</button>
+            <button onClick={() => { service._editing = false; setUpdating(u => !u); }} style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: 'none', background: 'transparent', color: D.muted, cursor: 'pointer' }}>Cancel</button>
+          </>
+        ) : (
+          <>
+            <span style={{
+              fontSize: 13, fontWeight: 600, color: D.text,
+              padding: '4px 10px', borderRadius: 8, background: zoneColor + '18', display: 'inline-block',
+              cursor: 'pointer',
+            }} onClick={() => { service._editing = true; setUpdating(u => !u); }}>
+              {service.serviceType}
+            </span>
+            {service.estimatedDuration && (
+              <span style={{ fontSize: 12, color: D.muted, cursor: 'pointer' }} onClick={() => { service._editing = true; setUpdating(u => !u); }}>
+                ~{service.estimatedDuration} min
+              </span>
+            )}
+          </>
         )}
       </div>
 
