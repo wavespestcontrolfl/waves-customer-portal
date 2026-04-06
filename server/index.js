@@ -186,6 +186,7 @@ app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
+app.use('/api/admin/equipment', require('./routes/admin-equipment'));
 
 // Health check
 app.get('/api/health', (req, res) => {

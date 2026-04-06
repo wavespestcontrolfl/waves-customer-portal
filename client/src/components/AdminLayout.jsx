@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { path: '/admin/seo', icon: '🔍', label: 'SEO' },
   { path: '/admin/knowledge', icon: '📚', label: 'Knowledge Base' },
   { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },
+  { path: '/admin/equipment', icon: '🔧', label: 'Equipment' },
   { path: '/admin/inventory', icon: '📦', label: 'Inventory' },
   { path: '/admin/lawn-assessment', icon: '🌿', label: 'Lawn Assessment' },
   { path: '/admin/pricing', icon: '🎯', label: 'Pricing Strategy' },
