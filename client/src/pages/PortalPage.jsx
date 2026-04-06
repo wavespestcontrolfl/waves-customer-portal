@@ -3722,11 +3722,28 @@ const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'responsive
 function MyPlanTab({ customer }) {
   const [expandedService, setExpandedService] = useState(null);
   const [expandedAddon, setExpandedAddon] = useState(null);
+  const [expandedCoverage, setExpandedCoverage] = useState(null);
   const [stats, setStats] = useState(null);
+  const [nextService, setNextService] = useState(null);
+  const [serviceHistory, setServiceHistory] = useState([]);
+  const [addonRequested, setAddonRequested] = useState({});
+  const [showPauseForm, setShowPauseForm] = useState(false);
+  const [showCancelForm, setShowCancelForm] = useState(false);
+  const [pauseDuration, setPauseDuration] = useState('1');
+  const [pauseReason, setPauseReason] = useState('');
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelDetails, setCancelDetails] = useState('');
+  const [pauseSubmitted, setPauseSubmitted] = useState(false);
+  const [cancelSubmitted, setCancelSubmitted] = useState(false);
+  const [upgradeRequested, setUpgradeRequested] = useState({});
   const badgeData = useBadges();
 
   useEffect(() => {
     api.getServiceStats().then(setStats).catch(console.error);
+    api.getNextService().then(d => setNextService(d.next || null)).catch(console.error);
+    api.getServices({ limit: 50 }).then(d => {
+      if (d.services) setServiceHistory(d.services);
+    }).catch(console.error);
   }, []);
 
   const tier = TIER[customer.tier];
@@ -3743,6 +3760,89 @@ function MyPlanTab({ customer }) {
   const annualSavings = totalFullPrice * discount;
   const monthlyRate = customer.monthlyRate || 0;
 
+  // Build bundled services one-liner
+  const includedServices = SERVICE_CATALOG.slice(0, numServices);
+  const bundleSummary = includedServices.map(s => s.name.replace(/ Program| Barrier Treatment| Control/g, '').replace('Quarterly ', '')).join(' + ');
+
+  // Build plan history timeline from member data
+  const planTimeline = [];
+  if (customer.memberSince) {
+    const startDate = parseDate(customer.memberSince);
+    planTimeline.push({ date: startDate, label: `Started ${tierName} WaveGuard`, icon: '🚀' });
+  }
+  if (customer.activity_log) {
+    customer.activity_log.forEach(a => {
+      if (a.type === 'tier_change' || a.type === 'upgrade') {
+        planTimeline.push({ date: parseDate(a.date), label: a.description || `Upgraded to ${a.tier || 'new tier'}`, icon: '⬆️' });
+      }
+      if (a.type === 'service_added') {
+        planTimeline.push({ date: parseDate(a.date), label: a.description || `Added ${a.service || 'service'}`, icon: '➕' });
+      }
+    });
+  }
+  // If no activity log, construct from tier
+  if (planTimeline.length === 1 && tierIdx > 0) {
+    const startDate = parseDate(customer.memberSince);
+    const upgradeDate = new Date(startDate);
+    upgradeDate.setMonth(upgradeDate.getMonth() + Math.floor(memberMonths * 0.4));
+    planTimeline.push({ date: upgradeDate, label: `Upgraded to ${tierName}`, icon: '⬆️' });
+  }
+  if (numServices >= 3 && planTimeline.length <= 2) {
+    const startDate = parseDate(customer.memberSince);
+    const addDate = new Date(startDate);
+    addDate.setMonth(addDate.getMonth() + Math.floor(memberMonths * 0.6));
+    planTimeline.push({ date: addDate, label: 'Added mosquito service', icon: '🦟' });
+  }
+  planTimeline.sort((a, b) => a.date - b.date);
+
+  // Current month for calendar
+  const now = new Date();
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
+
+  // Determine completed months from service history
+  const getCompletedMonths = (svcId) => {
+    const completed = new Set();
+    serviceHistory.forEach(s => {
+      const svcType = (s.serviceType || s.type || '').toLowerCase();
+      const matchesService = (
+        (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||
+        (svcId === 'lawn_care' && (svcType.includes('lawn') || svcType.includes('fertiliz'))) ||
+        (svcId === 'mosquito' && svcType.includes('mosquito')) ||
+        (svcId === 'tree_shrub' && (svcType.includes('tree') || svcType.includes('shrub'))) ||
+        (svcId === 'termite' && svcType.includes('termite'))
+      );
+      if (matchesService && s.date) {
+        const d = parseDate(s.date);
+        if (d.getFullYear() === currentYear) {
+          completed.add(d.getMonth());
+        }
+      }
+    });
+    return completed;
+  };
+
+  // Included service IDs for filtering add-ons
+  const includedServiceIds = includedServices.map(s => s.id);
+
+  // Filter add-ons that are NOT already included in the plan
+  const availableAddOns = ADD_ONS.filter(addon => {
+    // Map add-on IDs to service IDs they might overlap with
+    const overlapMap = { palm_injection: 'tree_shrub', rodent: 'pest_control' };
+    const overlaps = overlapMap[addon.id];
+    // Don't filter based on overlap — just exclude exact matches
+    return !includedServiceIds.includes(addon.id);
+  });
+
+  // Curated badges — filter out engagement-tracking ones
+  const curatedBadges = badgeData.data?.badges?.filter(b =>
+    !HIDDEN_BADGE_TYPES.includes(b.badgeType)
+  ) || [];
+  const recentEarnedBadges = curatedBadges
+    .filter(b => b.earned)
+    .sort((a, b) => new Date(b.earnedAt) - new Date(a.earnedAt))
+    .slice(0, 4);
+
   const Card = ({ children, style: s }) => (
     <div style={{ background: B.white, borderRadius: 16, padding: 20, border: `1px solid ${B.grayLight}`, ...s }}>{children}</div>
   );
@@ -3750,7 +3850,7 @@ function MyPlanTab({ customer }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
-      {/* Section 1 — Current Plan Summary */}
+      {/* Section 1 — Plan Summary Hero Card */}
       <div style={{
         background: `linear-gradient(135deg, ${tier?.gradientFrom || B.navy}, ${tier?.gradientTo || B.navyLight})`,
         borderRadius: 20, padding: '28px 24px', color: tier?.darkText ? B.navy : '#fff',
@@ -3761,71 +3861,246 @@ function MyPlanTab({ customer }) {
         <div style={{ fontSize: 32, fontWeight: 900, fontFamily: FONTS.heading, marginTop: 4 }}>
           {tierName} WaveGuard
         </div>
+
+        {/* Bundled services one-liner */}
+        <div style={{
+          fontSize: 13, fontWeight: 600, marginTop: 6, opacity: 0.9,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          {bundleSummary} — {numServices} service{numServices > 1 ? 's' : ''} bundled
+        </div>
+
+        {/* Next service date */}
+        {nextService && (
+          <div style={{
+            marginTop: 10, padding: '8px 14px', borderRadius: 10,
+            background: 'rgba(255,255,255,0.15)', backdropFilter: 'blur(4px)',
+            display: 'inline-flex', alignItems: 'center', gap: 8,
+            fontSize: 13, fontWeight: 600,
+          }}>
+            <span style={{ fontSize: 16 }}>📅</span>
+            Next visit: {parseDate(nextService.date).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
+            {nextService.serviceType ? ` (${nextService.serviceType})` : ''}
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: 20, marginTop: 16, flexWrap: 'wrap' }}>
           <div>
-            <div style={{ fontSize: 11, color: B.blueLight }}>Monthly Rate</div>
+            <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Monthly Rate</div>
             <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui }}>${monthlyRate}</div>
           </div>
           <div>
-            <div style={{ fontSize: 11, color: B.blueLight }}>Bundle Discount</div>
+            <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Bundle Discount</div>
             <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui }}>{Math.round(discount * 100)}%</div>
           </div>
           <div>
-            <div style={{ fontSize: 11, color: B.blueLight }}>Member Since</div>
+            <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Member Since</div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>{customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}</div>
           </div>
           <div>
-            <div style={{ fontSize: 11, color: B.blueLight }}>Loyalty</div>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>{memberMonths} months ⭐</div>
+            <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Loyalty</div>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>{memberMonths} months</div>
           </div>
         </div>
+
+        {/* Recent badges strip */}
+        {recentEarnedBadges.length > 0 && (
+          <div style={{ display: 'flex', gap: 6, marginTop: 16 }}>
+            {recentEarnedBadges.map(b => (
+              <div key={b.badgeType} title={b.title} style={{
+                width: 32, height: 32, borderRadius: '50%', flexShrink: 0,
+                background: 'rgba(255,255,255,0.2)', backdropFilter: 'blur(4px)',
+                border: '1.5px solid rgba(255,255,255,0.3)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 15,
+              }}>{b.icon}</div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Section 2 — Included Services Breakdown */}
       <SectionHeading>Your Included Services</SectionHeading>
       <div style={{ fontSize: 13, color: B.grayMid }}>{tierName} includes {numServices} recurring service{numServices > 1 ? 's' : ''}</div>
 
-      {SERVICE_CATALOG.slice(0, numServices).map(svc => (
-        <Card key={svc.id}>
-          <div onClick={() => setExpandedService(expandedService === svc.id ? null : svc.id)}
-            style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span style={{ fontSize: 28 }}>{svc.icon}</span>
-              <div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{svc.name}</div>
-                <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{svc.frequencies[0]}</div>
+      {includedServices.map(svc => {
+        const completedMonths = getCompletedMonths(svc.id);
+        const scheduleMonths = SERVICE_SCHEDULE_MONTHS[svc.id] || [];
+        const totalVisits = scheduleMonths.length;
+        const completedVisits = scheduleMonths.filter(m => completedMonths.has(m)).length;
+        const annualSavingsForService = svc.basePrice * 12 * discount;
+        const coverage = SERVICE_COVERAGE[svc.id];
+
+        return (
+          <Card key={svc.id}>
+            <div onClick={() => setExpandedService(expandedService === svc.id ? null : svc.id)}
+              style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span style={{ fontSize: 28 }}>{svc.icon}</span>
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{svc.name}</div>
+                  <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{svc.frequencies[0]}</div>
+                  {/* Service cycle tracker */}
+                  <div style={{ fontSize: 11, color: B.wavesBlue, fontWeight: 600, marginTop: 3 }}>
+                    {completedVisits} of {totalVisits} visits completed this year
+                  </div>
+                </div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 11, color: B.grayMid, textDecoration: 'line-through' }}>${svc.basePrice * 12}/yr</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
+                  ${annualSavingsForService > 0 ? `${annualSavingsForService.toFixed(0)}/yr saved` : `${svc.basePrice * 12}/yr`}
+                </div>
               </div>
             </div>
-            <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 11, color: B.grayMid, textDecoration: 'line-through' }}>${svc.basePrice}/mo</div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>${(svc.basePrice * (1 - discount)).toFixed(0)}/mo</div>
+
+            {/* Cycle progress bar */}
+            <div style={{ marginTop: 10, height: 4, borderRadius: 2, background: B.grayLight, overflow: 'hidden' }}>
+              <div style={{
+                height: '100%', borderRadius: 2, background: B.wavesBlue,
+                width: `${totalVisits > 0 ? (completedVisits / totalVisits) * 100 : 0}%`,
+                transition: 'width 0.6s ease-out',
+              }} />
             </div>
-          </div>
-          {expandedService === svc.id && (
-            <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
-              <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7 }}>{svc.description}</div>
-              <div style={{ marginTop: 12, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.grayMid }}>Products Used</div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-                {svc.products.map((p, i) => (
-                  <span key={i} style={{
-                    padding: '4px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
-                    background: `${B.wavesBlue}12`, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}22`,
-                  }}>{p}</span>
-                ))}
+
+            {expandedService === svc.id && (
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
+                <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7 }}>{svc.description}</div>
+                <div style={{ marginTop: 12, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.grayMid }}>Products Used</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                  {svc.products.map((p, i) => (
+                    <span key={i} style={{
+                      padding: '4px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
+                      background: `${B.wavesBlue}12`, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}22`,
+                    }}>{p}</span>
+                  ))}
+                </div>
+                <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: '#E8F5E9', fontSize: 12, color: B.green, fontWeight: 600 }}>
+                  💰 You save ${annualSavingsForService.toFixed(0)}/year on {svc.name} with your {tierName} discount
+                </div>
+
+                {/* What's Covered — collapsible */}
+                {coverage && (
+                  <div style={{ marginTop: 12 }}>
+                    <div
+                      onClick={(e) => { e.stopPropagation(); setExpandedCoverage(expandedCoverage === svc.id ? null : svc.id); }}
+                      style={{
+                        cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        padding: '10px 14px', borderRadius: 10, background: `${B.wavesBlue}08`,
+                        border: `1px solid ${B.wavesBlue}18`,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, fontWeight: 700, color: B.wavesBlue }}>What's Covered</span>
+                      <span style={{ fontSize: 12, color: B.wavesBlue, transform: expandedCoverage === svc.id ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▼</span>
+                    </div>
+                    {expandedCoverage === svc.id && (
+                      <div style={{ padding: '12px 14px', borderRadius: '0 0 10px 10px', background: `${B.wavesBlue}05`, borderTop: 'none' }}>
+                        <div style={{ fontSize: 12, color: B.grayDark, fontWeight: 600, marginBottom: 8 }}>{coverage.summary}</div>
+                        <ul style={{ margin: 0, paddingLeft: 18 }}>
+                          {coverage.details.map((d, i) => (
+                            <li key={i} style={{ fontSize: 12, color: B.grayDark, lineHeight: 1.8 }}>{d}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-              <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: '#E8F5E9', fontSize: 12, color: B.green, fontWeight: 600 }}>
-                💰 You save ${(svc.basePrice * discount).toFixed(0)}/mo with your {tierName} discount
+            )}
+          </Card>
+        );
+      })}
+
+      {/* Section — Service Calendar (Year-at-a-Glance) */}
+      <SectionHeading>Service Calendar</SectionHeading>
+      <Card>
+        <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 14 }}>Your {currentYear} service schedule at a glance</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {includedServices.map(svc => {
+            const scheduleMonths = SERVICE_SCHEDULE_MONTHS[svc.id] || [];
+            const completedMonths = getCompletedMonths(svc.id);
+            return (
+              <div key={svc.id}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6 }}>
+                  {svc.icon} {svc.name.replace(/ Program| Barrier Treatment/g, '')}
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {MONTH_LABELS.map((month, mi) => {
+                    const isScheduled = scheduleMonths.includes(mi);
+                    const isCompleted = completedMonths.has(mi);
+                    const isCurrentMonth = mi === currentMonth;
+                    const isPast = mi < currentMonth;
+                    // Determine dot state
+                    let dotColor = B.grayLight;
+                    let dotBorder = B.grayLight;
+                    let dotFill = 'transparent';
+                    let label = '';
+                    if (!isScheduled) {
+                      dotColor = B.grayLight;
+                      dotFill = 'transparent';
+                      dotBorder = B.grayLight;
+                    } else if (isCompleted) {
+                      dotColor = B.green;
+                      dotFill = B.green;
+                      dotBorder = B.green;
+                      label = 'Completed';
+                    } else if (isCurrentMonth) {
+                      dotColor = B.wavesBlue;
+                      dotFill = B.wavesBlue;
+                      dotBorder = B.wavesBlue;
+                      label = 'This month';
+                    } else if (isPast && isScheduled) {
+                      dotColor = B.orange;
+                      dotFill = B.orange;
+                      dotBorder = B.orange;
+                      label = 'Missed/Pending';
+                    } else {
+                      dotColor = B.grayMid;
+                      dotFill = 'transparent';
+                      dotBorder = B.grayMid;
+                      label = 'Upcoming';
+                    }
+                    return (
+                      <div key={mi} title={isScheduled ? `${month}: ${label}` : `${month}: No service`} style={{
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', width: 28,
+                      }}>
+                        <div style={{
+                          width: 14, height: 14, borderRadius: '50%',
+                          background: dotFill,
+                          border: `2px solid ${dotBorder}`,
+                          opacity: isScheduled ? 1 : 0.3,
+                          transition: 'all 0.2s',
+                          boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}30` : 'none',
+                        }} />
+                        <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2, fontWeight: isCurrentMonth ? 700 : 400 }}>{month.slice(0, 1)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
+            );
+          })}
+        </div>
+        {/* Legend */}
+        <div style={{ display: 'flex', gap: 14, marginTop: 14, flexWrap: 'wrap' }}>
+          {[
+            { color: B.green, fill: true, label: 'Completed' },
+            { color: B.wavesBlue, fill: true, label: 'This Month' },
+            { color: B.grayMid, fill: false, label: 'Upcoming' },
+          ].map(l => (
+            <div key={l.label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <div style={{ width: 10, height: 10, borderRadius: '50%', background: l.fill ? l.color : 'transparent', border: `2px solid ${l.color}` }} />
+              <span style={{ fontSize: 10, color: B.grayMid }}>{l.label}</span>
             </div>
-          )}
-        </Card>
-      ))}
+          ))}
+        </div>
+      </Card>
 
       {/* Section 3 — Available Add-Ons */}
       <SectionHeading>Available Add-Ons</SectionHeading>
       <div style={{ fontSize: 13, color: B.grayMid }}>Enhance your plan — your {Math.round(discount * 100)}% {tierName} discount applies</div>
 
-      {ADD_ONS.map(addon => (
+      {availableAddOns.map(addon => (
         <Card key={addon.id}>
           <div onClick={() => setExpandedAddon(expandedAddon === addon.id ? null : addon.id)}
             style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -3837,25 +4112,36 @@ function MyPlanTab({ customer }) {
               </div>
             </div>
             <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>
-              ${discount > 0 ? (addon.price * (1 - discount)).toFixed(0) : addon.price}{addon.unit}
+              ${discount > 0 && addon.id !== 'wdo_inspection' ? (addon.price * (1 - discount)).toFixed(0) : addon.price}{addon.unit}
             </div>
           </div>
           {expandedAddon === addon.id && (
             <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
               <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7 }}>{addon.desc}</div>
-              {discount > 0 && (
+              {discount > 0 && addon.id !== 'wdo_inspection' && (
                 <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 8 }}>
                   Your price: ${(addon.price * (1 - discount)).toFixed(2)}{addon.unit} (was ${addon.price}{addon.unit})
                 </div>
               )}
-              <button onClick={() => {
-                api.createRequest?.({ category: 'add_service', subject: `Add ${addon.name} to my plan`, description: `Customer requested to add ${addon.name} via portal.` });
-                setExpandedAddon(null);
-                alert('Request sent! We\'ll follow up to add this to your plan.');
-              }} style={{
-                ...BUTTON_BASE, marginTop: 12, padding: '9px 18px', fontSize: 13,
-                background: B.red, color: '#fff',
-              }}>Add to My Plan</button>
+              {addonRequested[addon.id] ? (
+                <div style={{
+                  marginTop: 12, padding: '10px 18px', borderRadius: 12, fontSize: 13,
+                  background: '#E8F5E9', color: B.green, fontWeight: 600,
+                  display: 'flex', alignItems: 'center', gap: 8,
+                }}>
+                  <span style={{ fontSize: 16 }}>✓</span>
+                  Request sent — we'll call to confirm
+                </div>
+              ) : (
+                <button onClick={() => {
+                  api.createRequest?.({ category: 'add_service', subject: `Add ${addon.name} to my plan`, description: `Customer requested to add ${addon.name} via portal.` });
+                  setAddonRequested(prev => ({ ...prev, [addon.id]: true }));
+                  setExpandedAddon(null);
+                }} style={{
+                  ...BUTTON_BASE, marginTop: 12, padding: '9px 18px', fontSize: 13,
+                  background: B.red, color: '#fff',
+                }}>Add to My Plan</button>
+              )}
             </div>
           )}
         </Card>
@@ -3870,6 +4156,9 @@ function MyPlanTab({ customer }) {
             const isCurrent = tn === tierName;
             const disc = TIER_DISCOUNTS[tn];
             const svcs = TIER_SERVICES[tn];
+            const tierServiceNames = TIER_SERVICE_NAMES[tn] || [];
+            // Estimate monthly cost for this tier
+            const tierMonthly = SERVICE_CATALOG.slice(0, svcs).reduce((sum, s) => sum + s.basePrice * (1 - disc), 0);
             return (
               <div key={tn} style={{
                 flex: 1, minWidth: 140, borderRadius: 14, padding: 16, textAlign: 'center',
@@ -3885,18 +4174,41 @@ function MyPlanTab({ customer }) {
                 <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>{tn}</div>
                 <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, marginTop: 4 }}>{Math.round(disc * 100)}%</div>
                 <div style={{ fontSize: 11, color: B.grayMid }}>discount</div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginTop: 8 }}>{svcs} service{svcs > 1 ? 's' : ''}</div>
+
+                {/* Estimated monthly cost */}
+                <div style={{ fontSize: 13, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, marginTop: 6 }}>
+                  ~${tierMonthly.toFixed(0)}/mo
+                </div>
+
+                {/* Service names list */}
+                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {tierServiceNames.map((sn, si) => (
+                    <div key={si} style={{ fontSize: 10, color: B.grayDark, lineHeight: 1.4 }}>{sn}</div>
+                  ))}
+                </div>
+
                 {isCurrent ? (
                   <div style={{ marginTop: 10, fontSize: 11, fontWeight: 700, color: B.green, background: '#E8F5E9', padding: '4px 10px', borderRadius: 20 }}>Current Plan</div>
                 ) : i > tierIdx ? (
-                  <button onClick={() => {
-                    api.createRequest?.({ category: 'billing', subject: `Upgrade to ${tn} WaveGuard`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
-                    alert('Upgrade request sent! We\'ll follow up with your new pricing.');
-                  }} style={{
-                    ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 11,
-                    background: B.red, color: '#fff',
-                  }}>Upgrade</button>
-                ) : null}
+                  upgradeRequested[tn] ? (
+                    <div style={{ marginTop: 10, fontSize: 11, fontWeight: 600, color: B.green, padding: '4px 10px' }}>
+                      ✓ Request sent
+                    </div>
+                  ) : (
+                    <button onClick={() => {
+                      api.createRequest?.({ category: 'billing', subject: `Upgrade to ${tn} WaveGuard`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
+                      setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
+                    }} style={{
+                      ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 11,
+                      background: B.red, color: '#fff',
+                    }}>Upgrade</button>
+                  )
+                ) : (
+                  <a href="sms:+19413187612?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
+                    marginTop: 10, display: 'inline-block', fontSize: 10, color: B.wavesBlue,
+                    fontWeight: 600, textDecoration: 'none', padding: '4px 0',
+                  }}>Contact us to adjust</a>
+                )}
               </div>
             );
           })}
@@ -3922,39 +4234,209 @@ function MyPlanTab({ customer }) {
         </div>
       </Card>
 
-      {/* Section 6 — Plan History */}
+      {/* Section 6 — Plan History Timeline */}
       <Card>
-        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>Plan History</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${B.grayLight}` }}>
-            <span style={{ fontSize: 13, color: B.grayDark }}>Plan started</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '—'}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${B.grayLight}` }}>
-            <span style={{ fontSize: 13, color: B.grayDark }}>Current tier</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{tierName} WaveGuard</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${B.grayLight}` }}>
-            <span style={{ fontSize: 13, color: B.grayDark }}>Billing cycle</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>Monthly (1st of month)</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0' }}>
-            <span style={{ fontSize: 13, color: B.grayDark }}>Contract</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: B.green }}>No contract — cancel anytime</span>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 16 }}>Plan History</div>
+        <div style={{ position: 'relative', paddingLeft: 28 }}>
+          {/* Vertical line */}
+          <div style={{
+            position: 'absolute', left: 9, top: 4, bottom: 4, width: 2,
+            background: `linear-gradient(to bottom, ${B.wavesBlue}, ${B.grayLight})`,
+            borderRadius: 1,
+          }} />
+          {planTimeline.map((event, idx) => (
+            <div key={idx} style={{
+              position: 'relative', paddingBottom: idx < planTimeline.length - 1 ? 20 : 0,
+              display: 'flex', flexDirection: 'column',
+            }}>
+              {/* Dot on timeline */}
+              <div style={{
+                position: 'absolute', left: -23, top: 2,
+                width: 14, height: 14, borderRadius: '50%',
+                background: idx === planTimeline.length - 1 ? B.wavesBlue : B.white,
+                border: `2.5px solid ${idx === planTimeline.length - 1 ? B.wavesBlue : B.blueLight}`,
+                zIndex: 1,
+              }} />
+              <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 600 }}>
+                {!isNaN(event.date) ? event.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 2 }}>
+                {event.icon} {event.label}
+              </div>
+            </div>
+          ))}
+          {/* Current status */}
+          <div style={{ position: 'relative', paddingTop: planTimeline.length > 0 ? 0 : 0 }}>
+            <div style={{
+              position: 'absolute', left: -25, top: 2,
+              width: 18, height: 18, borderRadius: '50%',
+              background: B.green, border: `3px solid #E8F5E9`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              zIndex: 1,
+            }}>
+              <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#fff' }} />
+            </div>
+            <div style={{ paddingTop: planTimeline.length > 0 ? 20 : 0 }}>
+              <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 600 }}>Now</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: B.green, marginTop: 2 }}>
+                Active — {tierName} WaveGuard · No contract
+              </div>
+            </div>
           </div>
         </div>
       </Card>
 
-      {/* Badge Showcase */}
-      {!badgeData.loading && badgeData.data && (
+      {/* Badge Showcase — curated */}
+      {!badgeData.loading && badgeData.data && curatedBadges.length > 0 && (
         <>
           <div style={{ marginTop: 8 }} />
           <BadgeShowcase
-            badges={badgeData.data.badges}
+            badges={curatedBadges}
             categories={badgeData.data.categories}
           />
         </>
       )}
+
+      {/* Section — Pause / Cancel Controls */}
+      <div style={{ textAlign: 'center', padding: '8px 0 4px' }}>
+        {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 16, alignItems: 'center' }}>
+            <button onClick={() => setShowPauseForm(true)} style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              fontSize: 12, color: B.grayMid, fontWeight: 600, fontFamily: FONTS.body,
+              textDecoration: 'underline', textUnderlineOffset: 3, padding: '4px 8px',
+            }}>Pause My Plan</button>
+            <span style={{ color: B.grayLight }}>|</span>
+            <button onClick={() => setShowCancelForm(true)} style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              fontSize: 12, color: B.grayMid, fontWeight: 500, fontFamily: FONTS.body,
+              textDecoration: 'underline', textUnderlineOffset: 3, padding: '4px 8px',
+            }}>Cancel</button>
+          </div>
+        )}
+
+        {/* Pause Form */}
+        {showPauseForm && !pauseSubmitted && (
+          <Card style={{ textAlign: 'left', border: `1px solid ${B.orange}33` }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>Pause My Plan</div>
+            <div style={{ fontSize: 12, color: B.grayDark, marginBottom: 12 }}>
+              We'll hold your services and billing. Your spot stays reserved.
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Duration</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {['1', '2'].map(d => (
+                  <button key={d} onClick={() => setPauseDuration(d)} style={{
+                    padding: '8px 18px', borderRadius: 10, fontSize: 13, fontWeight: 600,
+                    border: `1.5px solid ${pauseDuration === d ? B.wavesBlue : B.grayLight}`,
+                    background: pauseDuration === d ? `${B.wavesBlue}12` : B.white,
+                    color: pauseDuration === d ? B.wavesBlue : B.grayMid,
+                    cursor: 'pointer', fontFamily: FONTS.body,
+                  }}>{d} month{d === '2' ? 's' : ''}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Reason (optional)</div>
+              <input
+                value={pauseReason}
+                onChange={e => setPauseReason(e.target.value)}
+                placeholder="Traveling, seasonal, etc."
+                style={{
+                  width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 13,
+                  border: `1px solid ${B.grayLight}`, fontFamily: FONTS.body, outline: 'none',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => {
+                api.createRequest?.({
+                  category: 'billing',
+                  subject: `Pause plan for ${pauseDuration} month(s)`,
+                  description: `Customer requested to pause their ${tierName} WaveGuard plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
+                });
+                setPauseSubmitted(true);
+                setShowPauseForm(false);
+              }} style={{
+                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                background: B.orange, color: '#fff',
+              }}>Submit Pause Request</button>
+              <button onClick={() => setShowPauseForm(false)} style={{
+                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
+              }}>Never mind</button>
+            </div>
+          </Card>
+        )}
+
+        {pauseSubmitted && (
+          <div style={{ padding: '12px 18px', borderRadius: 12, background: '#E8F5E9', fontSize: 13, color: B.green, fontWeight: 600 }}>
+            ✓ Pause request submitted — we'll confirm within 1 business day.
+          </div>
+        )}
+
+        {/* Cancel Form */}
+        {showCancelForm && !cancelSubmitted && (
+          <Card style={{ textAlign: 'left', border: `1px solid ${B.red}33` }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>We're sorry to see you go</div>
+            <div style={{ fontSize: 12, color: B.grayDark, marginBottom: 14 }}>
+              Before you cancel, would you consider pausing instead? Your discount and spot stay reserved.
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Tell us why</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
+                  <button key={r} onClick={() => setCancelReason(r)} style={{
+                    padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 600,
+                    border: `1.5px solid ${cancelReason === r ? B.red : B.grayLight}`,
+                    background: cancelReason === r ? `${B.red}10` : B.white,
+                    color: cancelReason === r ? B.red : B.grayMid,
+                    cursor: 'pointer', fontFamily: FONTS.body,
+                  }}>{r}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <textarea
+                value={cancelDetails}
+                onChange={e => setCancelDetails(e.target.value)}
+                placeholder="Anything else you'd like us to know?"
+                rows={3}
+                style={{
+                  width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 13,
+                  border: `1px solid ${B.grayLight}`, fontFamily: FONTS.body, outline: 'none',
+                  resize: 'vertical', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => {
+                api.createRequest?.({
+                  category: 'cancellation',
+                  subject: `Cancel ${tierName} WaveGuard plan`,
+                  description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
+                });
+                setCancelSubmitted(true);
+                setShowCancelForm(false);
+              }} style={{
+                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                background: B.grayMid, color: '#fff',
+              }}>Submit Cancellation Request</button>
+              <button onClick={() => setShowCancelForm(false)} style={{
+                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
+              }}>Keep My Plan</button>
+            </div>
+          </Card>
+        )}
+
+        {cancelSubmitted && (
+          <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.grayMid}15`, fontSize: 13, color: B.grayDark, fontWeight: 600 }}>
+            ✓ Cancellation request received — we'll reach out to finalize.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

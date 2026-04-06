@@ -138,17 +138,60 @@ export function calculateEstimate(inputs) {
   const modifiers = [];
   const addMod = (service, label, impact, type = 'info') => modifiers.push({ service, label, impact, type });
 
-  // Track property-level modifiers
-  if (footprint > 0) addMod('property', `Footprint: ${footprint.toLocaleString()} sq ft`, null, 'info');
-  if (hasPool || hasPoolCage) addMod('pest', hasPoolCage ? 'Pool cage: +$22/visit' : 'Pool: +$5/visit', hasPoolCage ? 22 : 5, 'up');
+  // Track ALL property-level modifiers
+  addMod('property', `Home: ${homeSqFt.toLocaleString()} sq ft · ${stories} story`, null, 'info');
+  addMod('property', `Footprint: ${footprint.toLocaleString()} sq ft`, null, 'info');
+  addMod('property', `Lot: ${lotSqFt.toLocaleString()} sq ft`, null, 'info');
+
+  // Footprint impact on pest base price
+  const fpAdj = interpolate(footprint, [
+    { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
+    { at: 2000, adj: 0 }, { at: 2500, adj: 12 }, { at: 3000, adj: 22 },
+    { at: 4000, adj: 35 }, { at: 5500, adj: 50 },
+  ]);
+  if (fpAdj !== 0) addMod('pest', `Footprint size: ${fpAdj > 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : 'down');
+
+  // Lot size impact
+  const lotAdj = interpolate(lotSqFt, [
+    { at: 3000, adj: -10 }, { at: 5000, adj: -5 }, { at: 7500, adj: 0 },
+    { at: 10000, adj: 8 }, { at: 15000, adj: 18 }, { at: 25000, adj: 30 }, { at: 50000, adj: 42 },
+  ]);
+  if (lotAdj !== 0) addMod('pest', `Lot size: ${lotAdj > 0 ? '+' : ''}$${lotAdj}/visit`, lotAdj, lotAdj > 0 ? 'up' : 'down');
+
+  // Pool
+  if (hasPoolCage) addMod('pest', 'Pool cage: +$22/visit', 22, 'up');
+  else if (hasPool) addMod('pest', 'Pool: +$5/visit', 5, 'up');
+  else addMod('pest', 'No pool: $0 adjustment', 0, 'info');
+
+  // Shrubs
   if (shrubDensity === 'HEAVY') addMod('pest', 'Heavy shrubs: +$25/visit', 25, 'up');
+  else if (shrubDensity === 'MODERATE') addMod('pest', 'Moderate shrubs: $0 adjustment', 0, 'info');
   else if (shrubDensity === 'LIGHT') addMod('pest', 'Light shrubs: -$5/visit', -5, 'down');
+
+  // Trees
   if (treeDensity === 'HEAVY') addMod('pest', 'Heavy trees: +$15/visit', 15, 'up');
+  else if (treeDensity === 'MODERATE') addMod('pest', 'Moderate trees: $0 adjustment', 0, 'info');
   else if (treeDensity === 'LIGHT') addMod('pest', 'Light trees: -$3/visit', -3, 'down');
+
+  // Complexity
   if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$8/visit', 8, 'up');
+  else addMod('pest', `${landscapeComplexity || 'Simple'} landscape: $0 adjustment`, 0, 'info');
+
+  // Water proximity
   if (nearWater && nearWater !== 'NONE') addMod('mosquito', `Near water (${nearWater.replace(/_/g, ' ')}): higher mosquito pressure`, null, 'up');
+  else addMod('mosquito', 'No water nearby: standard mosquito pricing', null, 'info');
+
+  // Driveway
+  if (hasLargeDriveway) addMod('property', 'Large driveway: wider treatment perimeter', null, 'up');
+
+  // Urgency
   if (urgLabel) addMod('one-time', `Urgency: ${urgLabel}`, null, 'up');
-  if (isRC) addMod('one-time', 'Recurring customer: -15% one-time', null, 'down');
+  else addMod('one-time', 'Routine service: standard pricing', null, 'info');
+
+  // Recurring customer
+  if (isRC) addMod('one-time', 'Recurring customer: -15% one-time services', null, 'down');
+
+  // Roach modifier
   if (roachMod === 'GERMAN' || roachMod === 'REGULAR') addMod('pest', `Roach modifier (${roachMod}): +15%/visit`, null, 'up');
 
   /* ═══════════ RECURRING ═══════════ */
