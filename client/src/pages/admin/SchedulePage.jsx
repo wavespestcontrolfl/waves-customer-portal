@@ -856,18 +856,39 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [generating, setGenerating] = useState(false);
   const [success, setSuccess] = useState(false);
   const [elapsed, setElapsed] = useState('0:00');
+  const [quickComplete, setQuickComplete] = useState(false);
+  const [servicePhotos, setServicePhotos] = useState([]);
+  const [areasServiced, setAreasServiced] = useState([]);
+  const [customerInteraction, setCustomerInteraction] = useState('');
+  const [customerConcern, setCustomerConcern] = useState('');
+  const [nextVisit, setNextVisit] = useState(null);
+  const [nextVisitNote, setNextVisitNote] = useState('');
+  const [showNextVisitNote, setShowNextVisitNote] = useState(false);
+  const photoInputRef = useRef(null);
 
   const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
   const onSiteEntry = (service.statusLog || []).find(e => e.status === 'on_site');
   const onSiteTime = onSiteEntry ? onSiteEntry.at : service.checkInTime;
+
+  const svcTypeLower = (service.serviceType || '').toLowerCase();
+  const isCallback = svcTypeLower.includes('re-service') || svcTypeLower.includes('callback') || service.isCallback;
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
     return () => clearInterval(iv);
   }, [onSiteTime]);
 
-  function addQuickNote(text) {
-    setNotes(prev => prev.trim() ? prev.trimEnd() + '\n' + text : text);
+  useEffect(() => {
+    if (service.customerId) {
+      adminFetch(`/admin/schedule/next-visit?customerId=${service.customerId}`)
+        .then(d => { if (d.nextVisit) setNextVisit(d.nextVisit); })
+        .catch(() => {});
+    }
+  }, [service.customerId]);
+
+  function addChipNote(prefix, text) {
+    const line = `[${prefix}] ${text}`;
+    setNotes(prev => prev.trim() ? prev.trimEnd() + '\n' + line : line);
   }
   function addProduct(product) {
     if (selectedProducts.find(p => p.productId === product.id)) return;
@@ -880,6 +901,30 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
   function updateProduct(productId, field, value) {
     setSelectedProducts(prev => prev.map(p => p.productId === productId ? { ...p, [field]: value } : p));
   }
+  function toggleArea(area) {
+    setAreasServiced(prev => prev.includes(area) ? prev.filter(a => a !== area) : [...prev, area]);
+  }
+  function handlePhotoSelect(e) {
+    const files = Array.from(e.target.files || []);
+    if (servicePhotos.length + files.length > 5) {
+      alert('Maximum 5 photos allowed.');
+      return;
+    }
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setServicePhotos(prev => {
+          if (prev.length >= 5) return prev;
+          return [...prev, { data: reader.result, name: file.name }];
+        });
+      };
+      reader.readAsDataURL(file);
+    });
+    if (photoInputRef.current) photoInputRef.current.value = '';
+  }
+  function removePhoto(index) {
+    setServicePhotos(prev => prev.filter((_, i) => i !== index));
+  }
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -889,7 +934,19 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
         products: selectedProducts.map(p => ({ productId: p.productId, rate: p.rate, rateUnit: p.rateUnit })),
         sendCompletionSms: sendSms,
         requestReview,
+        timeOnSite: elapsed,
+        areasServiced,
+        customerInteraction,
       };
+      if (customerInteraction === 'concern' && customerConcern) {
+        body.customerConcernText = customerConcern;
+      }
+      if (servicePhotos.length > 0) {
+        body.photos = servicePhotos.map(p => p.data);
+      }
+      if (nextVisitNote) {
+        body.nextVisitAdjustmentNote = nextVisitNote;
+      }
       if (isLawn) {
         if (soilTemp) body.soilTemp = parseFloat(soilTemp);
         if (thatchMeasurement) body.thatchMeasurement = parseFloat(thatchMeasurement);
@@ -909,6 +966,9 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
     p.name.toLowerCase().includes(productSearch.toLowerCase())
   );
 
+  const chipGroupStyle = { marginBottom: 8 };
+  const chipLabelStyle = { fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4, display: 'block' };
+
   return (
     <>
       <div onClick={() => onClose(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 999 }} />
@@ -925,6 +985,9 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
           }}>
             <div style={{ fontSize: 64, marginBottom: 16, color: D.green }}>&#10003;</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: D.green }}>Service Completed!</div>
+            <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
+              {sendSms ? 'SMS + Report sent' : 'Report saved'} for {service.customerName}
+            </div>
           </div>
         )}
 
@@ -937,82 +1000,205 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
           <div style={{ fontSize: 14, color: D.text, fontWeight: 600 }}>{service.customerName}</div>
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{service.address}</div>
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{service.serviceType}</div>
+
+          {/* Service duration — prominent display */}
           {onSiteTime && (
             <div style={{
-              marginTop: 8, display: 'inline-block', padding: '3px 10px', borderRadius: 8,
-              background: D.teal + '22', color: D.teal, fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 13, fontWeight: 600,
+              marginTop: 10, padding: '10px 16px', borderRadius: 10,
+              background: D.teal + '18', border: `1px solid ${D.teal}44`,
+              display: 'flex', alignItems: 'center', gap: 10,
             }}>
-              On site: {elapsed}
+              <span style={{ fontSize: 20, color: D.teal }}>&#9201;</span>
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: D.teal, textTransform: 'uppercase', letterSpacing: 0.5 }}>Time on-site</div>
+                <div style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 22, fontWeight: 800, color: D.teal, letterSpacing: 1,
+                }}>{elapsed}</div>
+              </div>
             </div>
           )}
+
+          {/* Quick Complete toggle */}
+          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button onClick={() => setQuickComplete(!quickComplete)} style={{
+              padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
+              background: quickComplete ? D.amber : 'transparent',
+              color: quickComplete ? D.bg : D.amber,
+              border: `1px solid ${D.amber}`,
+              transition: 'all 0.15s',
+            }}>
+              {quickComplete ? 'Quick Complete ON' : 'Quick Complete'}
+            </button>
+            <span style={{ fontSize: 11, color: D.muted }}>
+              {quickComplete ? 'Showing minimal fields' : 'Bulk end-of-day mode'}
+            </span>
+          </div>
         </div>
+
+        {/* Callback banner */}
+        {isCallback && (
+          <div style={{
+            padding: '10px 24px', background: D.green + '18', borderBottom: `1px solid ${D.green}44`,
+            fontSize: 13, color: D.green, fontWeight: 600, lineHeight: 1.5,
+          }}>
+            Callback visit — will be noted as included with WaveGuard membership on the customer's report.
+          </div>
+        )}
 
         {/* Body */}
         <div style={{ flex: 1, padding: 24, overflowY: 'auto' }}>
+          {/* Technician Notes */}
           <label style={labelStyle}>Technician Notes</label>
-          <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={5} style={{
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={quickComplete ? 3 : 5} style={{
             width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`,
             borderRadius: 10, padding: 12, fontSize: 14, resize: 'vertical',
             fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box',
           }} placeholder="Notes about this service..." />
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8, marginBottom: 10 }}>
-            {QUICK_NOTES.map(qn => (
-              <button key={qn} onClick={() => addQuickNote(qn)} style={{
-                padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
-                background: D.card, color: D.text, border: `1px solid ${D.border}`, cursor: 'pointer',
-              }}>
-                {qn}
-              </button>
-            ))}
+          {/* Three-row chip system */}
+          <div style={{ marginTop: 10, marginBottom: 16 }}>
+            {/* Action chips (blue) */}
+            <div style={chipGroupStyle}>
+              <span style={{ ...chipLabelStyle, color: D.blue }}>Actions</span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                {CHIP_ACTIONS.map(chip => (
+                  <button key={chip} onClick={() => addChipNote('Action', chip)} style={{
+                    padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    background: D.blue + '18', color: D.blue, border: `1px solid ${D.blue}44`,
+                  }}>{chip}</button>
+                ))}
+              </div>
+            </div>
+            {/* Observation chips (amber) */}
+            <div style={chipGroupStyle}>
+              <span style={{ ...chipLabelStyle, color: D.amber }}>Observations</span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                {CHIP_OBSERVATIONS.map(chip => (
+                  <button key={chip} onClick={() => addChipNote('Found', chip)} style={{
+                    padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    background: D.amber + '18', color: D.amber, border: `1px solid ${D.amber}44`,
+                  }}>{chip}</button>
+                ))}
+              </div>
+            </div>
+            {/* Recommendation chips (green) */}
+            <div style={chipGroupStyle}>
+              <span style={{ ...chipLabelStyle, color: D.green }}>Recommendations</span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                {CHIP_RECOMMENDATIONS.map(chip => (
+                  <button key={chip} onClick={() => addChipNote('Next', chip)} style={{
+                    padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    background: D.green + '18', color: D.green, border: `1px solid ${D.green}44`,
+                  }}>{chip}</button>
+                ))}
+              </div>
+            </div>
           </div>
-          <button onClick={async () => {
-            if (!notes.trim()) { alert('Add service notes first.'); return; }
-            setGenerating(true);
-            try {
-              const productNames = selectedProducts.map(p => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : '')).join(', ');
-              const r = await adminFetch('/admin/schedule/generate-report', {
-                method: 'POST',
-                body: JSON.stringify({
-                  customerName: service.customerName,
-                  serviceType: service.serviceType,
-                  technicianName: service.technicianName || 'Waves Tech',
-                  serviceDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
-                  arrivalTime: service.checkInTime ? new Date(service.checkInTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '',
-                  serviceNotes: notes,
-                  productsApplied: productNames,
-                }),
-              });
-              if (r.report) setNotes(r.report);
-            } catch (e) { alert('AI report failed: ' + e.message); }
-            setGenerating(false);
-          }} disabled={generating} style={{
-            width: '100%', padding: '10px 16px', borderRadius: 10, border: 'none',
-            background: generating ? D.card : 'linear-gradient(135deg, #8b5cf6, #6366f1)',
-            color: D.white, fontSize: 13, fontWeight: 700, cursor: generating ? 'wait' : 'pointer',
-            marginBottom: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-          }}>
-            {generating ? 'Generating Report...' : 'Generate AI Service Report'}
-          </button>
 
-          <label style={labelStyle}>Products Applied</label>
-          <input type="text" value={productSearch} onChange={e => setProductSearch(e.target.value)}
-            placeholder="Search products..." style={inputStyle} />
-          {productSearch && filteredProducts.length > 0 && (
-            <div style={{
-              background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
-              maxHeight: 160, overflowY: 'auto', marginTop: 4, marginBottom: 8,
+          {/* AI Report Generator — hidden in quick complete */}
+          {!quickComplete && (
+            <button onClick={async () => {
+              if (!notes.trim()) { alert('Add service notes first.'); return; }
+              setGenerating(true);
+              try {
+                const productNames = selectedProducts.map(p => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : '')).join(', ');
+                const r = await adminFetch('/admin/schedule/generate-report', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    customerName: service.customerName,
+                    serviceType: service.serviceType,
+                    technicianName: service.technicianName || 'Waves Tech',
+                    serviceDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+                    arrivalTime: service.checkInTime ? new Date(service.checkInTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '',
+                    serviceNotes: notes,
+                    productsApplied: productNames,
+                  }),
+                });
+                if (r.report) setNotes(r.report);
+              } catch (e) { alert('AI report failed: ' + e.message); }
+              setGenerating(false);
+            }} disabled={generating} style={{
+              width: '100%', padding: '10px 16px', borderRadius: 10, border: 'none',
+              background: generating ? D.card : 'linear-gradient(135deg, #8b5cf6, #6366f1)',
+              color: D.white, fontSize: 13, fontWeight: 700, cursor: generating ? 'wait' : 'pointer',
+              marginBottom: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
             }}>
-              {filteredProducts.slice(0, 8).map(p => (
-                <div key={p.id} onClick={() => addProduct(p)} style={{
-                  padding: '8px 12px', fontSize: 13, color: D.text, cursor: 'pointer',
-                  borderBottom: `1px solid ${D.border}`,
-                }}>{p.name}</div>
-              ))}
+              {generating ? 'Generating Report...' : 'Generate AI Service Report'}
+            </button>
+          )}
+
+          {/* Photo Upload — hidden in quick complete */}
+          {!quickComplete && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Service Photos</label>
+              <input ref={photoInputRef} type="file" accept="image/*" capture="environment" multiple
+                onChange={handlePhotoSelect} style={{ display: 'none' }} />
+              <button onClick={() => photoInputRef.current?.click()} disabled={servicePhotos.length >= 5} style={{
+                ...btnBase, background: 'transparent', color: D.teal, border: `1px solid ${D.teal}44`,
+                height: 40, fontSize: 13, opacity: servicePhotos.length >= 5 ? 0.5 : 1,
+              }}>
+                <span style={{ fontSize: 16 }}>&#128247;</span> Add Photos ({servicePhotos.length}/5)
+              </button>
+              {servicePhotos.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                  {servicePhotos.map((photo, i) => (
+                    <div key={i} style={{ position: 'relative', width: 80, height: 80 }}>
+                      <img src={photo.data} alt={photo.name} style={{
+                        width: 80, height: 80, objectFit: 'cover', borderRadius: 8,
+                        border: `1px solid ${D.border}`,
+                      }} />
+                      <button onClick={() => removePhoto(i)} style={{
+                        position: 'absolute', top: -6, right: -6, width: 20, height: 20,
+                        borderRadius: '50%', background: D.red, color: D.white, border: 'none',
+                        fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        lineHeight: 1, fontWeight: 700,
+                      }}>&times;</button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
-          {selectedProducts.length > 0 && (
+
+          {/* Products Applied */}
+          <label style={labelStyle}>Products Applied</label>
+          {quickComplete ? (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 16 }}>
+              {(products || []).slice(0, 5).map(p => {
+                const isSelected = selectedProducts.find(sp => sp.productId === p.id);
+                return (
+                  <button key={p.id} onClick={() => isSelected ? removeProduct(p.id) : addProduct(p)} style={{
+                    padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                    background: isSelected ? D.teal + '22' : D.card,
+                    color: isSelected ? D.teal : D.text,
+                    border: `1px solid ${isSelected ? D.teal : D.border}`,
+                  }}>
+                    {isSelected ? '\u2713 ' : ''}{p.name}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <>
+              <input type="text" value={productSearch} onChange={e => setProductSearch(e.target.value)}
+                placeholder="Search products..." style={inputStyle} />
+              {productSearch && filteredProducts.length > 0 && (
+                <div style={{
+                  background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
+                  maxHeight: 160, overflowY: 'auto', marginTop: 4, marginBottom: 8,
+                }}>
+                  {filteredProducts.slice(0, 8).map(p => (
+                    <div key={p.id} onClick={() => addProduct(p)} style={{
+                      padding: '8px 12px', fontSize: 13, color: D.text, cursor: 'pointer',
+                      borderBottom: `1px solid ${D.border}`,
+                    }}>{p.name}</div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+          {selectedProducts.length > 0 && !quickComplete && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8, marginBottom: 20 }}>
               {selectedProducts.map(sp => (
                 <div key={sp.productId} style={{
@@ -1039,7 +1225,57 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
             </div>
           )}
 
-          {isLawn && (
+          {/* Areas Serviced */}
+          {!quickComplete && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Areas Serviced</label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {AREAS_SERVICED_OPTIONS.map(area => {
+                  const selected = areasServiced.includes(area);
+                  return (
+                    <button key={area} onClick={() => toggleArea(area)} style={{
+                      padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                      background: selected ? D.teal + '22' : D.card,
+                      color: selected ? D.teal : D.muted,
+                      border: `1px solid ${selected ? D.teal : D.border}`,
+                      transition: 'all 0.15s',
+                    }}>
+                      {selected ? '\u2713 ' : ''}{area}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Customer Interaction */}
+          {!quickComplete && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Customer Interaction</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {CUSTOMER_INTERACTION_OPTIONS.map(opt => (
+                  <button key={opt.value} onClick={() => setCustomerInteraction(opt.value)} style={{
+                    padding: '10px 14px', borderRadius: 10, fontSize: 13, fontWeight: 500, cursor: 'pointer',
+                    textAlign: 'left',
+                    background: customerInteraction === opt.value ? D.teal + '18' : D.card,
+                    color: customerInteraction === opt.value ? D.teal : D.text,
+                    border: `1px solid ${customerInteraction === opt.value ? D.teal : D.border}`,
+                    transition: 'all 0.15s',
+                  }}>
+                    {customerInteraction === opt.value ? '\u2713 ' : ''}{opt.label}
+                  </button>
+                ))}
+              </div>
+              {customerInteraction === 'concern' && (
+                <input type="text" value={customerConcern} onChange={e => setCustomerConcern(e.target.value)}
+                  placeholder="Describe the customer's concern..."
+                  style={{ ...inputStyle, marginTop: 8 }} />
+              )}
+            </div>
+          )}
+
+          {/* Lawn Measurements — hidden in quick complete */}
+          {isLawn && !quickComplete && (
             <>
               <label style={labelStyle}>Lawn Measurements</label>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 20 }}>
@@ -1063,6 +1299,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
             </>
           )}
 
+          {/* Options */}
           <label style={labelStyle}>Options</label>
           <label style={checkboxRow}>
             <input type="checkbox" checked={sendSms} onChange={e => setSendSms(e.target.checked)} />
@@ -1072,15 +1309,52 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
             <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} />
             <span>Send review request (2hr delay)</span>
           </label>
+
+          {/* Next Visit Prompt */}
+          {nextVisit && (
+            <div style={{
+              marginTop: 16, padding: '12px 16px', borderRadius: 10,
+              background: D.card, border: `1px solid ${D.border}`,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+                Next Scheduled Visit
+              </div>
+              <div style={{ fontSize: 14, color: D.white, fontWeight: 600 }}>
+                {nextVisit.date ? new Date(nextVisit.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : 'N/A'}
+                <span style={{ fontSize: 12, color: D.muted, fontWeight: 400, marginLeft: 8 }}>
+                  ({nextVisit.serviceType || 'Standard service'})
+                </span>
+              </div>
+              {!showNextVisitNote ? (
+                <button onClick={() => setShowNextVisitNote(true)} style={{
+                  background: 'none', border: 'none', color: D.amber, fontSize: 12, cursor: 'pointer',
+                  padding: 0, marginTop: 6, textDecoration: 'underline',
+                }}>
+                  Needs adjustment?
+                </button>
+              ) : (
+                <input type="text" value={nextVisitNote} onChange={e => setNextVisitNote(e.target.value)}
+                  placeholder="Note about next visit adjustment..."
+                  style={{ ...inputStyle, marginTop: 8, marginBottom: 0 }} />
+              )}
+            </div>
+          )}
         </div>
 
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0 }}>
           <button onClick={handleSubmit} disabled={submitting} style={{
-            ...btnBase, width: '100%', background: D.green, color: D.white, fontSize: 16, height: 48,
-            opacity: submitting ? 0.6 : 1,
+            ...btnBase, width: '100%', background: D.green, color: D.white, fontSize: 14, height: 52,
+            opacity: submitting ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
-            {submitting ? 'Completing...' : 'Complete Service'}
+            {submitting ? 'Completing...' : (
+              <>
+                <span style={{ fontSize: 15, fontWeight: 700 }}>Complete Service</span>
+                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
+                  {sendSms ? `SMS + Report sent to ${service.customerName}` : `Report saved for ${service.customerName}`}
+                </span>
+              </>
+            )}
           </button>
         </div>
       </div>
