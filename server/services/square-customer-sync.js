@@ -44,7 +44,7 @@ const SquareCustomerSync = {
     do {
       let response;
       try {
-        response = await customersApi.listCustomers(cursor, 100, 'CREATED_AT', 'DESC');
+        response = await customersApi.listCustomers(cursor, 100);
       } catch (err) {
         const detail = err.errors?.[0]?.detail || err.message;
         throw new Error(`Square Customers API failed: ${detail}`);
