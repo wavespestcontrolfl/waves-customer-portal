@@ -102,8 +102,10 @@ const InvoiceService = {
 
     const afterDiscount = subtotal - discountAmount;
 
-    // Tax — default to Florida 7% if not specified
-    const rate = taxRate !== undefined ? taxRate : 0.07;
+    // Tax — Florida: residential pest control is NOT taxable
+    // Commercial/nonresidential: 6% state + 1% county surtax (Manatee/Sarasota/Charlotte) = 7%
+    const isCommercial = customer.property_type === 'commercial' || customer.property_type === 'business';
+    const rate = taxRate !== undefined ? taxRate : (isCommercial ? 0.07 : 0);
     const taxAmount = Math.round(afterDiscount * rate * 100) / 100;
     const total = Math.round((afterDiscount + taxAmount) * 100) / 100;
 
@@ -407,7 +409,9 @@ const InvoiceService = {
       const tierDiscount = TIER_DISCOUNTS[customer?.waveguard_tier] || 0;
       const discountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
       const afterDiscount = subtotal - discountAmount;
-      const rate = updates.tax_rate !== undefined ? updates.tax_rate : (invoice.tax_rate || 0.07);
+      const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+      const defaultRate = isCommercial ? 0.07 : 0;
+      const rate = updates.tax_rate !== undefined ? updates.tax_rate : (invoice.tax_rate != null ? Number(invoice.tax_rate) : defaultRate);
       const taxAmount = Math.round(afterDiscount * rate * 100) / 100;
       data.subtotal = subtotal;
       data.discount_amount = discountAmount;
