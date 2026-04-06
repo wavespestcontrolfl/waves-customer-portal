@@ -9,7 +9,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { resolveLocation } = require('../config/locations');
 
-const GOOGLE_KEY = process.env.GOOGLE_CALENDAR_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
+const GOOGLE_KEY = process.env.GOOGLE_CALENDAR_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'c_5c16252ee04075f3fa68df16b64b93a0bf260fb164a84adbbcf5203e59e57609@group.calendar.google.com';
 
 function extractEmail(text) {
@@ -132,7 +132,7 @@ const CalendarSync = {
 
     // ── Google Calendar ──
     try {
-      if (!GOOGLE_KEY) throw new Error('GOOGLE_CALENDAR_API_KEY / GOOGLE_MAPS_API_KEY not set');
+      if (!GOOGLE_KEY) throw new Error('Set GOOGLE_API_KEY or GOOGLE_CALENDAR_API_KEY in Railway env vars');
 
       const now = new Date();
       const past = new Date(now.getTime() - 86400000); // 1 day back
@@ -142,7 +142,14 @@ const CalendarSync = {
         `?key=${GOOGLE_KEY}&timeMin=${past.toISOString()}&timeMax=${until.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=100`;
 
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`Calendar API ${res.status}: ${await res.text()}`);
+      if (!res.ok) {
+        const errBody = await res.text();
+        const hint = res.status === 403
+          ? 'Calendar must be shared publicly: Google Calendar → Settings → calendar → Access permissions → Make available to public'
+          : res.status === 404 ? 'Calendar ID not found — check GOOGLE_CALENDAR_ID'
+          : '';
+        throw new Error(`Calendar API ${res.status}${hint ? '. ' + hint : ''}`);
+      }
       const data = await res.json();
       const events = data.items || [];
       results.google.found = events.length;
