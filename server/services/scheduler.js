@@ -163,6 +163,34 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN — Process scheduled SMS sends
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const now = new Date();
+      const scheduled = await db('sms_log')
+        .where({ status: 'scheduled' })
+        .where('scheduled_for', '<=', now.toISOString())
+        .limit(20);
+
+      for (const msg of scheduled) {
+        try {
+          await TwilioService.sendSMS(msg.to_phone, msg.message_body, {
+            customerId: msg.customer_id, messageType: 'scheduled',
+          });
+          await db('sms_log').where({ id: msg.id }).update({ status: 'sent', created_at: new Date() });
+          logger.info(`[scheduled-sms] Sent scheduled SMS to ${msg.to_phone}`);
+        } catch (err) {
+          await db('sms_log').where({ id: msg.id }).update({ status: 'failed' });
+          logger.error(`[scheduled-sms] Failed: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      logger.error(`Scheduled SMS processing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 HOURS — Estimate follow-up SMS (unviewed, viewed-not-accepted, expiring)
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {

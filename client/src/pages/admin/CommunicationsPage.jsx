@@ -783,9 +783,9 @@ export default function CommunicationsPage() {
     }
   };
 
-  // Derived data
-  const totalSent = stats?.channelStats?.reduce((s, c) => s + (c.sent || 0), 0) || 0;
-  const totalReceived = stats?.locationStats?.reduce((s, l) => s + (l.received || 0), 0) || 0;
+  // Derived data — use server-provided totals (includes ALL message types)
+  const totalSent = stats?.totalSent || stats?.channelStats?.reduce((s, c) => s + (c.sent || 0), 0) || 0;
+  const totalReceived = stats?.totalReceived || stats?.locationStats?.reduce((s, l) => s + (l.received || 0), 0) || 0;
 
   const locationNumbers = stats?.locationStats || [];
   const trackingObj = stats?.phoneNumbers?.tracking || {};

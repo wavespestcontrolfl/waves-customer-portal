@@ -261,8 +261,40 @@ router.post('/sms', async (req, res) => {
           status: 'pending',
         });
 
+        // Auto-suggest appointment for schedule inquiries
+        if (intent.intent === 'SCHEDULE_INQUIRY' && customer) {
+          try {
+            // Find next available slot based on customer location
+            const zone = customer.city ? require('../config/locations').resolveLocation(customer.city) : null;
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const nextWeek = new Date();
+            nextWeek.setDate(nextWeek.getDate() + 7);
+
+            // Check scheduled service load for next 7 days
+            const dailyLoad = await db('scheduled_services')
+              .whereBetween('scheduled_date', [tomorrow.toISOString().split('T')[0], nextWeek.toISOString().split('T')[0]])
+              .whereNotIn('status', ['cancelled'])
+              .select('scheduled_date')
+              .count('* as count')
+              .groupBy('scheduled_date')
+              .orderBy('count', 'asc');
+
+            // Find the lightest day
+            const lightestDay = dailyLoad[0]?.scheduled_date || tomorrow.toISOString().split('T')[0];
+            const datePretty = new Date(lightestDay + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+
+            // Append suggestion to the draft
+            draft.draft += `\n\nI can get you scheduled for ${datePretty} — morning or afternoon works better for you?`;
+
+            logger.info(`[sms-intent] Schedule inquiry from ${customer.first_name} — suggesting ${datePretty}`);
+          } catch (schedErr) {
+            logger.error(`[sms-intent] Schedule suggestion failed: ${schedErr.message}`);
+          }
+        }
+
         // Notify Adam for high-urgency
-        if (['COMPLAINT', 'CANCEL_REQUEST'].includes(intent.intent)) {
+        if (['COMPLAINT', 'CANCEL_REQUEST', 'SCHEDULE_INQUIRY'].includes(intent.intent)) {
           try {
             await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
               `📱 ${customer.first_name}: "${Body.slice(0, 80)}"\n🤖 Draft: "${draft.draft.slice(0, 80)}..."\nApprove: ${process.env.CLIENT_URL || 'http://localhost:5173'}/admin/communications`,

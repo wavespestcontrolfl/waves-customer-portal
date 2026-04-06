@@ -87,14 +87,33 @@ router.get('/log', async (req, res, next) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const messages = await query.limit(parseInt(limit)).offset(offset);
 
-    res.json({
-      messages: messages.map(m => ({
+    // Resolve customer names for messages without customer_id (match by phone)
+    const resolved = [];
+    for (const m of messages) {
+      let customerName = m.first_name ? `${m.first_name} ${m.last_name || ''}`.trim() : null;
+
+      // If no customer match, try phone lookup
+      if (!customerName && !m.customer_id) {
+        const phone = m.direction === 'inbound' ? m.from_phone : m.to_phone;
+        if (phone) {
+          const cust = await db('customers').where({ phone }).first();
+          if (cust) {
+            customerName = `${cust.first_name} ${cust.last_name || ''}`.trim();
+            // Backfill customer_id for future lookups
+            await db('sms_log').where({ id: m.id }).update({ customer_id: cust.id }).catch(() => {});
+          }
+        }
+      }
+
+      resolved.push({
         id: m.id, direction: m.direction, from: m.from_phone, to: m.to_phone,
         body: m.message_body, status: m.status, messageType: m.message_type,
-        customerName: m.first_name ? `${m.first_name} ${m.last_name}` : null,
+        customerId: m.customer_id, customerName,
         createdAt: m.created_at,
-      })),
-    });
+      });
+    }
+
+    res.json({ messages: resolved });
   } catch (err) { next(err); }
 });
 
@@ -103,10 +122,13 @@ router.get('/stats', async (req, res, next) => {
   try {
     const som = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
 
+    // Total sent/received this month (ALL types including manual)
+    const [sentTotal] = await db('sms_log').where('direction', 'outbound').where('created_at', '>=', som).count('* as count');
+    const [receivedTotal] = await db('sms_log').where('direction', 'inbound').where('created_at', '>=', som).count('* as count');
+
     const stats = await db('sms_log')
       .where('direction', 'outbound')
       .where('created_at', '>=', som)
-      .whereNot('message_type', 'manual')
       .select('message_type')
       .count('* as sent')
       .groupBy('message_type')
@@ -122,6 +144,8 @@ router.get('/stats', async (req, res, next) => {
     );
 
     res.json({
+      totalSent: parseInt(sentTotal.count),
+      totalReceived: parseInt(receivedTotal.count),
       channelStats: stats.map(s => ({ type: s.message_type, sent: parseInt(s.sent) })),
       locationStats,
       phoneNumbers: {
@@ -214,6 +238,60 @@ router.post('/ai-auto-reply', async (req, res) => {
     }
     res.json({ enabled: value === 'true' });
   } catch (err) { res.json({ enabled: false, error: err.message }); }
+});
+
+// POST /api/admin/communications/schedule-sms — schedule SMS for later
+router.post('/schedule-sms', async (req, res, next) => {
+  try {
+    const { to, from, body, scheduledFor } = req.body;
+    if (!to || !body || !scheduledFor) return res.status(400).json({ error: 'to, body, scheduledFor required' });
+
+    const sendAt = new Date(scheduledFor);
+    if (sendAt <= new Date()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
+
+    // Find customer by phone
+    const customer = await db('customers').where({ phone: to }).first();
+
+    await db('sms_log').insert({
+      customer_id: customer?.id || null,
+      direction: 'outbound',
+      from_phone: from || '+19413187612',
+      to_phone: to,
+      message_body: body,
+      status: 'scheduled',
+      message_type: 'scheduled',
+      scheduled_for: sendAt,
+    });
+
+    res.json({ success: true, scheduledFor: sendAt.toISOString() });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/communications/scheduled — list scheduled messages
+router.get('/scheduled', async (req, res, next) => {
+  try {
+    const scheduled = await db('sms_log')
+      .where({ status: 'scheduled' })
+      .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
+      .select('sms_log.*', 'customers.first_name', 'customers.last_name')
+      .orderBy('scheduled_for', 'asc');
+
+    res.json({
+      messages: scheduled.map(m => ({
+        id: m.id, to: m.to_phone, from: m.from_phone, body: m.message_body,
+        customerName: m.first_name ? `${m.first_name} ${m.last_name || ''}`.trim() : null,
+        scheduledFor: m.scheduled_for, createdAt: m.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/admin/communications/scheduled/:id — cancel scheduled message
+router.delete('/scheduled/:id', async (req, res, next) => {
+  try {
+    await db('sms_log').where({ id: req.params.id, status: 'scheduled' }).del();
+    res.json({ success: true });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;
