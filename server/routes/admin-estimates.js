@@ -158,4 +158,28 @@ router.post('/:id/follow-up', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// DELETE /api/admin/estimates/:id — delete an estimate
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const deleted = await db('estimates').where({ id: req.params.id }).del();
+    if (!deleted) return res.status(404).json({ error: 'Estimate not found' });
+    logger.info(`[estimates] Deleted estimate ${req.params.id}`);
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/estimates/cleanup-demo — remove seed/demo estimates
+router.post('/cleanup-demo', async (req, res, next) => {
+  try {
+    const demoNames = ['James Kowalski', 'Karen White', 'Robert Niles', 'Linda Chen', 'Tom Perez', 'Susan Park', 'Dave Richardson', 'Maria Santos'];
+    let deleted = 0;
+    for (const name of demoNames) {
+      const count = await db('estimates').where('customer_name', name).del();
+      deleted += count;
+    }
+    logger.info(`[estimates] Cleaned up ${deleted} demo estimates`);
+    res.json({ success: true, deleted });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
