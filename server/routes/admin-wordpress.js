@@ -13,7 +13,6 @@ router.use(requireTechOrAdmin);
 router.get('/sites', async (req, res) => {
   try {
     const sites = await wpManager.getAllSites();
-    // Strip passwords from response
     const sanitized = sites.map((s) => ({
       ...s,
       wp_app_password: s.wp_app_password ? '••••••••' : null,
@@ -21,6 +20,27 @@ router.get('/sites', async (req, res) => {
     }));
     res.json({ sites: sanitized });
   } catch (err) {
+    // Table may not exist yet — return hardcoded site list
+    if (err.message?.includes('does not exist') || err.message?.includes('relation')) {
+      const SITES = [
+        { id: '1', domain: 'wavespestcontrol.com', name: 'Waves Pest Control', area: 'Lakewood Ranch', site_type: 'pest_control', status: 'active', webhook_status: 'unknown' },
+        { id: '2', domain: 'bradentonflpestcontrol.com', name: 'Bradenton Pest Control', area: 'Bradenton', site_type: 'pest_control', status: 'active', webhook_status: 'unknown' },
+        { id: '3', domain: 'sarasotaflpestcontrol.com', name: 'Sarasota Pest Control', area: 'Sarasota', site_type: 'pest_control', status: 'active', webhook_status: 'unknown' },
+        { id: '4', domain: 'veniceflpestcontrol.com', name: 'Venice Pest Control', area: 'Venice', site_type: 'pest_control', status: 'active', webhook_status: 'unknown' },
+        { id: '5', domain: 'palmettoflpestcontrol.com', name: 'Palmetto Pest Control', area: 'Palmetto', site_type: 'pest_control', status: 'active', webhook_status: 'unknown' },
+        { id: '6', domain: 'parrishpestcontrol.com', name: 'Parrish Pest Control', area: 'Parrish', site_type: 'pest_control', status: 'active', webhook_status: 'unknown' },
+        { id: '7', domain: 'bradentonflexterminator.com', name: 'Bradenton Exterminators', area: 'Bradenton', site_type: 'exterminator', status: 'active', webhook_status: 'unknown' },
+        { id: '8', domain: 'sarasotaflexterminator.com', name: 'Sarasota Exterminators', area: 'Sarasota', site_type: 'exterminator', status: 'active', webhook_status: 'unknown' },
+        { id: '9', domain: 'palmettoexterminator.com', name: 'Palmetto Exterminators', area: 'Palmetto', site_type: 'exterminator', status: 'active', webhook_status: 'unknown' },
+        { id: '10', domain: 'parrishexterminator.com', name: 'Parrish Exterminators', area: 'Parrish', site_type: 'exterminator', status: 'active', webhook_status: 'unknown' },
+        { id: '11', domain: 'bradentonfllawncare.com', name: 'Bradenton Lawn Care', area: 'Bradenton', site_type: 'lawn_care', status: 'active', webhook_status: 'unknown' },
+        { id: '12', domain: 'sarasotafllawncare.com', name: 'Sarasota Lawn Care', area: 'Sarasota', site_type: 'lawn_care', status: 'active', webhook_status: 'unknown' },
+        { id: '13', domain: 'venicelawncare.com', name: 'Venice Lawn Care', area: 'Venice', site_type: 'lawn_care', status: 'active', webhook_status: 'unknown' },
+        { id: '14', domain: 'parrishfllawncare.com', name: 'Parrish Lawn Care', area: 'Parrish', site_type: 'lawn_care', status: 'active', webhook_status: 'unknown' },
+        { id: '15', domain: 'waveslawncare.com', name: 'Waves Lawn Care', area: 'Lakewood Ranch', site_type: 'lawn_care', status: 'active', webhook_status: 'unknown' },
+      ];
+      return res.json({ sites: SITES, migrationPending: true });
+    }
     console.error('WordPress sites list error:', err);
     res.status(500).json({ error: err.message });
   }

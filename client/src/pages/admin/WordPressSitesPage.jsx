@@ -33,8 +33,14 @@ export default function WordPressSitesPage() {
   const [swapping, setSwapping] = useState(false);
   const [toast, setToast] = useState('');
 
+  const [migrationPending, setMigrationPending] = useState(false);
+
   const loadSites = () => {
-    adminFetch('/admin/wordpress/sites').then(d => { setSites(d.sites || []); setLoading(false); }).catch(() => setLoading(false));
+    adminFetch('/admin/wordpress/sites').then(d => {
+      setSites(d.sites || []);
+      setMigrationPending(d.migrationPending || false);
+      setLoading(false);
+    }).catch(() => setLoading(false));
   };
   useEffect(loadSites, []);
   const showToast = (m) => { setToast(m); setTimeout(() => setToast(''), 4000); };
@@ -107,6 +113,17 @@ export default function WordPressSitesPage() {
           {swapping ? 'Swapping All...' : `🔄 Swap All to Portal (${connected} sites)`}
         </button>
       </div>
+
+      {/* Migration pending banner */}
+      {migrationPending && (
+        <div style={{ ...sCard, borderColor: D.amber, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 20 }}>⚠️</span>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: D.amber }}>Database migration pending</div>
+            <div style={{ fontSize: 12, color: D.muted }}>The wordpress_sites table hasn't been created yet. Sites are shown from a static list. Credential saving requires the migration to run — try redeploying on Railway or running migrations manually.</div>
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
