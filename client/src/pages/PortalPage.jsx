@@ -2958,12 +2958,12 @@ function BillingTab({ customer }) {
 // =========================================================================
 // SERVICE REQUEST TAB
 // =========================================================================
-function RequestTab({ customer }) {
+function RequestTab({ customer, onSwitchTab }) {
   const [category, setCategory] = useState('');
   const [subject, setSubject] = useState('');
   const [description, setDescription] = useState('');
-  const [urgency, setUrgency] = useState('normal');
-  const [photoPreview, setPhotoPreview] = useState(null);
+  const [urgency, setUrgency] = useState('routine');
+  const [photos, setPhotos] = useState([]); // array of base64 preview strings
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [requests, setRequests] = useState([]);
@@ -2973,7 +2973,13 @@ function RequestTab({ customer }) {
     api.getRequests?.().then(d => setRequests(d?.requests || [])).catch(() => {});
   }, [submitted]);
 
-  const categories = [
+  // Check if customer's last pest service was within 30 days (callback eligibility)
+  const lastPestService = customer.lastServiceDate ? parseDate(customer.lastServiceDate) : null;
+  const daysSinceLastService = lastPestService ? Math.floor((Date.now() - lastPestService) / (1000 * 60 * 60 * 24)) : null;
+  const isCallbackEligible = daysSinceLastService !== null && daysSinceLastService <= 30;
+
+  // "Something's wrong" categories
+  const wrongCategories = [
     {
       value: 'pest_issue', label: '🐜 Pest Issue', desc: 'Seeing bugs, rodents, or wildlife',
       color: B.red, quickTaps: [
@@ -2995,16 +3001,6 @@ function RequestTab({ customer }) {
       ],
     },
     {
-      value: 'add_service', label: '➕ Add a Service', desc: 'Upgrade your plan or add one-time treatments',
-      color: B.wavesBlue, quickTaps: [
-        'Add tree & shrub care',
-        'Add mosquito service',
-        'One-time flea treatment',
-        'Upgrade my WaveGuard tier',
-        'Add fire ant treatment',
-      ],
-    },
-    {
       value: 'irrigation', label: '💧 Irrigation Issue', desc: 'Sprinkler problems, dry spots, overwatering',
       color: B.teal, quickTaps: [
         'Sprinkler head broken',
@@ -3014,6 +3010,18 @@ function RequestTab({ customer }) {
       ],
     },
     {
+      value: 'schedule', label: '📅 Schedule', desc: 'Reschedule, skip, or change service day',
+      color: B.wavesBlue, quickTaps: [
+        'Reschedule my next visit',
+        'Skip this month',
+        'Change my service day',
+      ],
+    },
+  ];
+
+  // "I need something" categories
+  const needCategories = [
+    {
       value: 'billing', label: '💳 Billing Question', desc: 'Payments, charges, plan changes',
       color: B.orange, quickTaps: [
         'Question about my bill',
@@ -3022,12 +3030,17 @@ function RequestTab({ customer }) {
       ],
     },
     {
+      value: 'add_service', label: '➕ Add a Service', desc: 'Upgrade your plan or add-ons',
+      color: B.wavesBlue, redirect: true,
+    },
+    {
       value: 'other', label: '💬 Other', desc: 'General questions or feedback',
       color: B.grayDark, quickTaps: [],
     },
   ];
 
-  const selectedCat = categories.find(c => c.value === category);
+  const allCategories = [...wrongCategories, ...needCategories];
+  const selectedCat = allCategories.find(c => c.value === category);
 
   const handleQuickTap = (text) => {
     setSubject(text);
@@ -3035,10 +3048,25 @@ function RequestTab({ customer }) {
 
   const handlePhotoSelect = (e) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || photos.length >= 5) return;
     const reader = new FileReader();
-    reader.onload = (ev) => setPhotoPreview(ev.target.result);
+    reader.onload = (ev) => setPhotos(prev => [...prev, ev.target.result]);
     reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  const removePhoto = (idx) => {
+    setPhotos(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleCategorySelect = (cat) => {
+    if (cat.value === 'add_service' && cat.redirect) {
+      // Redirect to Plan tab add-ons section
+      onSwitchTab?.('plan');
+      return;
+    }
+    setCategory(cat.value);
+    setSubject('');
   };
 
   const handleSubmit = async () => {
@@ -3050,15 +3078,29 @@ function RequestTab({ customer }) {
         subject: subject.trim(),
         description: description.trim(),
         urgency,
+        photos: photos.length > 0 ? photos : undefined,
       });
       setSubmitted(true);
       setCategory(''); setSubject(''); setDescription('');
-      setUrgency('normal'); setPhotoPreview(null);
+      setUrgency('routine'); setPhotos([]);
       setTimeout(() => setSubmitted(false), 4000);
     } catch (err) {
       console.error(err);
     }
     setSubmitting(false);
+  };
+
+  // Request status pipeline config
+  const PIPELINE_STEPS = [
+    { key: 'submitted', label: 'Submitted' },
+    { key: 'seen', label: 'Seen' },
+    { key: 'scheduled', label: 'Scheduled' },
+    { key: 'completed', label: 'Completed' },
+  ];
+
+  const getPipelineIndex = (status) => {
+    const map = { submitted: 0, new: 0, seen: 1, in_progress: 1, scheduled: 2, resolved: 3, completed: 3 };
+    return map[status] ?? 0;
   };
 
   return (
@@ -3073,19 +3115,36 @@ function RequestTab({ customer }) {
           padding: 18, borderRadius: 14, background: '#E8F5E9',
           border: `1.5px solid ${B.green}33`,
         }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: B.green }}>✅ Request submitted!</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: B.green }}>Request submitted!</div>
           <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4 }}>
             We've notified your service team. You'll get a text when we've reviewed it.
           </div>
         </div>
       )}
 
-      {/* Category Selection */}
+      {/* Category Selection — split into two groups */}
       <div style={{ background: B.white, borderRadius: 16, padding: 20, border: `1px solid ${B.grayLight}` }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 12 }}>What do you need help with?</div>
+        {/* Something's wrong */}
+        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 10 }}>Something's wrong</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          {categories.map(c => (
-            <div key={c.value} onClick={() => { setCategory(c.value); setSubject(''); }} style={{
+          {wrongCategories.map(c => (
+            <div key={c.value} onClick={() => handleCategorySelect(c)} style={{
+              padding: '14px 14px', borderRadius: 12, cursor: 'pointer',
+              border: category === c.value ? `2px solid ${c.color}` : `1px solid ${B.grayLight}`,
+              background: category === c.value ? `${c.color}08` : B.white,
+              transition: 'all 0.2s',
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{c.label}</div>
+              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{c.desc}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* I need something */}
+        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginTop: 18, marginBottom: 10 }}>I need something</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {needCategories.map(c => (
+            <div key={c.value} onClick={() => handleCategorySelect(c)} style={{
               padding: '14px 14px', borderRadius: 12, cursor: 'pointer',
               border: category === c.value ? `2px solid ${c.color}` : `1px solid ${B.grayLight}`,
               background: category === c.value ? `${c.color}08` : B.white,
@@ -3094,14 +3153,88 @@ function RequestTab({ customer }) {
             }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{c.label}</div>
               <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{c.desc}</div>
+              {c.redirect && <div style={{ fontSize: 10, color: B.wavesBlue, marginTop: 3, fontWeight: 600 }}>View add-ons in Plan tab →</div>}
             </div>
           ))}
         </div>
       </div>
 
+      {/* Callback recognition — pest issue within 30 days */}
+      {category === 'pest_issue' && isCallbackEligible && (
+        <div style={{
+          padding: 14, borderRadius: 12,
+          background: `${B.green}08`, border: `1.5px solid ${B.green}33`,
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: B.green }}>This may be a callback</div>
+          <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
+            Your last pest service was {daysSinceLastService} day{daysSinceLastService !== 1 ? 's' : ''} ago.
+            Callbacks are <strong>free</strong> with your {customer.tier || 'WaveGuard'} plan — we'll get you taken care of.
+          </div>
+        </div>
+      )}
+
       {/* Detail Form — shows after category selection */}
-      {category && (
+      {category && category !== 'add_service' && (
         <div style={{ background: B.white, borderRadius: 16, padding: 20, border: `1px solid ${B.grayLight}` }}>
+
+          {/* Photo Upload — front and center, before text */}
+          <div style={{ marginBottom: 16 }}>
+            <input
+              ref={fileInputRef}
+              type="file" accept="image/*" capture="environment"
+              onChange={handlePhotoSelect}
+              style={{ display: 'none' }}
+            />
+            {photos.length === 0 ? (
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                style={{
+                  padding: '18px 16px', borderRadius: 12, cursor: 'pointer',
+                  border: `2px dashed ${B.wavesBlue}55`, textAlign: 'center',
+                  background: `${B.wavesBlue}06`, transition: 'border-color 0.2s',
+                }}
+              >
+                <div style={{ fontSize: 32 }}>📸</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginTop: 4 }}>Snap a Photo</div>
+                <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
+                  A photo helps us diagnose faster — up to 5 photos
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {photos.map((p, idx) => (
+                    <div key={idx} style={{ position: 'relative', width: 80, height: 80 }}>
+                      <img src={p} alt={`Photo ${idx + 1}`} style={{
+                        width: 80, height: 80, objectFit: 'cover', borderRadius: 10,
+                        border: `1px solid ${B.grayLight}`,
+                      }} />
+                      <button onClick={() => removePhoto(idx)} style={{
+                        position: 'absolute', top: -6, right: -6,
+                        width: 22, height: 22, borderRadius: '50%',
+                        background: B.red, color: '#fff',
+                        border: 'none', cursor: 'pointer', fontSize: 12,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        lineHeight: 1,
+                      }}>x</button>
+                    </div>
+                  ))}
+                  {photos.length < 5 && (
+                    <div onClick={() => fileInputRef.current?.click()} style={{
+                      width: 80, height: 80, borderRadius: 10, cursor: 'pointer',
+                      border: `2px dashed ${B.grayLight}`, background: B.offWhite,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: 24, color: B.grayMid,
+                    }}>+</div>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
+                  {photos.length}/5 photos attached
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Quick-tap suggestions */}
           {selectedCat?.quickTaps?.length > 0 && (
             <div style={{ marginBottom: 16 }}>
@@ -3125,7 +3258,6 @@ function RequestTab({ customer }) {
             placeholder={
               category === 'pest_issue' ? "What are you seeing? (e.g., 'Ants in the kitchen')" :
               category === 'lawn_concern' ? "Describe the issue (e.g., 'Brown patches near oak tree')" :
-              category === 'add_service' ? "What service are you interested in?" :
               "Brief summary"
             }
             style={{
@@ -3155,59 +3287,14 @@ function RequestTab({ customer }) {
             onBlur={e => e.target.style.borderColor = B.grayLight}
           />
 
-          {/* Photo Upload */}
-          <div style={{ marginTop: 12 }}>
-            <input
-              ref={fileInputRef}
-              type="file" accept="image/*" capture="environment"
-              onChange={handlePhotoSelect}
-              style={{ display: 'none' }}
-            />
-            {!photoPreview ? (
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                style={{
-                  padding: '18px 16px', borderRadius: 12, cursor: 'pointer',
-                  border: `2px dashed ${B.grayLight}`, textAlign: 'center',
-                  background: B.offWhite, transition: 'border-color 0.2s',
-                }}
-              >
-                <div style={{ fontSize: 28 }}>📸</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 4 }}>Add a Photo</div>
-                <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>
-                  A photo helps us diagnose faster — snap the issue area
-                </div>
-              </div>
-            ) : (
-              <div style={{ position: 'relative' }}>
-                <img src={photoPreview} alt="Issue photo" style={{
-                  width: '100%', height: 180, objectFit: 'cover', borderRadius: 12,
-                  border: `1px solid ${B.grayLight}`,
-                }} />
-                <button onClick={() => setPhotoPreview(null)} style={{
-                  position: 'absolute', top: 8, right: 8,
-                  width: 28, height: 28, borderRadius: '50%',
-                  background: 'rgba(0,0,0,0.6)', color: '#fff',
-                  border: 'none', cursor: 'pointer', fontSize: 14,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                }}>×</button>
-                <div style={{
-                  position: 'absolute', bottom: 8, left: 8,
-                  padding: '4px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
-                  background: 'rgba(0,0,0,0.6)', color: '#fff',
-                }}>📎 Photo attached</div>
-              </div>
-            )}
-          </div>
-
-          {/* Urgency */}
+          {/* Urgency selector with expectations */}
           <div style={{ marginTop: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, marginBottom: 8 }}>How urgent is this?</div>
             <div style={{ display: 'flex', gap: 8 }}>
               {[
-                { value: 'low', label: 'Not Urgent', desc: 'Next visit is fine', color: B.grayMid },
-                { value: 'normal', label: 'Normal', desc: 'Within a few days', color: B.wavesBlue },
-                { value: 'urgent', label: 'Urgent', desc: 'ASAP please', color: B.red },
+                { value: 'routine', label: 'Routine', desc: '1 business day', color: B.grayMid },
+                { value: 'next_24', label: 'Next 24 Hours', desc: 'Today if possible', color: B.orange },
+                { value: 'urgent', label: 'Urgent', desc: 'Within 2 hours', color: B.red },
               ].map(u => (
                 <button key={u.value} onClick={() => setUrgency(u.value)} style={{
                   flex: 1, padding: '10px 8px', borderRadius: 10, cursor: 'pointer',
@@ -3222,6 +3309,24 @@ function RequestTab({ customer }) {
             </div>
           </div>
 
+          {/* Emergency call bypass for Urgent */}
+          {urgency === 'urgent' && (
+            <div style={{
+              marginTop: 12, padding: 14, borderRadius: 12,
+              background: `${B.red}08`, border: `1.5px solid ${B.red}33`,
+              textAlign: 'center',
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: B.red }}>Need help right now?</div>
+              <a href="tel:+19413187612" style={{
+                ...BUTTON_BASE, display: 'inline-block', padding: '10px 20px', fontSize: 14, marginTop: 8,
+                background: B.red, color: '#fff', textDecoration: 'none',
+              }}>Call (941) 318-7612 directly</a>
+              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
+                For urgent issues, calling gets the fastest response.
+              </div>
+            </div>
+          )}
+
           {/* Submit */}
           <button onClick={handleSubmit} disabled={!subject.trim() || submitting} style={{
             ...BUTTON_BASE, width: '100%', padding: 14, marginTop: 16, fontSize: 15,
@@ -3229,7 +3334,7 @@ function RequestTab({ customer }) {
             color: subject.trim() ? '#fff' : B.grayMid,
             opacity: submitting ? 0.7 : 1,
           }}>
-            {submitting ? 'Sending...' : '📤 Submit Request'}
+            {submitting ? 'Sending...' : 'Submit Request'}
           </button>
 
           <div style={{ fontSize: 11, color: B.grayMid, textAlign: 'center', marginTop: 8 }}>
@@ -3239,7 +3344,7 @@ function RequestTab({ customer }) {
       )}
 
       {/* Add a Service — upsell when not in add_service category */}
-      {category !== 'add_service' && (
+      {category !== 'add_service' && !category && (
         <div style={{
           background: `linear-gradient(135deg, ${B.wavesBlue}08, ${B.bluePale})`,
           borderRadius: 14, padding: 18, border: `1px solid ${B.wavesBlue}22`,
@@ -3248,44 +3353,57 @@ function RequestTab({ customer }) {
           <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
             Expand your coverage with add-on services — tree & shrub care, mosquito barrier, fire ant control, and more.
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-            {[
-              { label: '🌳 Tree & Shrub', service: 'Add tree & shrub care' },
-              { label: '🦟 Mosquito', service: 'Add mosquito service' },
-              { label: '🔥 Fire Ant', service: 'Add fire ant treatment' },
-              { label: '⬆️ Upgrade Plan', service: 'Upgrade my WaveGuard tier' },
-            ].map(s => (
-              <button key={s.label} onClick={() => { setCategory('add_service'); setSubject(s.service); }} style={{
-                ...BUTTON_BASE, padding: '7px 12px', fontSize: 11, borderRadius: 20,
-                background: B.white, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}33`,
-              }}>{s.label}</button>
-            ))}
-          </div>
+          <button onClick={() => onSwitchTab?.('plan')} style={{
+            ...BUTTON_BASE, padding: '9px 16px', fontSize: 12, marginTop: 10,
+            background: B.wavesBlue, color: '#fff',
+          }}>View Add-Ons in My Plan →</button>
         </div>
       )}
 
-      {/* Past requests */}
+      {/* Past requests with status pipeline */}
       {requests.length > 0 && (
         <>
           <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>Your Requests</div>
-          {requests.map(r => (
-            <div key={r.id} style={{
-              background: B.white, borderRadius: 12, padding: '14px 18px',
-              border: `1px solid ${r.status === 'resolved' ? B.green + '33' : B.grayLight}`,
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{r.subject}</div>
-                <span style={{
-                  fontSize: 11, fontWeight: 700, textTransform: 'uppercase', padding: '3px 8px', borderRadius: 20,
-                  background: r.status === 'resolved' ? '#E8F5E9' : r.status === 'in_progress' ? '#FFF3E0' : B.bluePale,
-                  color: r.status === 'resolved' ? B.green : r.status === 'in_progress' ? B.orange : B.wavesBlue,
-                }}>{r.status?.replace('_', ' ')}</span>
+          {requests.map(r => {
+            const pipeIdx = getPipelineIndex(r.status);
+            return (
+              <div key={r.id} style={{
+                background: B.white, borderRadius: 12, padding: '14px 18px',
+                border: `1px solid ${r.status === 'resolved' || r.status === 'completed' ? B.green + '33' : B.grayLight}`,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{r.subject}</div>
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '3px 8px', borderRadius: 20,
+                    background: pipeIdx >= 3 ? '#E8F5E9' : pipeIdx >= 2 ? '#E0F7FA' : pipeIdx >= 1 ? '#FFF3E0' : B.bluePale,
+                    color: pipeIdx >= 3 ? B.green : pipeIdx >= 2 ? B.teal : pipeIdx >= 1 ? B.orange : B.wavesBlue,
+                  }}>{PIPELINE_STEPS[pipeIdx]?.label}</span>
+                </div>
+                {/* Pipeline progress */}
+                <div style={{ display: 'flex', gap: 4, marginTop: 10 }}>
+                  {PIPELINE_STEPS.map((step, i) => (
+                    <div key={step.key} style={{ flex: 1, textAlign: 'center' }}>
+                      <div style={{
+                        height: 3, borderRadius: 2, marginBottom: 4,
+                        background: i <= pipeIdx ? (pipeIdx >= 3 ? B.green : B.wavesBlue) : B.grayLight,
+                        transition: 'background 0.3s',
+                      }} />
+                      <div style={{
+                        fontSize: 9, fontWeight: i <= pipeIdx ? 700 : 500,
+                        color: i <= pipeIdx ? B.navy : B.grayMid,
+                      }}>{step.label}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
+                  {r.category?.replace('_', ' ')} · {new Date(r.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  {r.seenAt && ` · Seen ${new Date(r.seenAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`}
+                  {r.scheduledAt && ` · Scheduled ${new Date(r.scheduledAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
+                  {r.completedAt && ` · Done ${new Date(r.completedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
+                </div>
               </div>
-              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 4 }}>
-                {r.category?.replace('_', ' ')} · {new Date(r.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </>
       )}
     </div>
@@ -5517,6 +5635,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
 
   const fetchData = () => {
     api.getReferrals()
@@ -5540,6 +5659,7 @@ function ReferTab({ customer, onSwitchTab }) {
       await api.submitReferral({ refereeName: name.trim(), refereePhone: phone.trim() });
       setSubmitted(true);
       setName(''); setPhone('');
+      setShowPreview(false);
       fetchData();
       setTimeout(() => setSubmitted(false), 3000);
     } catch (err) {
@@ -5555,7 +5675,25 @@ function ReferTab({ customer, onSwitchTab }) {
   const stats = data?.stats || { totalReferrals: 0, converted: 0, totalEarned: 0 };
   const referrals = data?.referrals || [];
 
+  // Fix stats math: ensure earned = signups * 25
+  const computedEarned = stats.converted * 25;
+  const lifetimeTotal = Math.max(computedEarned, stats.totalEarned || 0);
+
   const shareText = `Hey! I use Waves Pest Control for my lawn and pest service — they're the best in SW Florida. Use my referral link and we both get $25 off: ${shareLink}`;
+
+  // Preview text the friend will receive
+  const invitePreviewText = name.trim()
+    ? `Hey ${name.trim()}! Your friend ${customer.firstName || 'a Waves customer'} referred you to Waves Pest Control. Sign up for any WaveGuard plan and you both get $25 off your next bill. Learn more: ${shareLink}`
+    : `Hey! Your friend referred you to Waves Pest Control. Sign up for any WaveGuard plan and you both get $25 off your next bill. Learn more: ${shareLink}`;
+
+  // Milestone progress
+  const milestones = [
+    { count: 3, title: 'Referral Pro' },
+    { count: 5, title: 'Neighborhood Champion' },
+    { count: 10, title: 'Referral Legend' },
+  ];
+  const nextMilestone = milestones.find(m => stats.totalReferrals < m.count);
+  const referralsToNext = nextMilestone ? nextMilestone.count - stats.totalReferrals : 0;
 
   const statusConfig = {
     pending: { label: 'Invited', color: B.grayMid, bg: B.grayLight },
@@ -5579,14 +5717,14 @@ function ReferTab({ customer, onSwitchTab }) {
         <div style={{ fontSize: 40, marginBottom: 8 }}>🎁</div>
         <div style={{ fontSize: 28, fontWeight: 800, fontFamily: FONTS.heading }}>Give $25, Get $25</div>
         <div style={{ fontSize: 14, opacity: 0.85, marginTop: 8, lineHeight: 1.6 }}>
-          Refer a neighbor to Waves Pest Control. When they sign up for any WaveGuard plan, you both get a <strong>$25 credit</strong> on your next bill.
+          Refer anyone in Southwest Florida to Waves Pest Control. When they sign up for any WaveGuard plan, you both get a <strong>$25 credit</strong> on your next bill.
         </div>
         {/* Stats pills */}
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 18 }}>
           {[
             { value: stats.totalReferrals, label: 'Referred' },
             { value: stats.converted, label: 'Signed Up' },
-            { value: `$${stats.totalEarned}`, label: 'Earned' },
+            { value: `$${computedEarned}`, label: 'Earned' },
           ].map(s => (
             <div key={s.label} style={{
               padding: '8px 16px', borderRadius: 12,
@@ -5598,9 +5736,52 @@ function ReferTab({ customer, onSwitchTab }) {
             </div>
           ))}
         </div>
+        {/* Lifetime total */}
+        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>
+          Total earned: ${lifetimeTotal} all-time
+        </div>
       </div>
 
-      {/* Your Referral Code */}
+      {/* Social proof */}
+      <div style={{
+        textAlign: 'center', padding: '10px 16px', borderRadius: 12,
+        background: `${B.green}08`, border: `1px solid ${B.green}22`,
+      }}>
+        <div style={{ fontSize: 13, color: B.green, fontWeight: 600 }}>
+          247 Waves customers have referred neighbors this year
+        </div>
+      </div>
+
+      {/* Milestone progress */}
+      {nextMilestone && (
+        <div style={{
+          background: B.white, borderRadius: 14, padding: '14px 18px',
+          border: `1px solid ${B.grayLight}`,
+          display: 'flex', alignItems: 'center', gap: 12,
+        }}>
+          <div style={{ fontSize: 28 }}>🏆</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy }}>
+              You're {referralsToNext} referral{referralsToNext !== 1 ? 's' : ''} away from {nextMilestone.title}!
+            </div>
+            <div style={{
+              height: 6, borderRadius: 3, background: B.grayLight, marginTop: 6, overflow: 'hidden',
+            }}>
+              <div style={{
+                height: '100%', borderRadius: 3,
+                background: `linear-gradient(90deg, ${B.wavesBlue}, ${B.teal})`,
+                width: `${Math.min(100, (stats.totalReferrals / nextMilestone.count) * 100)}%`,
+                transition: 'width 0.5s',
+              }} />
+            </div>
+            <div style={{ fontSize: 10, color: B.grayMid, marginTop: 4 }}>
+              {stats.totalReferrals} / {nextMilestone.count} referrals
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Your Referral Code + Share Channels */}
       <div style={{
         background: B.white, borderRadius: 16, padding: 20,
         border: `1px solid ${B.grayLight}`,
@@ -5617,13 +5798,22 @@ function ReferTab({ customer, onSwitchTab }) {
           <button onClick={handleCopy} style={{
             ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
             background: copied ? B.green : B.red, color: '#fff',
-          }}>{copied ? '✓ Copied!' : 'Copy Link'}</button>
+          }}>{copied ? 'Copied!' : 'Copy Link'}</button>
         </div>
-        <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+        {/* Share channels: Text, Email, WhatsApp */}
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <a href={`sms:?body=${encodeURIComponent(shareText)}`} style={{
-            ...BUTTON_BASE, flex: 1, padding: '10px 16px', fontSize: 13,
-            background: B.red, color: '#fff', textDecoration: 'none',
-          }}>💬 Share via Text</a>
+            ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
+            background: B.red, color: '#fff', textDecoration: 'none', textAlign: 'center',
+          }}>💬 Text</a>
+          <a href={`mailto:?subject=${encodeURIComponent('$25 off Waves Pest Control')}&body=${encodeURIComponent(shareText)}`} style={{
+            ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
+            background: B.wavesBlue, color: '#fff', textDecoration: 'none', textAlign: 'center',
+          }}>📧 Email</a>
+          <a href={`https://wa.me/?text=${encodeURIComponent(shareText)}`} target="_blank" rel="noopener noreferrer" style={{
+            ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
+            background: '#25D366', color: '#fff', textDecoration: 'none', textAlign: 'center',
+          }}>WhatsApp</a>
         </div>
         <div style={{ fontSize: 11, color: B.grayMid, marginTop: 8, textAlign: 'center' }}>
           Share link: {shareLink}
@@ -5644,12 +5834,12 @@ function ReferTab({ customer, onSwitchTab }) {
           <div style={{
             padding: 14, borderRadius: 12, background: '#E8F5E9', marginBottom: 14,
             fontSize: 13, fontWeight: 600, color: B.green,
-          }}>✅ Invite sent! We texted them your referral.</div>
+          }}>Invite sent! We texted them your referral.</div>
         )}
 
         <input
           type="text" value={name} onChange={e => setName(e.target.value)}
-          placeholder="Neighbor's name"
+          placeholder="Friend's name"
           style={{
             width: '100%', padding: '11px 14px', borderRadius: 10, marginBottom: 10,
             border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -5669,13 +5859,33 @@ function ReferTab({ customer, onSwitchTab }) {
           onFocus={e => e.target.style.borderColor = B.wavesBlue}
           onBlur={e => e.target.style.borderColor = B.grayLight}
         />
+
+        {/* Invite preview toggle */}
+        {(name.trim() || phone.trim()) && (
+          <div style={{ marginBottom: 12 }}>
+            <button onClick={() => setShowPreview(!showPreview)} style={{
+              ...BUTTON_BASE, padding: '6px 12px', fontSize: 11, borderRadius: 8,
+              background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
+            }}>{showPreview ? 'Hide preview' : 'Preview what they will receive'}</button>
+            {showPreview && (
+              <div style={{
+                marginTop: 8, padding: 14, borderRadius: 12,
+                background: B.offWhite, border: `1px solid ${B.grayLight}`,
+                fontSize: 12, color: B.grayDark, lineHeight: 1.6, fontStyle: 'italic',
+              }}>
+                {invitePreviewText}
+              </div>
+            )}
+          </div>
+        )}
+
         <button onClick={handleSubmit} disabled={!name.trim() || !phone.trim() || submitting} style={{
           ...BUTTON_BASE, width: '100%', padding: 13, fontSize: 14,
           background: (name.trim() && phone.trim()) ? B.red : B.grayLight,
           color: (name.trim() && phone.trim()) ? '#fff' : B.grayMid,
           opacity: submitting ? 0.7 : 1,
         }}>
-          {submitting ? 'Sending...' : '📲 Send Invite'}
+          {submitting ? 'Sending...' : 'Send Invite'}
         </button>
       </div>
 
@@ -5689,7 +5899,7 @@ function ReferTab({ customer, onSwitchTab }) {
             Your Referrals
           </div>
           <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginBottom: 14 }}>
-            You've referred {stats.totalReferrals} neighbor{stats.totalReferrals !== 1 ? 's' : ''} and earned ${stats.totalEarned}!
+            You've referred {stats.totalReferrals} friend{stats.totalReferrals !== 1 ? 's' : ''} and earned ${computedEarned}!
           </div>
 
           {referrals.map(r => {
@@ -5723,7 +5933,7 @@ function ReferTab({ customer, onSwitchTab }) {
                 </div>
                 {r.referrerCredited && (
                   <div style={{ fontSize: 11, color: B.green, fontWeight: 600, marginTop: 6 }}>
-                    ✓ ${r.creditAmount} credit applied to your bill
+                    ${r.creditAmount} credit applied to your bill
                   </div>
                 )}
               </div>
@@ -5740,7 +5950,7 @@ function ReferTab({ customer, onSwitchTab }) {
         <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 10 }}>How it works</div>
         {[
           { step: '1', text: 'Share your code or send an invite from above' },
-          { step: '2', text: 'Your neighbor gets a text with your referral and $25 off' },
+          { step: '2', text: 'Your friend gets a text with your referral and $25 off' },
           { step: '3', text: 'When they sign up for any WaveGuard plan, you both get credited' },
           { step: '4', text: '$25 auto-applied to your next monthly bill via Square' },
         ].map(s => (
@@ -5764,7 +5974,7 @@ function ReferTab({ customer, onSwitchTab }) {
 // =========================================================================
 // DOCUMENTS TAB
 // =========================================================================
-function DocumentsTab({ customer }) {
+function DocumentsTab({ customer, onSwitchTab }) {
   const [docs, setDocs] = useState({});
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -5779,10 +5989,8 @@ function DocumentsTab({ customer }) {
 
   const handleDownload = (doc) => {
     if (doc.isAutoGenerated && doc.linkedServiceRecordId) {
-      // Open auto-generated PDF in new tab
       const url = api.getServiceReportUrl(doc.linkedServiceRecordId);
       const token = localStorage.getItem('waves_token');
-      // Fetch with auth and open as blob
       fetch(url, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.blob())
         .then(blob => {
@@ -5795,7 +6003,6 @@ function DocumentsTab({ customer }) {
         })
         .catch(console.error);
     }
-    // For S3 docs, would redirect to presigned URL
   };
 
   const handleShare = async (doc) => {
@@ -5811,33 +6018,45 @@ function DocumentsTab({ customer }) {
     }
   };
 
+  const handleShareWithRealtor = (doc) => {
+    const subject = encodeURIComponent(`WDO Inspection Report - ${customer.address || 'Property'}`);
+    const body = encodeURIComponent(
+      `Hi,\n\nPlease find attached the WDO (Wood-Destroying Organism) inspection report for the property at ${customer.address || 'the address on file'}.\n\nReport: ${doc.title}\n${doc.expirationDate ? `Valid through: ${new Date(doc.expirationDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}` : ''}\n\nFor questions, contact Waves Pest Control at (941) 318-7612.\n\nBest regards,\n${customer.firstName || ''} ${customer.lastName || ''}`
+    );
+    window.open(`mailto:?subject=${subject}&body=${body}`, '_self');
+  };
+
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading documents...</div>;
 
+  // Use-case oriented categories (renamed tabs)
   const categories = [
     { key: 'service_report', label: '📄 Visit Reports', empty: 'Reports will auto-generate from your service history.' },
-    { key: 'wdo_inspection', label: '🏠 WDO Inspection Reports', empty: 'No WDO inspections on file. Need one for a real estate transaction? Contact us to schedule.' },
-    { key: 'service_agreement', label: '📋 Service Agreements & Proposals', empty: 'Your service agreement will appear here after enrollment.' },
-    { key: 'annual_summary', label: '📊 Annual Summaries', empty: 'Your first annual summary will be generated at the end of the year.' },
-    { key: 'invoice', label: '💰 Invoices & Receipts', empty: 'Invoice history coming soon — currently available in your billing tab.' },
-    { key: 'insurance_cert', label: '🔒 Insurance & Licensing', empty: 'Insurance certificates will be uploaded by Waves.' },
+    { key: 'wdo_inspection', label: '🏠 Real Estate', empty: 'No WDO inspections on file. Need one for a real estate transaction? Contact us to schedule.' },
+    { key: 'service_agreement', label: '📋 Agreements', empty: 'Your service agreement will appear here after enrollment.' },
+    { key: 'insurance_cert', label: '🔒 Insurance', empty: 'Insurance certificates will be uploaded by Waves.' },
   ];
 
+  // Use-case filter tabs
   const typeFilters = [
     { value: 'all', label: 'All' },
-    { value: 'service_report', label: 'Reports' },
-    { value: 'wdo_inspection', label: 'WDO' },
+    { value: 'service_report', label: 'Visit Reports' },
+    { value: 'wdo_inspection', label: 'Real Estate' },
     { value: 'service_agreement', label: 'Agreements' },
     { value: 'insurance_cert', label: 'Insurance' },
   ];
 
-  // Filter docs
+  // Filter docs by search and type
   const filteredCategories = categories
     .filter(c => typeFilter === 'all' || c.key === typeFilter)
     .map(c => {
       let items = docs[c.key] || [];
       if (search.trim()) {
         const q = search.toLowerCase();
-        items = items.filter(d => d.title?.toLowerCase().includes(q) || d.description?.toLowerCase().includes(q));
+        items = items.filter(d =>
+          d.title?.toLowerCase().includes(q) ||
+          d.description?.toLowerCase().includes(q) ||
+          d.createdAt?.includes(q)
+        );
       }
       return { ...c, items };
     });
@@ -5849,8 +6068,14 @@ function DocumentsTab({ customer }) {
     const daysUntil = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
 
     if (daysUntil < 0) return { label: 'Expired', color: B.red, bg: '#FFEBEE' };
-    if (daysUntil <= 60) return { label: `Expires in ${daysUntil}d`, color: B.orange, bg: '#FFF3E0' };
-    return { label: 'Valid', color: B.green, bg: '#E8F5E9' };
+    if (daysUntil <= 30) return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.red, bg: '#FFEBEE' };
+    if (daysUntil <= 60) return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.orange, bg: '#FFF3E0' };
+    return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.green, bg: '#E8F5E9' };
+  };
+
+  const formatDate = (date) => {
+    const d = new Date(date);
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
   const relativeTime = (date) => {
@@ -5870,6 +6095,12 @@ function DocumentsTab({ customer }) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  // Year-to-date mini summary
+  const allDocs = Object.values(docs).flat();
+  const thisYear = new Date().getFullYear();
+  const ytdDocs = allDocs.filter(d => new Date(d.createdAt).getFullYear() === thisYear);
+  const ytdReports = (docs.service_report || []).filter(d => new Date(d.createdAt).getFullYear() === thisYear);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <SectionHeading>Documents</SectionHeading>
@@ -5877,17 +6108,20 @@ function DocumentsTab({ customer }) {
 
       {/* Search & Filter */}
       <div>
-        <input
-          type="text" value={search} onChange={e => setSearch(e.target.value)}
-          placeholder="Search documents..."
-          style={{
-            width: '100%', padding: '10px 14px', borderRadius: 10,
-            border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
-            color: B.navy, outline: 'none', boxSizing: 'border-box', marginBottom: 10,
-          }}
-          onFocus={e => e.target.style.borderColor = B.wavesBlue}
-          onBlur={e => e.target.style.borderColor = B.grayLight}
-        />
+        <div style={{ position: 'relative' }}>
+          <input
+            type="text" value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Search by document name or date..."
+            style={{
+              width: '100%', padding: '10px 14px 10px 36px', borderRadius: 10,
+              border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+              color: B.navy, outline: 'none', boxSizing: 'border-box', marginBottom: 10,
+            }}
+            onFocus={e => e.target.style.borderColor = B.wavesBlue}
+            onBlur={e => e.target.style.borderColor = B.grayLight}
+          />
+          <span style={{ position: 'absolute', left: 12, top: 10, fontSize: 14, color: B.grayMid }}>🔍</span>
+        </div>
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
           {typeFilters.map(f => (
             <button key={f.value} onClick={() => setTypeFilter(f.value)} style={{
@@ -5900,22 +6134,60 @@ function DocumentsTab({ customer }) {
         </div>
       </div>
 
+      {/* Year-to-Date Mini Summary (replaces Annual Summaries) */}
+      <div style={{
+        background: B.white, borderRadius: 14, padding: '14px 18px',
+        border: `1px solid ${B.grayLight}`,
+        display: 'flex', gap: 16, alignItems: 'center',
+      }}>
+        <div style={{ fontSize: 24 }}>📊</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{thisYear} Year-to-Date</div>
+          <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2 }}>
+            {ytdReports.length} visit report{ytdReports.length !== 1 ? 's' : ''} · {ytdDocs.length} total document{ytdDocs.length !== 1 ? 's' : ''}
+          </div>
+        </div>
+      </div>
+
       {/* Document Categories */}
       {filteredCategories.map(cat => (
         <DocumentSection
           key={cat.key}
           title={cat.label}
+          catKey={cat.key}
           items={cat.items}
           emptyMessage={cat.empty}
           onDownload={handleDownload}
           onShare={handleShare}
+          onShareWithRealtor={handleShareWithRealtor}
           shareStatus={shareStatus}
           getExpirationBadge={getExpirationBadge}
+          formatDate={formatDate}
           relativeTime={relativeTime}
           formatSize={formatSize}
           showWdoShare={cat.key === 'wdo_inspection'}
+          customer={customer}
         />
       ))}
+
+      {/* Invoices link — redirect to Billing tab */}
+      <div style={{
+        background: B.white, borderRadius: 14, padding: '14px 18px',
+        border: `1px solid ${B.grayLight}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 18 }}>💰</span>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>Invoices & Receipts</div>
+            <div style={{ fontSize: 11, color: B.grayMid }}>View payment history and invoices</div>
+          </div>
+        </div>
+        <button onClick={() => onSwitchTab?.('billing')} style={{
+          ...BUTTON_BASE, padding: '6px 14px', fontSize: 12,
+          background: B.offWhite, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}33`,
+        }}>View in Billing tab →</button>
+      </div>
 
       {/* Bottom note */}
       <div style={{
@@ -5929,11 +6201,11 @@ function DocumentsTab({ customer }) {
           <a href="tel:+19413187612" style={{
             ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
             background: B.red, color: '#fff', textDecoration: 'none',
-          }}>📞 Call</a>
+          }}>Call</a>
           <a href="sms:+19413187612" style={{
             ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
             background: B.red, color: '#fff', textDecoration: 'none',
-          }}>💬 Text</a>
+          }}>Text</a>
         </div>
         <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>
           All pesticide application records and visit reports are automatically generated from your service history.
@@ -5943,7 +6215,7 @@ function DocumentsTab({ customer }) {
   );
 }
 
-function DocumentSection({ title, items, emptyMessage, onDownload, onShare, shareStatus, getExpirationBadge, relativeTime, formatSize, showWdoShare }) {
+function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onShare, onShareWithRealtor, shareStatus, getExpirationBadge, formatDate, relativeTime, formatSize, showWdoShare, customer }) {
   const [open, setOpen] = useState(true);
 
   return (
@@ -5980,57 +6252,83 @@ function DocumentSection({ title, items, emptyMessage, onDownload, onShare, shar
             items.map(doc => {
               const expBadge = doc.expirationDate ? getExpirationBadge(doc.expirationDate) : null;
               const share = shareStatus[doc.id];
+              const isWdo = showWdoShare || doc.documentType === 'wdo_inspection';
+              const isInsurance = catKey === 'insurance_cert' || doc.documentType === 'insurance_cert';
 
               return (
                 <div key={doc.id} style={{
-                  display: 'flex', alignItems: 'center', gap: 12,
-                  padding: '10px 0',
+                  padding: '12px 0',
                   borderBottom: `1px solid ${B.grayLight}`,
                 }}>
-                  {/* Icon */}
-                  <div style={{
-                    width: 36, height: 36, borderRadius: 8, flexShrink: 0,
-                    background: doc.isAutoGenerated ? `${B.teal}15` : B.bluePale,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 16,
-                  }}>{doc.isAutoGenerated ? '⚡' : '📎'}</div>
-
-                  {/* Info */}
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    {/* Icon */}
                     <div style={{
-                      fontSize: 13, fontWeight: 600, color: B.navy,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>{doc.title}</div>
-                    <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>
-                      {relativeTime(doc.createdAt)}
-                      {doc.fileSizeBytes ? ` · ${formatSize(doc.fileSizeBytes)}` : ''}
-                      {doc.isAutoGenerated && ' · Auto-generated'}
+                      width: 36, height: 36, borderRadius: 8, flexShrink: 0,
+                      background: doc.isAutoGenerated ? `${B.teal}15` : B.bluePale,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: 16,
+                    }}>{doc.isAutoGenerated ? '⚡' : '📎'}</div>
+
+                    {/* Info — actual date primary, relative secondary */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 13, fontWeight: 600, color: B.navy,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{doc.title}</div>
+                      <div style={{ fontSize: 12, color: B.navy, marginTop: 2, fontWeight: 500 }}>
+                        {formatDate(doc.createdAt)}
+                        <span style={{ fontSize: 11, color: B.grayMid, fontWeight: 400 }}> · {relativeTime(doc.createdAt)}</span>
+                        {doc.fileSizeBytes ? <span style={{ fontSize: 11, color: B.grayMid }}> · {formatSize(doc.fileSizeBytes)}</span> : ''}
+                      </div>
+                      {/* WDO expiration tracking */}
+                      {expBadge && (
+                        <span style={{
+                          fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 8,
+                          background: expBadge.bg, color: expBadge.color, marginTop: 4,
+                          display: 'inline-block',
+                        }}>{expBadge.label}</span>
+                      )}
+                      {/* License number on insurance cert */}
+                      {isInsurance && doc.licenseNumber && (
+                        <div style={{ fontSize: 11, color: B.grayDark, marginTop: 3 }}>
+                          License #: <strong>{doc.licenseNumber}</strong>
+                        </div>
+                      )}
+                      {isInsurance && customer?.licenseNumber && !doc.licenseNumber && (
+                        <div style={{ fontSize: 11, color: B.grayDark, marginTop: 3 }}>
+                          License #: <strong>{customer.licenseNumber}</strong>
+                        </div>
+                      )}
                     </div>
-                    {expBadge && (
-                      <span style={{
-                        fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8,
-                        background: expBadge.bg, color: expBadge.color, marginTop: 3,
-                        display: 'inline-block',
-                      }}>{expBadge.label}</span>
-                    )}
+
+                    {/* Actions */}
+                    <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                      {isWdo && (
+                        <button onClick={() => onShare(doc)} style={{
+                          ...BUTTON_BASE, padding: '5px 8px', fontSize: 11, borderRadius: 8,
+                          background: share === 'copied' ? B.green : B.offWhite,
+                          color: share === 'copied' ? '#fff' : B.grayDark,
+                          border: share === 'copied' ? 'none' : `1px solid ${B.grayLight}`,
+                        }}>{share === 'copied' ? '✓' : share === 'copying' ? '...' : '↗'}</button>
+                      )}
+                      <button onClick={() => onDownload(doc)} style={{
+                        ...BUTTON_BASE, padding: '5px 8px', fontSize: 11, borderRadius: 8,
+                        background: B.offWhite, color: B.navy,
+                        border: `1px solid ${B.grayLight}`,
+                      }}>⬇</button>
+                    </div>
                   </div>
 
-                  {/* Actions */}
-                  <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                    {(showWdoShare || doc.documentType === 'wdo_inspection') && (
-                      <button onClick={() => onShare(doc)} style={{
-                        ...BUTTON_BASE, padding: '5px 8px', fontSize: 11, borderRadius: 8,
-                        background: share === 'copied' ? B.green : B.offWhite,
-                        color: share === 'copied' ? '#fff' : B.grayDark,
-                        border: share === 'copied' ? 'none' : `1px solid ${B.grayLight}`,
-                      }}>{share === 'copied' ? '✓' : share === 'copying' ? '...' : '↗'}</button>
-                    )}
-                    <button onClick={() => onDownload(doc)} style={{
-                      ...BUTTON_BASE, padding: '5px 8px', fontSize: 11, borderRadius: 8,
-                      background: B.offWhite, color: B.navy,
-                      border: `1px solid ${B.grayLight}`,
-                    }}>⬇</button>
-                  </div>
+                  {/* Share with Realtor button for WDO reports */}
+                  {isWdo && (
+                    <button onClick={() => onShareWithRealtor(doc)} style={{
+                      ...BUTTON_BASE, padding: '6px 14px', fontSize: 11, marginTop: 8,
+                      background: B.offWhite, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}33`,
+                      display: 'flex', alignItems: 'center', gap: 6,
+                    }}>
+                      <span>📧</span> Share with Realtor
+                    </button>
+                  )}
                 </div>
               );
             })
@@ -6637,9 +6935,9 @@ export default function PortalPage() {
         {activeTab === 'services' && <ServicesTab />}
         {activeTab === 'schedule' && <ScheduleTab customer={customer} />}
         {activeTab === 'billing' && <BillingTab customer={customer} />}
-        {activeTab === 'request' && <RequestTab customer={customer} />}
-        {activeTab === 'refer' && <ReferTab customer={customer} />}
-        {activeTab === 'documents' && <DocumentsTab customer={customer} />}
+        {activeTab === 'request' && <RequestTab customer={customer} onSwitchTab={setActiveTab} />}
+        {activeTab === 'refer' && <ReferTab customer={customer} onSwitchTab={setActiveTab} />}
+        {activeTab === 'documents' && <DocumentsTab customer={customer} onSwitchTab={setActiveTab} />}
         {activeTab === 'property' && <PropertyTab customer={customer} />}
         {activeTab === 'learn' && <LearnTab />}
       </div>
