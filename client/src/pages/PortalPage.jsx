@@ -2574,6 +2574,7 @@ function PropertyTab({ customer }) {
           onChange={v => updateField('lockboxCode', v)}
           placeholder="e.g., Lockbox on back door: 0000"
         />
+        {textInput('sideGateAccess', 'e.g., Side gate - lift latch, no code needed', 'Side Gate / Backyard Access')}
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Parking Notes</div>
           {textArea('parkingNotes', 'e.g., Park in driveway, HOA enforces no street parking')}
@@ -2587,14 +2588,113 @@ function PropertyTab({ customer }) {
       <PropertySection title="🐾 Pets">
         <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>How many pets?</div>
-          <NumberStepper value={prefs.petCount} onChange={v => updateField('petCount', v)} max={10} />
+          <NumberStepper value={prefs.petCount} onChange={v => {
+            updateField('petCount', v);
+            // Resize structured pets array to match count
+            const current = Array.isArray(prefs.petsStructured) ? prefs.petsStructured : [];
+            if (v > current.length) {
+              const extended = [...current];
+              for (let i = current.length; i < v; i++) {
+                extended.push({ name: '', type: '', breed: '', indoor: '', temperament: '' });
+              }
+              updateField('petsStructured', extended);
+            } else if (v < current.length) {
+              updateField('petsStructured', current.slice(0, v));
+            }
+          }} max={10} />
         </div>
         {(prefs.petCount || 0) > 0 && (
           <>
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Pet Details</div>
-              {textArea('petDetails', 'e.g., 2 dogs: Golden retriever Max (friendly, outdoor), Chihuahua Bella (barks, indoor). 1 outdoor cat.', 3)}
-            </div>
+            {Array.from({ length: prefs.petCount }).map((_, idx) => {
+              const pet = (Array.isArray(prefs.petsStructured) ? prefs.petsStructured : [])[idx] || {};
+              const updatePet = (key, val) => {
+                const arr = Array.isArray(prefs.petsStructured) ? [...prefs.petsStructured] : [];
+                while (arr.length <= idx) arr.push({ name: '', type: '', breed: '', indoor: '', temperament: '' });
+                arr[idx] = { ...arr[idx], [key]: val };
+                updateField('petsStructured', arr);
+              };
+              return (
+                <div key={idx} style={{
+                  marginBottom: 14, padding: 14, borderRadius: 12,
+                  background: B.offWhite, border: `1px solid ${B.grayLight}`,
+                }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 10 }}>
+                    Pet {idx + 1}
+                  </div>
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Name</div>
+                    <input
+                      type="text"
+                      value={pet.name || ''}
+                      onChange={e => updatePet('name', e.target.value)}
+                      placeholder="e.g., Max"
+                      style={{
+                        width: '100%', padding: '11px 14px', borderRadius: 10,
+                        border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+                        color: B.navy, outline: 'none', boxSizing: 'border-box',
+                      }}
+                      onFocus={e => e.target.style.borderColor = B.wavesBlue}
+                      onBlur={e => e.target.style.borderColor = B.grayLight}
+                    />
+                  </div>
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 6 }}>Type</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {['Dog', 'Cat', 'Other'].map(t => (
+                        <button key={t} onClick={() => updatePet('type', t)} style={{
+                          ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
+                          background: pet.type === t ? B.wavesBlue : B.white,
+                          color: pet.type === t ? '#fff' : B.grayDark,
+                          border: pet.type === t ? 'none' : `1px solid ${B.grayLight}`,
+                        }}>{t}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Breed (optional)</div>
+                    <input
+                      type="text"
+                      value={pet.breed || ''}
+                      onChange={e => updatePet('breed', e.target.value)}
+                      placeholder="e.g., Golden Retriever"
+                      style={{
+                        width: '100%', padding: '11px 14px', borderRadius: 10,
+                        border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+                        color: B.navy, outline: 'none', boxSizing: 'border-box',
+                      }}
+                      onFocus={e => e.target.style.borderColor = B.wavesBlue}
+                      onBlur={e => e.target.style.borderColor = B.grayLight}
+                    />
+                  </div>
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 6 }}>Indoor / Outdoor</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {['Indoor', 'Outdoor', 'Both'].map(t => (
+                        <button key={t} onClick={() => updatePet('indoor', t)} style={{
+                          ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
+                          background: pet.indoor === t ? B.wavesBlue : B.white,
+                          color: pet.indoor === t ? '#fff' : B.grayDark,
+                          border: pet.indoor === t ? 'none' : `1px solid ${B.grayLight}`,
+                        }}>{t}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 6 }}>Temperament</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {['Friendly', 'Cautious', 'Aggressive'].map(t => (
+                        <button key={t} onClick={() => updatePet('temperament', t)} style={{
+                          ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
+                          background: pet.temperament === t ? B.wavesBlue : B.white,
+                          color: pet.temperament === t ? '#fff' : B.grayDark,
+                          border: pet.temperament === t ? 'none' : `1px solid ${B.grayLight}`,
+                        }}>{t}</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
             <div>
               <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Pet Plan for Service Day</div>
               {textArea('petSecuredPlan', 'e.g., Dogs will be inside. Please text 15 min before so I can secure them.', 2)}
@@ -2629,7 +2729,7 @@ function PropertyTab({ customer }) {
             ]}
           />
         </div>
-        <div>
+        <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>Contact Preference</div>
           <PillSelector
             value={prefs.contactPreference}
@@ -2639,6 +2739,47 @@ function PropertyTab({ customer }) {
               { value: 'email', label: '📧 Email' },
             ]}
           />
+        </div>
+        <div style={{
+          padding: 14, borderRadius: 12, background: B.offWhite,
+          border: `1px solid ${B.grayLight}`,
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Blackout Dates</div>
+          <div style={{ fontSize: 11, color: B.grayMid, marginBottom: 10 }}>
+            Do not service between these dates (vacation, events, etc.)
+          </div>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: 130 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Start Date</div>
+              <input
+                type="date"
+                value={prefs.blackoutStart || ''}
+                onChange={e => updateField('blackoutStart', e.target.value || null)}
+                style={{
+                  width: '100%', padding: '11px 14px', borderRadius: 10,
+                  border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+                  color: B.navy, outline: 'none', boxSizing: 'border-box',
+                }}
+                onFocus={e => e.target.style.borderColor = B.wavesBlue}
+                onBlur={e => e.target.style.borderColor = B.grayLight}
+              />
+            </div>
+            <div style={{ flex: 1, minWidth: 130 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>End Date</div>
+              <input
+                type="date"
+                value={prefs.blackoutEnd || ''}
+                onChange={e => updateField('blackoutEnd', e.target.value || null)}
+                style={{
+                  width: '100%', padding: '11px 14px', borderRadius: 10,
+                  border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+                  color: B.navy, outline: 'none', boxSizing: 'border-box',
+                }}
+                onFocus={e => e.target.style.borderColor = B.wavesBlue}
+                onBlur={e => e.target.style.borderColor = B.grayLight}
+              />
+            </div>
+          </div>
         </div>
       </PropertySection>
 
@@ -2665,9 +2806,59 @@ function PropertyTab({ customer }) {
               <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>Number of Zones</div>
               <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={20} />
             </div>
-            <div>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>Watering Days</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => {
+                  const days = Array.isArray(prefs.wateringDays) ? prefs.wateringDays : [];
+                  const active = days.includes(day);
+                  return (
+                    <button key={day} onClick={() => {
+                      const next = active ? days.filter(d => d !== day) : [...days, day];
+                      updateField('wateringDays', next);
+                    }} style={{
+                      ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
+                      background: active ? B.wavesBlue : B.offWhite,
+                      color: active ? '#fff' : B.grayDark,
+                      border: active ? 'none' : `1px solid ${B.grayLight}`,
+                    }}>{day}</button>
+                  );
+                })}
+              </div>
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>System Type</div>
+              <PillSelector
+                value={prefs.irrigationSystemType}
+                onChange={v => updateField('irrigationSystemType', v)}
+                options={[
+                  { value: 'spray', label: 'In-ground Spray' },
+                  { value: 'drip', label: 'Drip' },
+                  { value: 'rotor', label: 'Rotor' },
+                ]}
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>Rain sensor installed?</div>
+              <div onClick={() => updateField('rainSensor', !prefs.rainSensor)} style={{
+                width: 44, height: 24, borderRadius: 12, cursor: 'pointer',
+                background: prefs.rainSensor ? B.wavesBlue : B.grayLight,
+                position: 'relative', transition: 'background 0.3s',
+              }}>
+                <div style={{
+                  position: 'absolute', top: 2, width: 20, height: 20,
+                  borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+                  left: prefs.rainSensor ? 22 : 2, transition: 'left 0.3s',
+                }} />
+              </div>
+            </div>
+            <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Schedule Notes</div>
               {textArea('irrigationScheduleNotes', 'e.g., Runs Mon/Wed/Fri at 4am. Zone 3 seems to run too long.', 3)}
+            </div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Known Issues</div>
+              {textArea('irrigationIssues', "e.g., Zone 4 doesn't reach the back corner", 2)}
             </div>
           </>
         )}
@@ -2676,10 +2867,17 @@ function PropertyTab({ customer }) {
       {/* SECTION 5 — HOA Information */}
       <PropertySection title="🏘️ HOA Information">
         {textInput('hoaName', 'e.g., Sandpiper Bay HOA', 'HOA Name')}
-        <div>
+        {textInput('hoaCompany', 'e.g., FirstService Residential', 'HOA Management Company')}
+        {textInput('hoaPhone', 'e.g., (239) 555-0100', 'HOA Contact Phone')}
+        {textInput('hoaEmail', 'e.g., manager@sandpiperhoa.com', 'HOA Contact Email')}
+        <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>HOA Restrictions</div>
           {textArea('hoaRestrictions', 'e.g., No signs in yard, must notify management 24hr before exterior treatment, no parking on street', 3)}
         </div>
+        {textInput('hoaLawnHeight', 'e.g., Must be mowed below 4 inches', 'Lawn Height Requirement')}
+        {textInput('hoaSignageRules', 'e.g., No lawn signs allowed', 'Treatment Signage Rules')}
+        {textInput('hoaTimingRestrictions', 'e.g., No spray before 9 AM near pool', 'Application Timing Restrictions')}
+        {textInput('hoaInspectionPeriod', 'e.g., March and October', 'Annual Inspection Period')}
       </PropertySection>
 
       {/* SECTION 6 — Access Notes */}
