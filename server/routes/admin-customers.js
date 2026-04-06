@@ -10,7 +10,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // GET /api/admin/customers — directory + pipeline
 router.get('/', async (req, res, next) => {
   try {
-    const { search, stage, tier, tag, source, area, sort = 'lead_score', order = 'desc', page = 1, limit = 25 } = req.query;
+    const { search, stage, tier, tag, source, area, sort = 'lead_score', order = 'desc', page = 1, limit = 100 } = req.query;
 
     let query = db('customers').select(
       'customers.*',

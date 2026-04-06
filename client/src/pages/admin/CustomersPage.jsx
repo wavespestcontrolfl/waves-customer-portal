@@ -540,6 +540,52 @@ export default function CustomersPage() {
   const [sortDir, setSortDir] = useState('asc');
   const [showAddModal, setShowAddModal] = useState(false);
   const [syncingSquare, setSyncingSquare] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
+  const [expandedData, setExpandedData] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  const expandCustomer = async (id) => {
+    if (expandedId === id) { setExpandedId(null); setExpandedData(null); return; }
+    setExpandedId(id);
+    setExpandedData(null);
+    try {
+      const data = await adminFetch(`/admin/customers/${id}`);
+      setExpandedData(data);
+    } catch { setExpandedData({ error: true }); }
+  };
+
+  const startEdit = (c) => {
+    setEditingId(c.id);
+    setEditForm({
+      firstName: c.firstName, lastName: c.lastName, email: c.email || '',
+      phone: c.phone || '', city: c.city || '', tier: c.tier || 'Bronze',
+      monthlyRate: c.monthlyRate || '', pipelineStage: c.pipelineStage || 'new_lead',
+    });
+  };
+
+  const saveEdit = async () => {
+    setSavingEdit(true);
+    try {
+      await adminFetch(`/admin/customers/${editingId}`, {
+        method: 'PUT', body: JSON.stringify(editForm),
+      });
+      setEditingId(null);
+      loadCustomers();
+    } catch (e) { alert('Save failed: ' + e.message); }
+    setSavingEdit(false);
+  };
+
+  const detectTier = (c) => {
+    // Detect tier from monthly rate vs what it would be without discount
+    // Silver=10%, Gold=15%, Platinum=20%
+    if (c.tier && c.tier !== 'Bronze') return c.tier;
+    if (c.monthlyRate > 200) return 'Platinum';
+    if (c.monthlyRate > 100) return 'Gold';
+    if (c.monthlyRate > 50) return 'Silver';
+    return c.tier || 'Bronze';
+  };
 
   const loadCustomers = () => {
     setLoading(true);
@@ -738,18 +784,17 @@ export default function CustomersPage() {
           {/* Table header */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: '2fr 1.2fr 1.5fr 0.8fr 0.7fr 0.6fr 0.7fr 1fr 0.8fr',
+            gridTemplateColumns: '2.5fr 1.2fr 1fr 0.8fr 0.7fr 0.7fr 0.8fr 0.5fr',
             gap: 8, padding: '10px 16px', marginBottom: 4,
           }}>
-            <SortHeader label="Name" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <SortHeader label="Name / Email" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
             <SortHeader label="Phone" sortKey="phone" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Address</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>City</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Stage</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Tier</div>
-            <SortHeader label="Score" sortKey="leadScore" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
             <SortHeader label="$/Mo" sortKey="monthlyRate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Tags</div>
-            <SortHeader label="Contact" sortKey="lastContactDate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <SortHeader label="Last Contact" sortKey="lastContactDate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <div />
           </div>
 
           {/* Rows */}
@@ -764,65 +809,179 @@ export default function CustomersPage() {
             </div>
           ) : (
             sorted.map(c => (
-              <div
-                key={c.id}
-                onClick={() => console.log('Navigate to /admin/customers/' + c.id)}
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '2fr 1.2fr 1.5fr 0.8fr 0.7fr 0.6fr 0.7fr 1fr 0.8fr',
-                  gap: 8, padding: '12px 16px', alignItems: 'center',
-                  background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, marginBottom: 6,
-                  cursor: 'pointer', transition: 'border-color 0.15s',
-                }}
-                onMouseEnter={e => e.currentTarget.style.borderColor = D.teal}
-                onMouseLeave={e => e.currentTarget.style.borderColor = D.border}
-              >
-                {/* Name */}
-                <div>
-                  <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.white }}>
-                    {c.firstName} {c.lastName}
+              <div key={c.id} style={{ marginBottom: 6 }}>
+                <div
+                  onClick={() => expandCustomer(c.id)}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '2.5fr 1.2fr 1fr 0.8fr 0.7fr 0.7fr 0.8fr 0.5fr',
+                    gap: 8, padding: '12px 16px', alignItems: 'center',
+                    background: expandedId === c.id ? `${D.teal}08` : D.card,
+                    border: `1px solid ${expandedId === c.id ? D.teal : D.border}`,
+                    borderRadius: expandedId === c.id ? '10px 10px 0 0' : 10,
+                    cursor: 'pointer', transition: 'border-color 0.15s',
+                  }}
+                >
+                  {/* Name + Email */}
+                  <div>
+                    <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.white }}>
+                      {c.firstName} {c.lastName}
+                    </div>
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 1 }}>{c.email || 'No email'}</div>
                   </div>
-                  {c.email && <div style={{ fontSize: 11, color: D.muted, marginTop: 1 }}>{c.email}</div>}
+                  {/* Phone — clickable */}
+                  <div>
+                    {c.phone ? (
+                      <a
+                        href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                        onClick={e => e.stopPropagation()}
+                        style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.teal, textDecoration: 'none' }}
+                      >
+                        {c.phone}
+                      </a>
+                    ) : (
+                      <span style={{ fontSize: 12, color: D.muted }}>--</span>
+                    )}
+                  </div>
+                  {/* City */}
+                  <div style={{ fontSize: 12, color: D.muted }}>{c.city || '--'}</div>
+                  {/* Stage */}
+                  <div><StageBadge stage={c.pipelineStage} /></div>
+                  {/* Tier */}
+                  <div><TierBadge tier={detectTier(c)} /></div>
+                  {/* Monthly rate */}
+                  <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: c.monthlyRate ? D.green : D.muted }}>
+                    {c.monthlyRate ? `$${c.monthlyRate}` : '--'}
+                  </div>
+                  {/* Last contact */}
+                  <div style={{ fontSize: 12, color: D.muted }}>{timeAgo(c.lastContactDate)}</div>
+                  {/* Edit */}
+                  <div>
+                    <button onClick={e => { e.stopPropagation(); startEdit(c); }} style={{
+                      padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6,
+                      color: D.muted, fontSize: 11, cursor: 'pointer',
+                    }}>Edit</button>
+                  </div>
                 </div>
-                {/* Phone */}
-                <div>
-                  {c.phone ? (
-                    <a
-                      href={`tel:${c.phone}`}
-                      onClick={e => e.stopPropagation()}
-                      style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.teal, textDecoration: 'none' }}
-                    >
-                      {c.phone}
-                    </a>
-                  ) : (
-                    <span style={{ fontSize: 12, color: D.muted }}>--</span>
-                  )}
-                </div>
-                {/* Address */}
-                <div style={{ fontSize: 12, color: D.muted, fontFamily: 'DM Sans, sans-serif', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {c.address || '--'}
-                </div>
-                {/* Stage */}
-                <div><StageBadge stage={c.pipelineStage} /></div>
-                {/* Tier */}
-                <div><TierBadge tier={c.tier} /></div>
-                {/* Score */}
-                <div><ScoreDot score={c.leadScore} /></div>
-                {/* Monthly rate */}
-                <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: c.monthlyRate ? D.green : D.muted }}>
-                  {c.monthlyRate ? `$${c.monthlyRate}` : '--'}
-                </div>
-                {/* Tags */}
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                  {(c.tags || []).slice(0, 2).map(t => <TagChip key={t} tag={t} />)}
-                  {(c.tags || []).length > 2 && (
-                    <span style={{ fontSize: 10, color: D.muted }}>+{c.tags.length - 2}</span>
-                  )}
-                </div>
-                {/* Last contact */}
-                <div style={{ fontSize: 12, color: D.muted, fontFamily: 'DM Sans, sans-serif' }}>
-                  {timeAgo(c.lastContactDate)}
-                </div>
+
+                {/* Expanded detail panel */}
+                {expandedId === c.id && (
+                  <div style={{
+                    background: D.card, border: `1px solid ${D.teal}`, borderTop: 'none',
+                    borderRadius: '0 0 10px 10px', padding: 20,
+                  }}>
+                    {!expandedData ? <div style={{ color: D.muted, textAlign: 'center', padding: 20 }}>Loading...</div> :
+                    expandedData.error ? <div style={{ color: D.red, textAlign: 'center' }}>Failed to load details</div> : (
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+                        {/* Column 1: Contact Info */}
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Contact</div>
+                          {[
+                            ['Name', `${expandedData.customer.firstName} ${expandedData.customer.lastName}`],
+                            ['Email', expandedData.customer.email],
+                            ['Phone', expandedData.customer.phone],
+                            ['Address', `${expandedData.customer.address?.line1 || ''}, ${expandedData.customer.address?.city || ''}, ${expandedData.customer.address?.state || ''} ${expandedData.customer.address?.zip || ''}`],
+                            ['Company', expandedData.customer.companyName],
+                            ['Member Since', expandedData.customer.memberSince],
+                            ['Lead Source', expandedData.customer.leadSource],
+                          ].map(([l, v]) => v && (
+                            <div key={l} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 12 }}>
+                              <span style={{ color: D.muted }}>{l}</span>
+                              <span style={{ color: D.white, textAlign: 'right', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{v}</span>
+                            </div>
+                          ))}
+                          <div style={{ marginTop: 12, display: 'flex', gap: 6 }}>
+                            {expandedData.customer.phone && (
+                              <>
+                                <a href={`/admin/communications?phone=${encodeURIComponent(expandedData.customer.phone)}&action=sms`} style={{ padding: '6px 12px', background: D.teal, color: D.white, borderRadius: 6, fontSize: 11, fontWeight: 600, textDecoration: 'none' }}>💬 Text</a>
+                                <a href={`/admin/communications?phone=${encodeURIComponent(expandedData.customer.phone)}&action=call`} style={{ padding: '6px 12px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, fontSize: 11, textDecoration: 'none' }}>📞 Call</a>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Column 2: Services + Payments */}
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Service History ({(expandedData.services || []).length})</div>
+                          {(expandedData.services || []).slice(0, 5).map((s, i) => (
+                            <div key={i} style={{ padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22` }}>
+                              <span style={{ color: D.white }}>{s.service_type}</span>
+                              <span style={{ color: D.muted, marginLeft: 8 }}>{s.service_date ? new Date(s.service_date).toLocaleDateString() : ''}</span>
+                            </div>
+                          ))}
+                          {(expandedData.services || []).length === 0 && <div style={{ fontSize: 12, color: D.muted }}>No services</div>}
+
+                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, marginTop: 16 }}>Payments ({(expandedData.payments || []).length})</div>
+                          {(expandedData.payments || []).slice(0, 5).map((p, i) => (
+                            <div key={i} style={{ padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22` }}>
+                              <span style={{ color: D.green, fontFamily: 'JetBrains Mono, monospace' }}>${parseFloat(p.amount || 0).toFixed(2)}</span>
+                              <span style={{ color: D.muted, marginLeft: 8 }}>{p.payment_date ? new Date(p.payment_date).toLocaleDateString() : ''}</span>
+                              <span style={{ color: D.muted, marginLeft: 8 }}>{p.description}</span>
+                            </div>
+                          ))}
+                          {(expandedData.payments || []).length === 0 && <div style={{ fontSize: 12, color: D.muted }}>No payments</div>}
+                        </div>
+
+                        {/* Column 3: Recent SMS + Interactions */}
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Recent SMS ({(expandedData.smsLog || []).length})</div>
+                          {(expandedData.smsLog || []).slice(0, 5).map((s, i) => (
+                            <div key={i} style={{ padding: '4px 0', fontSize: 11, borderBottom: `1px solid ${D.border}22` }}>
+                              <span style={{ color: s.direction === 'inbound' ? D.teal : D.green }}>{s.direction === 'inbound' ? '← ' : '→ '}</span>
+                              <span style={{ color: D.muted }}>{(s.message_body || '').substring(0, 60)}</span>
+                              <div style={{ fontSize: 10, color: D.muted }}>{timeAgo(s.created_at)}</div>
+                            </div>
+                          ))}
+                          {(expandedData.smsLog || []).length === 0 && <div style={{ fontSize: 12, color: D.muted }}>No SMS</div>}
+
+                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, marginTop: 16 }}>Tags</div>
+                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                            {(expandedData.tags || []).map(t => <TagChip key={t} tag={t} />)}
+                            {(expandedData.tags || []).length === 0 && <span style={{ fontSize: 12, color: D.muted }}>No tags</span>}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Inline edit modal */}
+                {editingId === c.id && (
+                  <div style={{ background: D.card, border: `1px solid ${D.teal}`, borderRadius: 10, padding: 20, marginTop: -2 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Edit Customer</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10, marginBottom: 12 }}>
+                      {[
+                        { key: 'firstName', label: 'First Name' },
+                        { key: 'lastName', label: 'Last Name' },
+                        { key: 'email', label: 'Email', type: 'email' },
+                        { key: 'phone', label: 'Phone', type: 'tel' },
+                        { key: 'city', label: 'City' },
+                        { key: 'monthlyRate', label: '$/Mo', type: 'number' },
+                      ].map(f => (
+                        <div key={f.key}>
+                          <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>{f.label}</label>
+                          <input value={editForm[f.key] || ''} onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))} type={f.type || 'text'} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+                        </div>
+                      ))}
+                      <div>
+                        <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Tier</label>
+                        <select value={editForm.tier || 'Bronze'} onChange={e => setEditForm(p => ({ ...p, tier: e.target.value }))} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
+                          <option value="Bronze">Bronze</option><option value="Silver">Silver (10%)</option><option value="Gold">Gold (15%)</option><option value="Platinum">Platinum (20%)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Stage</label>
+                        <select value={editForm.pipelineStage || ''} onChange={e => setEditForm(p => ({ ...p, pipelineStage: e.target.value }))} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
+                          {STAGES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button onClick={saveEdit} disabled={savingEdit} style={{ padding: '8px 18px', background: D.teal, color: D.white, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: savingEdit ? 0.5 : 1 }}>{savingEdit ? 'Saving...' : 'Save'}</button>
+                      <button onClick={() => setEditingId(null)} style={{ padding: '8px 18px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, borderRadius: 8, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))
           )}
