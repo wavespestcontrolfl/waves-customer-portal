@@ -54,6 +54,82 @@ function Toggle({ checked, onChange, label, sublabel }) {
 }
 
 // ── Call Card ────────────────────────────────────────────────
+function AnalyticsSection({ demoMode }) {
+  const [analytics, setAnalytics] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (demoMode) {
+      setAnalytics({
+        totalCalls: 47, aiHandled: 23, humanAnswered: 18, missed: 6,
+        avgDuration: 185, leadConversionRate: 39,
+        topCategories: [{ category: 'general_pest', count: 12 }, { category: 'lawn_care', count: 8 }, { category: 'termite_wdo', count: 5 }, { category: 'scheduling', count: 4 }],
+        byHour: Array.from({ length: 24 }, (_, h) => ({ hour: h, count: h >= 8 && h <= 18 ? Math.floor(Math.random() * 5) : h >= 18 ? Math.floor(Math.random() * 3) : 0 })),
+        resolutions: { lead_captured: 15, appointment_booked: 4, billing_deflected: 3, emergency_flagged: 1 },
+      });
+      setLoading(false);
+      return;
+    }
+    fetch(`${API_BASE}/admin/voice-agent/analytics`, { headers: authHeaders() })
+      .then(r => r.json()).then(setAnalytics).catch(() => {}).finally(() => setLoading(false));
+  }, [demoMode]);
+
+  if (loading || !analytics) return null;
+
+  return (
+    <div style={{ marginBottom: 24, padding: "16px 20px", borderRadius: 12, background: "var(--card-bg)", border: "1px solid var(--border)" }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 16, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Call Analytics</div>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        {[
+          { label: 'AI Handled', value: analytics.aiHandled, color: '#0ea5e9' },
+          { label: 'Human Answered', value: analytics.humanAnswered, color: '#22c55e' },
+          { label: 'Missed', value: analytics.missed, color: '#ef4444' },
+          { label: 'Avg Duration', value: `${Math.round((analytics.avgDuration || 0) / 60)}m`, color: '#94a3b8' },
+          { label: 'Lead Conv.', value: `${analytics.leadConversionRate || 0}%`, color: '#8b5cf6' },
+        ].map(s => (
+          <div key={s.label} style={{ flex: '1 1 100px', textAlign: 'center', padding: '10px 0' }}>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Top Categories */}
+      {analytics.topCategories?.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginRight: 4 }}>Top inquiries:</span>
+          {analytics.topCategories.map(c => (
+            <span key={c.category} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'rgba(14,165,233,0.1)', color: '#0ea5e9' }}>
+              {c.category.replace(/_/g, ' ')} ({c.count})
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Calls by Hour mini chart */}
+      {analytics.byHour && (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Calls by hour</div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1, height: 40 }}>
+            {analytics.byHour.map((h, i) => {
+              const max = Math.max(...analytics.byHour.map(x => x.count), 1);
+              const ht = Math.max(2, (h.count / max) * 36);
+              const isBusinessHour = i >= 8 && i < 18;
+              return (
+                <div key={i} style={{ flex: 1, height: ht, background: h.count > 0 ? (isBusinessHour ? '#0ea5e9' : '#f59e0b') : 'var(--border)', borderRadius: 2 }} title={`${i}:00 — ${h.count} calls`} />
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: 'var(--text-muted)', marginTop: 2 }}>
+            <span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>12am</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CallCard({ call }) {
   const categoryColors = {
     termite_wdo: "#dc2626", emergency: "#dc2626",
@@ -344,6 +420,9 @@ export default function WavesVoiceAgentAdmin() {
         )}
       </div>
 
+      {/* Analytics */}
+      <AnalyticsSection demoMode={demoMode} />
+
       {/* Config Panel */}
       <div style={{
         marginTop: 24, padding: "16px 20px", borderRadius: 12,
@@ -351,30 +430,21 @@ export default function WavesVoiceAgentAdmin() {
       }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Agent Config</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, fontSize: 13 }}>
-          <div>
-            <span style={{ color: "var(--text-muted)" }}>Model: </span>
-            <span style={{ fontWeight: 500 }}>claude-sonnet-4</span>
-          </div>
-          <div>
-            <span style={{ color: "var(--text-muted)" }}>TTS: </span>
-            <span style={{ fontWeight: 500 }}>ElevenLabs (Rachel)</span>
-          </div>
-          <div>
-            <span style={{ color: "var(--text-muted)" }}>STT: </span>
-            <span style={{ fontWeight: 500 }}>Deepgram</span>
-          </div>
-          <div>
-            <span style={{ color: "var(--text-muted)" }}>Ring Timeout: </span>
-            <span style={{ fontWeight: 500 }}>25 seconds</span>
-          </div>
-          <div>
-            <span style={{ color: "var(--text-muted)" }}>Hours: </span>
-            <span style={{ fontWeight: 500 }}>8am – 6pm ET</span>
-          </div>
-          <div>
-            <span style={{ color: "var(--text-muted)" }}>Estimator Sheet: </span>
-            <span style={{ fontWeight: 500, fontSize: 11, fontFamily: "monospace" }}>...SymP4</span>
-          </div>
+          {[
+            ['Model', status?.config?.model || 'claude-sonnet-4'],
+            ['TTS', `${status?.config?.ttsProvider || 'ElevenLabs'} (${status?.config?.ttsVoice || 'Rachel'})`],
+            ['STT', status?.config?.sttProvider || 'Deepgram'],
+            ['Ring Timeout', `${status?.config?.maxRingSeconds || 25} seconds`],
+            ['Hours', `${status?.config?.businessHours?.start || 8}am – ${status?.config?.businessHours?.end || 18 > 12 ? (status?.config?.businessHours?.end || 18) - 12 : status?.config?.businessHours?.end || 18}pm ET`],
+            ['Language', 'English + Spanish auto-detect'],
+            ['Post-Call Survey', 'SMS 5min after call'],
+            ['Knowledge Base', 'Auto-synced with services'],
+          ].map(([label, value]) => (
+            <div key={label}>
+              <span style={{ color: "var(--text-muted)" }}>{label}: </span>
+              <span style={{ fontWeight: 500 }}>{value}</span>
+            </div>
+          ))}
         </div>
       </div>
     </div>

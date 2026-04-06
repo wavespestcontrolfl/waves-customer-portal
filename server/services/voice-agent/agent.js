@@ -20,10 +20,18 @@ const config = require("../../config");
 const { isEnabled: checkGate } = require("../../config/feature-gates");
 const db = require("../../models/db");
 
-const { SYSTEM_PROMPT } = require("./system-prompt");
+const { SYSTEM_PROMPT, buildDynamicPrompt } = require("./system-prompt");
 const { TOOLS, executeTool } = require("./tools");
 
 let anthropic; try { anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); } catch { anthropic = null; }
+
+// ── #7: Spanish Language Detection Words ───────────────────
+const SPANISH_INDICATORS = [
+  'hola', 'necesito', 'ayuda', 'hablar', 'servicio', 'plaga', 'casa',
+  'buenos', 'buenas', 'gracias', 'por favor', 'tengo', 'quiero',
+  'problema', 'hormigas', 'cucarachas', 'ratas', 'mosquitos',
+  'jardin', 'cesped', 'precio', 'cita', 'llamar',
+];
 
 // ── Active call sessions (in-memory, keyed by callSid) ─────
 const sessions = new Map();
@@ -199,13 +207,105 @@ async function logCallEnd(callSid, sessionData) {
   }
 }
 
+// ── #5: Post-Call Survey ────────────────────────────────────
+function sendPostCallSurvey(callSid, callerPhone) {
+  if (!callerPhone) return;
+  // Wait 5 minutes then send survey SMS
+  setTimeout(async () => {
+    try {
+      const TwilioService = require("../twilio");
+      await TwilioService.sendSMS(
+        callerPhone,
+        "Thanks for calling Waves Pest Control! How was your experience? Reply 1-5 (1=poor, 5=excellent)",
+        { messageType: "post_call_survey" }
+      );
+      // Store pending survey for matching when they reply
+      try {
+        await db("system_config")
+          .insert({
+            key: `survey_pending_${callerPhone.replace(/\D/g, "").slice(-10)}`,
+            value: JSON.stringify({ callSid, phone: callerPhone, sentAt: new Date().toISOString() }),
+            updated_at: new Date(),
+          })
+          .onConflict("key")
+          .merge();
+      } catch (_) {}
+      console.log(`[VoiceAgent] Post-call survey sent to ${callerPhone} for ${callSid}`);
+    } catch (err) {
+      console.error("[VoiceAgent] Post-call survey failed:", err.message);
+    }
+  }, 5 * 60 * 1000); // 5 minutes
+}
+
+/**
+ * Handle a post-call survey reply. Called from the SMS webhook.
+ * @param {string} phone - Normalized phone (last 10 digits)
+ * @param {string} body - SMS body (should be 1-5)
+ * @returns {{ handled: boolean }} whether this was a survey response
+ */
+async function handleSurveyReply(phone, body) {
+  const normalized = phone.replace(/\D/g, "").slice(-10);
+  const key = `survey_pending_${normalized}`;
+  try {
+    const pending = await db("system_config").where({ key }).first();
+    if (!pending) return { handled: false };
+
+    const rating = parseInt((body || "").trim());
+    if (isNaN(rating) || rating < 1 || rating > 5) return { handled: false };
+
+    const surveyData = JSON.parse(pending.value);
+
+    // Log the survey rating to call_log
+    await db("call_log")
+      .where(function () {
+        this.where("twilio_call_sid", surveyData.callSid).orWhere("call_sid", surveyData.callSid);
+      })
+      .update({
+        metadata: db.raw(`
+          COALESCE(metadata::jsonb, '{}'::jsonb) || ?::jsonb
+        `, [JSON.stringify({ survey_rating: rating, survey_replied_at: new Date().toISOString() })]),
+        updated_at: new Date(),
+      });
+
+    // Remove pending survey
+    await db("system_config").where({ key }).del();
+
+    console.log(`[VoiceAgent] Survey reply from ${phone}: ${rating}/5 for call ${surveyData.callSid}`);
+    return { handled: true, rating, callSid: surveyData.callSid };
+  } catch (err) {
+    console.error("[VoiceAgent] Survey reply handling failed:", err.message);
+    return { handled: false };
+  }
+}
+
+// ── #7: Detect Spanish from transcript ──────────────────────
+function detectSpanish(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  const matches = SPANISH_INDICATORS.filter(w => lower.includes(w));
+  return matches.length >= 2; // At least 2 Spanish words to be confident
+}
+
 // ── Streaming AI Response with Tool Use ─────────────────────
 async function aiResponseStream(sessionData, ws) {
+  // #6: Use dynamic prompt if available, fall back to static
+  let systemPrompt = SYSTEM_PROMPT;
+  try {
+    if (sessionData.dynamicPrompt) {
+      systemPrompt = sessionData.dynamicPrompt;
+    }
+  } catch (_) {}
+
+  // #7: If Spanish was detected, append Spanish instruction
+  if (sessionData.languageDetected === 'es') {
+    systemPrompt += "\n\n## LANGUAGE\nThe caller is speaking Spanish. Respond in Spanish. Use natural, friendly Mexican/Central American Spanish appropriate for Southwest Florida's Latino community.";
+  }
+
   const stream = await anthropic.messages.create({
     model: agentConfig.model,
     max_tokens: 1024,
     messages: sessionData.conversation,
-    system: SYSTEM_PROMPT,
+    system: systemPrompt,
     tools: TOOLS,
     stream: true,
   });

@@ -14,7 +14,9 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const {
   initVoiceAgent, shouldAgentHandle, handleVoiceWebSocket,
   getConfig, updateConfig, getActiveCalls, getRecentVoiceAgentCalls,
+  getSessionByCallSid, injectMessage,
 } = require('../services/voice-agent/agent');
+const { analyzeSentiment } = require('../services/call-sentiment');
 
 function voiceAgentRoutes(app, httpServer) {
   // WebSocket is set up separately in index.js after app.listen()
@@ -64,15 +66,16 @@ function voiceAgentRoutes(app, httpServer) {
       );
     }
 
-    // Agent ON → ConversationRelay
+    // Agent ON → ConversationRelay with time-aware greeting
     const cfg = getConfig();
+    const greeting = getTimeAwareGreeting();
     res.type('text/xml').send(
       `<?xml version="1.0" encoding="UTF-8"?>
        <Response>
          <Connect>
            <ConversationRelay
              url="${wsUrl}"
-             welcomeGreeting="Hi, thanks for calling Waves Pest Control! How can I help you today?"
+             welcomeGreeting="${greeting} How can I help you today?"
              ttsProvider="${cfg.ttsProvider || 'ElevenLabs'}"
              voice="${cfg.ttsVoice || 'Rachel'}"
              transcriptionProvider="${cfg.sttProvider || 'Deepgram'}"
@@ -167,11 +170,6 @@ function voiceAgentRoutes(app, httpServer) {
     res.json({ total: calls.length, calls });
   });
 
-  app.get('/api/admin/voice-agent/active', adminAuthenticate, requireTechOrAdmin, (req, res) => {
-    const active = getActiveCalls();
-    res.json({ active_calls: active.length, calls: active });
-  });
-
   app.get('/api/admin/voice-agent/stats', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
     const days = parseInt(req.query.days) || 30;
     try {
@@ -196,6 +194,225 @@ function voiceAgentRoutes(app, httpServer) {
       res.json({ error: err.message });
     }
   });
+
+  // ── #1: Call Analytics Dashboard (enhanced) ────────────────
+  app.get('/api/admin/voice-agent/analytics', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
+    const days = parseInt(req.query.days) || 30;
+    try {
+      // Basic stats
+      const basicStats = await db.raw(`
+        SELECT
+          COUNT(*) as total_calls,
+          ROUND(AVG(duration_seconds)::numeric, 1) as avg_duration_seconds,
+          COUNT(*) FILTER (WHERE answered_by = 'voice_agent') as ai_handled,
+          COUNT(*) FILTER (WHERE answered_by = 'human') as human_handled,
+          COUNT(*) FILTER (WHERE answered_by = 'voicemail' OR answered_by = 'missed' OR answered_by IS NULL) as missed,
+          COUNT(*) FILTER (WHERE voice_agent_outcome = 'lead_captured') as leads_captured,
+          COUNT(*) FILTER (WHERE voice_agent_outcome = 'appointment_booked') as appointments_booked,
+          COUNT(*) FILTER (WHERE voice_agent_outcome = 'billing_deflected') as billing_deflected,
+          COUNT(*) FILTER (WHERE voice_agent_outcome = 'emergency_flagged') as emergencies_flagged,
+          COUNT(*) FILTER (WHERE voice_agent_outcome = 'escalated') as escalated,
+          COUNT(*) FILTER (WHERE voice_agent_outcome = 'info_provided') as info_provided,
+          COUNT(*) FILTER (WHERE voice_agent_outcome = 'callback_requested') as callback_requested,
+          COUNT(*) FILTER (WHERE voice_agent_outcome = 'hangup') as hangup
+        FROM call_log
+        WHERE direction = 'inbound'
+          AND created_at >= NOW() - INTERVAL '${days} days'
+      `);
+
+      // Lead conversion rate (AI-handled calls that resulted in an estimate)
+      const conversionData = await db.raw(`
+        SELECT
+          COUNT(*) FILTER (WHERE answered_by = 'voice_agent') as ai_calls,
+          COUNT(*) FILTER (WHERE answered_by = 'voice_agent' AND voice_agent_lead_id IS NOT NULL) as ai_leads
+        FROM call_log
+        WHERE direction = 'inbound'
+          AND created_at >= NOW() - INTERVAL '${days} days'
+      `);
+      const conv = conversionData.rows[0] || {};
+      const leadConversionRate = conv.ai_calls > 0
+        ? Math.round((conv.ai_leads / conv.ai_calls) * 100 * 10) / 10
+        : 0;
+
+      // Top service categories inquired about
+      const categoryData = await db.raw(`
+        SELECT
+          voice_agent_classification::json->>'category' as category,
+          COUNT(*) as count
+        FROM call_log
+        WHERE direction = 'inbound'
+          AND voice_agent_classification IS NOT NULL
+          AND created_at >= NOW() - INTERVAL '${days} days'
+        GROUP BY voice_agent_classification::json->>'category'
+        ORDER BY count DESC
+        LIMIT 10
+      `);
+
+      // Calls by hour of day
+      const hourlyData = await db.raw(`
+        SELECT
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'America/New_York') as hour,
+          COUNT(*) as count
+        FROM call_log
+        WHERE direction = 'inbound'
+          AND created_at >= NOW() - INTERVAL '${days} days'
+        GROUP BY hour
+        ORDER BY hour
+      `);
+
+      // Calls by day of week (0=Sunday, 6=Saturday)
+      const dailyData = await db.raw(`
+        SELECT
+          EXTRACT(DOW FROM created_at AT TIME ZONE 'America/New_York') as day_of_week,
+          COUNT(*) as count
+        FROM call_log
+        WHERE direction = 'inbound'
+          AND created_at >= NOW() - INTERVAL '${days} days'
+        GROUP BY day_of_week
+        ORDER BY day_of_week
+      `);
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const callsByDay = dailyData.rows.map(r => ({
+        day: dayNames[parseInt(r.day_of_week)] || r.day_of_week,
+        count: parseInt(r.count),
+      }));
+
+      // Resolution breakdown
+      const resolutionData = await db.raw(`
+        SELECT
+          COALESCE(voice_agent_outcome, 'unknown') as outcome,
+          COUNT(*) as count
+        FROM call_log
+        WHERE direction = 'inbound'
+          AND answered_by = 'voice_agent'
+          AND created_at >= NOW() - INTERVAL '${days} days'
+        GROUP BY voice_agent_outcome
+        ORDER BY count DESC
+      `);
+
+      const stats = basicStats.rows[0] || {};
+      res.json({
+        period_days: days,
+        total_calls: parseInt(stats.total_calls) || 0,
+        avg_duration_seconds: parseFloat(stats.avg_duration_seconds) || 0,
+        call_handling: {
+          ai_handled: parseInt(stats.ai_handled) || 0,
+          human_handled: parseInt(stats.human_handled) || 0,
+          missed: parseInt(stats.missed) || 0,
+        },
+        lead_conversion: {
+          ai_calls: parseInt(conv.ai_calls) || 0,
+          leads_from_ai: parseInt(conv.ai_leads) || 0,
+          conversion_rate_pct: leadConversionRate,
+        },
+        top_categories: categoryData.rows.map(r => ({
+          category: r.category,
+          count: parseInt(r.count),
+        })),
+        calls_by_hour: hourlyData.rows.map(r => ({
+          hour: parseInt(r.hour),
+          count: parseInt(r.count),
+        })),
+        calls_by_day: callsByDay,
+        resolution_breakdown: resolutionData.rows.map(r => ({
+          outcome: r.outcome,
+          count: parseInt(r.count),
+        })),
+        outcomes: {
+          leads_captured: parseInt(stats.leads_captured) || 0,
+          appointments_booked: parseInt(stats.appointments_booked) || 0,
+          billing_deflected: parseInt(stats.billing_deflected) || 0,
+          emergencies_flagged: parseInt(stats.emergencies_flagged) || 0,
+          escalated: parseInt(stats.escalated) || 0,
+          info_provided: parseInt(stats.info_provided) || 0,
+          callback_requested: parseInt(stats.callback_requested) || 0,
+          hangup: parseInt(stats.hangup) || 0,
+        },
+      });
+    } catch (err) {
+      console.error('[VoiceAgent] Analytics error:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── #2: Call Sentiment Analysis ────────────────────────────
+  app.post('/api/admin/voice-agent/analyze-sentiment/:callSid', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
+    try {
+      const result = await analyzeSentiment(req.params.callSid);
+      res.json({ success: true, callSid: req.params.callSid, sentiment: result });
+    } catch (err) {
+      console.error('[VoiceAgent] Sentiment analysis error:', err.message);
+      res.status(400).json({ success: false, error: err.message });
+    }
+  });
+
+  // ── #8: Enhanced Live Call Monitoring ──────────────────────
+  app.get('/api/admin/voice-agent/active', adminAuthenticate, requireTechOrAdmin, (req, res) => {
+    const active = getActiveCalls();
+    res.json({ active_calls: active.length, calls: active });
+  });
+
+  // ── #8: Live transcript for a specific call ────────────────
+  app.get('/api/admin/voice-agent/live/:callSid', adminAuthenticate, requireTechOrAdmin, (req, res) => {
+    const session = getSessionByCallSid(req.params.callSid);
+    if (!session) {
+      return res.status(404).json({ error: 'No active session for this call' });
+    }
+
+    const durationMs = Date.now() - new Date(session.startTime).getTime();
+    const transcript = session.conversation
+      .filter(m => typeof m.content === 'string')
+      .map(m => ({
+        role: m.role === 'user' ? 'caller' : 'agent',
+        content: m.content,
+      }));
+
+    res.json({
+      call_sid: req.params.callSid,
+      phone: session.callerPhone,
+      customer: session.customerData
+        ? { name: session.customerData.name, tier: session.customerData.tier, id: session.customerData.id }
+        : null,
+      classification: session.classification,
+      outcome: session.outcome,
+      start_time: session.startTime,
+      duration_seconds: Math.round(durationMs / 1000),
+      message_count: transcript.length,
+      transcript,
+      current_response: session.currentResponse || null,
+      language_detected: session.languageDetected || 'en',
+    });
+  });
+
+  // ── #8: Inject a message into an active call ──────────────
+  app.post('/api/admin/voice-agent/inject/:callSid', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
+    const { message } = req.body;
+    if (!message) return res.status(400).json({ error: 'Message is required' });
+
+    const result = await injectMessage(req.params.callSid, message);
+    if (!result.success) {
+      return res.status(404).json(result);
+    }
+    res.json(result);
+  });
+}
+
+// ── #3: Time-Aware Greeting Helper (Eastern Time) ────────────
+function getTimeAwareGreeting() {
+  const now = new Date();
+  const etString = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
+  const etDate = new Date(etString);
+  const hour = etDate.getHours();
+
+  if (hour >= 5 && hour < 12) {
+    return "Good morning, thanks for calling Waves Pest Control!";
+  } else if (hour >= 12 && hour < 17) {
+    return "Good afternoon, thanks for calling Waves Pest Control!";
+  } else if (hour >= 17 && hour < 21) {
+    return "Good evening, thanks for calling Waves Pest Control!";
+  } else {
+    return "Thanks for calling Waves Pest Control. Our office is currently closed, but I can still help you.";
+  }
 }
 
 module.exports = voiceAgentRoutes;
