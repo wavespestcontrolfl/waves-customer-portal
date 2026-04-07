@@ -1245,11 +1245,22 @@ Respond ONLY with valid JSON. No markdown, no explanation.`;
   const parts = data.candidates?.[0]?.content?.parts || [];
   let text = '';
   for (const part of parts) {
+    // Skip thought parts, only use text output parts
+    if (part.thought) continue;
     if (part.text) text += part.text;
   }
+  // If no non-thought text, try all parts
+  if (!text) {
+    for (const part of parts) {
+      if (part.text) text += part.text;
+    }
+  }
+  console.log(`[GEMINI DEBUG] Response text (first 200): ${(text || '').substring(0, 200)}`);
   if (!text) throw new Error('Gemini returned empty response');
   // Try direct parse first (responseMimeType: application/json)
-  try { return JSON.parse(text); } catch {}
+  try { return JSON.parse(text); } catch (e) {
+    console.log(`[GEMINI DEBUG] Direct JSON.parse failed: ${e.message}`);
+  }
   // Fallback: extract JSON from text
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Gemini returned no valid JSON');

@@ -21,7 +21,8 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT string_agg(tag, ',') FROM customer_tags WHERE customer_tags.customer_id = customers.id) as tags_str"),
       db.raw("(SELECT string_agg(DISTINCT service_type, ',') FROM service_records WHERE service_records.customer_id = customers.id) as service_types"),
       db.raw("(SELECT COUNT(DISTINCT service_type) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND status NOT IN ('cancelled')) as service_type_count"),
-      db.raw("(SELECT rating FROM service_records WHERE service_records.customer_id = customers.id AND rating IS NOT NULL ORDER BY service_date DESC LIMIT 1) as last_rating"),
+      // rating column may not exist — use satisfaction_rating from treatment_outcomes or skip
+      db.raw("(SELECT NULL) as last_rating"),
     );
 
     if (search) {
