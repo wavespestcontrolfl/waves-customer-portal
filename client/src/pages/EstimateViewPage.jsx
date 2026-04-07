@@ -723,6 +723,34 @@ export default function EstimateViewPage() {
                 </div>
               );
             })}
+
+            {/* Incentive offers */}
+            <div style={{ marginTop: 16, padding: 14, borderRadius: 12, background: `linear-gradient(135deg, ${B.green}08, ${B.green}15)`, border: `1.5px solid ${B.green}33` }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: B.green, fontFamily: FONTS.heading, marginBottom: 8 }}>
+                Save on your initial service:
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20, flexShrink: 0 }}>🎉</span>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
+                      Accept today — <span style={{ color: B.green }}>Initial service FREE</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: B.grayDark }}>Pay in full for your first year and the ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0))} initial visit is waived completely.</div>
+                  </div>
+                </div>
+                <div style={{ height: 1, background: `${B.green}22` }} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20, flexShrink: 0 }}>⚡</span>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
+                      Accept within 24 hours — <span style={{ color: B.green }}>50% off initial service</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: B.grayDark }}>Sign up within 24 hours and pay just ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0) / 2)} instead of ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0))}.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
