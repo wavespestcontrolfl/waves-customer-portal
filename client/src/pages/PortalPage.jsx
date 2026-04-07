@@ -5626,44 +5626,44 @@ function ServiceTracker() {
       </div>
 
       {/* Wave divider */}
-      <div style={{ height: 14, background: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 60'%3E%3Cpath d='M0,0 L0,25 C200,50 400,5 600,25 C800,45 1000,5 1200,25 L1200,0Z' fill='%231976D2'/%3E%3C/svg%3E") no-repeat top`, backgroundSize: '100% 100%', backgroundColor: B.blueSurface }} />
+      <div style={{ height: 10, background: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 60'%3E%3Cpath d='M0,0 L0,25 C200,50 400,5 600,25 C800,45 1000,5 1200,25 L1200,0Z' fill='%231976D2'/%3E%3C/svg%3E") no-repeat top`, backgroundSize: '100% 100%', backgroundColor: B.blueSurface }} />
 
       {/* Content */}
-      <div style={{ background: B.blueSurface, padding: '4px 16px 16px' }}>
+      <div style={{ background: B.blueSurface, padding: '2px 14px 10px' }}>
         {/* Status */}
         <div style={{
-          padding: '16px 18px', borderRadius: 14,
+          padding: '10px 12px', borderRadius: 10,
           background: step === 7 ? '#E8F5E9' : B.white,
           border: `1px solid ${step === 7 ? B.green + '33' : B.bluePale}`,
-          boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-          display: 'flex', alignItems: 'flex-start', gap: 14,
+          boxShadow: '0 1px 4px rgba(0,0,0,0.03)',
+          display: 'flex', alignItems: 'flex-start', gap: 10,
         }}>
           {/* Date badge */}
           <div style={{
-            width: 48, height: 52, borderRadius: 10, flexShrink: 0,
+            width: 40, height: 44, borderRadius: 8, flexShrink: 0,
             background: step === 7 ? B.green : B.red,
             display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            color: '#fff', boxShadow: `0 2px 8px ${step === 7 ? B.green : B.red}40`,
+            color: '#fff', boxShadow: `0 2px 6px ${step === 7 ? B.green : B.red}40`,
           }}>
-            <div style={{ fontSize: 20, fontWeight: 900, fontFamily: FONTS.ui, lineHeight: 1 }}>
+            <div style={{ fontSize: 18, fontWeight: 900, fontFamily: FONTS.ui, lineHeight: 1 }}>
               {new Date().getDate()}
             </div>
-            <div style={{ fontSize: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 1 }}>
+            <div style={{ fontSize: 7, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 1 }}>
               {new Date().toLocaleDateString('en-US', { month: 'short' })}
             </div>
           </div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1.2 }}>
               {svcType}
             </div>
-            <div style={{ fontSize: 13, color: B.grayDark, marginTop: 3, lineHeight: 1.4 }}>
+            <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2, lineHeight: 1.3 }}>
               {step === 7 ? 'Service complete!' : step === 3 ? `${techName} is on the way${eta ? ` — ~${eta} min` : ''}` : step >= 4 ? `${techName} is on your property` : `Scheduled for ${window}`}
               {estComplete && step >= 4 && step < 7 && (
                 <span style={{ color: B.wavesBlue, fontWeight: 600 }}> · Est. done ~{estComplete.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</span>
               )}
             </div>
             {stepTs && (
-              <div style={{ fontSize: 12, color: '#90A4AE', marginTop: 3 }}>
+              <div style={{ fontSize: 11, color: '#90A4AE', marginTop: 2 }}>
                 {techName} · {new Date(stepTs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
               </div>
             )}
@@ -5671,44 +5671,44 @@ function ServiceTracker() {
         </div>
 
         {/* Two columns */}
-        <div style={{ display: 'flex', gap: 12, marginTop: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
           {/* Left */}
-          <div style={{ flex: '1 1 280px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ flex: '1 1 280px', display: 'flex', flexDirection: 'column', gap: 6 }}>
             {/* ETA */}
             {step === 3 && eta && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderRadius: 12, background: B.white, border: `1px solid ${B.bluePale}` }}>
-                <span style={{ fontSize: 22 }}>🚐</span>
-                <div style={{ flex: 1 }}><div style={{ height: 6, borderRadius: 3, background: B.grayLight, overflow: 'hidden' }}><div style={{ height: '100%', borderRadius: 3, background: `linear-gradient(90deg, ${B.wavesBlue}, ${B.green})`, width: `${Math.max(10, 100 - eta * 3)}%`, transition: 'width 1s ease' }} /></div></div>
-                <span style={{ fontSize: 18, fontWeight: 900, color: B.navy, fontFamily: FONTS.ui }}>~{eta}m</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
+                <span style={{ fontSize: 18 }}>🚐</span>
+                <div style={{ flex: 1 }}><div style={{ height: 5, borderRadius: 3, background: B.grayLight, overflow: 'hidden' }}><div style={{ height: '100%', borderRadius: 3, background: `linear-gradient(90deg, ${B.wavesBlue}, ${B.green})`, width: `${Math.max(10, 100 - eta * 3)}%`, transition: 'width 1s ease' }} /></div></div>
+                <span style={{ fontSize: 16, fontWeight: 900, color: B.navy, fontFamily: FONTS.ui }}>~{eta}m</span>
               </div>
             )}
 
             {/* Tech card */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderRadius: 12, background: B.white, border: `1px solid ${B.bluePale}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
               <div style={{
-                width: 48, height: 48, borderRadius: '50%',
+                width: 38, height: 38, borderRadius: '50%',
                 background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
-                border: `2.5px solid ${B.yellow}`,
+                border: `2px solid ${B.yellow}`,
                 color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 17, fontWeight: 800, fontFamily: FONTS.heading, flexShrink: 0,
+                fontSize: 14, fontWeight: 800, fontFamily: FONTS.heading, flexShrink: 0,
               }}>{techInitials}</div>
               <div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{techName}</div>
-                <span style={{ display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '3px 9px', borderRadius: 10, background: B.yellow, color: '#1E1E2B', fontFamily: FONTS.ui, marginTop: 2 }}>{svcType}</span>
+                <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{techName}</div>
+                <span style={{ display: 'inline-block', fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: B.yellow, color: '#1E1E2B', fontFamily: FONTS.ui, marginTop: 1 }}>{svcType}</span>
               </div>
             </div>
 
             {/* Live notes */}
             {notes.length > 0 && (
-              <div style={{ padding: '12px 14px', borderRadius: 12, background: B.white, border: `1px solid ${B.bluePale}` }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Live Updates</div>
+              <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 5 }}>Live Updates</div>
                 {notes.map((n, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 8, marginBottom: i < notes.length - 1 ? 8 : 0 }}>
+                  <div key={i} style={{ display: 'flex', gap: 6, marginBottom: i < notes.length - 1 ? 5 : 0 }}>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 10, flexShrink: 0 }}>
-                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: B.wavesBlue }} />
-                      {i < notes.length - 1 && <div style={{ width: 2, flex: 1, background: B.bluePale, marginTop: 2 }} />}
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: B.wavesBlue }} />
+                      {i < notes.length - 1 && <div style={{ width: 1.5, flex: 1, background: B.bluePale, marginTop: 1 }} />}
                     </div>
-                    <div><div style={{ fontSize: 12, color: B.navy, fontWeight: 500, lineHeight: 1.4 }}>{n.note}</div><div style={{ fontSize: 10, color: '#90A4AE' }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
+                    <div><div style={{ fontSize: 11, color: B.navy, fontWeight: 500, lineHeight: 1.3 }}>{n.note}</div><div style={{ fontSize: 9, color: '#90A4AE' }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
                   </div>
                 ))}
               </div>
@@ -5716,79 +5716,79 @@ function ServiceTracker() {
           </div>
 
           {/* Right */}
-          <div style={{ flex: '1 1 220px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {/* Office card */}
-            <div style={{ padding: '12px 14px', borderRadius: 12, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>{office.name}</div>
-              <div style={{ fontSize: 12, color: B.grayDark, marginBottom: 8 }}>{office.area}</div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '7px 10px', fontSize: 11, background: B.red, color: '#fff', textDecoration: 'none' }}>📞 Call</a>
-                <a href={`sms:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '7px 10px', fontSize: 11, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}>💬 Text</a>
+          <div style={{ flex: '1 1 220px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {/* Office card — compact */}
+            <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{office.name}</div>
+                <div style={{ fontSize: 9, color: '#90A4AE' }}>Mon-Fri 7-5 · Sat 8-12</div>
               </div>
-              <div style={{ fontSize: 10, color: '#90A4AE', marginTop: 6 }}>Mon-Fri 7AM-5PM · Sat 8AM-12PM</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.red, color: '#fff', textDecoration: 'none' }}>📞 Call</a>
+                <a href={`sms:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}>💬 Text</a>
+              </div>
             </div>
 
-            {/* Pre-arrival checklist */}
+            {/* Pre-arrival checklist — compact */}
             {step < 5 && (
-              <div style={{ padding: '12px 14px', borderRadius: 12, background: B.white, border: `1px solid ${B.bluePale}` }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>Before Your Tech Arrives</div>
+              <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Before Your Tech Arrives</div>
                 {[
                   propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
-                    ? { icon: '✅', text: 'Gate code on file — your tech has it', ok: true }
-                    : { icon: '⚠️', text: 'No gate code on file — update Property Preferences', ok: false },
+                    ? { icon: '✅', text: 'Gate code on file', ok: true }
+                    : { icon: '⚠️', text: 'No gate code on file', ok: false },
                   propertyPrefs?.petCount > 0 && propertyPrefs?.petSecuredPlan
-                    ? { icon: '✅', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 60)}${propertyPrefs.petSecuredPlan.length > 60 ? '...' : ''}`, ok: true }
-                    : { icon: '⚠️', text: 'Got pets? Secure them before tech arrives', ok: false },
+                    ? { icon: '✅', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 40)}`, ok: true }
+                    : { icon: '⚠️', text: 'Secure pets before tech arrives', ok: false },
                   { icon: '🔓', text: 'Ensure gates are unlocked', ok: true },
                   ...(isLawn ? [
-                    { icon: '💧', text: 'Turn off irrigation 24hrs before treatment', ok: true },
-                    { icon: '🌿', text: "Don't mow 3 days before or after treatment", ok: true },
+                    { icon: '💧', text: 'Turn off irrigation 24hrs before', ok: true },
+                    { icon: '🌿', text: "Don't mow 3 days before/after", ok: true },
                   ] : []),
                   ...(isPest ? [
-                    { icon: '🏠', text: 'Clear counters and floors along baseboards', ok: true },
-                    { icon: '🐠', text: 'Cover fish tanks and pet food/water bowls', ok: true },
+                    { icon: '🏠', text: 'Clear counters and baseboards', ok: true },
+                    { icon: '🐠', text: 'Cover fish tanks and pet bowls', ok: true },
                   ] : []),
                   ...(isMosquito ? [
-                    { icon: '💧', text: 'Remove standing water from yard', ok: true },
-                    { icon: '✅', text: 'Exterior only — no indoor prep needed', ok: true },
+                    { icon: '💧', text: 'Remove standing water', ok: true },
+                    { icon: '✅', text: 'Exterior only — no indoor prep', ok: true },
                   ] : []),
                   ...(isTermite ? [
-                    { icon: '🏠', text: 'Clear access to garage, attic, and crawl spaces', ok: true },
+                    { icon: '🏠', text: 'Clear access to garage/attic', ok: true },
                   ] : []),
                 ].map((item, i) => (
                   <div key={i} style={{
-                    display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 5,
-                    padding: item.ok ? '0' : '4px 0 4px 0',
-                    borderLeft: item.ok ? 'none' : `3px solid ${B.orange}`,
-                    paddingLeft: item.ok ? 0 : 8,
+                    display: 'flex', gap: 5, alignItems: 'center', marginBottom: 3,
+                    borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
+                    paddingLeft: item.ok ? 0 : 6,
                   }}>
-                    <span style={{ flexShrink: 0, fontSize: 12 }}>{item.icon}</span>
-                    <span style={{ fontSize: item.ok ? 12 : 12, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.grayDark : B.navy, lineHeight: 1.4 }}>{item.text}</span>
+                    <span style={{ flexShrink: 0, fontSize: 11 }}>{item.icon}</span>
+                    <span style={{ fontSize: 11, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.grayDark : B.navy, lineHeight: 1.3 }}>{item.text}</span>
                   </div>
                 ))}
               </div>
             )}
 
             {/* What to Expect */}
-            <div style={{ borderRadius: 12, background: B.white, border: `1px solid ${B.bluePale}`, overflow: 'hidden' }}>
+            <div style={{ borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}`, overflow: 'hidden' }}>
               <div onClick={() => setShowExpect(!showExpect)} style={{
-                padding: '10px 14px', cursor: 'pointer',
+                padding: '7px 12px', cursor: 'pointer',
                 display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               }}>
-                <span style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>What to Expect</span>
-                <span style={{ fontSize: 14, color: B.grayMid, transform: showExpect ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>What to Expect</span>
+                <span style={{ fontSize: 12, color: B.grayMid, transform: showExpect ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
               </div>
               {showExpect && (
-                <div style={{ padding: '0 14px 12px', borderTop: `1px solid ${B.grayLight}` }}>
-                  <div style={{ fontSize: 12, color: B.grayDark, lineHeight: 1.65, marginTop: 8 }}>{whatToExpect}</div>
+                <div style={{ padding: '0 12px 8px', borderTop: `1px solid ${B.grayLight}` }}>
+                  <div style={{ fontSize: 11, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>{whatToExpect}</div>
                 </div>
               )}
             </div>
 
             {/* Completion summary */}
             {step === 7 && summary && (
-              <div style={{ padding: '12px 14px', borderRadius: 12, background: '#E8F5E9', border: `1px solid ${B.green}33` }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginBottom: 6 }}>Service Summary</div>
+              <div style={{ padding: '8px 12px', borderRadius: 10, background: '#E8F5E9', border: `1px solid ${B.green}33` }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: B.green, marginBottom: 4 }}>Service Summary</div>
                 {summary.productsApplied?.length > 0 && (
                   <div style={{ marginBottom: 6 }}>
                     <div style={{ fontSize: 10, color: B.grayDark, fontWeight: 600, marginBottom: 3 }}>Products:</div>
@@ -5806,7 +5806,7 @@ function ServiceTracker() {
 
       {/* Demo controls */}
       {step < 7 && (
-        <div style={{ padding: '10px 16px 14px', background: B.white, borderTop: `1px solid ${B.grayLight}`, display: 'flex', gap: 6, alignItems: 'center' }}>
+        <div style={{ padding: '6px 14px 8px', background: B.white, borderTop: `1px solid ${B.grayLight}`, display: 'flex', gap: 6, alignItems: 'center' }}>
           <button onClick={handleAdvance} style={{ ...BUTTON_BASE, padding: '8px 14px', fontSize: 11, background: B.red, color: '#fff', flexShrink: 0 }}>Next Step →</button>
           <input type="text" value={demoNote} onChange={e => setDemoNote(e.target.value)} placeholder="Add note..." style={{ flex: 1, padding: '7px 10px', borderRadius: 8, fontSize: 11, border: `1px solid ${B.grayLight}`, outline: 'none', fontFamily: FONTS.body, color: B.navy, boxSizing: 'border-box' }} onKeyDown={e => e.key === 'Enter' && handleAddNote()} />
           <button onClick={handleAddNote} disabled={!demoNote.trim()} style={{ ...BUTTON_BASE, padding: '8px 10px', fontSize: 11, background: B.wavesBlue, color: '#fff', flexShrink: 0, opacity: demoNote.trim() ? 1 : 0.5 }}>+Note</button>

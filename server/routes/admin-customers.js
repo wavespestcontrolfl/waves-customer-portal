@@ -4,13 +4,14 @@ const db = require('../models/db');
 const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/customers — directory + pipeline
 router.get('/', async (req, res, next) => {
   try {
-    const { search, stage, tier, tag, source, area, sort = 'lead_score', order = 'desc', page = 1, limit = 100 } = req.query;
+    const { search, stage, tier, tag, source, area, city, sort = 'lead_score', order = 'desc', page = 1, limit = 100 } = req.query;
 
     let query = db('customers').select(
       'customers.*',
@@ -18,6 +19,9 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed')) as next_service_date"),
       db.raw("(SELECT string_agg(tag, ',') FROM customer_tags WHERE customer_tags.customer_id = customers.id) as tags_str"),
+      db.raw("(SELECT string_agg(DISTINCT service_type, ',') FROM service_records WHERE service_records.customer_id = customers.id) as service_types"),
+      db.raw("(SELECT COUNT(DISTINCT service_type) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND status NOT IN ('cancelled')) as service_type_count"),
+      db.raw("(SELECT rating FROM service_records WHERE service_records.customer_id = customers.id AND rating IS NOT NULL ORDER BY service_date DESC LIMIT 1) as last_rating"),
     );
 
     if (search) {
@@ -30,7 +34,9 @@ router.get('/', async (req, res, next) => {
       });
     }
     if (stage) query = query.where('pipeline_stage', stage);
-    if (tier) query = query.where('waveguard_tier', tier);
+    if (tier === 'none') query = query.whereNull('waveguard_tier');
+    else if (tier) query = query.where('waveguard_tier', tier);
+    if (city) query = query.whereILike('city', city);
     if (source) query = query.where('lead_source', source);
     if (area) query = query.whereILike('city', `%${area}%`);
     if (tag) query = query.whereExists(function () {
@@ -70,6 +76,9 @@ router.get('/', async (req, res, next) => {
         lifetimeRevenue: parseFloat(c.lifetime_revenue || 0),
         totalServices: parseInt(c.total_services || c.services_count || 0),
         lastServiceDate: c.last_service_date, nextServiceDate: c.next_service_date,
+        serviceTypes: c.service_types || '',
+        serviceCount: parseInt(c.service_type_count || 0),
+        lastRating: c.last_rating != null ? parseInt(c.last_rating) : null,
         tags: (c.tags_str || '').split(',').filter(Boolean),
         onboardingComplete: c.onboarding_complete,
       })),
@@ -427,6 +436,41 @@ router.delete('/:id', async (req, res, next) => {
     await db('customers').where({ id: req.params.id }).del();
     logger.info(`[customers] Deleted customer ${customer.first_name} ${customer.last_name} (${req.params.id})`);
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/customers/fix-tiers — Recalculate tiers from service count
+router.post('/fix-tiers', async (req, res, next) => {
+  try {
+    const customers = await db('customers')
+      .select('customers.id', 'customers.waveguard_tier')
+      .whereIn('customers.pipeline_stage', ['active_customer', 'won']);
+
+    let updated = 0;
+    for (const c of customers) {
+      // Count distinct recurring service types for this customer
+      const services = await db('scheduled_services')
+        .where({ customer_id: c.id })
+        .whereIn('status', ['scheduled', 'confirmed', 'completed'])
+        .countDistinct('service_type as count')
+        .first();
+
+      const count = parseInt(services?.count || 0);
+      let newTier = null;
+      if (count === 0) newTier = null;
+      else if (count === 1) newTier = 'Bronze';
+      else if (count === 2) newTier = 'Silver';
+      else if (count === 3) newTier = 'Gold';
+      else newTier = 'Platinum';
+
+      if (newTier !== c.waveguard_tier) {
+        await db('customers').where({ id: c.id }).update({ waveguard_tier: newTier });
+        updated++;
+      }
+    }
+
+    logger.info(`[customers] Fix tiers: ${updated} of ${customers.length} customers updated`);
+    res.json({ success: true, updated, total: customers.length });
   } catch (err) { next(err); }
 });
 

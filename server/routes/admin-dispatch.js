@@ -147,7 +147,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const svc = await db('scheduled_services').where({ id: req.params.serviceId })
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
-      .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.city', 'technicians.name as tech_name')
+      .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.city', 'customers.property_type', 'customers.monthly_rate as cust_monthly_rate', 'technicians.name as tech_name')
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
@@ -186,6 +186,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     });
 
     await db('service_status_log').insert({ scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId });
+
+    // Auto-generate invoice from completed service
+    try {
+      const InvoiceService = require('../services/invoice');
+      await InvoiceService.createFromService(record.id, {
+        amount: svc.cust_monthly_rate || 0,
+        description: svc.service_type,
+        taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
+      });
+    } catch (invErr) {
+      logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
+    }
 
     // Completion SMS — link to Visit Reports in portal
     if (svc.cust_phone) {

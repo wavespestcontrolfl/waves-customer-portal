@@ -600,6 +600,9 @@ export default function CustomersPage() {
   const [sortDir, setSortDir] = useState('asc');
   const [showAddModal, setShowAddModal] = useState(false);
   const [syncingSquare, setSyncingSquare] = useState(false);
+  const [squareSyncInfo, setSquareSyncInfo] = useState(null);
+  const [filterCity, setFilterCity] = useState('all');
+  const [fixingTiers, setFixingTiers] = useState(false);
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -668,6 +671,7 @@ export default function CustomersPage() {
     if (search.trim()) params.set('search', search.trim());
     if (filterStage !== 'all') params.set('stage', filterStage);
     if (filterTier !== 'all') params.set('tier', filterTier);
+    if (filterCity !== 'all') params.set('city', filterCity);
     params.set('page', String(pg));
     params.set('limit', '100');
     adminFetch(`/admin/customers?${params.toString()}`)
@@ -686,7 +690,7 @@ export default function CustomersPage() {
       .catch(() => {}); // silent fail for pipeline
   };
 
-  useEffect(() => { setPage(1); loadCustomers(1); }, [filterStage, filterTier]);
+  useEffect(() => { setPage(1); loadCustomers(1); }, [filterStage, filterTier, filterCity]);
   useEffect(() => { if (view === 'pipeline') loadPipeline(); }, [view]);
 
   // Debounced search
@@ -702,6 +706,47 @@ export default function CustomersPage() {
       setSortBy(key);
       setSortDir('asc');
     }
+  };
+
+  const handleFixTiers = async () => {
+    if (!confirm('Recalculate all customer tiers based on active service count?\n\n0 services = No Plan\n1 = Bronze\n2 = Silver\n3 = Gold\n4+ = Platinum')) return;
+    setFixingTiers(true);
+    try {
+      const result = await adminFetch('/admin/customers/fix-tiers', { method: 'POST', body: '{}' });
+      alert(`Tiers updated: ${result.updated || 0} customers recalculated`);
+      loadCustomers();
+    } catch (e) {
+      alert('Fix tiers failed: ' + e.message);
+    }
+    setFixingTiers(false);
+  };
+
+  const handleDeleteCustomer = async (customerId, customerName) => {
+    if (!confirm(`Delete ${customerName}? This cannot be undone.`)) return;
+    try {
+      await fetch(`${API_BASE}/admin/customers/${customerId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` } });
+      loadCustomers();
+    } catch (e) { alert('Delete failed: ' + e.message); }
+  };
+
+  // Service type icons helper
+  const serviceIcons = (c) => {
+    const icons = [];
+    const types = (c.serviceTypes || c.service_types || '').toLowerCase();
+    if (types.includes('pest')) icons.push({ icon: 'P', label: 'Pest', color: D.teal });
+    if (types.includes('lawn')) icons.push({ icon: 'L', label: 'Lawn', color: D.green });
+    if (types.includes('mosquito')) icons.push({ icon: 'M', label: 'Mosquito', color: D.amber });
+    if (types.includes('termite')) icons.push({ icon: 'T', label: 'Termite', color: D.red });
+    return icons;
+  };
+
+  // Auto-tier from service count
+  const tierFromServices = (count) => {
+    if (!count || count === 0) return null;
+    if (count === 1) return 'Bronze';
+    if (count === 2) return 'Silver';
+    if (count === 3) return 'Gold';
+    return 'Platinum';
   };
 
   // Client-side sort
@@ -827,6 +872,7 @@ export default function CustomersPage() {
               if (!r.ok) {
                 alert(`Sync failed: ${result.error}`);
               } else {
+                setSquareSyncInfo({ count: result.totalFetched || 0, lastSync: new Date().toISOString() });
                 alert(`Square sync: ${result.totalFetched} fetched, ${result.created} new, ${result.updated} updated, ${result.skipped} unchanged${result.errors?.length ? '\n' + result.errors.length + ' errors' : ''}`);
                 loadCustomers();
               }
@@ -849,29 +895,75 @@ export default function CustomersPage() {
       {/* ====================== DIRECTORY VIEW ====================== */}
       {view === 'directory' && (
         <>
-          {/* Filter bar */}
-          <div className="customers-filter-bar" style={{
-            display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center',
-            padding: '10px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
+          {/* Square sync status + Fix tiers */}
+          <div style={{
+            display: 'flex', gap: 10, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center',
+            padding: '8px 14px', background: `${D.card}cc`, border: `1px solid ${D.border}`, borderRadius: 10,
           }}>
-            <Select
-              value={filterStage}
-              onChange={setFilterStage}
-              options={[{ value: 'all', label: 'All Stages' }, ...STAGES.map(s => ({ value: s.key, label: s.label }))]}
-            />
-            <Select
-              value={filterTier}
-              onChange={setFilterTier}
-              options={[
-                { value: 'all', label: 'All Tiers' },
-                { value: 'Platinum', label: 'Platinum' },
-                { value: 'Gold', label: 'Gold' },
-                { value: 'Silver', label: 'Silver' },
-                { value: 'Bronze', label: 'Bronze' },
-              ]}
-            />
+            {squareSyncInfo && (
+              <span style={{ fontSize: 11, color: D.muted, fontFamily: 'JetBrains Mono, monospace' }}>
+                Square sync: {squareSyncInfo.count || 0} records · {squareSyncInfo.lastSync ? timeAgo(squareSyncInfo.lastSync) : 'never'}
+              </span>
+            )}
             <div style={{ flex: 1 }} />
-            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.muted }}>
+            <button onClick={handleFixTiers} disabled={fixingTiers} style={{
+              padding: '5px 12px', background: 'transparent', border: `1px solid ${D.amber}66`, borderRadius: 6,
+              color: D.amber, fontSize: 11, fontWeight: 600, cursor: 'pointer', opacity: fixingTiers ? 0.5 : 1,
+            }}>{fixingTiers ? 'Fixing...' : 'Fix Tiers'}</button>
+          </div>
+
+          {/* Filter pills — City */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>City:</span>
+            {['all', 'Lakewood Ranch', 'Parrish', 'Sarasota', 'Venice', 'Bradenton'].map(city => (
+              <button key={city} onClick={() => setFilterCity(city)} style={{
+                padding: '4px 10px', borderRadius: 9999, border: `1px solid ${filterCity === city ? D.teal : D.border}`,
+                background: filterCity === city ? `${D.teal}22` : 'transparent',
+                color: filterCity === city ? D.teal : D.muted, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+              }}>{city === 'all' ? 'All' : city}</button>
+            ))}
+          </div>
+
+          {/* Filter pills — Tier */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>Tier:</span>
+            {[
+              { value: 'all', label: 'All' },
+              { value: 'Bronze', label: 'Bronze' },
+              { value: 'Silver', label: 'Silver' },
+              { value: 'Gold', label: 'Gold' },
+              { value: 'Platinum', label: 'Platinum' },
+              { value: 'none', label: 'No Plan' },
+            ].map(t => (
+              <button key={t.value} onClick={() => setFilterTier(t.value)} style={{
+                padding: '4px 10px', borderRadius: 9999,
+                border: `1px solid ${filterTier === t.value ? (TIER_COLORS[t.value] || D.teal) : D.border}`,
+                background: filterTier === t.value ? `${TIER_COLORS[t.value] || D.teal}22` : 'transparent',
+                color: filterTier === t.value ? (TIER_COLORS[t.value] || D.teal) : D.muted,
+                fontSize: 11, fontWeight: 600, cursor: 'pointer',
+              }}>{t.label}</button>
+            ))}
+          </div>
+
+          {/* Filter pills — Status */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>Status:</span>
+            {[
+              { value: 'all', label: 'All' },
+              { value: 'active_customer', label: 'Active' },
+              { value: 'new_lead', label: 'New Lead' },
+              { value: 'at_risk', label: 'At Risk' },
+            ].map(s => (
+              <button key={s.value} onClick={() => setFilterStage(s.value)} style={{
+                padding: '4px 10px', borderRadius: 9999,
+                border: `1px solid ${filterStage === s.value ? D.teal : D.border}`,
+                background: filterStage === s.value ? `${D.teal}22` : 'transparent',
+                color: filterStage === s.value ? D.teal : D.muted,
+                fontSize: 11, fontWeight: 600, cursor: 'pointer',
+              }}>{s.label}</button>
+            ))}
+            <div style={{ flex: 1 }} />
+            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.muted, alignSelf: 'center' }}>
               {sorted.length} result{sorted.length !== 1 ? 's' : ''}
             </span>
           </div>
@@ -879,18 +971,18 @@ export default function CustomersPage() {
           {/* Table header */}
           <div className="customers-table-header" style={{
             display: 'grid',
-            gridTemplateColumns: '2fr 1.1fr 0.8fr 0.7fr 0.6fr 0.6fr 0.7fr 0.9fr 0.7fr 0.4fr',
+            gridTemplateColumns: '1.8fr 0.6fr 0.6fr 0.6fr 0.5fr 0.5fr 0.7fr 0.7fr 0.5fr 0.5fr',
             gap: 6, padding: '10px 16px', marginBottom: 4,
           }}>
-            <SortHeader label="Name / Email" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-            <SortHeader label="Phone" sortKey="phone" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>City</div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Stage</div>
+            <SortHeader label="Name" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Services</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Tier</div>
             <SortHeader label="$/Mo" sortKey="monthlyRate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-            <SortHeader label="Revenue" sortKey="revenue" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Lead Source</div>
-            <SortHeader label="Contact" sortKey="lastContactDate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>City</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Next Svc</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Last Svc</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Stage</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Rating</div>
             <div />
           </div>
 
@@ -905,14 +997,17 @@ export default function CustomersPage() {
               <div style={{ fontSize: 13, marginTop: 4 }}>Try adjusting your filters or add a new customer</div>
             </div>
           ) : (
-            sorted.map(c => (
+            sorted.map(c => {
+              const icons = serviceIcons(c);
+              const computedTier = c.serviceCount != null ? tierFromServices(c.serviceCount) : null;
+              return (
               <div key={c.id} style={{ marginBottom: 6 }}>
                 <div
                   className="customers-row-grid"
                   onClick={() => expandCustomer(c.id)}
                   style={{
                     display: 'grid',
-                    gridTemplateColumns: '2fr 1.1fr 0.8fr 0.7fr 0.6fr 0.6fr 0.7fr 0.9fr 0.7fr 0.4fr',
+                    gridTemplateColumns: '1.8fr 0.6fr 0.6fr 0.6fr 0.5fr 0.5fr 0.7fr 0.7fr 0.5fr 0.5fr',
                     gap: 6, padding: '12px 16px', alignItems: 'center',
                     background: expandedId === c.id ? `${D.teal}08` : D.card,
                     border: `1px solid ${expandedId === c.id ? D.teal : D.border}`,
@@ -920,53 +1015,66 @@ export default function CustomersPage() {
                     cursor: 'pointer', transition: 'border-color 0.15s',
                   }}
                 >
-                  {/* Name + Email */}
+                  {/* Name + Phone */}
                   <div>
                     <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.white }}>
                       {c.firstName} {c.lastName}
                     </div>
-                    <div style={{ fontSize: 11, color: D.muted, marginTop: 1 }}>{c.email || 'No email'}</div>
-                  </div>
-                  {/* Phone — clickable */}
-                  <div>
                     {c.phone ? (
-                      <a
-                        href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                        onClick={e => e.stopPropagation()}
-                        style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.teal, textDecoration: 'none' }}
-                      >
-                        {c.phone}
-                      </a>
+                      <a href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`} onClick={e => e.stopPropagation()} style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: D.teal, textDecoration: 'none' }}>{c.phone}</a>
                     ) : (
-                      <span style={{ fontSize: 12, color: D.muted }}>--</span>
+                      <span style={{ fontSize: 11, color: D.muted }}>{c.email || '--'}</span>
                     )}
                   </div>
-                  {/* City */}
-                  <div style={{ fontSize: 12, color: D.muted }}>{c.city || '--'}</div>
-                  {/* Stage */}
-                  <div><StageBadge stage={c.pipelineStage} /></div>
+                  {/* Services icons */}
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    {icons.length > 0 ? icons.map(ic => (
+                      <span key={ic.label} title={ic.label} style={{
+                        display: 'inline-block', padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                        background: `${ic.color}22`, color: ic.color, letterSpacing: 0.3,
+                      }}>{ic.icon}</span>
+                    )) : <span style={{ fontSize: 11, color: D.muted }}>--</span>}
+                  </div>
                   {/* Tier */}
                   <div><TierBadge tier={detectTier(c)} /></div>
                   {/* Monthly rate */}
                   <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: c.monthlyRate ? D.green : D.muted }}>
-                    {c.monthlyRate ? `$${c.monthlyRate}/mo` : '--'}
+                    {c.monthlyRate ? `$${c.monthlyRate}` : '--'}
                   </div>
-                  {/* Revenue */}
-                  <div style={{ fontSize: 12, color: c.lifetimeRevenue ? D.green : D.muted }}>
-                    {c.lifetimeRevenue ? `$${c.lifetimeRevenue.toFixed(0)}` : '--'}
+                  {/* City */}
+                  <div style={{ fontSize: 11, color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.city || '--'}</div>
+                  {/* Next service date */}
+                  <div style={{ fontSize: 11, color: c.nextServiceDate ? D.teal : D.muted }}>
+                    {c.nextServiceDate ? new Date(c.nextServiceDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '--'}
                   </div>
-                  {/* Lead Source */}
-                  <div style={{ fontSize: 11, color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {c.leadSource || '--'}
+                  {/* Last service date */}
+                  <div style={{ fontSize: 11, color: D.muted }}>
+                    {c.lastServiceDate ? new Date(c.lastServiceDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '--'}
                   </div>
-                  {/* Last contact */}
-                  <div style={{ fontSize: 11, color: D.muted }}>{timeAgo(c.lastContactDate)}</div>
-                  {/* Edit */}
+                  {/* Stage */}
+                  <div><StageBadge stage={c.pipelineStage} /></div>
+                  {/* Satisfaction / Rating */}
                   <div>
+                    {c.lastRating != null ? (
+                      <span style={{ fontSize: 12, color: c.lastRating >= 4 ? D.green : c.lastRating >= 3 ? D.amber : D.red, fontWeight: 600 }}>
+                        {'*'.repeat(c.lastRating)}{c.lastRating >= 4 ? '' : ''}
+                      </span>
+                    ) : c.leadScore != null ? (
+                      <ScoreDot score={c.leadScore} />
+                    ) : (
+                      <span style={{ fontSize: 11, color: D.muted }}>--</span>
+                    )}
+                  </div>
+                  {/* Actions: Edit + Delete */}
+                  <div style={{ display: 'flex', gap: 4 }}>
                     <button onClick={e => { e.stopPropagation(); startEdit(c); }} style={{
-                      padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6,
-                      color: D.muted, fontSize: 11, cursor: 'pointer',
+                      padding: '4px 8px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6,
+                      color: D.muted, fontSize: 10, cursor: 'pointer',
                     }}>Edit</button>
+                    <button onClick={e => { e.stopPropagation(); handleDeleteCustomer(c.id, `${c.firstName} ${c.lastName}`); }} style={{
+                      padding: '4px 6px', background: 'transparent', border: `1px solid ${D.red}44`, borderRadius: 6,
+                      color: D.red, fontSize: 10, cursor: 'pointer', opacity: 0.7,
+                    }}>x</button>
                   </div>
                 </div>
 
@@ -1100,7 +1208,7 @@ export default function CustomersPage() {
                   </div>
                 )}
               </div>
-            ))
+            );})
           )}
           {/* Pagination */}
           {totalPages > 1 && (
