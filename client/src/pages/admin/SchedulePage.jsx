@@ -2011,6 +2011,9 @@ export default function SchedulePage() {
   const [completingService, setCompletingService] = useState(null);
   const [rescheduleService, setRescheduleService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
+  const [showNewAppt, setShowNewAppt] = useState(false);
+  const [newAppt, setNewAppt] = useState({ customerId: '', customerSearch: '', customerResults: [], serviceType: 'Pest Control', windowStart: '09:00', windowEnd: '11:00', notes: '' });
+  const [savingAppt, setSavingAppt] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
@@ -2258,6 +2261,9 @@ export default function SchedulePage() {
               }}>
                 {optimizing ? 'Optimizing...' : 'Optimize Routes'}
               </button>
+              <button onClick={() => setShowNewAppt(!showNewAppt)} style={{
+                ...btnBase, background: D.green, color: D.white, fontSize: 13, height: 38,
+              }}>+ New Appointment</button>
             </>
           )}
           {activeTab !== 'board' && (
@@ -2272,6 +2278,100 @@ export default function SchedulePage() {
         </div>
       </div>
       {syncMsg && <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>{syncMsg}</div>}
+
+      {/* New Appointment Form */}
+      {showNewAppt && (
+        <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.green}44`, marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>New Appointment — {new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</div>
+            <button onClick={() => setShowNewAppt(false)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
+          </div>
+
+          {/* Customer search */}
+          <div style={{ marginBottom: 12, position: 'relative' }}>
+            <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>Customer</label>
+            <input type="text" value={newAppt.customerSearch} onChange={async (e) => {
+              const val = e.target.value;
+              setNewAppt(a => ({ ...a, customerSearch: val }));
+              if (val.length >= 2) {
+                try {
+                  const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8`);
+                  setNewAppt(a => ({ ...a, customerResults: r.customers || [] }));
+                } catch {}
+              } else {
+                setNewAppt(a => ({ ...a, customerResults: [] }));
+              }
+            }} placeholder="Search by name or phone..." style={{ width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 14, outline: 'none', boxSizing: 'border-box' }} />
+            {newAppt.customerResults.length > 0 && (
+              <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 8px 8px', maxHeight: 200, overflowY: 'auto', zIndex: 20 }}>
+                {newAppt.customerResults.map(c => (
+                  <div key={c.id} onClick={() => setNewAppt(a => ({ ...a, customerId: c.id, customerSearch: `${c.firstName} ${c.lastName} — ${c.phone || ''}`, customerResults: [] }))} style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, color: D.white }}>
+                    <strong>{c.firstName} {c.lastName}</strong>
+                    <span style={{ color: D.muted, marginLeft: 8 }}>{c.phone || ''}</span>
+                    {c.tier && <span style={{ marginLeft: 8, fontSize: 10, padding: '1px 6px', borderRadius: 6, background: `${D.teal}22`, color: D.teal }}>{c.tier}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>Service Type</label>
+              <select value={newAppt.serviceType} onChange={e => setNewAppt(a => ({ ...a, serviceType: e.target.value }))} style={{ width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13, outline: 'none' }}>
+                <option value="Pest Control">Pest Control</option>
+                <option value="Lawn Care">Lawn Care</option>
+                <option value="Mosquito Treatment">Mosquito Treatment</option>
+                <option value="Tree & Shrub">Tree & Shrub</option>
+                <option value="Termite Inspection">Termite Inspection</option>
+                <option value="Rodent Service">Rodent Service</option>
+                <option value="WDO Inspection">WDO Inspection</option>
+                <option value="Assessment">Assessment</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>Start Time</label>
+              <input type="time" value={newAppt.windowStart} onChange={e => setNewAppt(a => ({ ...a, windowStart: e.target.value }))} style={{ width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>End Time</label>
+              <input type="time" value={newAppt.windowEnd} onChange={e => setNewAppt(a => ({ ...a, windowEnd: e.target.value }))} style={{ width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>Notes (optional)</label>
+            <input type="text" value={newAppt.notes} onChange={e => setNewAppt(a => ({ ...a, notes: e.target.value }))} placeholder="Any special instructions..." style={{ width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button disabled={!newAppt.customerId || savingAppt} onClick={async () => {
+              setSavingAppt(true);
+              try {
+                await adminFetch('/admin/schedule', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    customerId: newAppt.customerId,
+                    scheduledDate: date,
+                    serviceType: newAppt.serviceType,
+                    windowStart: newAppt.windowStart,
+                    windowEnd: newAppt.windowEnd,
+                    notes: newAppt.notes,
+                    sendConfirmation: true,
+                  }),
+                });
+                setShowNewAppt(false);
+                setNewAppt({ customerId: '', customerSearch: '', customerResults: [], serviceType: 'Pest Control', windowStart: '09:00', windowEnd: '11:00', notes: '' });
+                fetchSchedule(date);
+              } catch (e) { alert('Failed: ' + e.message); }
+              setSavingAppt(false);
+            }} style={{ ...btnBase, background: D.green, color: D.white, fontSize: 13, height: 40, flex: 1, opacity: !newAppt.customerId || savingAppt ? 0.5 : 1 }}>
+              {savingAppt ? 'Creating...' : 'Create Appointment'}
+            </button>
+            <button onClick={() => setShowNewAppt(false)} style={{ ...btnBase, background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, fontSize: 13, height: 40, padding: '0 20px' }}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
