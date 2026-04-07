@@ -97,7 +97,7 @@ router.get('/:date?', async (req, res, next) => {
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
     const { status, notes, lat, lng } = req.body;
-    const svc = await db('scheduled_services').where({ id: req.params.serviceId })
+    const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'customers.first_name', 'customers.phone as cust_phone', 'customers.city', 'technicians.name as tech_name')
@@ -144,7 +144,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
 router.post('/:serviceId/complete', async (req, res, next) => {
   try {
     const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview } = req.body;
-    const svc = await db('scheduled_services').where({ id: req.params.serviceId })
+    const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.city', 'customers.property_type', 'customers.monthly_rate as cust_monthly_rate', 'technicians.name as tech_name')
