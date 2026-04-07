@@ -339,7 +339,12 @@ router.put('/:id', async (req, res, next) => {
     }
     if (Object.keys(updates).length) await db('customers').where({ id: req.params.id }).update(updates);
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.message?.includes('customers_email_unique') || err.message?.includes('duplicate key')) {
+      return res.status(400).json({ error: 'That email is already in use by another customer.' });
+    }
+    next(err);
+  }
 });
 
 // PUT /api/admin/customers/:id/stage
