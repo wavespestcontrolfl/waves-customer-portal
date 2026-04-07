@@ -1216,8 +1216,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
       {/* Quick Actions Row */}
       <div style={{
-        display: 'flex', gap: 10, overflowX: 'auto', WebkitOverflowScrolling: 'touch',
-        paddingBottom: 4, scrollbarWidth: 'none',
+        display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10,
       }}>
         {[
           { icon: '🔧', label: 'Request Service', action: () => onSwitchTab?.('services') },
@@ -1227,7 +1226,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         ].map((item, i) => (
           <button key={i} onClick={item.action} style={{
             ...BUTTON_BASE, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-            padding: '14px 16px', minWidth: 90, flexShrink: 0, borderRadius: 14,
+            padding: '14px 8px', borderRadius: 14,
             background: B.white, border: `1.5px solid ${B.bluePale}`,
             color: B.navy, fontSize: 11, fontWeight: 600, fontFamily: FONTS.ui,
             boxShadow: '0 2px 8px rgba(0,0,0,0.04)',

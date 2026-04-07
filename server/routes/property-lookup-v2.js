@@ -1230,7 +1230,7 @@ Respond ONLY with valid JSON. No markdown, no explanation.`;
           { text: prompt },
         ],
       }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 2000 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2000, responseMimeType: 'application/json' },
     }),
   });
 
@@ -1240,7 +1240,16 @@ Respond ONLY with valid JSON. No markdown, no explanation.`;
   }
 
   const data = await resp.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  // Gemini 2.5+ may return multiple parts (thinking + response)
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  let text = '';
+  for (const part of parts) {
+    if (part.text) text += part.text;
+  }
+  if (!text) throw new Error('Gemini returned empty response');
+  // Try direct parse first (responseMimeType: application/json)
+  try { return JSON.parse(text); } catch {}
+  // Fallback: extract JSON from text
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Gemini returned no valid JSON');
   return JSON.parse(jsonMatch[0]);
