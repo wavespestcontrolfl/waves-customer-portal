@@ -160,11 +160,27 @@ router.get('/', async (req, res, next) => {
 
     const technicians = await db('technicians').select('id', 'name').where({ active: true }).orderBy('name');
 
+    // Fetch live weather for Lakewood Ranch area
+    let weather = {};
+    try {
+      const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=27.40&longitude=-82.40&current=temperature_2m,wind_speed_10m,precipitation_probability&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America/New_York`);
+      if (weatherRes.ok) {
+        const wd = await weatherRes.json();
+        const current = wd.current || {};
+        weather = {
+          temp: Math.round(current.temperature_2m || 0),
+          windSpeed: Math.round(current.wind_speed_10m || 0),
+          rainProbability: current.precipitation_probability || 0,
+        };
+      }
+    } catch { /* weather is optional */ }
+
     res.json({
       date, services: enriched,
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
+      weather,
       zoneColors: ZONE_COLORS, zoneLabels: ZONE_LABELS,
     });
   } catch (err) { next(err); }
