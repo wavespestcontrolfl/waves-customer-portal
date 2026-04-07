@@ -1477,6 +1477,28 @@ function DashboardTab({ customer, onSwitchTab }) {
         ))}
       </div>
 
+      {/* WaveGuard Rewards — compact dashboard card */}
+      {tier && (() => {
+        const renewalCredit = Math.min(75, Math.round(((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)) * 6.25));
+        const referralCredits = (referralStats?.totalReferrals || 0) * 25;
+        const totalCredits = renewalCredit + referralCredits;
+        return totalCredits > 0 ? (
+          <div style={{
+            background: B.white, borderRadius: 14, padding: '14px 18px',
+            border: `1.5px solid ${B.wavesBlue}22`,
+            display: 'flex', alignItems: 'center', gap: 14,
+          }}>
+            <span style={{ fontSize: 28 }}>🎖️</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Your WaveGuard Rewards</div>
+              <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2, lineHeight: 1.5 }}>
+                ${renewalCredit} renewal credit · ${referralCredits} referral credits · <strong style={{ color: B.wavesBlue }}>Total: ${totalCredits}</strong>
+              </div>
+            </div>
+          </div>
+        ) : null;
+      })()}
+
       {/* My Requests — open service requests */}
       <MyRequestsCard />
 
@@ -5115,13 +5137,20 @@ function MyPlanTab({ customer }) {
                       ✓ Request sent
                     </div>
                   ) : (
-                    <button onClick={() => {
-                      api.createRequest?.({ category: 'billing', subject: `Upgrade to ${tn} WaveGuard`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
-                      setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
-                    }} style={{
-                      ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 11,
-                      background: B.red, color: '#fff',
-                    }}>Upgrade</button>
+                    <div>
+                      <button onClick={() => {
+                        api.createRequest?.({ category: 'billing', subject: `Upgrade to ${tn} WaveGuard`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
+                        setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
+                      }} style={{
+                        ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 11,
+                        background: B.red, color: '#fff',
+                      }}>Upgrade</button>
+                      {tierIdx >= 1 && i === tierIdx + 1 && (
+                        <div style={{ fontSize: 9, color: B.green, fontWeight: 600, marginTop: 4, lineHeight: 1.3 }}>
+                          Your {tierName} loyalty credit covers ${tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25} off your first {tn} month
+                        </div>
+                      )}
+                    </div>
                   )
                 ) : (
                   <a href="sms:+19413187612?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
@@ -5153,6 +5182,38 @@ function MyPlanTab({ customer }) {
           You keep <strong style={{ color: B.green }}>${annualSavings.toFixed(0)}</strong> in your pocket.
         </div>
       </Card>
+
+      {/* Section 5b — Loyalty Rewards */}
+      {tier && (
+        <Card style={{ border: `1.5px solid ${tier.color}33`, background: `${tier.color}08` }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+            <span style={{ fontSize: 32 }}>🎖️</span>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Loyalty Rewards</div>
+              <div style={{ fontSize: 12, color: B.grayMid }}>Your {tierName} membership rewards</div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
+            {[
+              { text: `$${Math.min(75, Math.round(memberMonths * 6.25))} annual renewal credit (applied to month 13)`, icon: '💰' },
+              tierIdx < TIER_ORDER.length - 1 && {
+                text: `$${tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
+                icon: '⬆️',
+              },
+              tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: '🌀' },
+            ].filter(Boolean).map((item, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: B.grayDark, lineHeight: 1.5 }}>
+                <span style={{ fontSize: 16, flexShrink: 0 }}>{item.icon}</span>
+                {item.text}
+              </div>
+            ))}
+          </div>
+          <button onClick={() => {}} style={{
+            ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
+            background: 'none', color: B.wavesBlue, border: `1px solid ${B.wavesBlue}33`,
+          }}>See full program →</button>
+        </Card>
+      )}
 
       {/* Section 6 — Plan History Timeline */}
       <Card>
