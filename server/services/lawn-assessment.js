@@ -68,7 +68,7 @@ async function callGeminiVision(base64Image, mimeType) {
   if (!GEMINI_KEY) return null;
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`;
 
     const response = await fetch(url, {
       method: 'POST',
