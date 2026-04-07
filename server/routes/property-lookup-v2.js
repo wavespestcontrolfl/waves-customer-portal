@@ -86,11 +86,12 @@ router.post('/property-lookup', async (req, res) => {
       const wideUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=18&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
 
       const [ultraCloseB64, superCloseB64, closeB64, wideB64] = await Promise.all([
-        fetchImageAsBase64(ultraCloseUrl),
-        fetchImageAsBase64(superCloseUrl),
-        fetchImageAsBase64(closeUrlWithKey),
-        fetchImageAsBase64(wideUrlWithKey)
+        fetchImageAsBase64(ultraCloseUrl).catch(() => null),
+        fetchImageAsBase64(superCloseUrl).catch(() => null),
+        fetchImageAsBase64(closeUrlWithKey).catch(() => null),
+        fetchImageAsBase64(wideUrlWithKey).catch(() => null),
       ]);
+      console.log(`[property-lookup] Satellite images: ultra=${!!ultraCloseB64}, super=${!!superCloseB64}, close=${!!closeB64}, wide=${!!wideB64}`);
 
       result.satellite = {
         lat, lng,
@@ -987,14 +988,8 @@ function buildFieldVerifyFlags(rc, ai) {
     });
   }
 
-  // Organization-owned (rental)
-  if (rc?.ownerType === 'Organization') {
-    flags.push({
-      field: 'ownerType',
-      reason: 'Organization-owned (likely rental) — tenant may not have approval authority',
-      priority: 'LOW'
-    });
-  }
+  // Organization-owned — note for context (common in SWFL for LLCs/trusts)
+  // Don't flag as a warning — many homeowners use LLCs
 
   // Wood frame construction
   if (rc?.constructionMaterial === 'WOOD_FRAME' ||
