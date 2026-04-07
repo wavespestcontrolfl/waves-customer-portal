@@ -543,4 +543,33 @@ async function recalcBestPrice(productId) {
   }
 }
 
+// POST / — create a new product
+router.post('/', async (req, res, next) => {
+  try {
+    const { name, category, subcategory, activeIngredient, moaGroup, defaultUnit, unitSize, epaRegNumber } = req.body;
+    if (!name) return res.status(400).json({ error: 'Product name is required' });
+
+    const [product] = await db('products_catalog').insert({
+      name, category: category || null, subcategory: subcategory || null,
+      active_ingredient: activeIngredient || null, moa_group: moaGroup || null,
+      default_unit: defaultUnit || 'oz', unit_size: unitSize || null,
+      epa_reg_number: epaRegNumber || null,
+    }).returning('*');
+
+    res.status(201).json(product);
+  } catch (err) { next(err); }
+});
+
+// DELETE /:id — delete a product
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const product = await db('products_catalog').where({ id: req.params.id }).first();
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    await db('vendor_pricing').where({ product_id: req.params.id }).del().catch(() => {});
+    await db('products_catalog').where({ id: req.params.id }).del();
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

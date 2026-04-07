@@ -103,6 +103,9 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
   const [vendors, setVendors] = useState([]);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newProduct, setNewProduct] = useState({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz' });
+  const [deleting, setDeleting] = useState(null);
 
   const load = useCallback(async () => {
     const [pData, vData] = await Promise.all([
@@ -145,17 +148,49 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
         ))}
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search products..." style={{ ...sInput, flex: 1, minWidth: 200 }} />
         <select value={catFilter} onChange={e => setCatFilter(e.target.value)} style={{ ...sInput, cursor: 'pointer', minWidth: 150 }}>
           <option value="">All Categories</option>
           {categories.map(c => <option key={c.name} value={c.name}>{c.name} ({c.count})</option>)}
         </select>
+        <button onClick={() => setShowAddForm(!showAddForm)} style={{ padding: '10px 16px', borderRadius: 8, border: 'none', background: D.green, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add Product</button>
       </div>
+
+      {/* Add Product Form */}
+      {showAddForm && (
+        <div style={{ background: D.card, borderRadius: 10, padding: 16, border: `1px solid ${D.green}44`, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 10 }}>New Product</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 10 }}>
+            <input value={newProduct.name} onChange={e => setNewProduct(p => ({ ...p, name: e.target.value }))} placeholder="Product name *" style={sInput} />
+            <input value={newProduct.category} onChange={e => setNewProduct(p => ({ ...p, category: e.target.value }))} placeholder="Category (e.g. insecticide)" style={sInput} />
+            <input value={newProduct.activeIngredient} onChange={e => setNewProduct(p => ({ ...p, activeIngredient: e.target.value }))} placeholder="Active ingredient" style={sInput} />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 10 }}>
+            <input value={newProduct.moaGroup} onChange={e => setNewProduct(p => ({ ...p, moaGroup: e.target.value }))} placeholder="MOA/FRAC group" style={sInput} />
+            <select value={newProduct.defaultUnit} onChange={e => setNewProduct(p => ({ ...p, defaultUnit: e.target.value }))} style={sInput}>
+              <option value="oz">oz</option><option value="ml">ml</option><option value="gal">gal</option><option value="lb">lb</option><option value="g">g</option><option value="each">each</option>
+            </select>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={async () => {
+                if (!newProduct.name.trim()) { showToast('Product name required'); return; }
+                try {
+                  await adminFetch('/admin/inventory', { method: 'POST', body: JSON.stringify(newProduct) });
+                  showToast('Product added');
+                  setNewProduct({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz' });
+                  setShowAddForm(false);
+                  load();
+                } catch (e) { showToast('Failed: ' + e.message); }
+              }} style={{ flex: 1, padding: '10px', borderRadius: 8, border: 'none', background: D.green, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Save</button>
+              <button onClick={() => setShowAddForm(false)} style={{ padding: '10px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'none', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead><tr>
-          {['Product', 'Category', 'Active Ingredient', 'Size', 'Best Price', 'Vendor', 'Status', ''].map(h => <th key={h} style={thS}>{h}</th>)}
+          {['Product', 'Category', 'Active Ingredient', 'Size', 'Best Price', 'Vendor', 'Status', 'Sources', ''].map(h => <th key={h} style={thS}>{h}</th>)}
         </tr></thead>
         <tbody>
           {products.filter(p => {
@@ -173,6 +208,16 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
                 <td style={{ ...tdS, fontSize: 12 }}>{p.bestVendor || '—'}</td>
                 <td style={tdS}>{p.needsPricing ? <span style={sBadge(`${D.amber}22`, D.amber)}>Needs Price</span> : <span style={sBadge(`${D.green}22`, D.green)}>Priced</span>}</td>
                 <td style={{ ...tdS, fontSize: 11, color: D.muted }}>{p.vendorPricing.length} vendor{p.vendorPricing.length !== 1 ? 's' : ''}</td>
+                <td style={{ ...tdS, width: 40 }}>
+                  {deleting === p.id ? (
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button onClick={async (e) => { e.stopPropagation(); try { await adminFetch(`/admin/inventory/${p.id}`, { method: 'DELETE' }); showToast('Deleted'); load(); } catch { showToast('Delete failed'); } setDeleting(null); }} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, border: 'none', background: D.red, color: D.white, cursor: 'pointer' }}>Yes</button>
+                      <button onClick={(e) => { e.stopPropagation(); setDeleting(null); }} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'none', color: D.muted, cursor: 'pointer' }}>No</button>
+                    </div>
+                  ) : (
+                    <button onClick={(e) => { e.stopPropagation(); setDeleting(p.id); }} style={{ fontSize: 12, background: 'none', border: 'none', color: D.muted, cursor: 'pointer', padding: 4 }}>×</button>
+                  )}
+                </td>
               </tr>
               {expanded === p.id && (
                 <tr key={`${p.id}-exp`}><td colSpan={8} style={{ padding: '0 10px 16px', background: `${D.teal}05` }}>
