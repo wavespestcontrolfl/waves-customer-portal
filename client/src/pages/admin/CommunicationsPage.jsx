@@ -349,6 +349,8 @@ function CallLogTab() {
   const [calls, setCalls] = useState([]);
   const [loading, setLoading] = useState(true);
   const [callTo, setCallTo] = useState('');
+  const [callToSearch, setCallToSearch] = useState('');
+  const [callToResults, setCallToResults] = useState([]);
   const [callFrom, setCallFrom] = useState('+19413187612');
   const [calling, setCalling] = useState(false);
   const [callResult, setCallResult] = useState(null);
@@ -495,15 +497,50 @@ function CallLogTab() {
           <div>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>To</label>
             <input
-              type="tel"
-              placeholder="+1 (xxx) xxx-xxxx"
-              value={callTo}
-              onChange={e => setCallTo(e.target.value)}
+              type="text"
+              placeholder="Search by name or enter phone number..."
+              value={callToSearch || callTo}
+              onChange={async (e) => {
+                const val = e.target.value;
+                if (/^[\d\s\(\)\-\+]+$/.test(val)) {
+                  setCallTo(val);
+                  setCallToSearch('');
+                  setCallToResults([]);
+                } else {
+                  setCallToSearch(val);
+                  setCallTo('');
+                  if (val.length >= 2) {
+                    try {
+                      const r = await fetch(`${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8`, {
+                        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+                      });
+                      if (r.ok) { const d = await r.json(); setCallToResults(d.customers || []); }
+                    } catch {}
+                  } else { setCallToResults([]); }
+                }
+              }}
               style={{
                 width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-                color: D.white, fontSize: 14, fontFamily: "'JetBrains Mono', monospace", outline: 'none', boxSizing: 'border-box',
+                color: D.white, fontSize: 14, fontFamily: callToSearch ? "'DM Sans', sans-serif" : "'JetBrains Mono', monospace", outline: 'none', boxSizing: 'border-box',
               }}
             />
+            {callToResults.length > 0 && (
+              <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 8px 8px', maxHeight: 180, overflowY: 'auto' }}>
+                {callToResults.map(c => (
+                  <div key={c.id} onClick={() => {
+                    setCallTo(c.phone || '');
+                    setCallToSearch(`${c.firstName} ${c.lastName} — ${c.phone || ''}`);
+                    setCallToResults([]);
+                  }} style={{
+                    padding: '8px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`,
+                    fontSize: 13, color: D.white,
+                  }}>
+                    <strong>{c.firstName} {c.lastName}</strong>
+                    <span style={{ color: D.muted, marginLeft: 8 }}>{c.phone || 'no phone'}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
