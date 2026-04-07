@@ -277,9 +277,9 @@ function RecordingDetail({ recording, onClose }) {
         </div>
 
         {/* Audio player */}
-        {r.recording_url && (
+        {(r.recording_url || r.recording_sid) && (
           <div style={{ marginBottom: 16 }}>
-            <audio controls src={r.recording_url} style={{ width: '100%', height: 36 }} />
+            <audio controls src={`${API_BASE}/admin/call-recordings/audio/${r.recording_sid || r.id}`} style={{ width: '100%', height: 36 }} />
           </div>
         )}
 

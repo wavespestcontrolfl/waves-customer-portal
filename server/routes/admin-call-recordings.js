@@ -73,4 +73,33 @@ router.get('/recording/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /audio/:id — proxy Twilio recording audio (avoids auth redirect)
+router.get('/audio/:id', async (req, res) => {
+  try {
+    const config = require('../config');
+    const recording = await db('call_recordings').where({ id: req.params.id })
+      .orWhere({ recording_sid: req.params.id })
+      .first();
+
+    if (!recording?.recording_url) return res.status(404).json({ error: 'Recording not found' });
+
+    // Fetch from Twilio with auth
+    let url = recording.recording_url;
+    if (!url.endsWith('.mp3')) url += '.mp3';
+    if (!url.startsWith('http')) url = `https://api.twilio.com${url}`;
+
+    const authHeader = 'Basic ' + Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
+    const audioRes = await fetch(url, { headers: { Authorization: authHeader } });
+
+    if (!audioRes.ok) return res.status(audioRes.status).json({ error: 'Failed to fetch recording' });
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    const buffer = await audioRes.arrayBuffer();
+    res.send(Buffer.from(buffer));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
