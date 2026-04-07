@@ -552,8 +552,9 @@ router.post('/', async (req, res, next) => {
     const [product] = await db('products_catalog').insert({
       name, category: category || null, subcategory: subcategory || null,
       active_ingredient: activeIngredient || null, moa_group: moaGroup || null,
-      default_unit: defaultUnit || 'oz', unit_size: unitSize || null,
-      epa_reg_number: epaRegNumber || null,
+      default_unit: defaultUnit || 'oz',
+      container_size: unitSize || null,
+      formulation: req.body.formulation || null,
     }).returning('*');
 
     res.status(201).json(product);
