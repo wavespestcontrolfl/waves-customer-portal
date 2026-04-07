@@ -4,14 +4,16 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const {
+  normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
+  cleanSquareNotes, isNewCustomer, safeDate,
+} = require('../utils/service-normalizer');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Square catalog IDs are uppercase alphanumeric — replace with readable label
+// Legacy wrapper — kept for backwards compat in other code paths
 function sanitizeServiceType(serviceType) {
-  if (!serviceType) return 'Service';
-  if (/^[A-Z0-9]{5,}$/.test(serviceType)) return 'Service';
-  return serviceType;
+  return normalizeServiceType(serviceType);
 }
 
 function getZone(city, zip) {
@@ -65,6 +67,16 @@ router.get('/', async (req, res, next) => {
         .where({ customer_id: s.customer_id, status: 'completed' })
         .orderBy('service_date', 'desc').first();
 
+      // BUG FIX #1: Compute isNewCustomer from actual service records, not Square notes
+      const genuinelyNew = await isNewCustomer(db, s.customer_id);
+
+      // BUG FIX #2: Normalize raw Square service type to clean Waves label
+      const normalizedType = normalizeServiceType(s.service_type);
+      const category = detectServiceCategory(normalizedType);
+
+      // BUG FIX #4: Clean Square boilerplate from notes before adding to alerts
+      const cleanedNotes = cleanSquareNotes(s.notes);
+
       const alerts = [];
       if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
       if (prefs?.property_gate_code) alerts.push({ type: 'gate', text: `Yard: ${prefs.property_gate_code}` });
@@ -72,7 +84,10 @@ router.get('/', async (req, res, next) => {
       if (prefs?.pets_secured_plan) alerts.push({ type: 'pet_plan', text: prefs.pets_secured_plan });
       if (prefs?.chemical_sensitivities) alerts.push({ type: 'chemical', text: prefs.chemical_sensitivity_details || 'Chemical sensitivity' });
       if (prefs?.access_notes) alerts.push({ type: 'access', text: prefs.access_notes });
-      if (s.notes) alerts.push({ type: 'note', text: s.notes });
+      // Only add notes if there's meaningful content after cleaning
+      if (cleanedNotes) alerts.push({ type: 'note', text: cleanedNotes });
+      // Show "New customer" badge ONLY if genuinely new (no completed service records)
+      if (genuinelyNew) alerts.push({ type: 'new_customer', text: 'New customer — first visit' });
 
       const zone = s.zone || getZone(s.city, s.zip);
 
@@ -81,7 +96,12 @@ router.get('/', async (req, res, next) => {
         customerName: `${s.first_name} ${s.last_name}`,
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
-        city: s.city, serviceType: sanitizeServiceType(s.service_type),
+        city: s.city,
+        serviceType: normalizedType,                    // FIX #2: clean label
+        serviceTypeRaw: s.service_type,                 // Keep raw for debugging
+        serviceCategory: category,                      // pest, lawn, mosquito, etc.
+        serviceIcon: serviceIcon(category),
+        serviceCategoryColor: serviceColor(category),   // For UI color coding
         windowStart: s.window_start, windowEnd: s.window_end,
         windowDisplay: s.window_display || (s.window_start ? `${fmtTime(s.window_start)}–${fmtTime(s.window_end)}` : 'Flexible'),
         status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
@@ -90,12 +110,13 @@ router.get('/', async (req, res, next) => {
         leadScore: s.lead_score, lawnType: s.lawn_type,
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
-        estimatedDuration: s.estimated_duration_minutes || estimateDuration(s.service_type, s.property_sqft, s.lot_sqft),
+        estimatedDuration: s.estimated_duration_minutes || estimateDuration(normalizedType, s.property_sqft, s.lot_sqft),
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
-        lastServiceDate: lastService?.service_date,
-        lastServiceType: lastService?.service_type,
+        isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
+        lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
+        lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,
         lastServiceNotes: lastService?.technician_notes?.slice(0, 200),
         checkInTime: s.check_in_time, checkOutTime: s.check_out_time,
         actualDuration: s.actual_duration_minutes,

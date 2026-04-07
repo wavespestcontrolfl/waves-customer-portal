@@ -4,6 +4,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const { normalizeServiceType, cleanSquareNotes } = require('../utils/service-normalizer');
 
 router.use(authenticate);
 
@@ -34,12 +35,12 @@ router.get('/', async (req, res, next) => {
         date: s.scheduled_date,
         windowStart: s.window_start,
         windowEnd: s.window_end,
-        serviceType: s.service_type,
+        serviceType: normalizeServiceType(s.service_type),
         status: s.status,
         technician: s.technician_name,
         customerConfirmed: s.customer_confirmed,
         confirmedAt: s.confirmed_at,
-        notes: s.notes,
+        notes: cleanSquareNotes(s.notes),
       })),
     });
   } catch (err) {
@@ -147,7 +148,7 @@ router.get('/next', async (req, res, next) => {
         date: nextService.scheduled_date,
         windowStart: nextService.window_start,
         windowEnd: nextService.window_end,
-        serviceType: nextService.service_type,
+        serviceType: normalizeServiceType(nextService.service_type),
         status: nextService.status,
         technician: nextService.technician_name,
         customerConfirmed: nextService.customer_confirmed,

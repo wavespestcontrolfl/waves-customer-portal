@@ -70,22 +70,40 @@ const SKIP_REASONS = [
 
 function stripSquareBoilerplate(notes) {
   if (!notes) return '';
-  return notes.replace(/\*{3}\s*Please make changes.*?(?:\.|\n|$)/gi, '')
+  return notes
+    .replace(/\*{3}\s*Please make changes.*?(?:\.|\n|$)/gi, '')
     .replace(/https?:\/\/app\.squareup\.com\S*/g, '')
+    .replace(/New customer\s*[-\u2013\u2014]\s*first visit/gi, '')
+    .replace(/New customer\s*[-\u2013\u2014]\s*first time/gi, '')
+    .replace(/First[-\s]time customer/gi, '')
+    .replace(/Booked via Square Online/gi, '')
+    .replace(/Booked online/gi, '')
+    .replace(/Created by Square/gi, '')
+    .replace(/\|\s*$/g, '').replace(/^\s*\|/g, '')
+    .replace(/\s{2,}/g, ' ')
     .trim();
 }
 
 function sanitizeServiceTypeClient(serviceType) {
-  if (!serviceType) return 'Service';
-  if (/^[A-Z0-9]{5,}$/.test(serviceType)) return 'Service';
-  return serviceType;
+  if (!serviceType) return 'General Service';
+  if (/^[A-Z0-9]{5,}$/.test(serviceType)) return 'General Service';
+  // Strip common Square suffixes: " - 1 hour", " - $117", " - 45 min"
+  return serviceType
+    .replace(/\s*[-\u2013]\s*\d+\s*(hour|hr|min|minute)s?\b/gi, '')
+    .replace(/\s*[-\u2013]\s*\$[\d,.]+/g, '')
+    .replace(/\s*[-\u2013]\s*$/g, '')
+    .trim() || 'General Service';
 }
 
 function formatLastServiceDate(dateStr) {
   if (!dateStr) return null;
-  const d = new Date(dateStr + 'T00:00:00');
-  if (isNaN(d.getTime())) return 'New customer — first visit';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  try {
+    const d = new Date(dateStr + 'T12:00:00');
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  } catch {
+    return null;
+  }
 }
 
 function adminFetch(path, options = {}) {
@@ -305,7 +323,7 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
         </a>
       </div>
 
-      {/* Service type + duration — editable */}
+      {/* Service type + duration — editable, with category color and icon */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
         {service._editing ? (
           <>
@@ -336,10 +354,12 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
           <>
             <span style={{
               fontSize: 13, fontWeight: 600, color: D.text,
-              padding: '4px 10px', borderRadius: 8, background: zoneColor + '18', display: 'inline-block',
+              padding: '4px 10px', borderRadius: 8,
+              background: (service.serviceCategoryColor || zoneColor) + '18',
+              display: 'inline-block',
               cursor: 'pointer',
             }} onClick={() => { service._editing = true; setUpdating(u => !u); }}>
-              {sanitizeServiceTypeClient(service.serviceType)}
+              {service.serviceIcon || ''} {sanitizeServiceTypeClient(service.serviceType)}
             </span>
             {service.estimatedDuration && (
               <span style={{ fontSize: 12, color: D.muted, cursor: 'pointer' }} onClick={() => { service._editing = true; setUpdating(u => !u); }}>
@@ -375,19 +395,28 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
         </span>
       </div>
 
-      {/* Last service info */}
-      <div style={{ fontSize: 12, color: D.muted, fontStyle: 'italic', marginBottom: 8, lineHeight: 1.5 }}>
-        {(() => {
-          const formatted = formatLastServiceDate(service.lastServiceDate);
-          if (!formatted && !service.lastServiceDate) return 'New customer \u2014 first visit';
-          return formatted ? `Last: ${formatted}` : 'New customer \u2014 first visit';
-        })()}
-        {service.lastServiceNotes && (() => {
-          const cleaned = stripSquareBoilerplate(service.lastServiceNotes);
-          if (!cleaned) return null;
-          return <> \u2014 {cleaned.substring(0, 100)}{cleaned.length > 100 ? '...' : ''}</>;
-        })()}
-      </div>
+      {/* Last service info — with safe date handling */}
+      {service.lastServiceDate && (
+        <div style={{ fontSize: 12, color: D.muted, fontStyle: 'italic', marginBottom: 8, lineHeight: 1.5 }}>
+          Last: {(() => {
+            try {
+              const d = new Date(service.lastServiceDate + 'T12:00:00');
+              return isNaN(d.getTime()) ? 'Unknown date' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            } catch { return 'Unknown date'; }
+          })()}
+          {service.lastServiceType && <> {'\u2014'} {service.lastServiceType}</>}
+          {service.lastServiceNotes && (() => {
+            const cleaned = stripSquareBoilerplate(service.lastServiceNotes);
+            if (!cleaned) return null;
+            return <> {'\u2014'} {cleaned.substring(0, 100)}{cleaned.length > 100 ? '...' : ''}</>;
+          })()}
+        </div>
+      )}
+      {!service.lastServiceDate && !service.isNewCustomer && (
+        <div style={{ fontSize: 12, color: D.muted, fontStyle: 'italic', marginBottom: 8 }}>
+          No previous service on record
+        </div>
+      )}
 
       {/* Materials needed */}
       {service.materialsNeeded && service.materialsNeeded.length > 0 && (
