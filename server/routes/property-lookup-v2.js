@@ -123,20 +123,26 @@ router.post('/property-lookup', async (req, res) => {
       // Gemini Vision
       (async () => {
         const geminiKey = process.env.GEMINI_API_KEY;
+        console.log(`[GEMINI DEBUG] Key exists: ${!!geminiKey}, Key starts with: ${geminiKey ? geminiKey.substring(0, 10) : 'N/A'}`);
         if (!geminiKey) {
-          logger.warn('[property-lookup] GEMINI_API_KEY not set — skipping Gemini analysis');
+          console.log('[GEMINI DEBUG] GEMINI_API_KEY not set — skipping');
           return null;
         }
-        logger.info(`[property-lookup] Starting Gemini analysis with key ${geminiKey.substring(0, 8)}...`);
-        const geminiAnalysis = await analyzeWithGemini(
-          result.satellite?._superCloseB64 || result.satellite?._closeB64,
-          result.satellite?._wideB64,
-          result.rentcast,
-          address,
-          geminiKey
-        );
-        logger.info(`[property-lookup] Gemini analysis complete: confidence ${geminiAnalysis?.confidenceScore || 'N/A'}%`);
-        return geminiAnalysis;
+        try {
+          console.log('[GEMINI DEBUG] Starting Gemini vision analysis...');
+          const geminiAnalysis = await analyzeWithGemini(
+            result.satellite?._superCloseB64 || result.satellite?._closeB64,
+            result.satellite?._wideB64,
+            result.rentcast,
+            address,
+            geminiKey
+          );
+          console.log(`[GEMINI DEBUG] Success! Confidence: ${geminiAnalysis?.confidenceScore || 'N/A'}%`);
+          return geminiAnalysis;
+        } catch (gemErr) {
+          console.error(`[GEMINI DEBUG] FAILED: ${gemErr.message}`);
+          throw gemErr;
+        }
       })(),
     ]);
 
