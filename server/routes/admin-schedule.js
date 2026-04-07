@@ -409,16 +409,7 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    // Send confirmation SMS
-    if (sendConfirmation && customer?.phone) {
-      const datePretty = new Date(scheduledDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-      await TwilioService.sendSMS(customer.phone,
-        `Hi ${customer.first_name}! Your ${serviceType} with Waves is scheduled for ${datePretty}${windowStart ? ` between ${fmtTime(windowStart)}-${fmtTime(windowEnd)}` : ''}. Reply YES to confirm or let us know if you need to adjust. — Waves 🌊`,
-        { customerId, messageType: 'confirmation' }
-      );
-    }
-
-    // Register for appointment reminders (sends confirmation for admin_manual)
+    // Register for appointment reminders (handles confirmation SMS for admin_manual)
     try {
       const AppointmentReminders = require('../services/appointment-reminders');
       await AppointmentReminders.registerAppointment(
