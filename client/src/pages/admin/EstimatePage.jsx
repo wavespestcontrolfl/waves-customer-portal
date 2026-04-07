@@ -833,7 +833,7 @@ function EstimateToolView() {
             {form.svcLawn && (
               <div style={sSubOpts}>
                 <Field label="Lawn Program Tier (shown in results)" style={{ marginBottom: 0 }}>
-                  <div style={{ fontSize: 12, color: C.gray }}>7-app / 9-app / 13-app options shown after generating</div>
+                  <div style={{ fontSize: 12, color: C.gray }}>4x / 6x / 9x / 12x frequency options shown after generating</div>
                 </Field>
               </div>
             )}
@@ -875,7 +875,7 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcPlugging" label="Lawn Plugging" />
+            <Checkbox k="svcPlugging" label="One-Time Lawn Plugging" />
             {form.svcPlugging && (
               <div style={sSubOpts}>
                 <div style={sRow}>
@@ -884,13 +884,13 @@ function EstimateToolView() {
                 </div>
               </div>
             )}
-            <Checkbox k="svcTopdress" label="Top Dressing" />
-            <Checkbox k="svcDethatch" label="Dethatching" />
+            <Checkbox k="svcTopdress" label="One-Time Top Dressing" />
+            <Checkbox k="svcDethatch" label="One-Time Dethatching" />
 
             {/* -- Termite Services -- */}
             <div style={{ ...sSvcSection, color: C.red }}>Termite Services</div>
-            <Checkbox k="svcTrenching" label="Termite Trenching" />
-            <Checkbox k="svcBoracare" label="Bora-Care Attic" />
+            <Checkbox k="svcTrenching" label="One-Time Termite Trenching" />
+            <Checkbox k="svcBoracare" label="One-Time Bora-Care Attic" />
             {form.svcBoracare && (
               <div style={sSubOpts}>
                 <Field label="Attic Sq Ft (auto-estimated from home/stories)" style={{ marginBottom: 0 }}>
@@ -898,7 +898,7 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcPreslab" label="Pre-Slab Termidor SC" />
+            <Checkbox k="svcPreslab" label="One-Time Pre-Slab Termidor SC" />
             {form.svcPreslab && (
               <div style={sSubOpts}>
                 <div style={sRow}>
@@ -908,7 +908,7 @@ function EstimateToolView() {
                 <Field label="Builder Volume"><Select k="preslabVolume" options={[{ value: 'NONE', label: 'No discount' }, { value: '5', label: '5+ homes (-10%)' }, { value: '10', label: '10+ homes (-15%)' }]} /></Field>
               </div>
             )}
-            <Checkbox k="svcFoam" label="Termidor Foam Drill" />
+            <Checkbox k="svcFoam" label="One-Time Termidor Foam Drill" />
             {form.svcFoam && (
               <div style={sSubOpts}>
                 <Field label="Drill Points" style={{ marginBottom: 0 }}>
@@ -921,8 +921,8 @@ function EstimateToolView() {
             <div style={{ ...sSvcSection, color: C.amber }}>Pest Services</div>
             <Checkbox k="svcOnetimePest" label="One-Time Pest" />
             <Checkbox k="svcOnetimeMosquito" label="One-Time Mosquito" />
-            <Checkbox k="svcFlea" label="Flea (2-visit)" />
-            <Checkbox k="svcRoach" label="Cockroach Treatment" />
+            <Checkbox k="svcFlea" label="One-Time Flea Treatment" />
+            <Checkbox k="svcRoach" label="One-Time Cockroach Treatment" />
             {form.svcRoach && (
               <div style={sSubOpts}>
                 <Field label="Type" style={{ marginBottom: 0 }}>
@@ -930,8 +930,8 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcWasp" label="Wasp/Bee/Stinging Insect" />
-            <Checkbox k="svcBedbug" label="Bed Bug Treatment" />
+            <Checkbox k="svcWasp" label="One-Time Wasp/Bee/Stinging Insect" />
+            <Checkbox k="svcBedbug" label="One-Time Bed Bug Treatment" />
             {form.svcBedbug && (
               <div style={sSubOpts}>
                 <div style={sRow}>
@@ -943,8 +943,9 @@ function EstimateToolView() {
 
             {/* -- Rodent Services -- */}
             <div style={{ ...sSvcSection, color: C.gray }}>Rodent Services</div>
-            <Checkbox k="svcRodentTrap" label="Rodent Trapping" />
-            <Checkbox k="svcExclusion" label="Rodent Exclusion" />
+            <Checkbox k="svcRodentTrap" label="One-Time Rodent Trapping" />
+            <Checkbox k="svcRodentSanitation" label="One-Time Rodent Sanitation" />
+            <Checkbox k="svcExclusion" label="One-Time Rodent Exclusion" />
             {form.svcExclusion && (
               <div style={sSubOpts}>
                 <div style={sRow3}>
