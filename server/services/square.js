@@ -290,6 +290,58 @@ const SquareService = {
   // =========================================================================
 
   /**
+   * Create a booking in Square from a scheduled service
+   */
+  async createBookingFromSchedule(customerId, scheduledDate, windowStart, windowEnd, serviceType) {
+    if (!bookingsApi) {
+      logger.warn('[square] Bookings API not available — skipping booking creation');
+      return null;
+    }
+    try {
+      const customer = await db('customers').where({ id: customerId }).first();
+      if (!customer) return null;
+
+      // Ensure customer exists in Square
+      let squareCustomerId = customer.square_customer_id;
+      if (!squareCustomerId) {
+        try { squareCustomerId = await this.getOrCreateSquareCustomer(customer); } catch { return null; }
+      }
+      if (!squareCustomerId) return null;
+
+      const locationId = config.square.locationId || process.env.SQUARE_LOCATION_ID;
+      const startAt = `${scheduledDate}T${windowStart || '09:00'}:00`;
+      const endTime = windowEnd || (() => { const [h] = (windowStart || '09:00').split(':'); return `${String(Number(h) + 1).padStart(2, '0')}:00`; })();
+
+      const { result } = await bookingsApi.createBooking({
+        booking: {
+          customerId: squareCustomerId,
+          locationId,
+          startAt: new Date(startAt).toISOString(),
+          appointmentSegments: [{
+            durationMinutes: (() => {
+              const [sh] = (windowStart || '09:00').split(':').map(Number);
+              const [eh] = endTime.split(':').map(Number);
+              return Math.max(30, (eh - sh) * 60);
+            })(),
+            serviceVariationId: undefined, // Optional — Square will accept without
+          }],
+          sellerNote: `${serviceType} — created from Waves Portal`,
+        },
+        idempotencyKey: uuidv4(),
+      });
+
+      const bookingId = result?.booking?.id;
+      if (bookingId) {
+        logger.info(`[square] Created booking ${bookingId} for ${customer.first_name} ${customer.last_name}`);
+      }
+      return bookingId;
+    } catch (err) {
+      logger.error(`[square] createBooking failed (non-blocking): ${err.message}`);
+      return null;
+    }
+  },
+
+  /**
    * Get upcoming appointments from Square Bookings API
    * @param {number} days — how many days ahead to look (default 7)
    */
