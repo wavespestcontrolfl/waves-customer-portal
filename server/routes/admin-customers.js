@@ -405,4 +405,29 @@ router.post('/sync-square', async (req, res, next) => {
   }
 });
 
+// DELETE /api/admin/customers/:id — delete a customer and related records
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Delete related records (cascade should handle most, but be explicit)
+    await db('estimates').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('scheduled_services').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('payments').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('service_records').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('property_preferences').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('notification_prefs').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('customer_interactions').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('customer_tags').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('activity_log').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('sms_log').where({ customer_id: req.params.id }).del().catch(() => {});
+    await db('notifications').where({ recipient_id: req.params.id }).del().catch(() => {});
+
+    await db('customers').where({ id: req.params.id }).del();
+    logger.info(`[customers] Deleted customer ${customer.first_name} ${customer.last_name} (${req.params.id})`);
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

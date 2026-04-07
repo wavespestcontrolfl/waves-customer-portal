@@ -226,7 +226,8 @@ function QuickAddModal({ onClose, onCreated }) {
 }
 
 // --- Pipeline kanban card ---
-function PipelineCard({ customer }) {
+function PipelineCard({ customer, onDelete }) {
+  const [confirming, setConfirming] = useState(false);
   const daysInStage = customer.stageEnteredAt
     ? Math.floor((Date.now() - new Date(customer.stageEnteredAt)) / 86400000)
     : null;
@@ -235,11 +236,30 @@ function PipelineCard({ customer }) {
   return (
     <div style={{
       background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 8,
-      cursor: 'pointer',
-    }} onClick={() => console.log('Navigate to /admin/customers/' + customer.id)}>
-      <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>
-        {customer.firstName} {customer.lastName}
+      position: 'relative',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>
+          {customer.firstName} {customer.lastName}
+        </div>
+        <button onClick={(e) => { e.stopPropagation(); setConfirming(!confirming); }} style={{
+          background: 'none', border: 'none', color: D.muted, fontSize: 14, cursor: 'pointer', padding: '0 4px',
+        }}>×</button>
       </div>
+      {confirming && (
+        <div style={{ background: D.card, border: `1px solid ${D.red}44`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: D.red, marginBottom: 8 }}>Delete {customer.firstName} {customer.lastName}?</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={async () => {
+              try {
+                await fetch(`${API_BASE}/admin/customers/${customer.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` } });
+                onDelete?.(customer.id);
+              } catch (e) { alert('Delete failed: ' + e.message); }
+            }} style={{ padding: '4px 12px', borderRadius: 6, border: 'none', background: D.red, color: D.white, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Delete</button>
+            <button onClick={() => setConfirming(false)} style={{ padding: '4px 12px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'none', color: D.muted, fontSize: 11, cursor: 'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      )}
       {addressLine && (
         <div style={{ fontSize: 12, color: D.muted, fontFamily: 'DM Sans, sans-serif', marginBottom: 8 }}>{addressLine}</div>
       )}
@@ -262,7 +282,7 @@ function PipelineCard({ customer }) {
 }
 
 // --- Pipeline column ---
-function PipelineColumn({ stage, customers }) {
+function PipelineColumn({ stage, customers, onDeleteCustomer }) {
   const monthlyTotal = customers.reduce((sum, c) => sum + (c.monthlyRate || 0), 0);
   return (
     <div style={{
@@ -291,7 +311,7 @@ function PipelineColumn({ stage, customers }) {
             No customers
           </div>
         ) : (
-          customers.map(c => <PipelineCard key={c.id} customer={c} />)
+          customers.map(c => <PipelineCard key={c.id} customer={c} onDelete={onDeleteCustomer} />)
         )}
       </div>
     </div>
@@ -1113,6 +1133,7 @@ export default function CustomersPage() {
                 key={key}
                 stage={stage}
                 customers={pipelineGroups[key] || []}
+                onDeleteCustomer={() => { loadPipeline(); loadCustomers(); }}
               />
             );
           })}
