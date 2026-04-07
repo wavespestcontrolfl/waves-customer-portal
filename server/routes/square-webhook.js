@@ -3,8 +3,140 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TwilioService = require('../services/twilio');
+const { normalizeServiceType, cleanSquareNotes, detectServiceCategory } = require('../utils/service-normalizer');
 
 const WAVES_FROM = '+19413187612';
+
+// ─── TIER COMPUTATION ────────────────────────────────────────────
+
+/**
+ * Compute WaveGuard tier from active Square subscriptions.
+ * 1 service = Bronze, 2 = Silver, 3 = Gold, 4+ = Platinum
+ */
+async function computeWaveGuardTier(customerId) {
+  try {
+    const subs = await db('customer_subscriptions')
+      .where({ customer_id: customerId, status: 'active' })
+      .count('id as cnt')
+      .first();
+
+    const count = parseInt(subs?.cnt || 0);
+    if (count >= 4) return 'Platinum';
+    if (count >= 3) return 'Gold';
+    if (count >= 2) return 'Silver';
+    return 'Bronze';
+  } catch { return 'Bronze'; }
+}
+
+/**
+ * Sync a subscription event to the customer_subscriptions table,
+ * then recompute the customer's WaveGuard tier.
+ */
+async function syncSubscription(squareSubscription, eventType) {
+  const sub = squareSubscription;
+  if (!sub || !sub.customer_id) return;
+
+  const customer = await db('customers')
+    .where({ square_customer_id: sub.customer_id })
+    .first();
+  if (!customer) {
+    logger.warn(`[square-webhook] Subscription event for unknown customer: ${sub.customer_id}`);
+    return;
+  }
+
+  let status = 'active';
+  if (sub.status === 'CANCELED' || sub.status === 'DEACTIVATED') status = 'cancelled';
+  if (sub.status === 'PAUSED') status = 'paused';
+
+  const planName = sub.plan_variation_id || sub.source?.name || '';
+  const serviceType = normalizeServiceType(planName);
+
+  const existing = await db('customer_subscriptions')
+    .where({ square_subscription_id: sub.id })
+    .first();
+
+  const subData = {
+    customer_id: customer.id,
+    square_subscription_id: sub.id,
+    square_customer_id: sub.customer_id,
+    service_type: serviceType,
+    status,
+    start_date: sub.start_date || sub.created_at,
+    monthly_amount: sub.price_override_money
+      ? sub.price_override_money.amount / 100
+      : null,
+    updated_at: new Date(),
+  };
+
+  if (existing) {
+    await db('customer_subscriptions').where({ id: existing.id }).update(subData);
+  } else {
+    await db('customer_subscriptions').insert({
+      ...subData,
+      created_at: new Date(),
+    });
+  }
+
+  const newTier = await computeWaveGuardTier(customer.id);
+  const oldTier = customer.waveguard_tier;
+
+  await db('customers').where({ id: customer.id }).update({
+    waveguard_tier: newTier,
+    updated_at: new Date(),
+  });
+
+  if (newTier !== oldTier) {
+    logger.info(`[square-webhook] Tier change: ${customer.first_name} ${customer.last_name} ${oldTier} → ${newTier}`);
+    await db('activity_log').insert({
+      customer_id: customer.id,
+      action: 'tier_change',
+      description: `WaveGuard tier changed: ${oldTier || 'None'} → ${newTier}`,
+      metadata: JSON.stringify({ oldTier, newTier, triggerEvent: eventType }),
+    }).catch(() => {});
+  }
+
+  return { customer, newTier, oldTier, status };
+}
+
+// ─── EMAIL AUTOMATION TRIGGERS ───────────────────────────────────
+
+/**
+ * Check and fire email automation triggers based on events.
+ */
+async function triggerAutomation(automationKey, customerId, metadata = {}) {
+  try {
+    const alreadySent = await db('email_automation_sends')
+      .where({ customer_id: customerId, automation_key: automationKey })
+      .first();
+
+    if (alreadySent) {
+      logger.info(`[automation] ${automationKey} already sent to customer ${customerId}, skipping`);
+      return false;
+    }
+
+    await db('email_automation_sends').insert({
+      customer_id: customerId,
+      automation_key: automationKey,
+      status: 'queued',
+      metadata: JSON.stringify(metadata),
+      queued_at: new Date(),
+    });
+
+    logger.info(`[automation] Queued ${automationKey} for customer ${customerId}`);
+
+    try {
+      const EmailAutomations = require('../services/email-automations');
+      await EmailAutomations.processQueuedSend(customerId, automationKey);
+    } catch (e) {
+      logger.error(`[automation] Failed to process ${automationKey}: ${e.message}`);
+    }
+
+    return true;
+  } catch (e) {
+    logger.error(`[automation] Trigger failed for ${automationKey}: ${e.message}`);
+    return false;
+  }
+}
 
 // =========================================================================
 // POST /api/webhooks/square/payment — Square payment/invoice events
@@ -392,6 +524,182 @@ router.post('/payment', async (req, res) => {
           }
         } catch (e) { logger.error(`[square-webhook] customer.updated failed: ${e.message}`); }
       }
+    }
+
+    // ── CUSTOMER DELETED ──
+    if (event.type === 'customer.deleted') {
+      const sqCustomer = event.data?.object?.customer;
+      if (sqCustomer) {
+        // Don't delete — mark as inactive to preserve history
+        await db('customers')
+          .where({ square_customer_id: sqCustomer.id })
+          .update({ stage: 'inactive', updated_at: new Date() })
+          .catch(() => {});
+
+        logger.info(`[square-webhook] Customer deactivated: ${sqCustomer.id}`);
+      }
+    }
+
+    // ── BOOKING UPDATED ──
+    if (event.type === 'booking.updated') {
+      const booking = event.data?.object?.booking;
+      if (booking) {
+        try {
+          // Try to find existing scheduled service by square_booking_id
+          const existing = await db('scheduled_services')
+            .where({ square_booking_id: booking.id })
+            .first()
+            .catch(() => null);
+
+          if (existing) {
+            const start = booking.start_at ? new Date(booking.start_at) : null;
+            const updates = {};
+
+            if (start) {
+              updates.scheduled_date = start.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+              updates.window_start = start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' });
+              const durationMin = booking.appointment_segments?.[0]?.duration_minutes || 60;
+              const endAt = new Date(start.getTime() + durationMin * 60000);
+              updates.window_end = endAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' });
+              updates.estimated_duration_minutes = durationMin;
+            }
+
+            if (booking.status === 'CANCELLED_BY_CUSTOMER' || booking.status === 'CANCELLED_BY_SELLER') {
+              updates.status = 'cancelled';
+            } else if (booking.status === 'ACCEPTED') {
+              updates.status = 'confirmed';
+            }
+
+            if (booking.customer_note) {
+              updates.notes = booking.customer_note;
+            }
+
+            updates.updated_at = new Date();
+            await db('scheduled_services').where({ id: existing.id }).update(updates);
+            logger.info(`[square-webhook] Booking updated: service ${existing.id}`);
+
+            // Log activity
+            if (existing.customer_id) {
+              await db('activity_log').insert({
+                customer_id: existing.customer_id,
+                action: 'booking_updated',
+                description: `Square booking updated for ${updates.scheduled_date || existing.scheduled_date}`,
+                metadata: JSON.stringify({ squareBookingId: booking.id }),
+              }).catch(() => {});
+            }
+          } else {
+            logger.info(`[square-webhook] booking.updated — no matching service for booking ${booking.id}`);
+          }
+        } catch (e) { logger.error(`[square-webhook] booking.updated failed: ${e.message}`); }
+      }
+    }
+
+    // ── SUBSCRIPTION EVENTS — WaveGuard Tier Auto-Computation ──
+    if (event.type === 'subscription.created') {
+      const sub = event.data?.object?.subscription;
+      if (sub) {
+        try {
+          const result = await syncSubscription(sub, event.type);
+
+          // Trigger onboarding automation for new recurring customers
+          if (result?.customer && result.status === 'active') {
+            const serviceType = normalizeServiceType(sub.plan_variation_id || '');
+            const svcLower = serviceType.toLowerCase();
+
+            if (svcLower.includes('lawn')) {
+              await triggerAutomation('lawn_onboarding', result.customer.id, { tier: result.newTier });
+            } else {
+              await triggerAutomation('new_recurring', result.customer.id, { tier: result.newTier, serviceType });
+            }
+          }
+
+          logger.info(`[square-webhook] Subscription created → tier: ${result?.newTier}`);
+        } catch (e) { logger.error(`[square-webhook] subscription.created failed: ${e.message}`); }
+      }
+    }
+
+    if (event.type === 'subscription.updated') {
+      const sub = event.data?.object?.subscription;
+      if (sub) {
+        try {
+          const result = await syncSubscription(sub, event.type);
+          logger.info(`[square-webhook] Subscription updated → tier: ${result?.newTier} (status: ${result?.status})`);
+        } catch (e) { logger.error(`[square-webhook] subscription.updated failed: ${e.message}`); }
+      }
+    }
+
+    // ── ORDER EVENTS — Revenue Attribution ──
+    if (event.type === 'order.created' || event.type === 'order.updated') {
+      const order = event.data?.object?.order;
+      if (order && order.customer_id && order.state === 'COMPLETED') {
+        try {
+          const customer = await db('customers')
+            .where({ square_customer_id: order.customer_id })
+            .first();
+
+          if (customer) {
+            const totalAmount = (order.total_money?.amount || 0) / 100;
+            await db('activity_log').insert({
+              customer_id: customer.id,
+              action: 'order_completed',
+              description: `Order completed: $${totalAmount.toFixed(2)}`,
+              metadata: JSON.stringify({ orderId: order.id, amount: totalAmount }),
+            }).catch(() => {});
+          }
+        } catch (e) { logger.error(`[square-webhook] order event failed: ${e.message}`); }
+      }
+    }
+
+    // ── TEAM MEMBER EVENTS — Technician Sync ──
+    if (event.type === 'team_member.created' || event.type === 'team_member.updated') {
+      const member = event.data?.object?.team_member;
+      if (member) {
+        try {
+          const name = `${member.given_name || ''} ${member.family_name || ''}`.trim();
+          if (!name) return;
+
+          const existing = await db('technicians')
+            .where({ square_team_member_id: member.id })
+            .first()
+            .catch(() => null);
+
+          if (existing) {
+            await db('technicians').where({ id: existing.id }).update({
+              name,
+              active: member.status === 'ACTIVE',
+              updated_at: new Date(),
+            });
+          } else if (member.status === 'ACTIVE') {
+            await db('technicians').insert({
+              name,
+              square_team_member_id: member.id,
+              active: true,
+              created_at: new Date(),
+              updated_at: new Date(),
+            }).catch(() => {}); // Might fail if unique constraint or column missing
+          }
+
+          logger.info(`[square-webhook] Team member synced: ${name}`);
+        } catch (e) { logger.error(`[square-webhook] team_member event failed: ${e.message}`); }
+      }
+    }
+
+    // ── Update customer stage on payment if still new_lead ──
+    if (event.type === 'payment.completed') {
+      try {
+        const payment = event.data?.object?.payment;
+        if (payment?.customer_id) {
+          const customer = await db('customers')
+            .where({ square_customer_id: payment.customer_id })
+            .first();
+          if (customer && customer.stage === 'new_lead') {
+            await db('customers').where({ id: customer.id }).update({
+              stage: 'active',
+              updated_at: new Date(),
+            });
+          }
+        }
+      } catch { /* best effort */ }
     }
 
   } catch (err) {

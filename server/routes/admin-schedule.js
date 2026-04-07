@@ -216,18 +216,157 @@ router.get('/week', async (req, res, next) => {
         date: dateStr,
         dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short' }),
         dayNum: d.getDate(),
-        services: services.map(s => ({
-          id: s.id, customerName: `${s.first_name} ${s.last_name}`,
-          serviceType: s.service_type, status: s.status,
-          techName: s.tech_name, zone: s.zone,
-          tier: s.waveguard_tier,
-        })),
+        services: services.map(s => {
+          const svcType = normalizeServiceType(s.service_type);
+          return {
+            id: s.id, customerName: `${s.first_name} ${s.last_name}`,
+            serviceType: svcType,
+            serviceCategory: detectServiceCategory(svcType),
+            status: s.status,
+            techName: s.tech_name, zone: s.zone,
+            tier: s.waveguard_tier,
+          };
+        }),
         count: services.length,
         zones,
       });
     }
 
     res.json({ startDate, days });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/month — month calendar view
+router.get('/month', async (req, res, next) => {
+  try {
+    const yearMonth = req.query.month || new Date().toISOString().slice(0, 7); // "2026-04"
+    const [year, month] = yearMonth.split('-').map(Number);
+
+    // Get first and last day of the month
+    const firstDay = new Date(year, month - 1, 1);
+    const lastDay = new Date(year, month, 0);
+    const startDate = firstDay.toISOString().split('T')[0];
+    const endDate = lastDay.toISOString().split('T')[0];
+
+    // Extend to fill calendar grid (previous month's trailing days, next month's leading days)
+    const gridStart = new Date(firstDay);
+    gridStart.setDate(gridStart.getDate() - firstDay.getDay()); // Back to Sunday
+    const gridEnd = new Date(lastDay);
+    const remaining = 6 - lastDay.getDay();
+    if (remaining < 6) gridEnd.setDate(gridEnd.getDate() + remaining); // Forward to Saturday
+
+    // Fetch all services for the full grid range
+    const services = await db('scheduled_services')
+      .whereBetween('scheduled_services.scheduled_date', [
+        gridStart.toISOString().split('T')[0],
+        gridEnd.toISOString().split('T')[0],
+      ])
+      .whereNotIn('scheduled_services.status', ['cancelled'])
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .select(
+        'scheduled_services.id', 'scheduled_services.scheduled_date',
+        'scheduled_services.service_type', 'scheduled_services.status',
+        'scheduled_services.window_start', 'scheduled_services.zone',
+        'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes',
+        'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
+        'customers.city', 'customers.zip',
+        'technicians.name as tech_name'
+      )
+      .orderBy('scheduled_services.scheduled_date')
+      .orderByRaw('COALESCE(scheduled_services.route_order, 999)');
+
+    // Group by date
+    const byDate = {};
+    services.forEach(s => {
+      const d = s.scheduled_date instanceof Date
+        ? s.scheduled_date.toISOString().split('T')[0]
+        : String(s.scheduled_date).split('T')[0];
+      if (!byDate[d]) byDate[d] = [];
+      const svcType = normalizeServiceType(s.service_type);
+      const category = detectServiceCategory(svcType);
+      byDate[d].push({
+        id: s.id,
+        customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
+        serviceType: svcType,
+        serviceCategory: category,
+        status: s.status,
+        techName: s.tech_name,
+        technicianId: s.technician_id,
+        tier: s.waveguard_tier,
+        zone: s.zone || getZone(s.city, s.zip),
+        windowStart: s.window_start,
+        duration: s.estimated_duration_minutes || 30,
+      });
+    });
+
+    // Build calendar grid (array of weeks, each week is array of 7 days)
+    const weeks = [];
+    let currentDate = new Date(gridStart);
+    while (currentDate <= gridEnd) {
+      const week = [];
+      for (let i = 0; i < 7; i++) {
+        const dateStr = currentDate.toISOString().split('T')[0];
+        const daySvcs = byDate[dateStr] || [];
+
+        // Count by category
+        const categoryCounts = {};
+        const techCounts = {};
+        daySvcs.forEach(s => {
+          categoryCounts[s.serviceCategory] = (categoryCounts[s.serviceCategory] || 0) + 1;
+          if (s.techName) techCounts[s.techName] = (techCounts[s.techName] || 0) + 1;
+        });
+
+        week.push({
+          date: dateStr,
+          dayNum: currentDate.getDate(),
+          isCurrentMonth: currentDate.getMonth() === month - 1,
+          isToday: dateStr === new Date().toISOString().split('T')[0],
+          isWeekend: currentDate.getDay() === 0 || currentDate.getDay() === 6,
+          services: daySvcs,
+          count: daySvcs.length,
+          completed: daySvcs.filter(s => s.status === 'completed').length,
+          categoryCounts,
+          techCounts,
+          estimatedRevenue: daySvcs.reduce((sum, s) => {
+            const rev = { pest: 110, lawn: 75, mosquito: 89, termite: 200, tree_shrub: 130, rodent: 95 };
+            return sum + (rev[s.serviceCategory] || 95);
+          }, 0),
+        });
+
+        currentDate.setDate(currentDate.getDate() + 1);
+      }
+      weeks.push(week);
+    }
+
+    // Month summary stats
+    const monthServices = services.filter(s => {
+      const d = s.scheduled_date instanceof Date
+        ? s.scheduled_date.toISOString().split('T')[0]
+        : String(s.scheduled_date).split('T')[0];
+      return d >= startDate && d <= endDate;
+    });
+
+    const summary = {
+      totalServices: monthServices.length,
+      completed: monthServices.filter(s => s.status === 'completed').length,
+      pending: monthServices.filter(s => s.status === 'pending' || s.status === 'confirmed').length,
+      uniqueCustomers: new Set(monthServices.map(s => `${s.first_name} ${s.last_name}`)).size,
+      byCategory: {},
+      byTech: {},
+    };
+    monthServices.forEach(s => {
+      const cat = detectServiceCategory(normalizeServiceType(s.service_type));
+      summary.byCategory[cat] = (summary.byCategory[cat] || 0) + 1;
+      if (s.tech_name) summary.byTech[s.tech_name] = (summary.byTech[s.tech_name] || 0) + 1;
+    });
+
+    res.json({
+      yearMonth,
+      monthName: firstDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+      weeks,
+      summary,
+    });
   } catch (err) { next(err); }
 });
 
