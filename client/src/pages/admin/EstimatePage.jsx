@@ -1150,7 +1150,7 @@ function EstimateToolView() {
                         {E.oneTime.total > 0 && (
                           <div style={{ textAlign: 'center' }}>
                             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: C.white }}>{fmtInt(E.oneTime.total)}</div>
-                            <div style={{ fontSize: 12, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.5 }}>One-Time{E.oneTime.tmInstall > 0 ? ` (incl ${fmtInt(E.oneTime.tmInstall)} install)` : ''}</div>
+                            <div style={{ fontSize: 12, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.5 }}>{E.oneTime.tmInstall > 0 ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)` : 'WaveGuard Membership'}</div>
                           </div>
                         )}
                         <div style={{ textAlign: 'center' }}>
@@ -1495,7 +1495,7 @@ function EstimateToolView() {
                           </div>
                           {E.oneTime.items.map((item, i) => (
                             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 0 3px 16px', fontSize: 14, color: C.gray }}>
-                              <span>{item.name}</span>
+                              <span>{item.name}{item.waivedWithPrepay ? <span style={{ fontSize: 11, color: C.green, marginLeft: 6 }}>waived with annual prepay</span> : ''}</span>
                               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, color: C.green }}>{fmtInt(item.price)}</span>
                             </div>
                           ))}

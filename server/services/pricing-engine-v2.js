@@ -592,19 +592,8 @@ function calcPest(footprint, p, mods, pestFreq, roachMod, zoneMult) {
     rOG = Math.round(basePrice * 0.15 * 100) / 100;
   }
 
-  // Initial service fee — tiered by footprint
-  let initFee = 175;
-  if (footprint < 2000) initFee = 149;
-  else if (footprint <= 3000) initFee = 175;
-  else initFee = 199;
-  if (p.shrubDensity === 'HEAVY' || p.treeDensity === 'HEAVY') initFee += 25;
-  if (p.landscapeComplexity === 'COMPLEX') initFee += 25;
-
-  // ── NEW: Construction/age bump on initial ──
-  if (p.constructionMaterial === 'WOOD_FRAME') initFee += 25;
-  if (p.yearBuilt && p.yearBuilt < 1985) initFee += 25;
-
-  initFee = Math.max(149, Math.min(299, initFee));
+  // WaveGuard Membership fee — flat $99, waived with annual prepay
+  const initFee = 99;
 
   const prepayAnn = basePrice * 4;
 
@@ -633,10 +622,12 @@ function calcPest(footprint, p, mods, pestFreq, roachMod, zoneMult) {
   return {
     service: 'Pest Control',
     basePrice: Math.round(basePrice),
-    adjustments: [], // adjItems from calcPestBase would need to be passed through
+    adjustments: [],
     roachModifier: roachMod,
     roachAdj: rOG,
     initialFee: initFee,
+    initialFeeLabel: 'WaveGuard Membership',
+    initialFeeWaivedWithPrepay: true,
     prepayAnnual: prepayAnn,
     tiers,
     selected,
@@ -1246,11 +1237,11 @@ function calcTotals(result) {
     }
   });
 
-  // Pest initial fee
-  const pestInitial = rec.pest?.initialFee || 0;
-  if (pestInitial > 0) {
-    oneTimeTotal += pestInitial;
-    otItems.push({ name: 'Pest Initial Service', price: pestInitial });
+  // WaveGuard Membership fee — waived with annual prepay
+  const membershipFee = rec.pest?.initialFee || 0;
+  if (membershipFee > 0) {
+    oneTimeTotal += membershipFee;
+    otItems.push({ name: 'WaveGuard Membership', price: membershipFee, waivedWithPrepay: true });
   }
 
   // Termite bait install

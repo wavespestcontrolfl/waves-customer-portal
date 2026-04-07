@@ -319,10 +319,9 @@ export function calculateEstimate(inputs) {
       const perApp = Math.round((pp * ft.disc + rOG) * 100) / 100;
       const ann = Math.round(perApp * ft.f * 100) / 100;
       const mo = Math.round(ann / 12 * 100) / 100;
-      const init = Math.round(pp * 0.85 * 100) / 100;
-      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init, rOG, label: ft.label, recommended: ft.rec, dimmed: !ft.rec });
+      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG, label: ft.label, recommended: ft.rec, dimmed: !ft.rec });
       if (ft.f === pestFreq) {
-        R.pest = { pa: perApp, apps: ft.f, ann, mo, init, rOG, label: ft.label };
+        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG, label: ft.label };
       }
     });
     R.pestRoachMod = roachMod;
