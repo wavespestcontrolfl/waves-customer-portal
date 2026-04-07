@@ -191,6 +191,9 @@ function voiceAgentRoutes(app, httpServer) {
        <Response>
          <Play>${greetingAudio}</Play>
          <Dial timeout="25"
+           record="record-from-answer-dual"
+           recordingStatusCallback="https://${domain}/api/webhooks/twilio/recording-status"
+           recordingStatusCallbackEvent="completed"
            action="https://${domain}/api/webhooks/twilio/voice-agent${useSpanish ? '?language=es' : ''}"
            callerId="${from || to}">
            <Number>+19415993489</Number>
@@ -205,7 +208,7 @@ function voiceAgentRoutes(app, httpServer) {
         `<?xml version="1.0" encoding="UTF-8"?>
          <Response>
            <Say voice="alice">Thank you for calling Waves Pest Control. Please hold while we connect you.</Say>
-           <Dial timeout="30">
+           <Dial timeout="30" record="record-from-answer-dual" recordingStatusCallbackEvent="completed">
              <Number>+19415993489</Number>
            </Dial>
          </Response>`

@@ -216,6 +216,7 @@ function EstimateToolView() {
     nearWater: 'NO', urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
     bedArea: '', palmCount: '', treeCount: '',
     roachModifier: 'NONE', pestFreq: '4', plugArea: '', plugSpacing: '12',
+    grassType: 'A',
     otLawnType: 'FERT',
     exclSimple: '0', exclModerate: '0', exclAdvanced: '0', exclWaive: 'NO',
     bedbugRooms: '1', bedbugMethod: 'BOTH',
@@ -863,8 +864,14 @@ function EstimateToolView() {
             <Checkbox k="svcLawn" label="Lawn Care" />
             {form.svcLawn && (
               <div style={sSubOpts}>
-                <Field label="Lawn Program Tier (shown in results)" style={{ marginBottom: 0 }}>
-                  <div style={{ fontSize: 12, color: C.gray }}>4x / 6x / 9x / 12x frequency options shown after generating</div>
+                <Field label="Grass Type / Track">
+                  <Select k="grassType" options={[
+                    { value: 'A', label: 'Track A: St. Augustine — Full Sun' },
+                    { value: 'B', label: 'Track B: St. Augustine — Shade' },
+                    { value: 'C1', label: 'Track C: Bermuda' },
+                    { value: 'C2', label: 'Track C: Zoysia' },
+                    { value: 'D', label: 'Track D: Bahia' },
+                  ]} />
                 </Field>
               </div>
             )}
@@ -1224,10 +1231,10 @@ function EstimateToolView() {
                     {/* Lawn */}
                     {R.lawn && (
                       <div style={{ marginBottom: 24 }}>
-                        <div style={sSectionTitle}>Lawn Care <span style={sTag('blue')}>{R.lawnMeta?.lsf?.toLocaleString()} sf turf</span></div>
+                        <div style={sSectionTitle}>Lawn Care <span style={sTag('blue')}>{R.lawnMeta?.lsf?.toLocaleString()} sf turf</span>{R.lawnMeta?.grassName && <span style={sTag('green')}>{R.lawnMeta.grassName}</span>}</div>
                         <TierGrid>
                           {R.lawn.map((t, i) => (
-                            <TierRow key={i} name={t.name} detail={`${fmt(t.pa)}/app x ${t.v}${t.hasLandscape ? ' (incl landscape)' : ''}`} price={`${fmt(t.mo)}/mo`} recommended={t.recommended} dimmed={t.dimmed} />
+                            <TierRow key={i} name={t.name} detail={`${fmt(t.pa)}/app x ${t.v}`} price={`${fmt(t.mo)}/mo`} recommended={t.recommended} dimmed={t.dimmed} />
                           ))}
                         </TierGrid>
                       </div>

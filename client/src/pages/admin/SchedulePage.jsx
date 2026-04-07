@@ -5,6 +5,7 @@ const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPan
 const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanel'));
 const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanel'));
 const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanel'));
+import { ViewModeSelector, WeekView, MonthView } from '../../components/schedule/CalendarViews';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -2003,6 +2004,7 @@ function ProtocolReferenceTab() {
 
 export default function SchedulePage() {
   const [activeTab, setActiveTab] = useState('board');
+  const [viewMode, setViewMode] = useState('day');
   const [date, setDate] = useState(formatDateISO(new Date()));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2140,9 +2142,11 @@ export default function SchedulePage() {
     setSyncingCal(false);
   };
 
-  function shiftDate(days) {
-    const d = new Date(date + 'T00:00:00');
-    d.setDate(d.getDate() + days);
+  function shiftDate(dir) {
+    const d = new Date(date + 'T12:00:00');
+    if (viewMode === 'day') d.setDate(d.getDate() + dir);
+    else if (viewMode === 'week') d.setDate(d.getDate() + dir * 7);
+    else d.setMonth(d.getMonth() + dir);
     setDate(formatDateISO(d));
   }
 
@@ -2217,21 +2221,29 @@ export default function SchedulePage() {
           <div style={{ fontSize: 26, fontWeight: 700, color: D.white, marginBottom: 4 }}>Schedule & Dispatch</div>
           {/* Date nav */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-            <button onClick={() => shiftDate(-1)} style={navBtnStyle} title="Previous day">&#9664;</button>
-            <span style={{ fontSize: 14, fontWeight: 600, color: D.text, minWidth: 180, textAlign: 'center' }}>
-              {formatDateDisplay(date)}
+            <button onClick={() => shiftDate(-1)} style={navBtnStyle} title="Previous">&#9664;</button>
+            <span style={{ fontSize: 14, fontWeight: 600, color: D.text, minWidth: 220, textAlign: 'center' }}>
+              {viewMode === 'day' ? formatDateDisplay(date)
+                : viewMode === 'week' ? (() => {
+                    const d = new Date(date + 'T12:00:00');
+                    const end = new Date(d); end.setDate(end.getDate() + 6);
+                    return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+                  })()
+                : new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+              }
             </span>
-            <button onClick={() => shiftDate(1)} style={navBtnStyle} title="Next day">&#9654;</button>
+            <button onClick={() => shiftDate(1)} style={navBtnStyle} title="Next">&#9654;</button>
             {!isToday(date) && (
               <button onClick={() => setDate(formatDateISO(new Date()))} style={{
                 ...navBtnStyle, fontSize: 12, padding: '4px 12px', width: 'auto',
               }}>Today</button>
             )}
+            <ViewModeSelector viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
           </div>
         </div>
 
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          {activeTab === 'board' && (
+          {viewMode === 'day' && activeTab === 'board' && (
             <>
               <div style={{
                 display: 'flex', gap: 12, alignItems: 'center', fontSize: 13, color: D.muted,
@@ -2266,7 +2278,7 @@ export default function SchedulePage() {
               }}>+ New Appointment</button>
             </>
           )}
-          {activeTab !== 'board' && (
+          {viewMode === 'day' && activeTab !== 'board' && (
             <button onClick={syncDispatchAI} disabled={syncing} style={{
               padding: '6px 14px', borderRadius: 8, border: `1px solid ${D.border}`,
               background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer',
@@ -2392,8 +2404,12 @@ export default function SchedulePage() {
         </div>
       )}
 
-      {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
+      {/* Week / Month calendar views */}
+      {viewMode === 'week' && <WeekView startDate={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
+      {viewMode === 'month' && <MonthView date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
+
+      {/* Tabs — day view only */}
+      {viewMode === 'day' && <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {SCHEDULE_TABS.map(t => (
           <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer',
@@ -2405,20 +2421,20 @@ export default function SchedulePage() {
             {t.label}
           </button>
         ))}
-      </div>
+      </div>}
 
       {/* ── Protocol Reference ── */}
-      {activeTab === 'protocols' && <ProtocolReferenceTab />}
+      {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTab />}
 
       {/* ── AI Dispatch Panels ── */}
-      {activeTab === 'routes' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><RoutePanel date={date} /></Suspense>}
-      {activeTab === 'match' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><TechMatchPanel /></Suspense>}
-      {activeTab === 'csr' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><CSRPanel /></Suspense>}
-      {activeTab === 'revenue' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><RevenuePanel date={date} /></Suspense>}
-      {activeTab === 'insights' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><InsightsPanel /></Suspense>}
+      {viewMode === 'day' && activeTab === 'routes' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><RoutePanel date={date} /></Suspense>}
+      {viewMode === 'day' && activeTab === 'match' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><TechMatchPanel /></Suspense>}
+      {viewMode === 'day' && activeTab === 'csr' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><CSRPanel /></Suspense>}
+      {viewMode === 'day' && activeTab === 'revenue' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><RevenuePanel date={date} /></Suspense>}
+      {viewMode === 'day' && activeTab === 'insights' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><InsightsPanel /></Suspense>}
 
       {/* ── Board Tab Content ── */}
-      {activeTab === 'board' && <>
+      {viewMode === 'day' && activeTab === 'board' && <>
 
       {/* Today's Focus summary */}
       {hasFocusAlerts && (

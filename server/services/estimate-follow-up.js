@@ -51,7 +51,7 @@ const EstimateFollowUp = {
         .where('viewed_at', '<', new Date(Date.now() - 48 * 3600000))
         .where('viewed_at', '>', new Date(Date.now() - 72 * 3600000))
         .whereNotNull('customer_phone')
-        .whereRaw('COALESCE(follow_up_count, 0) < 2');
+        .whereRaw('COALESCE(follow_up_count, 0) < 1');
 
       for (const est of viewedNotAccepted) {
         try {
@@ -77,7 +77,7 @@ const EstimateFollowUp = {
         .where('viewed_at', '<', new Date(Date.now() - 5 * 86400000))
         .where('viewed_at', '>', new Date(Date.now() - 6 * 86400000))
         .whereNotNull('customer_phone')
-        .whereRaw('COALESCE(follow_up_count, 0) < 3');
+        .whereRaw('COALESCE(follow_up_count, 0) < 1');
 
       for (const est of finalNudge) {
         try {
@@ -105,7 +105,7 @@ const EstimateFollowUp = {
           new Date(Date.now() + 1 * 86400000),
           new Date(Date.now() + 3 * 86400000),
         ])
-        .whereRaw('COALESCE(follow_up_count, 0) < 4');
+        .whereRaw('COALESCE(follow_up_count, 0) < 1');
 
       for (const est of expiring) {
         try {

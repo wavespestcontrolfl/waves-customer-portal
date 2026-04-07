@@ -102,17 +102,6 @@ function calculateEstimate(profile, selectedServices, options = {}) {
     footprintEstimated = true;
   }
 
-  // ── Compute turf area (using AI impervious surface if available) ──
-  let turfSf = p.estimatedTurfSf || 0;
-  if (turfSf <= 0 && p.lotSqFt > 0) {
-    // Use AI impervious surface percentage if available, otherwise flat estimate
-    const imperviousFraction = (p.imperviosSurfacePercent || 20) / 100;
-    const openArea = Math.max(0, p.lotSqFt * (1 - imperviousFraction));
-    // Subtract beds and non-turf areas
-    const bedArea = p.estimatedBedAreaSf || Math.round(openArea * 0.15);
-    turfSf = Math.max(0, Math.round(openArea - bedArea));
-  }
-
   // ── Compute bed area ──
   let bedArea = p.estimatedBedAreaSf || 0;
   if (bedArea <= 0 && p.lotSqFt > 0) {
@@ -120,6 +109,44 @@ function calculateEstimate(profile, selectedServices, options = {}) {
              p.shrubDensity === 'MODERATE' ? 0.18 : 0.10;
     if (p.landscapeComplexity === 'COMPLEX') bp += 0.05;
     bedArea = Math.min(8000, Math.round(p.lotSqFt * bp));
+  }
+
+  // ── Compute turf area: fixed hardscape + complexity scoring + smoothed turf factor ──
+  let turfSf = p.estimatedTurfSf || 0;
+  if (turfSf <= 0 && p.lotSqFt > 0) {
+    const ptl = (p.propertyType || '').toLowerCase();
+    let hardscape = 0;
+    if (ptl.includes('commercial')) {
+      hardscape = Math.round(p.lotSqFt * 0.15);
+    } else {
+      let base = 800, marginal = 0.03;
+      if (ptl.includes('town') || ptl.includes('duplex')) { base = 400; marginal = 0.02; }
+      else if (ptl.includes('condo')) { base = 200; marginal = 0.05; }
+      hardscape = base + Math.max(0, Math.round((p.lotSqFt - 7500) * marginal));
+    }
+    if (p.poolCage === 'YES') hardscape += 600;
+    else if (p.pool === 'YES') hardscape += 450;
+    if (p.hasLargeDriveway) hardscape += 300;
+
+    const openArea = Math.max(0, Math.round(p.lotSqFt - footprint - hardscape));
+
+    // Complexity score
+    let sc = 0;
+    if (p.pool === 'YES') sc += 2;
+    if (p.poolCage === 'YES') sc += 2;
+    if (p.hasLargeDriveway) sc += 2;
+    if (p.shrubDensity === 'MODERATE') sc += 1; else if (p.shrubDensity === 'HEAVY') sc += 2;
+    if (p.treeDensity === 'MODERATE') sc += 1; else if (p.treeDensity === 'HEAVY') sc += 2;
+    if (p.landscapeComplexity === 'MODERATE') sc += 1; else if (p.landscapeComplexity === 'COMPLEX') sc += 2;
+    if (bedArea > 0 && p.lotSqFt > 0) {
+      const bedRatio = bedArea / p.lotSqFt;
+      if (bedRatio >= 0.20) sc += 3;
+      else if (bedRatio >= 0.10) sc += 1;
+    }
+
+    const tfTable = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33];
+    const tf = tfTable[Math.min(sc, 9)];
+    turfSf = Math.max(0, Math.round(openArea * tf));
   }
 
   // ── Estimate attic sqft (for Bora-Care) ──
@@ -417,8 +444,7 @@ function interpolate(v, breakpoints) {
   if (v >= breakpoints[breakpoints.length - 1].at) return breakpoints[breakpoints.length - 1].adj;
   for (let i = 1; i < breakpoints.length; i++) {
     if (v <= breakpoints[i].at) {
-      const prev = breakpoints[i - 1], curr = breakpoints[i];
-      return Math.round(prev.adj + ((v - prev.at) / (curr.at - prev.at)) * (curr.adj - prev.adj));
+      return breakpoints[i - 1].adj;
     }
   }
   return 0;
@@ -444,12 +470,7 @@ function calcLawn(turfSf, grassType, p) {
     const pts = lp.pts;
     if (sf >= pts[pts.length - 1][0]) return pts[pts.length - 1][freqIdx + 1];
     for (let i = 1; i < pts.length; i++) {
-      if (sf <= pts[i][0]) {
-        const lo = pts[i - 1], hi = pts[i];
-        if (lo[0] === hi[0]) return hi[freqIdx + 1];
-        const t = (sf - lo[0]) / (hi[0] - lo[0]);
-        return Math.round(lo[freqIdx + 1] + (hi[freqIdx + 1] - lo[freqIdx + 1]) * t);
-      }
+      if (sf <= pts[i][0]) return pts[i - 1][freqIdx + 1];
     }
     return pts[pts.length - 1][freqIdx + 1];
   }
@@ -493,86 +514,55 @@ function calcPestBase(footprint, p, mods) {
   let adj = 0;
   const adjItems = [];
 
-  // Footprint adjustment — based on chemical cost + labor data
+  // Footprint adjustment — based on actual chemical cost + labor data
   const fpAdj = interpolate(footprint, [
-    { at: 800, adj: -20 }, { at: 1200, adj: -10 }, { at: 1500, adj: -4 },
-    { at: 2000, adj: 0 }, { at: 2500, adj: 5 }, { at: 3000, adj: 11 },
-    { at: 4000, adj: 20 }, { at: 5500, adj: 30 }
+    { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
+    { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 },
+    { at: 4000, adj: 20 }, { at: 5500, adj: 28 }
   ]);
   adj += fpAdj;
   adjItems.push({ name: `Footprint (${footprint.toLocaleString()} sf)`, value: fpAdj });
 
-  // ── NEW: Year built modifier ──
-  const ageAdj = mods.pestAgeAdj || 0;
-  if (ageAdj !== 0) {
-    adj += ageAdj;
-    adjItems.push({ name: `Year built (${p.yearBuilt || '?'})`, value: ageAdj });
-  }
-
-  // ── NEW: Construction material modifier ──
-  const conAdj = mods.pestConstructionAdj || 0;
-  if (conAdj !== 0) {
-    adj += conAdj;
-    adjItems.push({ name: `Construction (${p.constructionMaterial})`, value: conAdj });
-  }
-
-  // ── NEW: Attached garage modifier ──
-  const garAdj = mods.pestGarageAdj || 0;
-  if (garAdj !== 0) {
-    adj += garAdj;
-    adjItems.push({ name: 'Attached garage', value: garAdj });
-  }
-
-  // Shrub density (existing)
+  // Shrub density
   let shrAdj = 0;
-  if (p.shrubDensity === 'LIGHT') shrAdj = -5;
-  else if (p.shrubDensity === 'HEAVY') shrAdj = 5;
+  if (p.shrubDensity === 'MODERATE') shrAdj = 5;
+  else if (p.shrubDensity === 'HEAVY') shrAdj = 10;
   adj += shrAdj;
   adjItems.push({ name: `Shrubs (${p.shrubDensity})`, value: shrAdj });
 
-  // Pool/lanai (existing, expanded)
+  // Pool
   let poolAdj = 0;
-  if (p.pool === 'YES' && p.poolCage === 'YES') poolAdj = 20;
-  else if (p.poolCage === 'YES') poolAdj = 10;
+  if (p.poolCage === 'YES') poolAdj = 10;
   else if (p.pool === 'YES') poolAdj = 5;
   adj += poolAdj;
-  adjItems.push({ name: `Pool/Lanai`, value: poolAdj });
+  adjItems.push({ name: `Pool`, value: poolAdj });
 
-  // Lot size (existing)
-  const lotAdj = interpolate(p.lotSqFt, [
-    { at: 3000, adj: -5 }, { at: 5000, adj: -3 }, { at: 7500, adj: 0 },
-    { at: 10000, adj: 3 }, { at: 15000, adj: 8 }, { at: 25000, adj: 12 },
-    { at: 50000, adj: 15 }
-  ]);
-  adj += lotAdj;
-  adjItems.push({ name: `Lot (${(p.lotSqFt || 0).toLocaleString()} sf)`, value: lotAdj });
 
-  // Tree density (existing)
+  // Tree density
   let treeAdj = 0;
-  if (p.treeDensity === 'LIGHT') treeAdj = -5;
-  else if (p.treeDensity === 'HEAVY') treeAdj = 5;
+  if (p.treeDensity === 'MODERATE') treeAdj = 5;
+  else if (p.treeDensity === 'HEAVY') treeAdj = 10;
   adj += treeAdj;
   adjItems.push({ name: `Trees (${p.treeDensity})`, value: treeAdj });
 
-  // Complexity (existing)
+  // Complexity
   let compAdj = 0;
-  if (p.landscapeComplexity === 'COMPLEX') compAdj = 8;
+  if (p.landscapeComplexity === 'COMPLEX') compAdj = 5;
   adj += compAdj;
   adjItems.push({ name: `Complexity (${p.landscapeComplexity})`, value: compAdj });
 
-  // ── NEW: Fence modifier ──
-  let fenceAdj = 0;
-  if (p.fenceType === 'PRIVACY_WOOD' || p.fenceType === 'PRIVACY_VINYL') fenceAdj = 5;
-  if (fenceAdj !== 0) {
-    adj += fenceAdj;
-    adjItems.push({ name: `Privacy fence`, value: fenceAdj });
+  // Near water
+  let waterAdj = 0;
+  if (p.nearWater && p.nearWater !== 'NONE' && p.nearWater !== 'NO') waterAdj = 5;
+  if (waterAdj > 0) {
+    adj += waterAdj;
+    adjItems.push({ name: 'Near water', value: waterAdj });
   }
 
-  // ── NEW: Outbuildings ──
-  const outAdj = (p.outbuildingCount || 0) * 5;
-  if (outAdj > 0) {
-    adj += outAdj;
-    adjItems.push({ name: `Outbuildings (${p.outbuildingCount})`, value: outAdj });
+  // Large driveway
+  if (p.hasLargeDriveway) {
+    adj += 5;
+    adjItems.push({ name: 'Large driveway', value: 5 });
   }
 
   // ── Property type adjustment ──
