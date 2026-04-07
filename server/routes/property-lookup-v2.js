@@ -80,11 +80,13 @@ router.post('/property-lookup', async (req, res) => {
     if (!mapsKey) {
       result.errors.push({ source: 'satellite', message: 'No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured' });
     } else {
+      const ultraCloseUrl = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=21&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const superCloseUrl = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const closeUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=19&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const wideUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=18&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
 
-      const [superCloseB64, closeB64, wideB64] = await Promise.all([
+      const [ultraCloseB64, superCloseB64, closeB64, wideB64] = await Promise.all([
+        fetchImageAsBase64(ultraCloseUrl),
         fetchImageAsBase64(superCloseUrl),
         fetchImageAsBase64(closeUrlWithKey),
         fetchImageAsBase64(wideUrlWithKey)
@@ -92,11 +94,13 @@ router.post('/property-lookup', async (req, res) => {
 
       result.satellite = {
         lat, lng,
+        ultraCloseUrl,
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
         inServiceArea: !(lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
                          lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax),
+        _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
         _closeB64: closeB64,
         _wideB64: wideB64
@@ -182,6 +186,7 @@ router.post('/property-lookup', async (req, res) => {
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
+    delete result.satellite._ultraCloseB64;
     delete result.satellite._superCloseB64;
     delete result.satellite._closeB64;
     delete result.satellite._wideB64;
@@ -374,10 +379,11 @@ RentCast data for this property:
 
   const systemPrompt = `You are a property analysis AI for Waves Pest Control, a pest control and lawn care company in Southwest Florida. You analyze satellite imagery to extract property features that affect pest control, lawn care, tree/shrub care, mosquito control, and termite treatment pricing.
 
-You will receive up to three satellite images:
-1. SUPER CLOSE VIEW (zoom 20) — shows fine detail: roof material, driveway surface, landscape beds, individual plants
-2. CLOSE VIEW (zoom 19) — shows the full property in context
-3. WIDE VIEW (zoom 18) — shows the neighborhood, water features, surrounding lots
+You will receive up to four satellite images (closer views carry MORE weight for feature detection):
+1. ULTRA CLOSE VIEW (zoom 21) — HIGHEST PRIORITY — shows pool cages, screen enclosures, lanai details, driveway width, individual plants. Use this for pool/cage/driveway detection.
+2. SUPER CLOSE VIEW (zoom 20) — shows fine detail: roof material, driveway surface, landscape beds
+3. CLOSE VIEW (zoom 19) — shows the full property lot boundaries and structure
+4. WIDE VIEW (zoom 18) — shows the neighborhood, water features, surrounding lots
 
 You also receive RentCast property record data for cross-reference.
 
@@ -469,6 +475,10 @@ Return a JSON object with exactly these fields:
       messages: [{
         role: 'user',
         content: [
+          ...(result.satellite?._ultraCloseB64 ? [{
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: result.satellite._ultraCloseB64 }
+          }] : []),
           ...(superCloseB64 ? [{
             type: 'image',
             source: { type: 'base64', media_type: 'image/png', data: superCloseB64 }

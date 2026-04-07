@@ -411,6 +411,7 @@ function EstimateToolView() {
       if (data.satellite) {
         setSatelliteData({
           imageUrl: data.satellite.closeUrl,
+          ultraCloseUrl: data.satellite.ultraCloseUrl,
           superCloseUrl: data.satellite.superCloseUrl,
           closeUrl: data.satellite.closeUrl,
           wideUrl: data.satellite.wideUrl,
@@ -738,21 +739,27 @@ function EstimateToolView() {
             )}
             {satelliteData && (satelliteData.imageUrl || satelliteData.closeUrl) && (
               <div style={{ marginBottom: 12 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, marginBottom: 8 }}>
+                  {satelliteData.ultraCloseUrl && (
+                    <div>
+                      <img src={satelliteData.ultraCloseUrl} alt="Ultra close" style={{ width: '100%', borderRadius: 8, border: `2px solid ${C.teal}`, aspectRatio: '1', objectFit: 'cover' }} />
+                      <div style={{ fontSize: 9, color: C.teal, textAlign: 'center', marginTop: 2, fontWeight: 600 }}>Ultra</div>
+                    </div>
+                  )}
                   {satelliteData.superCloseUrl && (
                     <div>
-                      <img src={satelliteData.superCloseUrl} alt="Super close" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
-                      <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Detail</div>
+                      <img src={satelliteData.superCloseUrl} alt="Super close" style={{ width: '100%', borderRadius: 8, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
+                      <div style={{ fontSize: 9, color: C.gray, textAlign: 'center', marginTop: 2 }}>Detail</div>
                     </div>
                   )}
                   <div>
-                    <img src={satelliteData.closeUrl || satelliteData.imageUrl} alt="Close view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
-                    <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Property</div>
+                    <img src={satelliteData.closeUrl || satelliteData.imageUrl} alt="Close view" style={{ width: '100%', borderRadius: 8, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
+                    <div style={{ fontSize: 9, color: C.gray, textAlign: 'center', marginTop: 2 }}>Property</div>
                   </div>
                   {satelliteData.wideUrl && (
                     <div>
-                      <img src={satelliteData.wideUrl} alt="Area view" style={{ width: '100%', borderRadius: 10, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
-                      <div style={{ fontSize: 10, color: C.gray, textAlign: 'center', marginTop: 2 }}>Area</div>
+                      <img src={satelliteData.wideUrl} alt="Area view" style={{ width: '100%', borderRadius: 8, border: `1px solid ${C.border}`, aspectRatio: '1', objectFit: 'cover' }} />
+                      <div style={{ fontSize: 9, color: C.gray, textAlign: 'center', marginTop: 2 }}>Area</div>
                     </div>
                   )}
                 </div>
@@ -846,7 +853,7 @@ function EstimateToolView() {
                 </div>
               </div>
             )}
-            <Checkbox k="svcTs" label="Tree & Shrub (Spray)" />
+            <Checkbox k="svcTs" label="Tree & Shrub" />
             <Checkbox k="svcInjection" label="Palm Injection" />
             <Checkbox k="svcMosquito" label="Mosquito Program" />
             <Checkbox k="svcTermiteBait" label="Termite Bait Stations" />
@@ -865,9 +872,11 @@ function EstimateToolView() {
               </div>
             )}
 
+            <div style={sSvcSection}>One-Time Services</div>
+
             {/* -- Lawn Services -- */}
-            <div style={{ ...sSvcSection, color: C.green }}>Lawn Services</div>
-            <Checkbox k="svcOnetimeLawn" label="One-Time Lawn Treatment" />
+            <div style={{ ...sSvcSection, color: C.green, fontSize: 11 }}>Lawn</div>
+            <Checkbox k="svcOnetimeLawn" label="Lawn Treatment" />
             {form.svcOnetimeLawn && (
               <div style={sSubOpts}>
                 <Field label="Type" style={{ marginBottom: 0 }}>
@@ -875,7 +884,7 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcPlugging" label="One-Time Lawn Plugging" />
+            <Checkbox k="svcPlugging" label="Lawn Plugging" />
             {form.svcPlugging && (
               <div style={sSubOpts}>
                 <div style={sRow}>
@@ -884,14 +893,14 @@ function EstimateToolView() {
                 </div>
               </div>
             )}
-            <Checkbox k="svcTopdress" label="One-Time Top Dressing" />
-            <Checkbox k="svcDethatch" label="One-Time Dethatching" />
-            <Checkbox k="svcOverseed" label="One-Time Overseeding" />
+            <Checkbox k="svcTopdress" label="Top Dressing" />
+            <Checkbox k="svcDethatch" label="Dethatching" />
+            <Checkbox k="svcOverseed" label="Overseeding" />
 
             {/* -- Termite Services -- */}
-            <div style={{ ...sSvcSection, color: C.red }}>Termite Services</div>
-            <Checkbox k="svcTrenching" label="One-Time Termite Trenching" />
-            <Checkbox k="svcBoracare" label="One-Time Termite Attic Remediation" />
+            <div style={{ ...sSvcSection, color: C.red, fontSize: 11 }}>Termite</div>
+            <Checkbox k="svcTrenching" label="Termite Trenching" />
+            <Checkbox k="svcBoracare" label="Termite Attic Remediation" />
             {form.svcBoracare && (
               <div style={sSubOpts}>
                 <Field label="Attic Sq Ft (auto-estimated from home/stories)" style={{ marginBottom: 0 }}>
@@ -899,7 +908,7 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcPreslab" label="One-Time Pre-Slab Termite Treatment" />
+            <Checkbox k="svcPreslab" label="Pre-Slab Termite Treatment" />
             {form.svcPreslab && (
               <div style={sSubOpts}>
                 <div style={sRow}>
@@ -909,7 +918,7 @@ function EstimateToolView() {
                 <Field label="Builder Volume"><Select k="preslabVolume" options={[{ value: 'NONE', label: 'No discount' }, { value: '5', label: '5+ homes (-10%)' }, { value: '10', label: '10+ homes (-15%)' }]} /></Field>
               </div>
             )}
-            <Checkbox k="svcFoam" label="One-Time Termite Foam Treatment" />
+            <Checkbox k="svcFoam" label="Termite Foam Treatment" />
             {form.svcFoam && (
               <div style={sSubOpts}>
                 <Field label="Drill Points" style={{ marginBottom: 0 }}>
@@ -919,11 +928,11 @@ function EstimateToolView() {
             )}
 
             {/* -- Pest Services -- */}
-            <div style={{ ...sSvcSection, color: C.amber }}>Pest Services</div>
-            <Checkbox k="svcOnetimePest" label="One-Time Pest" />
-            <Checkbox k="svcOnetimeMosquito" label="One-Time Mosquito" />
-            <Checkbox k="svcFlea" label="One-Time Flea Treatment" />
-            <Checkbox k="svcRoach" label="One-Time Cockroach Treatment" />
+            <div style={{ ...sSvcSection, color: C.amber, fontSize: 11 }}>Pest</div>
+            <Checkbox k="svcOnetimePest" label="Pest Treatment" />
+            <Checkbox k="svcOnetimeMosquito" label="Mosquito Treatment" />
+            <Checkbox k="svcFlea" label="Flea Treatment" />
+            <Checkbox k="svcRoach" label="Cockroach Treatment" />
             {form.svcRoach && (
               <div style={sSubOpts}>
                 <Field label="Type" style={{ marginBottom: 0 }}>
@@ -931,8 +940,8 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcWasp" label="One-Time Wasp/Bee/Stinging Insect" />
-            <Checkbox k="svcBedbug" label="One-Time Bed Bug Treatment" />
+            <Checkbox k="svcWasp" label="Wasp/Bee/Stinging Insect" />
+            <Checkbox k="svcBedbug" label="Bed Bug Treatment" />
             {form.svcBedbug && (
               <div style={sSubOpts}>
                 <div style={sRow}>
@@ -943,10 +952,10 @@ function EstimateToolView() {
             )}
 
             {/* -- Rodent Services -- */}
-            <div style={{ ...sSvcSection, color: C.gray }}>Rodent Services</div>
-            <Checkbox k="svcRodentTrap" label="One-Time Rodent Trapping" />
-            <Checkbox k="svcRodentSanitation" label="One-Time Rodent Sanitation" />
-            <Checkbox k="svcExclusion" label="One-Time Rodent Exclusion" />
+            <div style={{ ...sSvcSection, color: C.gray, fontSize: 11 }}>Rodent</div>
+            <Checkbox k="svcRodentTrap" label="Rodent Trapping" />
+            <Checkbox k="svcRodentSanitation" label="Rodent Sanitation" />
+            <Checkbox k="svcExclusion" label="Rodent Exclusion" />
             {form.svcExclusion && (
               <div style={sSubOpts}>
                 <div style={sRow3}>
@@ -1176,7 +1185,7 @@ function EstimateToolView() {
                         <span style={{ fontSize: 12, color: m.type === 'up' ? '#ef4444' : m.type === 'down' ? '#10b981' : C.gray, flex: 1 }}>
                           {m.label}
                         </span>
-                        <span style={{ fontSize: 10, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.5 }}>{m.service}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", color: m.type === 'up' ? '#ef4444' : m.type === 'down' ? '#10b981' : C.gray }}>{m.impact != null ? (m.impact >= 0 ? '+$' + m.impact : '-$' + Math.abs(m.impact)) : '$0'}</span>
                       </div>
                     ))}
                   </div>
