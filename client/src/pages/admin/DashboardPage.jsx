@@ -59,6 +59,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [weekBookings, setWeekBookings] = useState([]);
   const [bookingsLoading, setBookingsLoading] = useState(true);
+  const [activeKPI, setActiveKPI] = useState(null);
 
   useEffect(() => {
     adminFetch('/admin/dashboard').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
@@ -71,8 +72,6 @@ export default function DashboardPage() {
   const k = data.kpis;
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-
-  const [activeKPI, setActiveKPI] = useState(null);
 
   const KPI_CARDS = [
     { id: 'revenue', icon: '💰', label: 'Revenue MTD', value: fmt(k.revenueMTD), change: k.revenueChangePercent, changeSuffix: '% vs last month', color: k.revenueChangePercent >= 0 ? D.green : D.red, detail: 'revenue' },
