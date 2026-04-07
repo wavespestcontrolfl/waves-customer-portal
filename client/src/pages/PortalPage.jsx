@@ -466,8 +466,16 @@ function BadgeRow({ badges, earnedCount, totalCount, onViewAll }) {
             width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
             background: `${B.wavesBlue}12`, border: `1.5px solid ${B.wavesBlue}33`,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 18,
-          }}>{b.icon}</div>
+            fontSize: 18, position: 'relative',
+          }}>
+            {b.icon}
+            {b.reward && (
+              <span style={{
+                position: 'absolute', top: -3, right: -3,
+                fontSize: 10, color: '#DAA520', lineHeight: 1,
+              }}>★</span>
+            )}
+          </div>
         ))}
         {remaining > 0 && (
           <div onClick={onViewAll} style={{
@@ -482,7 +490,7 @@ function BadgeRow({ badges, earnedCount, totalCount, onViewAll }) {
   );
 }
 
-function BadgeShowcase({ badges, categories }) {
+function BadgeShowcase({ badges, categories, categoryOrder }) {
   const [selected, setSelected] = useState(null);
 
   if (!badges) return null;
@@ -493,6 +501,9 @@ function BadgeShowcase({ badges, categories }) {
     if (!grouped[b.category]) grouped[b.category] = [];
     grouped[b.category].push(b);
   }
+
+  // Use defined category order, falling back to Object.keys
+  const orderedCategories = (categoryOrder || Object.keys(grouped)).filter(cat => grouped[cat]);
 
   const earnedCount = badges.filter(b => b.earned).length;
 
@@ -520,54 +531,67 @@ function BadgeShowcase({ badges, categories }) {
         </div>
       </div>
 
-      {Object.entries(grouped).map(([cat, catBadges]) => (
-        <div key={cat}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-            {categories[cat] || cat}
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-            {catBadges.sort((a, b) => a.order - b.order).map(b => (
-              <div key={b.badgeType} onClick={() => setSelected(b)} style={{
-                background: B.white, borderRadius: 12, padding: '14px 8px',
-                border: `1px solid ${b.earned ? B.wavesBlue + '33' : B.grayLight}`,
-                textAlign: 'center', cursor: 'pointer',
-                opacity: b.earned ? 1 : 0.5,
-                transition: 'transform 0.15s',
-              }}>
-                <div style={{
-                  width: 44, height: 44, borderRadius: '50%', margin: '0 auto',
-                  background: b.earned ? `${B.wavesBlue}12` : B.grayLight,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 22, position: 'relative',
+      {orderedCategories.map(cat => {
+        const catBadges = grouped[cat];
+        if (!catBadges) return null;
+        return (
+          <div key={cat}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
+              {categories[cat] || cat}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+              {catBadges.sort((a, b) => a.order - b.order).map(b => (
+                <div key={b.badgeType} onClick={() => setSelected(b)} style={{
+                  background: B.white, borderRadius: 12, padding: '14px 8px',
+                  border: `1px solid ${b.earned ? B.wavesBlue + '33' : B.grayLight}`,
+                  textAlign: 'center', cursor: 'pointer',
+                  opacity: b.earned ? 1 : 0.5,
+                  transition: 'transform 0.15s',
                 }}>
-                  {b.icon}
-                  {!b.earned && (
-                    <div style={{
-                      position: 'absolute', bottom: -2, right: -2,
-                      fontSize: 10, background: B.grayMid, color: '#fff',
-                      width: 16, height: 16, borderRadius: '50%',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    }}>🔒</div>
+                  <div style={{
+                    width: 44, height: 44, borderRadius: '50%', margin: '0 auto',
+                    background: b.earned ? `${B.wavesBlue}12` : B.grayLight,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 22, position: 'relative',
+                  }}>
+                    {b.icon}
+                    {!b.earned && (
+                      <div style={{
+                        position: 'absolute', bottom: -2, right: -2,
+                        fontSize: 10, background: B.grayMid, color: '#fff',
+                        width: 16, height: 16, borderRadius: '50%',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>🔒</div>
+                    )}
+                    {b.reward && (
+                      <span style={{
+                        position: 'absolute', top: -3, right: -3,
+                        fontSize: 11, color: '#DAA520', lineHeight: 1,
+                      }}>★</span>
+                    )}
+                  </div>
+                  <div style={{
+                    fontSize: 11, fontWeight: 600, marginTop: 6,
+                    color: b.earned ? B.navy : B.grayMid,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{b.title}</div>
+                  {b.reward && (
+                    <div style={{ fontSize: 8, color: '#DAA520', fontWeight: 700, marginTop: 1 }}>★ Reward</div>
+                  )}
+                  {b.earned && b.earnedAt && (
+                    <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2 }}>
+                      {new Date(b.earnedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
+                    </div>
+                  )}
+                  {!b.earned && b.progress && (
+                    <div style={{ fontSize: 9, color: B.orange, fontWeight: 600, marginTop: 2 }}>{b.progress}</div>
                   )}
                 </div>
-                <div style={{
-                  fontSize: 11, fontWeight: 600, marginTop: 6,
-                  color: b.earned ? B.navy : B.grayMid,
-                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                }}>{b.title}</div>
-                {b.earned && b.earnedAt && (
-                  <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2 }}>
-                    {new Date(b.earnedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
-                  </div>
-                )}
-                {!b.earned && b.progress && (
-                  <div style={{ fontSize: 9, color: B.orange, fontWeight: 600, marginTop: 2 }}>{b.progress}</div>
-                )}
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
 
       {/* Badge Detail Modal */}
       {selected && (
@@ -597,9 +621,19 @@ function BadgeShowcase({ badges, categories }) {
             </div>
 
             {selected.earned ? (
-              <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 12 }}>
-                ✓ Earned {selected.earnedAt ? new Date(selected.earnedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
-              </div>
+              <>
+                <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 12 }}>
+                  ✓ Earned {selected.earnedAt ? new Date(selected.earnedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
+                </div>
+                {selected.reward && (
+                  <div style={{
+                    marginTop: 10, padding: '8px 12px', borderRadius: 8,
+                    background: '#FFF8E1', border: '1px solid #DAA520',
+                  }}>
+                    <div style={{ fontSize: 11, color: '#DAA520', fontWeight: 700 }}>★ Reward unlocked: {selected.reward.description}</div>
+                  </div>
+                )}
+              </>
             ) : (
               <>
                 {selected.progress && (
@@ -617,6 +651,14 @@ function BadgeShowcase({ badges, categories }) {
                       }} />
                     </div>
                     <div style={{ fontSize: 11, color: B.orange, fontWeight: 600, marginTop: 4 }}>{selected.progress}</div>
+                  </div>
+                )}
+                {selected.reward && (
+                  <div style={{
+                    marginTop: 10, padding: '8px 12px', borderRadius: 8,
+                    background: '#FFF8E1', border: '1px solid #e0d5b0',
+                  }}>
+                    <div style={{ fontSize: 11, color: '#9e8a4f', fontWeight: 600 }}>★ Unlock reward: {selected.reward.description}</div>
                   </div>
                 )}
               </>
@@ -656,13 +698,15 @@ function BadgeCelebrationToast({ badges }) {
     // Queue toasts 2 seconds apart
     unnotified.forEach((b, i) => {
       notifiedRef.current.add(b.badgeType);
+      const isReward = !!b.reward;
+      const duration = isReward ? 6000 : 4000;
       setTimeout(() => {
         setToasts(prev => [...prev, b]);
         api.notifyBadge(b.badgeType).catch(() => {});
-        // Remove after 4 seconds
+        // Remove after duration
         setTimeout(() => {
           setToasts(prev => prev.filter(t => t.badgeType !== b.badgeType));
-        }, 4000);
+        }, duration);
       }, i * 2000);
     });
   }, [badges]);
@@ -676,34 +720,43 @@ function BadgeCelebrationToast({ badges }) {
         @keyframes toast-slide-out { from { opacity: 1; } to { opacity: 0; transform: translateY(-20px); } }
         @keyframes badge-confetti { 0% { transform: translateY(0) rotate(0); opacity: 1; } 100% { transform: translateY(60px) rotate(360deg); opacity: 0; } }
       `}</style>
-      {toasts.map((b, i) => (
-        <div key={b.badgeType} style={{
-          position: 'fixed', top: 60 + i * 70, left: '50%', transform: 'translateX(-50%)',
-          zIndex: 2000, animation: 'toast-slide-in 0.5s ease-out',
-          background: B.white, borderRadius: 16, padding: '12px 20px',
-          boxShadow: '0 8px 30px rgba(0,0,0,0.15)', border: `2px solid ${B.yellow}`,
-          display: 'flex', alignItems: 'center', gap: 12, minWidth: 280,
-          overflow: 'visible', position: 'fixed',
-        }}>
-          {/* Mini confetti */}
-          {[B.yellow, B.green, B.wavesBlue, B.orange].map((c, j) => (
-            <div key={j} style={{
-              position: 'absolute', top: -4, left: `${20 + j * 20}%`,
-              width: 5, height: 5, borderRadius: j % 2 ? 1 : '50%',
-              background: c, animation: `badge-confetti 1.5s ease-out ${j * 0.1}s forwards`,
-            }} />
-          ))}
-          <div style={{
-            width: 36, height: 36, borderRadius: '50%',
-            background: `${B.yellow}20`, display: 'flex', alignItems: 'center',
-            justifyContent: 'center', fontSize: 20, flexShrink: 0,
-          }}>{b.icon}</div>
-          <div>
-            <div style={{ fontSize: 11, color: B.yellow, fontWeight: 700 }}>🎉 New Badge Earned!</div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{b.title}</div>
+      {toasts.map((b, i) => {
+        const isReward = !!b.reward;
+        return (
+          <div key={b.badgeType} style={{
+            position: 'fixed', top: 60 + i * 80, left: '50%', transform: 'translateX(-50%)',
+            zIndex: 2000, animation: 'toast-slide-in 0.5s ease-out',
+            background: B.white, borderRadius: 16, padding: '12px 20px',
+            boxShadow: isReward ? '0 8px 30px rgba(218,165,32,0.3)' : '0 8px 30px rgba(0,0,0,0.15)',
+            border: `2px solid ${isReward ? '#DAA520' : B.yellow}`,
+            display: 'flex', alignItems: 'center', gap: 12, minWidth: 280,
+            overflow: 'visible',
+          }}>
+            {/* Mini confetti */}
+            {[B.yellow, B.green, B.wavesBlue, B.orange].map((c, j) => (
+              <div key={j} style={{
+                position: 'absolute', top: -4, left: `${20 + j * 20}%`,
+                width: 5, height: 5, borderRadius: j % 2 ? 1 : '50%',
+                background: c, animation: `badge-confetti 1.5s ease-out ${j * 0.1}s forwards`,
+              }} />
+            ))}
+            <div style={{
+              width: 36, height: 36, borderRadius: '50%',
+              background: isReward ? '#FFF8E1' : `${B.yellow}20`, display: 'flex', alignItems: 'center',
+              justifyContent: 'center', fontSize: 20, flexShrink: 0,
+            }}>{b.icon}</div>
+            <div>
+              <div style={{ fontSize: 11, color: isReward ? '#DAA520' : B.yellow, fontWeight: 700 }}>
+                {isReward ? '★ Reward Badge Earned!' : '🎉 New Badge Earned!'}
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{b.title}</div>
+              {isReward && b.reward && (
+                <div style={{ fontSize: 11, color: '#9e8a4f', marginTop: 1 }}>{b.reward.description}</div>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </>
   );
 }
@@ -4641,7 +4694,7 @@ const SERVICE_SCHEDULE_MONTHS = {
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 // Hidden badge types (engagement-tracking ones we don't show)
-const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer'];
+const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer', 'feedback_champion'];
 
 // =========================================================================
 // MY PLAN TAB
@@ -5274,6 +5327,7 @@ function MyPlanTab({ customer }) {
           <BadgeShowcase
             badges={curatedBadges}
             categories={badgeData.data.categories}
+            categoryOrder={badgeData.data.categoryOrder}
           />
         </>
       )}
