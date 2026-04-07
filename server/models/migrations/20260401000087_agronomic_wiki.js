@@ -11,7 +11,7 @@ exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('treatment_outcomes'))) {
     await knex.schema.createTable('treatment_outcomes', (t) => {
       t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
-      t.uuid('customer_id').notNullable().references('id').inTable('customers');
+      t.uuid('customer_id').notNullable();
 
       // The treatment
       t.uuid('service_record_id').notNullable().unique();

@@ -292,7 +292,7 @@ router.put('/:id/assign', async (req, res, next) => {
 router.put('/:id/status', async (req, res, next) => {
   try {
     const { status, notes } = req.body;
-    const svc = await db('scheduled_services').where({ id: req.params.id })
+    const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'customers.first_name', 'customers.phone as cust_phone',

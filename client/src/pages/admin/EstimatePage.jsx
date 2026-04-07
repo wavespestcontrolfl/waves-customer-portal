@@ -661,9 +661,10 @@ function EstimateToolView() {
     setSending(true);
     try {
       const method = form.sendMethod || 'both';
+      const scheduled = form.scheduleSend && form.scheduledAt ? form.scheduledAt : null;
       const r = await fetch(`/api/admin/estimates/${savedId}/send`, {
         method: 'POST', headers: authHeaders,
-        body: JSON.stringify({ sendMethod: method }),
+        body: JSON.stringify({ sendMethod: method, scheduledAt: scheduled }),
       });
       if (!r.ok) throw new Error('Send failed: ' + r.status);
       const label = method === 'sms' ? 'SMS' : method === 'email' ? 'email' : 'SMS & email';
@@ -1001,29 +1002,54 @@ function EstimateToolView() {
                   </div>
                 </div>
               )}
+              {/* Schedule toggle */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, color: C.gray }}>
+                  <input type="checkbox" checked={form.scheduleSend || false} onChange={e => set('scheduleSend', e.target.checked)} style={{ accentColor: C.teal }} />
+                  Schedule for later
+                </label>
+                {form.scheduleSend && (
+                  <input type="datetime-local" value={form.scheduledAt || ''} onChange={e => set('scheduledAt', e.target.value)}
+                    style={{ ...sInput, width: 'auto', padding: '6px 10px', fontSize: 13 }} />
+                )}
+              </div>
+              {form.scheduleSend && !form.scheduledAt && (
+                <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>
+                  Quick: <button onClick={() => {
+                    const tomorrow = new Date();
+                    tomorrow.setDate(tomorrow.getDate() + 1);
+                    tomorrow.setHours(8, 0, 0, 0);
+                    set('scheduledAt', tomorrow.toISOString().slice(0, 16));
+                  }} style={{ background: 'none', border: 'none', color: C.teal, cursor: 'pointer', fontSize: 11, fontWeight: 600, textDecoration: 'underline' }}>Tomorrow 8:00 AM</button>
+                </div>
+              )}
+
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
                   <button style={{ ...sBtn(C.green, 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerPhone) { alert('Enter a phone number.'); return; }
+                    if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
                     set('sendMethod', 'sms');
                     await doSave();
                     setTimeout(() => doSend(), 500);
-                  }} disabled={sending}>{sending ? '...' : 'SMS Only'}</button>
+                  }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule SMS' : 'SMS Only'}</button>
                   <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerEmail) { alert('Enter an email.'); return; }
+                    if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
                     set('sendMethod', 'email');
                     await doSave();
                     setTimeout(() => doSend(), 500);
-                  }} disabled={sending}>{sending ? '...' : 'Email Only'}</button>
+                  }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule Email' : 'Email Only'}</button>
                   <button style={{ ...sBtn(C.teal, 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerPhone && !form.customerEmail) { alert('Enter phone or email.'); return; }
+                    if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
                     set('sendMethod', 'both');
                     await doSave();
                     setTimeout(() => doSend(), 500);
-                  }} disabled={sending}>{sending ? '...' : 'Both'}</button>
+                  }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule Both' : 'Both'}</button>
                 </div>
                 <button style={{ ...sBtn('transparent', C.gray), fontSize: 13, padding: '10px 16px', border: `1px solid ${C.border}` }} onClick={() => setShowSendForm(false)}>Cancel</button>
               </div>

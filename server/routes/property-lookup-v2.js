@@ -14,6 +14,7 @@
 
 const express = require('express');
 const router = express.Router();
+const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
