@@ -117,14 +117,29 @@ router.post('/property-lookup', async (req, res) => {
     const [claudeResult, geminiResult] = await Promise.allSettled([
       // Claude Vision
       (async () => {
-        if (!process.env.ANTHROPIC_API_KEY) return null;
-        return analyzeWithClaude(
-          result.satellite._closeB64,
-          result.satellite._wideB64,
-          result.rentcast,
-          address,
-          result.satellite._superCloseB64
-        );
+        if (!process.env.ANTHROPIC_API_KEY) {
+          console.log('[CLAUDE DEBUG] ANTHROPIC_API_KEY not set — skipping');
+          return null;
+        }
+        if (!result.satellite?._closeB64) {
+          console.log('[CLAUDE DEBUG] No close satellite image — skipping');
+          return null;
+        }
+        try {
+          console.log('[CLAUDE DEBUG] Starting Claude vision analysis...');
+          const claudeAnalysis = await analyzeWithClaude(
+            result.satellite._closeB64,
+            result.satellite._wideB64 || result.satellite._closeB64,
+            result.rentcast,
+            address,
+            result.satellite._superCloseB64
+          );
+          console.log(`[CLAUDE DEBUG] Success! Confidence: ${claudeAnalysis?.confidenceScore || 'N/A'}%`);
+          return claudeAnalysis;
+        } catch (err) {
+          console.error(`[CLAUDE DEBUG] FAILED: ${err.message}`);
+          throw err;
+        }
       })(),
       // Gemini Vision
       (async () => {
