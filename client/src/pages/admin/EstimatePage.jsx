@@ -576,9 +576,31 @@ function EstimateToolView() {
           const p = result.property || profile || {};
           const mods = [];
           const add = (svc, label, impact, type) => mods.push({ service: svc, label, impact, type });
-          add('property', `Home: ${(p.homeSqFt || p.squareFootage || 0).toLocaleString()} sq ft · ${p.stories || 1} story`, 0, 'info');
-          add('property', `Footprint: ${(p.footprint || Math.round((p.homeSqFt || 0) / (p.stories || 1))).toLocaleString()} sq ft`, 0, 'info');
-          add('property', `Lot: ${(p.lotSqFt || p.lotSize || 0).toLocaleString()} sq ft`, 0, 'info');
+
+          // Interpolation helper (same as estimateEngine)
+          const interp = (v, b) => {
+            if (v <= b[0].at) return b[0].adj;
+            if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
+            for (let i = 1; i < b.length; i++) {
+              if (v <= b[i].at) {
+                const prev = b[i - 1]; const cur = b[i];
+                return Math.round(prev.adj + ((v - prev.at) / (cur.at - prev.at)) * (cur.adj - prev.adj));
+              }
+            }
+            return 0;
+          };
+
+          const homeSf = p.homeSqFt || p.squareFootage || 0;
+          const stories = p.stories || 1;
+          const fp = p.footprint || Math.round(homeSf / stories);
+          const lotSf = p.lotSqFt || p.lotSize || 0;
+
+          const fpAdj = interp(fp, [{ at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 }, { at: 2000, adj: 0 }, { at: 2500, adj: 12 }, { at: 3000, adj: 22 }, { at: 4000, adj: 35 }, { at: 5500, adj: 50 }]);
+          const lotAdj = interp(lotSf, [{ at: 3000, adj: -10 }, { at: 5000, adj: -5 }, { at: 7500, adj: 0 }, { at: 10000, adj: 8 }, { at: 15000, adj: 18 }, { at: 25000, adj: 30 }, { at: 50000, adj: 42 }]);
+
+          add('property', `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
+          add('pest', `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
+          add('pest', `Lot: ${lotSf.toLocaleString()} sq ft → ${lotAdj >= 0 ? '+' : ''}$${lotAdj}/visit`, lotAdj, lotAdj > 0 ? 'up' : lotAdj < 0 ? 'down' : 'info');
           if (p.pool === 'YES' || p.pool === true || p.hasPool) add('pest', p.poolCage === 'YES' || p.hasPoolCage ? 'Pool cage: +$22/visit' : 'Pool: +$5/visit', p.poolCage === 'YES' || p.hasPoolCage ? 22 : 5, 'up');
           else add('pest', 'No pool: $0/visit', 0, 'info');
           const sd = p.shrubDensity || p.shrubs;
