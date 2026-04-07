@@ -564,6 +564,15 @@ function EstimateToolView() {
         if (form.palmCount) profile.estimatedPalmCount = parseInt(form.palmCount);
         if (form.treeCount) profile.estimatedTreeCount = parseInt(form.treeCount);
         profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
+        // Override property features from form dropdowns
+        profile.pool = form.hasPool === 'YES' ? 'YES' : 'NO';
+        profile.poolCage = form.hasPoolCage === 'YES' ? 'YES' : 'NO';
+        profile.hasLargeDriveway = form.hasLargeDriveway === 'YES';
+        profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
+        profile.treeDensity = form.treeDensity || profile.treeDensity;
+        profile.landscapeComplexity = form.landscapeComplexity || profile.landscapeComplexity;
+        profile.nearWater = form.nearWater === 'YES' ? 'YES' : 'NO';
+        profile.propertyType = form.propertyType || profile.propertyType;
 
         const r = await fetch('/api/admin/estimator/calculate-estimate', {
           method: 'POST', headers: authHeaders,
@@ -578,15 +587,12 @@ function EstimateToolView() {
           const mods = [];
           const add = (svc, label, impact, type) => mods.push({ service: svc, label, impact, type });
 
-          // Interpolation helper (same as estimateEngine)
+          // Round-down lookup (same as estimateEngine)
           const interp = (v, b) => {
             if (v <= b[0].at) return b[0].adj;
             if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
             for (let i = 1; i < b.length; i++) {
-              if (v <= b[i].at) {
-                const prev = b[i - 1]; const cur = b[i];
-                return Math.round(prev.adj + ((v - prev.at) / (cur.at - prev.at)) * (cur.adj - prev.adj));
-              }
+              if (v <= b[i].at) return b[i - 1].adj;
             }
             return 0;
           };
@@ -594,30 +600,29 @@ function EstimateToolView() {
           const homeSf = p.homeSqFt || p.squareFootage || 0;
           const stories = p.stories || 1;
           const fp = p.footprint || Math.round(homeSf / stories);
-          const lotSf = p.lotSqFt || p.lotSize || 0;
 
-          const fpAdj = interp(fp, [{ at: 800, adj: -20 }, { at: 1200, adj: -10 }, { at: 1500, adj: -4 }, { at: 2000, adj: 0 }, { at: 2500, adj: 5 }, { at: 3000, adj: 11 }, { at: 4000, adj: 20 }, { at: 5500, adj: 30 }]);
-          const lotAdj = interp(lotSf, [{ at: 3000, adj: -5 }, { at: 5000, adj: -3 }, { at: 7500, adj: 0 }, { at: 10000, adj: 3 }, { at: 15000, adj: 8 }, { at: 25000, adj: 12 }, { at: 50000, adj: 15 }]);
+          const fpAdj = interp(fp, [{ at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 }, { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 }, { at: 4000, adj: 20 }, { at: 5500, adj: 28 }]);
 
           add('property', `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
           add('pest', `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
-          add('pest', `Lot: ${lotSf.toLocaleString()} sq ft → ${lotAdj >= 0 ? '+' : ''}$${lotAdj}/visit`, lotAdj, lotAdj > 0 ? 'up' : lotAdj < 0 ? 'down' : 'info');
-          if (p.pool === 'YES' || p.pool === true || p.hasPool) add('pest', p.poolCage === 'YES' || p.hasPoolCage ? 'Pool cage: +$22/visit' : 'Pool: +$5/visit', p.poolCage === 'YES' || p.hasPoolCage ? 22 : 5, 'up');
+          if (p.poolCage === 'YES') add('pest', 'Pool cage: +$10/visit', 10, 'up');
+          else if (p.pool === 'YES') add('pest', 'Pool (no cage): +$5/visit', 5, 'up');
           else add('pest', 'No pool: $0/visit', 0, 'info');
           const sd = p.shrubDensity || p.shrubs;
-          if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$25/visit', 25, 'up');
-          else if (sd === 'LIGHT') add('pest', 'Light shrubs: -$5/visit', -5, 'down');
-          else add('pest', `${sd || 'Moderate'} shrubs: $0/visit`, 0, 'info');
+          if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$10/visit', 10, 'up');
+          else if (sd === 'MODERATE') add('pest', 'MODERATE shrubs: +$5/visit', 5, 'up');
+          else add('pest', 'Light shrubs: $0/visit', 0, 'info');
           const td = p.treeDensity || p.trees;
-          if (td === 'HEAVY') add('pest', 'Heavy trees: +$15/visit', 15, 'up');
-          else if (td === 'LIGHT') add('pest', 'Light trees: -$3/visit', -3, 'down');
-          else add('pest', `${td || 'Moderate'} trees: $0/visit`, 0, 'info');
+          if (td === 'HEAVY') add('pest', 'Heavy trees: +$10/visit', 10, 'up');
+          else if (td === 'MODERATE') add('pest', 'MODERATE trees: +$5/visit', 5, 'up');
+          else add('pest', 'Light trees: $0/visit', 0, 'info');
           const lc = p.landscapeComplexity || p.complexity;
-          if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$8/visit', 8, 'up');
+          if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$5/visit', 5, 'up');
           else add('pest', `${lc || 'Simple'} landscape: $0/visit`, 0, 'info');
           const nw = p.nearWater || p.waterProximity;
-          if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('mosquito', `Near water (${String(nw).replace(/_/g, ' ')}): +$15/visit`, 15, 'up');
-          else add('mosquito', 'No water nearby: $0/visit', 0, 'info');
+          if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('pest', 'Near water: +$5/visit', 5, 'up');
+          else add('pest', 'No water nearby: $0/visit', 0, 'info');
+          if (p.hasLargeDriveway) add('pest', 'Large driveway: +$5/visit', 5, 'up');
           if (p.yearBuilt) add('property', `Built: ${p.yearBuilt} · ${p.constructionMaterial || 'CBS'} · ${p.foundationType || 'Slab'} · ${p.roofType || 'Shingle'}`, 0, 'info');
           result.modifiers = mods;
         }
