@@ -493,11 +493,11 @@ function calcPestBase(footprint, p, mods) {
   let adj = 0;
   const adjItems = [];
 
-  // Footprint adjustment (existing)
+  // Footprint adjustment — based on chemical cost + labor data
   const fpAdj = interpolate(footprint, [
-    { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
-    { at: 2000, adj: 0 }, { at: 2500, adj: 12 }, { at: 3000, adj: 22 },
-    { at: 4000, adj: 35 }, { at: 5500, adj: 50 }
+    { at: 800, adj: -20 }, { at: 1200, adj: -10 }, { at: 1500, adj: -4 },
+    { at: 2000, adj: 0 }, { at: 2500, adj: 5 }, { at: 3000, adj: 11 },
+    { at: 4000, adj: 20 }, { at: 5500, adj: 30 }
   ]);
   adj += fpAdj;
   adjItems.push({ name: `Footprint (${footprint.toLocaleString()} sf)`, value: fpAdj });
@@ -540,9 +540,9 @@ function calcPestBase(footprint, p, mods) {
 
   // Lot size (existing)
   const lotAdj = interpolate(p.lotSqFt, [
-    { at: 3000, adj: -10 }, { at: 5000, adj: -5 }, { at: 7500, adj: 0 },
-    { at: 10000, adj: 8 }, { at: 15000, adj: 18 }, { at: 25000, adj: 30 },
-    { at: 50000, adj: 42 }
+    { at: 3000, adj: -5 }, { at: 5000, adj: -3 }, { at: 7500, adj: 0 },
+    { at: 10000, adj: 3 }, { at: 15000, adj: 8 }, { at: 25000, adj: 12 },
+    { at: 50000, adj: 15 }
   ]);
   adj += lotAdj;
   adjItems.push({ name: `Lot (${(p.lotSqFt || 0).toLocaleString()} sf)`, value: lotAdj });

@@ -143,18 +143,18 @@ export function calculateEstimate(inputs) {
   addMod('property', `Footprint: ${footprint.toLocaleString()} sq ft`, 0, 'info');
   addMod('property', `Lot: ${lotSqFt.toLocaleString()} sq ft`, 0, 'info');
 
-  // Footprint impact on pest base price
+  // Footprint impact — based on actual chemical cost + labor data
   const fpAdj = interpolate(footprint, [
-    { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
-    { at: 2000, adj: 0 }, { at: 2500, adj: 12 }, { at: 3000, adj: 22 },
-    { at: 4000, adj: 35 }, { at: 5500, adj: 50 },
+    { at: 800, adj: -20 }, { at: 1200, adj: -10 }, { at: 1500, adj: -4 },
+    { at: 2000, adj: 0 }, { at: 2500, adj: 5 }, { at: 3000, adj: 11 },
+    { at: 4000, adj: 20 }, { at: 5500, adj: 30 },
   ]);
   addMod('pest', `Footprint size: ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
 
-  // Lot size impact
+  // Lot size impact — reduced from previous values
   const lotAdj = interpolate(lotSqFt, [
-    { at: 3000, adj: -10 }, { at: 5000, adj: -5 }, { at: 7500, adj: 0 },
-    { at: 10000, adj: 8 }, { at: 15000, adj: 18 }, { at: 25000, adj: 30 }, { at: 50000, adj: 42 },
+    { at: 3000, adj: -5 }, { at: 5000, adj: -3 }, { at: 7500, adj: 0 },
+    { at: 10000, adj: 3 }, { at: 15000, adj: 8 }, { at: 25000, adj: 12 }, { at: 50000, adj: 15 },
   ]);
   addMod('pest', `Lot size: ${lotAdj >= 0 ? '+' : ''}$${lotAdj}/visit`, lotAdj, lotAdj > 0 ? 'up' : lotAdj < 0 ? 'down' : 'info');
 

@@ -595,8 +595,8 @@ function EstimateToolView() {
           const fp = p.footprint || Math.round(homeSf / stories);
           const lotSf = p.lotSqFt || p.lotSize || 0;
 
-          const fpAdj = interp(fp, [{ at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 }, { at: 2000, adj: 0 }, { at: 2500, adj: 12 }, { at: 3000, adj: 22 }, { at: 4000, adj: 35 }, { at: 5500, adj: 50 }]);
-          const lotAdj = interp(lotSf, [{ at: 3000, adj: -10 }, { at: 5000, adj: -5 }, { at: 7500, adj: 0 }, { at: 10000, adj: 8 }, { at: 15000, adj: 18 }, { at: 25000, adj: 30 }, { at: 50000, adj: 42 }]);
+          const fpAdj = interp(fp, [{ at: 800, adj: -20 }, { at: 1200, adj: -10 }, { at: 1500, adj: -4 }, { at: 2000, adj: 0 }, { at: 2500, adj: 5 }, { at: 3000, adj: 11 }, { at: 4000, adj: 20 }, { at: 5500, adj: 30 }]);
+          const lotAdj = interp(lotSf, [{ at: 3000, adj: -5 }, { at: 5000, adj: -3 }, { at: 7500, adj: 0 }, { at: 10000, adj: 3 }, { at: 15000, adj: 8 }, { at: 25000, adj: 12 }, { at: 50000, adj: 15 }]);
 
           add('property', `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
           add('pest', `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
