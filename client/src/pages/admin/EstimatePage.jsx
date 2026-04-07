@@ -807,10 +807,12 @@ function EstimateToolView() {
             <div style={sPanelTitle}>Property Data</div>
             <Field label="Property Type">
               <Select k="propertyType" options={[
-                { value: 'Single Family', label: 'Single Family' },
-                { value: 'Townhome', label: 'Townhome / Villa' },
-                { value: 'Condo', label: 'Condo' },
-                { value: 'Duplex', label: 'Duplex' },
+                { value: 'Single Family', label: 'Single Family ($0)' },
+                { value: 'Townhome', label: 'Townhome — End Unit (-$8)' },
+                { value: 'Townhome Interior', label: 'Townhome — Interior Unit (-$15)' },
+                { value: 'Duplex', label: 'Duplex (-$10)' },
+                { value: 'Condo', label: 'Condo — Ground Floor (-$20)' },
+                { value: 'Condo Upper', label: 'Condo — Upper Floor (-$25)' },
                 { value: 'Commercial', label: 'Commercial' },
               ]} />
             </Field>

@@ -191,6 +191,20 @@ export function calculateEstimate(inputs) {
   else if (urgency === 'URGENT') addMod('one-time', `Urgency (Emergency): +50%`, 50, 'up');
   else addMod('one-time', 'Routine service: $0 surcharge', 0, 'info');
 
+  // Property type adjustment
+  const ptLower = (propertyType || '').toLowerCase();
+  let propTypeAdj = 0;
+  let propTypeLabel = 'Single Family';
+  if (ptLower.includes('townhome') || ptLower.includes('town home') || ptLower.includes('townhouse')) {
+    if (ptLower.includes('interior') || ptLower.includes('inner')) { propTypeAdj = -15; propTypeLabel = 'Townhome (interior)'; }
+    else { propTypeAdj = -8; propTypeLabel = 'Townhome (end unit)'; }
+  } else if (ptLower.includes('duplex')) { propTypeAdj = -10; propTypeLabel = 'Duplex'; }
+  else if (ptLower.includes('condo')) {
+    if (ptLower.includes('upper') || ptLower.includes('2nd') || ptLower.includes('3rd') || stories > 1) { propTypeAdj = -25; propTypeLabel = 'Condo (upper floor)'; }
+    else { propTypeAdj = -20; propTypeLabel = 'Condo (ground floor)'; }
+  }
+  addMod('pest', `${propTypeLabel}: ${propTypeAdj >= 0 ? '+' : ''}$${propTypeAdj}/visit`, propTypeAdj, propTypeAdj < 0 ? 'down' : 'info');
+
   // Recurring customer
   if (isRC) addMod('one-time', 'Recurring customer: -15% one-time services', null, 'down');
 
@@ -262,6 +276,7 @@ export function calculateEstimate(inputs) {
     if (treeDensity === 'LIGHT') adj -= 3;
     else if (treeDensity === 'HEAVY') adj += 15;
     if (landscapeComplexity === 'COMPLEX') adj += 8;
+    adj += propTypeAdj; // Property type adjustment
     let pp = Math.max(89, 117 + adj), rOG = 0;
     if (roachMod === 'REGULAR' || roachMod === 'GERMAN') rOG = Math.round(pp * 0.15 * 100) / 100;
     const freqTiers = [

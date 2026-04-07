@@ -575,6 +575,20 @@ function calcPestBase(footprint, p, mods) {
     adjItems.push({ name: `Outbuildings (${p.outbuildingCount})`, value: outAdj });
   }
 
+  // ── Property type adjustment ──
+  const ptLower = (p.propertyType || '').toLowerCase();
+  let propTypeAdj = 0;
+  if (ptLower.includes('townhome') || ptLower.includes('town home') || ptLower.includes('townhouse')) {
+    propTypeAdj = ptLower.includes('interior') || ptLower.includes('inner') ? -15 : -8;
+  } else if (ptLower.includes('duplex')) { propTypeAdj = -10; }
+  else if (ptLower.includes('condo')) {
+    propTypeAdj = ptLower.includes('upper') || ptLower.includes('2nd') || ptLower.includes('3rd') ? -25 : -20;
+  }
+  if (propTypeAdj !== 0) {
+    adj += propTypeAdj;
+    adjItems.push({ name: `Property type (${p.propertyType})`, value: propTypeAdj });
+  }
+
   const basePrice = Math.max(89, 117 + adj);
   return basePrice;
 }
