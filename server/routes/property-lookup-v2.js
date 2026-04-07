@@ -382,11 +382,12 @@ You will receive up to three satellite images:
 You also receive RentCast property record data for cross-reference.
 
 IMPORTANT RULES:
-- If RentCast says pool=YES, do NOT downgrade to NO. Satellite may not show it (lanai roof covers it).
-- If RentCast says pool=NO and you see what looks like a pool, flag it but note "possible neighbor pool" — satellite perspective can be misleading.
+- POOL DETECTION (SWFL-specific): Pool cages/screen enclosures are EXTREMELY common in Southwest Florida. They appear as rectangular screened structures attached to the back of the home, often covering both a pool and a lanai/patio. Look for: rectangular screen enclosure (lighter gray mesh visible from above), blue water visible through the screen, or a solid lanai roof extending from the main roof. If you see ANY screen enclosure attached to the home, mark poolCage=YES. Even small ones count — pool cages in SWFL range from 200-800+ sq ft. If RentCast says pool=NO but you clearly see a pool cage or blue water, override RentCast — county records are often outdated for pools added after construction.
+- DRIVEWAY: "largeDriveway" means the driveway is wider than a standard 2-car width (~20ft) OR extends significantly along the side of the home OR has a circular/turnaround area. Standard SWFL driveways are 2-car width going straight to the garage — that is NOT large. Only mark YES if it's notably oversized.
 - For construction material: if RentCast already identified it, confirm or note disagreement. If unknown, infer from satellite (CBS=stucco appearance, wood frame=siding visible, etc.)
 - For foundation: SWFL default is slab-on-grade. Only flag raised/crawlspace if clearly visible (house elevated, visible piers/stilts, lattice skirting).
 - Estimate impervious surface as a percentage of the total lot, not just what you see — account for areas under the roof line too.
+- Be aggressive about detecting features — it's better to flag "POSSIBLE" than to miss something. Pest control pricing depends on accurate property assessment.
 
 Respond ONLY with a JSON object. No markdown, no explanation, no backticks.`;
 
