@@ -221,10 +221,10 @@ export function calculateEstimate(inputs) {
     let tf = sc <= 1 ? 0.75 : sc <= 3 ? 0.65 : sc <= 5 ? 0.55 : sc <= 7 ? 0.45 : 0.35;
     const lsf = Math.round(oa * tf), lk = lsf / 1000, lpv = LABOR * (27.5 / 60);
     const tiers = [
-      { name: 'Basic', v: 4, mk: 13.80, fl: 45 },
-      { name: 'Standard', v: 6, mk: 21.37, fl: 55 },
-      { name: 'Enhanced', v: 9, mk: 34.74, fl: 55 },
-      { name: 'Premium', v: 12, mk: 38.12, fl: 55, w: true },
+      { name: '4x/yr', v: 4, mk: 13.80, fl: 45 },
+      { name: '6x/yr', v: 6, mk: 21.37, fl: 55 },
+      { name: '9x/yr', v: 9, mk: 34.74, fl: 55 },
+      { name: '12x/yr', v: 12, mk: 38.12, fl: 55, w: true },
     ];
     R.lawn = [];
     tiers.forEach((t, i) => {
@@ -237,7 +237,7 @@ export function calculateEstimate(inputs) {
       const rec = i === 2, dim = i !== 2;
       R.lawn.push({ pa, v: t.v, ann, mo, name: t.name, recommended: rec, dimmed: dim, hasLandscape: !!t.w });
     });
-    wgServices.push({ name: 'Lawn (Enhanced)', mo: R.lawn[2].mo });
+    wgServices.push({ name: 'Lawn Care', mo: R.lawn[2].mo });
     R.lawnMeta = { lsf, sc, tf, oa };
   }
 
@@ -246,18 +246,18 @@ export function calculateEstimate(inputs) {
     hasRec = true;
     let adj = 0;
     adj += interpolate(footprint, [
-      { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
-      { at: 2000, adj: 0 }, { at: 2500, adj: 12 }, { at: 3000, adj: 22 },
-      { at: 4000, adj: 35 }, { at: 5500, adj: 50 },
+      { at: 800, adj: -20 }, { at: 1200, adj: -10 }, { at: 1500, adj: -4 },
+      { at: 2000, adj: 0 }, { at: 2500, adj: 5 }, { at: 3000, adj: 11 },
+      { at: 4000, adj: 20 }, { at: 5500, adj: 30 },
     ]);
     if (shrubDensity === 'LIGHT') adj -= 5;
     else if (shrubDensity === 'HEAVY') adj += 25;
     if (hasPoolCage) adj += 22;
     else if (hasPool) adj += 5;
     adj += interpolate(lotSqFt, [
-      { at: 3000, adj: -10 }, { at: 5000, adj: -5 }, { at: 7500, adj: 0 },
-      { at: 10000, adj: 8 }, { at: 15000, adj: 18 }, { at: 25000, adj: 30 },
-      { at: 50000, adj: 42 },
+      { at: 3000, adj: -5 }, { at: 5000, adj: -3 }, { at: 7500, adj: 0 },
+      { at: 10000, adj: 3 }, { at: 15000, adj: 8 }, { at: 25000, adj: 12 },
+      { at: 50000, adj: 15 },
     ]);
     if (treeDensity === 'LIGHT') adj -= 3;
     else if (treeDensity === 'HEAVY') adj += 15;
