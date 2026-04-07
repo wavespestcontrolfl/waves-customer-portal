@@ -234,4 +234,14 @@ router.get('/scan-results', async (req, res) => {
   }
 });
 
+// GET /api/admin/wordpress/specs/:name — serve spec markdown files
+router.get('/specs/:name', (req, res) => {
+  const path = require('path');
+  const fs = require('fs');
+  const name = req.params.name.replace(/[^a-z0-9-]/gi, '');
+  const filePath = path.join(__dirname, '..', 'data', 'wordpress-specs', `${name}.md`);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Spec not found' });
+  res.type('text/markdown').send(fs.readFileSync(filePath, 'utf8'));
+});
+
 module.exports = router;

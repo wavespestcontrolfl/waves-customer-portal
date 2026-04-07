@@ -235,6 +235,30 @@ export default function WordPressSitesPage() {
         </div>
       </div>
 
+      {/* WordPress Network Specs & Protocols */}
+      <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginTop: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 1 }}>Network Specs & Protocols</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
+          {[
+            { name: '15-Site Network Spec', file: '15-site-network-spec', desc: 'Complete architecture for the Waves 15-domain SEO network', icon: '🌐' },
+            { name: 'Lawn Care Spoke Rebuild', file: 'lawn-care-spoke-rebuild', desc: 'Spec for rebuilding lawn care satellite sites', icon: '🌱' },
+            { name: 'Fleet Protocol', file: 'fleet-protocol', desc: 'Complete WordPress fleet management protocol', icon: '🚀' },
+            { name: 'Claude Code Protocol', file: 'claude-code-protocol', desc: 'WordPress development workflow with Claude Code', icon: '🤖' },
+          ].map(spec => (
+            <a key={spec.file} href={`/api/admin/wordpress/specs/${spec.file}`} target="_blank" rel="noopener noreferrer" style={{
+              background: D.bg, borderRadius: 10, padding: 14, border: `1px solid ${D.border}`,
+              textDecoration: 'none', display: 'block', transition: 'border-color 0.2s',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <span style={{ fontSize: 18 }}>{spec.icon}</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: D.teal }}>{spec.name}</span>
+              </div>
+              <div style={{ fontSize: 11, color: D.muted, lineHeight: 1.4 }}>{spec.desc}</div>
+            </a>
+          ))}
+        </div>
+      </div>
+
       <div style={{ position: 'fixed', bottom: 20, right: 20, background: D.card, border: `1px solid ${D.green}`, borderRadius: 8, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 32px rgba(0,0,0,.4)', zIndex: 300, fontSize: 12, transform: toast ? 'translateY(0)' : 'translateY(80px)', opacity: toast ? 1 : 0, transition: 'all .3s', pointerEvents: 'none' }}>
         <span style={{ color: D.green }}>✓</span><span style={{ color: D.text }}>{toast}</span>
       </div>
