@@ -11,7 +11,7 @@ exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('treatment_outcomes'))) {
     await knex.schema.createTable('treatment_outcomes', (t) => {
       t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
-      t.integer('customer_id').notNullable().references('id').inTable('customers');
+      t.uuid('customer_id').notNullable().references('id').inTable('customers');
 
       // The treatment
       t.uuid('service_record_id').notNullable().unique();
@@ -24,7 +24,7 @@ exports.up = async function (knex) {
       t.jsonb('products_applied').nullable();
 
       // Pre-treatment assessment
-      t.integer('pre_assessment_id').nullable();
+      t.uuid('pre_assessment_id').nullable();
       t.date('pre_assessment_date').nullable();
       t.integer('pre_turf_density').nullable();
       t.integer('pre_weed_suppression').nullable();
@@ -33,7 +33,7 @@ exports.up = async function (knex) {
       t.integer('pre_thatch_level').nullable();
 
       // Post-treatment assessment
-      t.integer('post_assessment_id').nullable();
+      t.uuid('post_assessment_id').nullable();
       t.date('post_assessment_date').nullable();
       t.integer('post_turf_density').nullable();
       t.integer('post_weed_suppression').nullable();
