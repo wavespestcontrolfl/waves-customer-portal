@@ -21,6 +21,7 @@ export default function InventoryPage() {
   const [tab, setTab] = useState('products');
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState('');
+  const [productFilter, setProductFilter] = useState('all');
 
   useEffect(() => { adminFetch('/admin/inventory/stats').then(setStats).catch(() => {}); }, []);
   const showToast = (m) => { setToast(m); setTimeout(() => setToast(''), 3500); };
@@ -46,14 +47,17 @@ export default function InventoryPage() {
       {stats && (
         <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
           {[
-            { label: 'Products', value: stats.products?.total, color: D.white },
-            { label: 'Priced', value: stats.products?.priced, color: D.green },
-            { label: 'Needs Price', value: stats.products?.needsPrice, color: D.amber },
-            { label: 'Vendors', value: stats.vendors?.total, color: D.teal },
-            { label: 'Pending Approvals', value: stats.approvals?.pending, color: stats.approvals?.pending > 0 ? D.amber : D.green },
-            { label: 'Scrape Jobs', value: stats.scrapeJobs?.completed, color: D.purple },
+            { label: 'Products', value: stats.products?.total, color: D.white, filter: 'all' },
+            { label: 'Priced', value: stats.products?.priced, color: D.green, filter: 'priced' },
+            { label: 'Needs Price', value: stats.products?.needsPrice, color: D.amber, filter: 'needs_price' },
+            { label: 'Vendors', value: stats.vendors?.total, color: D.teal, action: () => setTab('vendors') },
+            { label: 'Pending Approvals', value: stats.approvals?.pending, color: stats.approvals?.pending > 0 ? D.amber : D.green, action: () => setTab('approvals') },
+            { label: 'Scrape Jobs', value: stats.scrapeJobs?.completed, color: D.purple, action: () => setTab('scraping') },
           ].map(s => (
-            <div key={s.label} style={{ ...sCard, flex: '1 1 120px', minWidth: 120, marginBottom: 0, textAlign: 'center' }}>
+            <div key={s.label} onClick={() => {
+              if (s.action) { s.action(); }
+              else if (s.filter) { setTab('products'); setProductFilter?.(s.filter); }
+            }} style={{ ...sCard, flex: '1 1 120px', minWidth: 120, marginBottom: 0, textAlign: 'center', cursor: 'pointer', border: `1px solid ${D.border}`, transition: 'border-color 0.2s' }}>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700, color: s.color }}>{s.value ?? 0}</div>
               <div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
             </div>
@@ -75,7 +79,7 @@ export default function InventoryPage() {
         ))}
       </div>
 
-      {tab === 'products' && <ProductsTab showToast={showToast} />}
+      {tab === 'products' && <ProductsTab showToast={showToast} filter={productFilter} onFilterChange={setProductFilter} />}
       {tab === 'vendors' && <VendorsTab showToast={showToast} />}
       {tab === 'approvals' && <ApprovalsTab showToast={showToast} onUpdate={() => adminFetch('/admin/inventory/stats').then(setStats).catch(() => {})} />}
       {tab === 'margins' && <MarginsTab showToast={showToast} />}
@@ -91,7 +95,7 @@ export default function InventoryPage() {
 // ══════════════════════════════════════════════════════════════
 // PRODUCTS TAB
 // ══════════════════════════════════════════════════════════════
-function ProductsTab({ showToast }) {
+function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
   const [search, setSearch] = useState('');
@@ -127,6 +131,20 @@ function ProductsTab({ showToast }) {
 
   return (
     <div>
+      {/* Filter pills */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+        {[
+          { key: 'all', label: 'All Products' },
+          { key: 'priced', label: 'Priced' },
+          { key: 'needs_price', label: 'Needs Price' },
+        ].map(f => (
+          <button key={f.key} onClick={() => onFilterChange?.(f.key)} style={{
+            padding: '6px 14px', borderRadius: 20, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+            background: filter === f.key ? D.teal : D.card, color: filter === f.key ? D.white : D.muted,
+          }}>{f.label}</button>
+        ))}
+      </div>
+
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search products..." style={{ ...sInput, flex: 1, minWidth: 200 }} />
         <select value={catFilter} onChange={e => setCatFilter(e.target.value)} style={{ ...sInput, cursor: 'pointer', minWidth: 150 }}>
@@ -140,7 +158,11 @@ function ProductsTab({ showToast }) {
           {['Product', 'Category', 'Active Ingredient', 'Size', 'Best Price', 'Vendor', 'Status', ''].map(h => <th key={h} style={thS}>{h}</th>)}
         </tr></thead>
         <tbody>
-          {products.map(p => (
+          {products.filter(p => {
+            if (filter === 'priced') return p.bestPrice && p.bestPrice > 0;
+            if (filter === 'needs_price') return !p.bestPrice || p.bestPrice === 0;
+            return true;
+          }).map(p => (
             <>
               <tr key={p.id} onClick={() => setExpanded(expanded === p.id ? null : p.id)} style={{ cursor: 'pointer', background: expanded === p.id ? `${D.teal}08` : 'transparent' }}>
                 <td style={{ ...tdS, fontWeight: 600, color: D.white }}>{p.name}</td>
