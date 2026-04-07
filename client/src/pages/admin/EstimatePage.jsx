@@ -886,11 +886,12 @@ function EstimateToolView() {
             )}
             <Checkbox k="svcTopdress" label="One-Time Top Dressing" />
             <Checkbox k="svcDethatch" label="One-Time Dethatching" />
+            <Checkbox k="svcOverseed" label="One-Time Overseeding" />
 
             {/* -- Termite Services -- */}
             <div style={{ ...sSvcSection, color: C.red }}>Termite Services</div>
             <Checkbox k="svcTrenching" label="One-Time Termite Trenching" />
-            <Checkbox k="svcBoracare" label="One-Time Bora-Care Attic" />
+            <Checkbox k="svcBoracare" label="One-Time Termite Attic Remediation" />
             {form.svcBoracare && (
               <div style={sSubOpts}>
                 <Field label="Attic Sq Ft (auto-estimated from home/stories)" style={{ marginBottom: 0 }}>
@@ -898,7 +899,7 @@ function EstimateToolView() {
                 </Field>
               </div>
             )}
-            <Checkbox k="svcPreslab" label="One-Time Pre-Slab Termidor SC" />
+            <Checkbox k="svcPreslab" label="One-Time Pre-Slab Termite Treatment" />
             {form.svcPreslab && (
               <div style={sSubOpts}>
                 <div style={sRow}>
@@ -908,7 +909,7 @@ function EstimateToolView() {
                 <Field label="Builder Volume"><Select k="preslabVolume" options={[{ value: 'NONE', label: 'No discount' }, { value: '5', label: '5+ homes (-10%)' }, { value: '10', label: '10+ homes (-15%)' }]} /></Field>
               </div>
             )}
-            <Checkbox k="svcFoam" label="One-Time Termidor Foam Drill" />
+            <Checkbox k="svcFoam" label="One-Time Termite Foam Treatment" />
             {form.svcFoam && (
               <div style={sSubOpts}>
                 <Field label="Drill Points" style={{ marginBottom: 0 }}>
