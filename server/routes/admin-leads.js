@@ -641,4 +641,70 @@ router.post('/:id/assign', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/leads/:id/send-sms — send SMS to lead via Twilio
+router.post('/:id/send-sms', async (req, res, next) => {
+  try {
+    const { message } = req.body;
+    if (!message) return res.status(400).json({ error: 'Message is required' });
+
+    const lead = await db('leads').where('id', req.params.id).first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number' });
+
+    const TwilioService = require('../services/twilio');
+    await TwilioService.sendSMS(lead.phone, message, { messageType: 'lead_outreach' });
+
+    // Log activity
+    await db('lead_activities').insert({
+      lead_id: req.params.id,
+      activity_type: 'sms_sent',
+      description: `SMS sent: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
+      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+      metadata: JSON.stringify({ message }),
+    });
+
+    // Record first response time if not yet recorded
+    if (lead.response_time_minutes == null) {
+      await leadAttribution.logFirstResponse(req.params.id);
+    }
+
+    // Update status to 'contacted' if currently 'new'
+    if (lead.status === 'new') {
+      await db('leads').where('id', req.params.id).update({ status: 'contacted', updated_at: new Date() });
+    }
+
+    const updated = await db('leads').where('id', req.params.id).first();
+    res.json({ lead: updated, sent: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/leads/:id/schedule-callback — schedule a callback for a lead
+router.post('/:id/schedule-callback', async (req, res, next) => {
+  try {
+    const { date, time, notes } = req.body;
+    if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
+
+    const lead = await db('leads').where('id', req.params.id).first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    const callbackAt = new Date(`${date}T${time}`);
+
+    await db('lead_activities').insert({
+      lead_id: req.params.id,
+      activity_type: 'callback_scheduled',
+      description: `Callback scheduled for ${callbackAt.toLocaleString()}${notes ? ' — ' + notes : ''}`,
+      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+      metadata: JSON.stringify({ date, time, notes, callback_at: callbackAt.toISOString() }),
+    });
+
+    await db('leads').where('id', req.params.id).update({
+      next_follow_up_at: callbackAt,
+      updated_at: new Date(),
+    });
+
+    const updated = await db('leads').where('id', req.params.id).first();
+    res.json({ lead: updated });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

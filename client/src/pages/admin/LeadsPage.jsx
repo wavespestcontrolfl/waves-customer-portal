@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -102,10 +103,61 @@ function fmtTime(min) {
 function roiColor(roi) { return roi > 200 ? C.green : roi > 50 ? C.amber : C.red; }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SPEED-TO-LEAD TIMER
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Inject pulse keyframe once
+if (typeof document !== 'undefined' && !document.getElementById('speed-to-lead-pulse')) {
+  const style = document.createElement('style');
+  style.id = 'speed-to-lead-pulse';
+  style.textContent = `@keyframes stlPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`;
+  document.head.appendChild(style);
+}
+
+function SpeedToLeadTimer({ firstContactAt }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!firstContactAt) return;
+    const start = new Date(firstContactAt).getTime();
+    const tick = () => setElapsed(Math.floor((Date.now() - start) / 1000));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [firstContactAt]);
+
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const mm = String(mins).padStart(2, '0');
+  const ss = String(secs).padStart(2, '0');
+  const color = mins < 5 ? C.green : mins < 15 ? C.amber : C.red;
+  const shouldPulse = mins >= 5;
+
+  return <span style={{
+    ...mono, fontSize: 13, color, fontWeight: 600,
+    animation: shouldPulse ? 'stlPulse 1.5s ease-in-out infinite' : 'none',
+  }}>{mm}:{ss}</span>;
+}
+
+const LOST_REASONS = [
+  { value: 'price', label: 'Price too high' },
+  { value: 'competitor', label: 'Chose competitor' },
+  { value: 'diy', label: 'DIY / self-treating' },
+  { value: 'not_ready', label: 'Not ready yet' },
+  { value: 'no_response', label: 'No response' },
+  { value: 'out_of_area', label: 'Out of service area' },
+  { value: 'no_need', label: 'No longer needed' },
+  { value: 'other', label: 'Other' },
+];
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════
 export default function LeadsPage() {
+  const navigate = useNavigate();
   const [tab, setTab] = useState('pipeline');
+  const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
+  const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
+  const [smsSending, setSmsSending] = useState(false);
   const [leads, setLeads] = useState([]);
   const [leadsTotal, setLeadsTotal] = useState(0);
   const [sources, setSources] = useState([]);
@@ -250,6 +302,7 @@ export default function LeadsPage() {
         <MetricCard label="Conversion Rate" value={fmtPct(ov.conversionRate)} color={C.green} />
         <MetricCard label="Avg Response Time" value={fmtTime(ov.avgResponseTime)} color={C.amber} />
         <MetricCard label="Cost per Acquisition" value={fmtMoney(ov.cpa)} color={C.purple} />
+        <MetricCard label="Avg Speed to Lead" value={fmtTime(ov.avgResponseTime)} sub={ov.avgResponseTime != null && ov.avgResponseTime < 5 ? 'Great!' : ov.avgResponseTime != null && ov.avgResponseTime < 15 ? 'Good' : ov.avgResponseTime != null ? 'Needs work' : null} color={ov.avgResponseTime != null ? (ov.avgResponseTime < 5 ? C.green : ov.avgResponseTime < 15 ? C.amber : C.red) : C.muted} />
         <MetricCard label="Monthly ROI" value={ov.roi != null ? fmtPct(ov.roi) : '--'} color={roiColor(ov.roi||0)} />
       </div>
 
@@ -331,7 +384,9 @@ export default function LeadsPage() {
                   </td>
                   <td style={{ padding:'12px 16px', ...mono, fontSize:13,
                     color:lead.response_time_minutes!=null?(lead.response_time_minutes<15?C.green:lead.response_time_minutes<60?C.amber:C.red):C.muted }}>
-                    {fmtTime(lead.response_time_minutes)}
+                    {lead.status === 'new' && lead.response_time_minutes == null && lead.first_contact_at
+                      ? <SpeedToLeadTimer firstContactAt={lead.first_contact_at} />
+                      : fmtTime(lead.response_time_minutes)}
                   </td>
                   <td style={{ padding:'12px 16px', color:C.text, fontSize:13 }}>{lead.assigned_name || '--'}</td>
                 </tr>
@@ -362,11 +417,108 @@ export default function LeadsPage() {
                         </div>
                       </div>
                     </div>
-                    <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+                    {/* AI Suggested Reply */}
+                    {(() => {
+                      const triageActivity = leadActivities.find(a => a.activity_type === 'ai_triage' && a.metadata);
+                      if (!triageActivity) return null;
+                      let meta = {};
+                      try { meta = typeof triageActivity.metadata === 'string' ? JSON.parse(triageActivity.metadata) : triageActivity.metadata; } catch(e) {}
+                      if (!meta.suggestedReply) return null;
+                      return <div style={{ border:`1px solid ${C.teal}44`, borderRadius:10, padding:14, marginBottom:14, backgroundColor:C.teal+'0a' }}>
+                        <div style={{ fontSize:12, color:C.teal, fontWeight:600, marginBottom:6 }}>AI Suggested Reply</div>
+                        <div style={{ fontSize:13, color:C.text, marginBottom:8, lineHeight:1.5 }}>{meta.suggestedReply}</div>
+                        {meta.serviceInterest && <Badge label={meta.serviceInterest} color={C.teal} style={{ marginRight:6 }} />}
+                        {meta.urgency && meta.urgency !== 'normal' && <Badge label={meta.urgency} color={meta.urgency==='urgent'?C.red:C.amber} style={{ marginRight:6 }} />}
+                        <div style={{ marginTop:10 }}>
+                          <Btn small color={C.teal} disabled={smsSending} onClick={async ()=>{
+                            setSmsSending(true);
+                            try {
+                              await adminFetch(`/admin/leads/${lead.id}/send-sms`, { method:'POST', body:{ message:meta.suggestedReply } });
+                              loadLeads(); expandLead(lead);
+                            } catch(e) { alert('Send failed: '+e.message); }
+                            setSmsSending(false);
+                          }}>{smsSending?'Sending...':'Send This Reply'}</Btn>
+                        </div>
+                      </div>;
+                    })()}
+
+                    {/* Quick Actions */}
+                    <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:12 }}>
+                      <Btn small color={C.teal} onClick={()=>{
+                        const name = lead.first_name || 'there';
+                        const svc = lead.service_interest || 'pest control';
+                        setSmsCompose({ leadId:lead.id, message:'', suggestions:[
+                          `Hi ${name}! This is Adam from Waves Pest Control. I saw your inquiry about ${svc} — I'd love to help. When's a good time to chat?`,
+                          `Hey ${name}! Thanks for reaching out about ${svc}. We can usually get you on the schedule within a day or two. Want me to set up an estimate?`
+                        ]});
+                      }}>Send Text</Btn>
+                      <Btn small color={C.purple} onClick={()=>{
+                        const params = new URLSearchParams();
+                        if (lead.first_name) params.set('first_name', lead.first_name);
+                        if (lead.last_name) params.set('last_name', lead.last_name);
+                        if (lead.phone) params.set('phone', lead.phone);
+                        if (lead.email) params.set('email', lead.email);
+                        if (lead.address) params.set('address', lead.address);
+                        if (lead.service_interest) params.set('service_interest', lead.service_interest);
+                        navigate(`/admin/estimates?${params}`);
+                      }}>Create Estimate</Btn>
+                      <Btn small color={C.amber} onClick={()=>setCallbackForm({ leadId:lead.id, date:'', time:'', notes:'' })}>Schedule Callback</Btn>
+                      {lead.phone && <a href={`tel:${lead.phone}`} style={{ textDecoration:'none' }}>
+                        <Btn small color={C.green}>Call Now</Btn>
+                      </a>}
                       <Btn small color={C.green} onClick={()=>{ setFormData({ leadId:lead.id }); setShowModal('convert'); }}>Convert to Customer</Btn>
                       <Btn small color={C.red} onClick={()=>{ setFormData({ leadId:lead.id }); setShowModal('lost'); }}>Mark Lost</Btn>
                       <Btn small color={C.purple} onClick={()=>{ setFormData({ leadId:lead.id }); setShowModal('assign'); }}>Assign</Btn>
                     </div>
+
+                    {/* Inline SMS Compose */}
+                    {smsCompose && smsCompose.leadId === lead.id && <div style={{ border:`1px solid ${C.border}`, borderRadius:10, padding:14, marginBottom:12, backgroundColor:C.card }}>
+                      <div style={{ fontSize:12, color:C.teal, fontWeight:600, marginBottom:8 }}>Send SMS to {lead.first_name || 'Lead'}</div>
+                      {smsCompose.suggestions && smsCompose.suggestions.map((s, i) => <div key={i} onClick={()=>setSmsCompose(prev=>({...prev, message:s}))}
+                        style={{ fontSize:12, color:C.text, padding:'8px 10px', borderRadius:6, border:`1px solid ${C.border}`,
+                          marginBottom:6, cursor:'pointer', backgroundColor:smsCompose.message===s?C.teal+'22':'transparent', transition:'background 0.15s' }}>
+                        {s}
+                      </div>)}
+                      <textarea value={smsCompose.message} onChange={e=>setSmsCompose(prev=>({...prev, message:e.target.value}))}
+                        placeholder="Type your message..."
+                        style={{ width:'100%', minHeight:60, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8,
+                          padding:'8px 12px', color:C.text, fontSize:13, resize:'vertical', boxSizing:'border-box', marginBottom:8 }} />
+                      <div style={{ display:'flex', gap:8 }}>
+                        <Btn small color={C.teal} disabled={smsSending||!smsCompose.message} onClick={async ()=>{
+                          setSmsSending(true);
+                          try {
+                            await adminFetch(`/admin/leads/${lead.id}/send-sms`, { method:'POST', body:{ message:smsCompose.message } });
+                            setSmsCompose(null); loadLeads(); expandLead(lead);
+                          } catch(e) { alert('Send failed: '+e.message); }
+                          setSmsSending(false);
+                        }}>{smsSending?'Sending...':'Send'}</Btn>
+                        <Btn small color={C.muted} onClick={()=>setSmsCompose(null)}>Cancel</Btn>
+                      </div>
+                    </div>}
+
+                    {/* Inline Schedule Callback */}
+                    {callbackForm && callbackForm.leadId === lead.id && <div style={{ border:`1px solid ${C.border}`, borderRadius:10, padding:14, marginBottom:12, backgroundColor:C.card }}>
+                      <div style={{ fontSize:12, color:C.amber, fontWeight:600, marginBottom:8 }}>Schedule Callback</div>
+                      <div style={{ display:'flex', gap:8, marginBottom:8 }}>
+                        <input type="date" value={callbackForm.date} onChange={e=>setCallbackForm(prev=>({...prev, date:e.target.value}))}
+                          style={{ flex:1, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', color:C.text, fontSize:13 }} />
+                        <input type="time" value={callbackForm.time} onChange={e=>setCallbackForm(prev=>({...prev, time:e.target.value}))}
+                          style={{ flex:1, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', color:C.text, fontSize:13 }} />
+                      </div>
+                      <textarea value={callbackForm.notes||''} onChange={e=>setCallbackForm(prev=>({...prev, notes:e.target.value}))}
+                        placeholder="Notes..."
+                        style={{ width:'100%', minHeight:40, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8,
+                          padding:'8px 12px', color:C.text, fontSize:13, resize:'vertical', boxSizing:'border-box', marginBottom:8 }} />
+                      <div style={{ display:'flex', gap:8 }}>
+                        <Btn small color={C.amber} disabled={!callbackForm.date||!callbackForm.time} onClick={async ()=>{
+                          try {
+                            await adminFetch(`/admin/leads/${lead.id}/schedule-callback`, { method:'POST', body:{ date:callbackForm.date, time:callbackForm.time, notes:callbackForm.notes } });
+                            setCallbackForm(null); loadLeads(); expandLead(lead);
+                          } catch(e) { alert('Failed: '+e.message); }
+                        }}>Save</Btn>
+                        <Btn small color={C.muted} onClick={()=>setCallbackForm(null)}>Cancel</Btn>
+                      </div>
+                    </div>}
                   </div>
                 </td></tr>}
               </React.Fragment>;
@@ -730,9 +882,16 @@ export default function LeadsPage() {
 
     if (showModal === 'lost') return <Modal title="Mark Lead Lost" onClose={()=>setShowModal(null)}>
       <Input label="Reason" value={formData.reason} onChange={v=>setFormData(f=>({...f,reason:v}))}
-        options={['Price too high','Chose competitor','No response','Not ready','Out of service area','DIY','Bad fit','Other']} />
-      <Input label="Lost to Competitor" value={formData.competitor} onChange={v=>setFormData(f=>({...f,competitor:v}))} placeholder="Competitor name" />
-      <Input label="Notes" value={formData.notes} onChange={v=>setFormData(f=>({...f,notes:v}))} placeholder="Additional context" />
+        options={LOST_REASONS} />
+      {formData.reason === 'competitor' && <Input label="Competitor Name" value={formData.competitor}
+        onChange={v=>setFormData(f=>({...f,competitor:v}))} placeholder="e.g. Terminix, Orkin, HomeTeam" />}
+      <div style={{ marginBottom:12 }}>
+        <label style={{ fontSize:12, color:C.muted, display:'block', marginBottom:4 }}>Notes</label>
+        <textarea value={formData.notes||''} onChange={e=>setFormData(f=>({...f,notes:e.target.value}))}
+          placeholder="Additional context about why this lead was lost..."
+          style={{ width:'100%', minHeight:80, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8,
+            padding:'8px 12px', color:C.text, fontSize:13, resize:'vertical', boxSizing:'border-box' }} />
+      </div>
       <Btn onClick={submitForm} disabled={loading} color={C.red}>{loading?'Saving...':'Mark Lost'}</Btn>
     </Modal>;
 

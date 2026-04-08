@@ -7,6 +7,9 @@ const LeadScorer = require('../services/lead-scorer');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 
+const { aiTriageLead } = require('../services/lead-triage');
+const leadAttribution = require('../services/lead-attribution');
+
 const WAVES_ADMIN_PHONE = '+19413187612';
 
 // POST /api/webhooks/lead — Elementor form submission webhook
@@ -29,6 +32,7 @@ router.post('/', async (req, res) => {
     const utmTerm = body.utm_term || body['Utm Term'] || '';
     const formId = body.form_id || body['Form Id'] || '';
     const formName = body.form_name || body['Form Name'] || '';
+    const gclid = body.gclid || body['Gclid'] || body.GCLID || '';
 
     // Parse name
     const nameParts = rawName.trim().split(/\s+/);
@@ -190,6 +194,64 @@ router.post('/', async (req, res) => {
       });
     } catch (estErr) {
       logger.error(`Lead estimate creation failed: ${estErr.message}`);
+    }
+
+    // Create leads table record for pipeline tracking
+    let leadRecord = null;
+    try {
+      const serviceInterestField = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
+      const [newLead] = await db('leads').insert({
+        first_name: firstName, last_name: lastName,
+        phone: phoneFormatted, email: email || null,
+        address: address || '', city: leadSource.area || '',
+        lead_source_id: null,
+        lead_type: 'form_submission',
+        service_interest: serviceInterestField || null,
+        first_contact_at: new Date(),
+        first_contact_channel: 'form',
+        status: 'new',
+        customer_id: customer.id,
+        gclid: gclid || null,
+        is_residential: true,
+      }).returning('*');
+      leadRecord = newLead;
+    } catch (leadErr) {
+      logger.error(`Lead record creation failed: ${leadErr.message}`);
+    }
+
+    // Fire-and-forget AI triage
+    if (leadRecord) {
+      const messageText = body.message || body['Message'] || body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn|message/i) || '';
+      aiTriageLead({ name: `${firstName} ${lastName}`, phone: phoneFormatted, message: messageText, address, pageUrl, formName })
+        .then(async (triageResult) => {
+          if (!triageResult) return;
+          try {
+            const updates = {};
+            if (triageResult.serviceInterest) updates.service_interest = triageResult.serviceInterest;
+            if (triageResult.urgency) updates.urgency = triageResult.urgency;
+            if (triageResult.extractedData) updates.extracted_data = JSON.stringify(triageResult.extractedData);
+            if (Object.keys(updates).length > 0) {
+              updates.updated_at = new Date();
+              await db('leads').where('id', leadRecord.id).update(updates);
+            }
+            await db('lead_activities').insert({
+              lead_id: leadRecord.id,
+              activity_type: 'ai_triage',
+              description: 'AI triage completed',
+              performed_by: 'system',
+              metadata: JSON.stringify({
+                serviceInterest: triageResult.serviceInterest,
+                urgency: triageResult.urgency,
+                extractedData: triageResult.extractedData,
+                suggestedReply: triageResult.suggestedReply,
+              }),
+            });
+            logger.info(`[lead-webhook] AI triage completed for lead ${leadRecord.id}`);
+          } catch (storeErr) {
+            logger.error(`[lead-webhook] AI triage store failed: ${storeErr.message}`);
+          }
+        })
+        .catch(err => logger.error(`[lead-webhook] AI triage fire-and-forget error: ${err.message}`));
     }
 
     await db('activity_log').insert({
