@@ -51,13 +51,31 @@ const TABS = [
   { key: 'blog', label: 'Blog Content', icon: '📝' },
 ];
 
+const NETWORK_DOMAINS = [
+  { domain: 'wavespestcontrol.com', label: 'Waves Pest Control (Hub)', type: 'hub' },
+  { domain: 'waveslawncare.com', label: 'Waves Lawn Care (Hub)', type: 'hub' },
+  { domain: 'bradentonflpestcontrol.com', label: 'Bradenton Pest', type: 'spoke' },
+  { domain: 'palmettoflpestcontrol.com', label: 'Palmetto Pest', type: 'spoke' },
+  { domain: 'parrishpestcontrol.com', label: 'Parrish Pest', type: 'spoke' },
+  { domain: 'sarasotaflpestcontrol.com', label: 'Sarasota Pest', type: 'spoke' },
+  { domain: 'veniceflpestcontrol.com', label: 'Venice Pest', type: 'spoke' },
+  { domain: 'bradentonflexterminator.com', label: 'Bradenton Ext', type: 'spoke' },
+  { domain: 'palmettoexterminator.com', label: 'Palmetto Ext', type: 'spoke' },
+  { domain: 'parrishexterminator.com', label: 'Parrish Ext', type: 'spoke' },
+  { domain: 'sarasotaflexterminator.com', label: 'Sarasota Ext', type: 'spoke' },
+  { domain: 'bradentonfllawncare.com', label: 'Bradenton Lawn', type: 'spoke' },
+  { domain: 'parrishfllawncare.com', label: 'Parrish Lawn', type: 'spoke' },
+  { domain: 'sarasotafllawncare.com', label: 'Sarasota Lawn', type: 'spoke' },
+  { domain: 'venicelawncare.com', label: 'Venice Lawn', type: 'spoke' },
+];
+
 // ── GSC Dashboard ──
-function DashboardTab() {
+function DashboardTab({ domain }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState(28);
   const [queryFilter, setQueryFilter] = useState('all');
-  useEffect(() => { setLoading(true); adminFetch(`/admin/seo/dashboard?period=${period}`).then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, [period]);
+  useEffect(() => { setLoading(true); adminFetch(`/admin/seo/dashboard?period=${period}${domain ? `&domain=${domain}` : ''}`).then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, [period, domain]);
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading SEO data...</div>;
   const cur = data?.current || {};
   const chg = data?.change || {};
@@ -944,6 +962,7 @@ function SiteAuditTab() {
 // ── Main Page ──
 export default function SEOPage() {
   const [tab, setTab] = useState('dashboard');
+  const [activeDomain, setActiveDomain] = useState('wavespestcontrol.com');
 
   return (
     <div>
@@ -965,9 +984,30 @@ export default function SEOPage() {
           .seo-audit-history-grid { grid-template-columns: repeat(3, 1fr) !important; }
           .seo-funnel-stats { grid-template-columns: 1fr 1fr 1fr !important; }
           .seo-analytics-period { flex-wrap: wrap !important; }
+          .seo-domain-picker { width: 100% !important; }
         }
       `}</style>
-      <div style={{ fontSize: 28, fontWeight: 700, color: D.white, marginBottom: 24 }}>SEO</div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>SEO</div>
+        <div className="seo-domain-picker" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, color: D.muted }}>Domain:</span>
+          <select
+            value={activeDomain}
+            onChange={e => setActiveDomain(e.target.value)}
+            style={{
+              padding: '6px 12px', borderRadius: 8, fontSize: 13, fontWeight: 500,
+              background: D.card, color: D.text, border: `1px solid ${D.border}`,
+              outline: 'none', cursor: 'pointer', minWidth: 220,
+            }}
+          >
+            {NETWORK_DOMAINS.map(d => (
+              <option key={d.domain} value={d.domain}>
+                {d.type === 'hub' ? '⭐ ' : '  '}{d.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
 
       <div className="seo-tab-bar" style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
         {TABS.map(t => (
@@ -980,7 +1020,7 @@ export default function SEOPage() {
         ))}
       </div>
 
-      {tab === 'dashboard' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading dashboard...</div>}><SEODashboardPage /></Suspense>}
+      {tab === 'dashboard' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading dashboard...</div>}><SEODashboardPage domain={activeDomain} /></Suspense>}
       {tab === 'advisor' && <AdvisorTab />}
       {tab === 'rankings' && <RankingsTab />}
       {tab === 'backlinks' && <BacklinksTab />}
@@ -989,7 +1029,7 @@ export default function SEOPage() {
       {tab === 'funnel' && <FunnelTab />}
       {tab === 'analytics' && <AnalyticsTab />}
       {tab === 'site-audit' && <SiteAuditTab />}
-      {tab === 'blog' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading blog...</div>}><BlogPage /></Suspense>}
+      {tab === 'blog' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading blog...</div>}><BlogPage domain={activeDomain} /></Suspense>}
     </div>
   );
 }

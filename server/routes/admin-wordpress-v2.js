@@ -333,6 +333,128 @@ router.post('/sites/:id/update-field', async (req, res) => {
   }
 });
 
+// ── GET /content-pipeline — blog status across all connected sites ───
+
+router.get('/content-pipeline', async (req, res) => {
+  try {
+    await ensureTable();
+    const sites = await db('wordpress_sites')
+      .whereNotNull('wp_username')
+      .whereNotNull('wp_app_password')
+      .orderBy('site_type')
+      .orderBy('area');
+
+    const pipeline = [];
+
+    for (const site of sites) {
+      try {
+        // Get most recent post date
+        const postsResp = await fetch(`https://${site.domain}/wp-json/wp/v2/posts?per_page=1&orderby=date&order=desc&status=publish`, {
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${site.wp_username}:${site.wp_app_password}`).toString('base64')}`,
+          },
+          signal: AbortSignal.timeout(15000),
+        });
+
+        const totalPosts = parseInt(postsResp.headers.get('x-wp-total') || '0');
+        let lastPostDate = null;
+        let lastPostTitle = null;
+
+        if (postsResp.ok) {
+          const posts = await postsResp.json();
+          if (posts[0]) {
+            lastPostDate = posts[0].date;
+            lastPostTitle = (posts[0].title?.rendered || '').replace(/&#8211;/g, '–').replace(/&#8217;/g, "'").replace(/&amp;/g, '&');
+          }
+        }
+
+        // Check a sample of recent posts for hub backlinks
+        let postsWithHubLinks = 0;
+        if (totalPosts > 0) {
+          try {
+            const sampleResp = await fetch(`https://${site.domain}/wp-json/wp/v2/posts?per_page=10&orderby=date&order=desc&status=publish`, {
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${site.wp_username}:${site.wp_app_password}`).toString('base64')}`,
+              },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (sampleResp.ok) {
+              const samplePosts = await sampleResp.json();
+              for (const p of samplePosts) {
+                const content = p.content?.rendered || '';
+                if (content.includes('wavespestcontrol.com') || content.includes('waveslawncare.com')) {
+                  postsWithHubLinks++;
+                }
+              }
+            }
+          } catch { /* skip backlink check */ }
+        }
+
+        // Monthly target: 2-3 posts for spokes, 4-6 for hubs
+        const isHub = site.domain === 'wavespestcontrol.com' || site.domain === 'waveslawncare.com';
+        const monthlyTarget = isHub ? 5 : 3;
+
+        // Check if on track (posted in last 30 days)
+        const daysSinceLastPost = lastPostDate
+          ? Math.floor((Date.now() - new Date(lastPostDate).getTime()) / 86400000)
+          : 999;
+
+        const status = totalPosts === 0 ? 'no_blog'
+          : daysSinceLastPost <= 14 ? 'on_track'
+          : daysSinceLastPost <= 30 ? 'needs_attention'
+          : 'behind';
+
+        pipeline.push({
+          id: site.id,
+          domain: site.domain,
+          name: site.name,
+          site_type: site.site_type,
+          hub_type: site.hub_type,
+          area: site.area,
+          totalPosts,
+          postsWithHubLinks,
+          lastPostDate,
+          lastPostTitle,
+          daysSinceLastPost: daysSinceLastPost < 999 ? daysSinceLastPost : null,
+          monthlyTarget,
+          status,
+        });
+      } catch (err) {
+        pipeline.push({
+          id: site.id,
+          domain: site.domain,
+          name: site.name,
+          site_type: site.site_type,
+          area: site.area,
+          error: err.message,
+          status: 'error',
+        });
+      }
+    }
+
+    res.json({ pipeline });
+  } catch (err) {
+    console.error('Content pipeline error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /sync-all-gsc — sync GSC data for all network domains ──────
+
+router.post('/sync-all-gsc', async (req, res) => {
+  try {
+    const searchConsole = require('../services/seo/search-console');
+    res.json({ status: 'syncing', message: 'Syncing GSC data for all 15 domains...' });
+    searchConsole.syncAllDomains(3).then(results => {
+      console.log(`[gsc] Network sync complete: ${results.filter(r => r.synced).length}/${results.length} domains synced`);
+    }).catch(err => {
+      console.error(`[gsc] Network sync failed: ${err.message}`);
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/wordpress/specs/:name — serve spec markdown files
 router.get('/specs/:name', (req, res) => {
   const path = require('path');
