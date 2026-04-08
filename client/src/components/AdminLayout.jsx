@@ -8,23 +8,34 @@ const NAV_SECTIONS = [
   { section: 'Operations', items: [
     { path: '/admin/dashboard', icon: '📊', label: 'Dashboard' },
     { path: '/admin/customers', icon: '👥', label: 'Customers' },
-    { path: '/admin/health', icon: '💚', label: 'Customer Health' },
-    { path: '/admin/leads', icon: '🎯', label: 'Leads' },
+    { path: '/admin/health', icon: '❤️', label: 'Customer Health' },
+    { path: '/admin/leads', icon: '📈', label: 'Leads' },
     { path: '/admin/estimates', icon: '📋', label: 'Pipeline' },
     { path: '/admin/schedule', icon: '📅', label: 'Schedule' },
     { path: '/admin/timetracking', icon: '⏱️', label: 'Time Tracking' },
+    { path: '/admin/service-library', icon: '📖', label: 'Service Library' },
+    { path: '/admin/discounts', icon: '🏷️', label: 'Discounts' },
   ]},
   { section: 'Communications', items: [
     { path: '/admin/communications', icon: '📱', label: 'SMS & Calls' },
+    { path: '/admin/call-recordings', icon: '🎧', label: 'Call Recordings' },
+    { path: '/admin/phone-numbers', icon: '📞', label: 'Phone Numbers' },
     { path: '/admin/reviews', icon: '⭐', label: 'Reviews' },
     { path: '/admin/referrals', icon: '🎁', label: 'Referrals' },
     { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },
   ]},
+  { section: 'Marketing', items: [
+    { path: '/admin/ppc', icon: '📣', label: 'PPC' },
+    { path: '/admin/seo', icon: '🔍', label: 'SEO' },
+    { path: '/admin/social-media', icon: '📲', label: 'Social Media' },
+    { path: '/admin/wordpress', icon: '🌐', label: 'WordPress Sites' },
+  ]},
   { section: 'Field & Equipment', items: [
     { path: '/admin/equipment', icon: '🔧', label: 'Equipment' },
-    { path: '/admin/fleet', icon: '🚛', label: 'Fleet & Mileage' },
+    { path: '/admin/fleet', icon: '🚐', label: 'Fleet & Mileage' },
     { path: '/admin/inventory', icon: '📦', label: 'Inventory' },
-    { path: '/admin/lawn-assessment', icon: '🌿', label: 'Compliance' },
+    { path: '/admin/compliance', icon: '📋', label: 'Compliance' },
+    { path: '/admin/lawn-assessment', icon: '🌿', label: 'Lawn Assessment' },
   ]},
   { section: 'Intelligence', items: [
     { path: '/admin/knowledge', icon: '📚', label: 'Knowledge Base' },
@@ -35,6 +46,7 @@ const NAV_SECTIONS = [
     { path: '/admin/tax', icon: '💰', label: 'Tax Center' },
   ]},
   { section: 'System', items: [
+    { path: '/admin/badges', icon: '🏅', label: 'Badges' },
     { path: '/admin/settings', icon: '⚙️', label: 'Settings' },
   ]},
 ];
