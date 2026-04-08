@@ -640,18 +640,57 @@ function AlertsTab() {
                 {a.description && <div style={{ fontSize: 12, color: COLORS.textMuted, marginBottom: 12, lineHeight: 1.5 }}>{a.description}</div>}
                 {actions.length > 0 && (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {actions.map((act, idx) => (
-                      <button
-                        key={idx}
-                        disabled={actionLoading === `${a.id}-${idx}`}
-                        onClick={() => handleAction(a.id, idx)}
-                        style={{
-                          padding: '5px 12px', borderRadius: 6, border: `1px solid ${COLORS.teal}44`,
-                          backgroundColor: COLORS.teal + '11', color: COLORS.teal, fontSize: 11,
-                          cursor: 'pointer', fontWeight: 500, opacity: actionLoading === `${a.id}-${idx}` ? 0.5 : 1,
-                        }}
-                      >{actionLoading === `${a.id}-${idx}` ? 'Sending...' : act.label}</button>
-                    ))}
+                    {actions.map((act, idx) => {
+                      const isExecuted = act.executed === true;
+                      const isLoading = actionLoading === `${a.id}-${idx}`;
+
+                      // Color map by action type
+                      const actionColors = {
+                        sms: COLORS.teal,
+                        send_sms: COLORS.teal,
+                        discount: COLORS.green,
+                        save_offer: COLORS.green,
+                        free_service: COLORS.purple,
+                        complimentary: COLORS.purple,
+                        call: COLORS.amber,
+                        schedule_call: COLORS.amber,
+                      };
+                      const btnColor = isExecuted ? COLORS.textMuted : (actionColors[act.type] || COLORS.teal);
+
+                      // Label map by action type
+                      const actionLabels = {
+                        sms: 'Send Check-In',
+                        send_sms: 'Send Check-In',
+                        discount: `Apply $${act.amount || 25} Credit`,
+                        save_offer: `Apply $${act.amount || 25} Credit`,
+                        free_service: 'Schedule Free Service',
+                        complimentary: 'Schedule Free Service',
+                        call: 'Schedule Call',
+                        schedule_call: 'Schedule Call',
+                      };
+                      const label = isExecuted
+                        ? '\u2713 Done'
+                        : isLoading
+                          ? 'Processing...'
+                          : (actionLabels[act.type] || act.label || act.type);
+
+                      return (
+                        <button
+                          key={idx}
+                          disabled={isExecuted || isLoading}
+                          onClick={() => handleAction(a.id, idx)}
+                          style={{
+                            padding: '5px 12px', borderRadius: 6,
+                            border: `1px solid ${btnColor}44`,
+                            backgroundColor: isExecuted ? (COLORS.textMuted + '11') : (btnColor + '11'),
+                            color: btnColor, fontSize: 11,
+                            cursor: isExecuted || isLoading ? 'default' : 'pointer',
+                            fontWeight: 500,
+                            opacity: isLoading ? 0.5 : isExecuted ? 0.6 : 1,
+                          }}
+                        >{label}</button>
+                      );
+                    })}
                   </div>
                 )}
               </div>

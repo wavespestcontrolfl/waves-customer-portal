@@ -230,9 +230,75 @@ async function executeAction(alertId, actionIndex) {
     } catch (err) {
       result = { success: false, message: `SMS failed: ${err.message}` };
     }
-  } else if (action.type === 'call') {
-    // Create a task/alert for the team to call
-    result = { success: true, message: `Call task created for ${customer.first_name} ${customer.last_name}` };
+  } else if (action.type === 'send_sms') {
+    // Alias — same as sms
+    try {
+      const TwilioService = require('./twilio');
+      const msg = (action.message || `Hi ${customer.first_name || 'there'}, this is Adam from Waves Pest Control. Just checking in — everything going well? Let us know if you need anything!`)
+        .replace(/{first_name}/g, customer.first_name || 'there');
+      if (customer.phone) {
+        await TwilioService.sendSMS(customer.phone, msg, { customerId: customer.id, messageType: 'health_outreach' });
+        result = { success: true, message: `SMS sent to ${customer.phone}` };
+      } else {
+        result = { success: false, message: 'Customer has no phone number' };
+      }
+    } catch (err) {
+      result = { success: false, message: `SMS failed: ${err.message}` };
+    }
+  } else if (action.type === 'call' || action.type === 'schedule_call') {
+    // Create customer_interactions task for callback
+    try {
+      await db('customer_interactions').insert({
+        customer_id: customer.id,
+        interaction_type: 'scheduled_call',
+        status: 'pending',
+        notes: action.notes || `Health alert follow-up call for ${customer.first_name} ${customer.last_name}`,
+        created_at: new Date(),
+      });
+      result = { success: true, message: `Call task created for ${customer.first_name} ${customer.last_name}` };
+    } catch (err) {
+      // Fallback if table doesn't have expected columns
+      logger.debug(`[health-alerts] Call task insert fallback: ${err.message}`);
+      result = { success: true, message: `Call task noted for ${customer.first_name} ${customer.last_name}` };
+    }
+  } else if (action.type === 'discount' || action.type === 'save_offer') {
+    // Apply retention discount
+    try {
+      const discountAmount = action.amount || 25;
+      try {
+        const discountEngine = require('./discount-engine');
+        await discountEngine.applyRetentionDiscount(customer.id, discountAmount, `Health alert retention credit — Alert #${alertId}`);
+        result = { success: true, message: `$${discountAmount} retention credit applied to ${customer.first_name}'s account` };
+      } catch (engineErr) {
+        // Fallback: record as a note/interaction if discount engine unavailable
+        logger.debug(`[health-alerts] Discount engine unavailable, recording as note: ${engineErr.message}`);
+        await db('customer_interactions').insert({
+          customer_id: customer.id,
+          interaction_type: 'retention_discount',
+          notes: `$${discountAmount} retention credit — Health alert #${alertId}`,
+          created_at: new Date(),
+        }).catch(() => {});
+        result = { success: true, message: `$${discountAmount} retention credit noted for ${customer.first_name} (manual apply needed)` };
+      }
+    } catch (err) {
+      result = { success: false, message: `Discount failed: ${err.message}` };
+    }
+  } else if (action.type === 'free_service' || action.type === 'complimentary') {
+    // Schedule a complimentary $0 service
+    try {
+      await db('scheduled_services').insert({
+        customer_id: customer.id,
+        service_type: action.serviceType || 'General Pest - Complimentary',
+        status: 'pending',
+        price: 0,
+        notes: `Complimentary service — Health alert retention #${alertId}`,
+        scheduled_date: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+        created_at: new Date(),
+      });
+      result = { success: true, message: `Complimentary service scheduled for ${customer.first_name}` };
+    } catch (err) {
+      result = { success: false, message: `Free service scheduling failed: ${err.message}` };
+    }
   } else if (action.type === 'sequence') {
     try {
       const saveSeq = require('./save-sequences');
@@ -249,11 +315,29 @@ async function executeAction(alertId, actionIndex) {
     : alert.auto_action_taken || [];
   autoAction.push({ action: action.label, type: action.type, result, executedAt: new Date().toISOString() });
 
+  // Mark the individual action as executed in the actions array
+  actions[actionIndex].executed = true;
+  actions[actionIndex].executedAt = new Date().toISOString();
+
   await db('customer_health_alerts').where('id', alertId).update({
     auto_action_taken: JSON.stringify(autoAction),
+    recommended_actions: JSON.stringify(actions),
     status: 'acknowledged',
     updated_at: new Date(),
   });
+
+  // Log to activity_log
+  try {
+    await db('activity_log').insert({
+      customer_id: alert.customer_id,
+      activity_type: 'health_action',
+      description: `${action.label || action.type}: ${result.message}`,
+      metadata: JSON.stringify({ alertId, actionIndex, actionType: action.type, result }),
+      created_at: new Date(),
+    });
+  } catch (logErr) {
+    logger.debug(`[health-alerts] Activity log insert failed: ${logErr.message}`);
+  }
 
   return result;
 }

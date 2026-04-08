@@ -165,6 +165,19 @@ async function handlePaymentIntentFailed(paymentIntent) {
       status: 'failed',
       failure_reason: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
     });
+
+  // Fire-and-forget health rescore after payment failure
+  try {
+    const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+    if (payment?.customer_id) {
+      const customerHealth = require('../services/customer-health');
+      customerHealth.scoreCustomer(payment.customer_id).catch(err => {
+        logger.debug(`[stripe-webhook] Health rescore after payment failure: ${err.message}`);
+      });
+    }
+  } catch (err) {
+    logger.debug(`[stripe-webhook] Health rescore lookup failed: ${err.message}`);
+  }
 }
 
 /**
@@ -185,6 +198,19 @@ async function handleChargeRefunded(charge) {
       refund_amount: refundAmountDollars,
       refund_status: isFullRefund ? 'full' : 'partial',
     });
+
+  // Fire-and-forget health rescore after refund
+  try {
+    const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+    if (payment?.customer_id) {
+      const customerHealth = require('../services/customer-health');
+      customerHealth.scoreCustomer(payment.customer_id).catch(err => {
+        logger.debug(`[stripe-webhook] Health rescore after refund: ${err.message}`);
+      });
+    }
+  } catch (err) {
+    logger.debug(`[stripe-webhook] Health rescore lookup failed: ${err.message}`);
+  }
 }
 
 /**

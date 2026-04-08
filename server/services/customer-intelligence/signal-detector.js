@@ -24,7 +24,119 @@ const SIGNAL_TYPES = {
   REFERRAL_GIVEN: { weight: +20, severity: 'info' },
   UPSELL_ACCEPTED: { weight: +15, severity: 'info' },
   SMS_ENGAGED: { weight: +5, severity: 'info' },
+  CALLBACK_SINGLE: { weight: -5, severity: 'info' },
+  CALLBACK_MULTIPLE: { weight: -15, severity: 'warning' },
+  CALLBACK_PATTERN: { weight: -25, severity: 'critical' },
 };
+
+// ---------------------------------------------------------------------------
+// AI Sentiment Mining
+// ---------------------------------------------------------------------------
+async function analyzeSentimentBatch(customerId) {
+  const signals = [];
+  try {
+    // Throttle: only run for customers with recent inbound SMS in last 14 days
+    const recentInbound = await db('sms_log')
+      .where('customer_id', customerId)
+      .where('direction', 'inbound')
+      .where('created_at', '>', new Date(Date.now() - 14 * 86400000))
+      .count('* as count').first();
+
+    if (parseInt(recentInbound?.count || 0) === 0) return signals;
+
+    // Get last 10 inbound SMS
+    const smsMessages = await db('sms_log')
+      .where('customer_id', customerId)
+      .where('direction', 'inbound')
+      .orderBy('created_at', 'desc')
+      .limit(10)
+      .select('message_body', 'created_at');
+
+    // Get last 5 tech notes
+    let techNotes = [];
+    try {
+      techNotes = await db('service_records')
+        .where('customer_id', customerId)
+        .whereNotNull('technician_notes')
+        .where('technician_notes', '!=', '')
+        .orderBy('service_date', 'desc')
+        .limit(5)
+        .select('technician_notes', 'service_date');
+    } catch { /* technician_notes column may not exist */ }
+
+    const smsText = smsMessages.map(m => m.message_body || '').filter(Boolean);
+    const notesText = techNotes.map(n => n.technician_notes || '').filter(Boolean);
+
+    if (smsText.length === 0 && notesText.length === 0) return signals;
+
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic();
+
+    const prompt = `Analyze the following customer communications for a pest control company. Return ONLY valid JSON, no other text.
+
+SMS messages from customer (most recent first):
+${smsText.map((t, i) => `${i + 1}. "${t}"`).join('\n')}
+
+Technician notes about customer (most recent first):
+${notesText.length > 0 ? notesText.map((t, i) => `${i + 1}. "${t}"`).join('\n') : 'None available'}
+
+Detect these sentiment signals and rate confidence 0.0-1.0:
+- frustration: customer seems frustrated/angry/annoyed
+- treatment_ineffective: customer reports bugs still present, treatment not working
+- price_complaint: customer mentions cost being too high, seeking cheaper options
+- competitor_interest: customer mentions other pest control companies
+- cancellation_intent: customer hints at or explicitly mentions cancelling/stopping service
+
+Return JSON format:
+{"signals": [{"type": "frustration", "confidence": 0.8, "evidence": "brief quote"}, ...]}
+Only include signals you detect. Empty array if none found.`;
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 500,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const responseText = response.content[0]?.text || '{}';
+    // Extract JSON from response (handle possible markdown wrapping)
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return signals;
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    const aiSignals = parsed.signals || [];
+
+    // Map AI types to existing signal types (only confidence >= 0.6)
+    const typeMap = {
+      frustration: 'COMPLAINT_FILED',
+      treatment_ineffective: 'SERVICE_DECLINED',
+      price_complaint: 'PRICE_COMPLAINT',
+      competitor_interest: 'COMPETITOR_MENTIONED',
+      cancellation_intent: 'DOWNGRADE_REQUEST',
+    };
+
+    const severityMap = {
+      frustration: 'critical',
+      treatment_ineffective: 'warning',
+      price_complaint: 'warning',
+      competitor_interest: 'critical',
+      cancellation_intent: 'critical',
+    };
+
+    for (const sig of aiSignals) {
+      if (sig.confidence >= 0.6 && typeMap[sig.type]) {
+        signals.push({
+          signal_type: typeMap[sig.type],
+          signal_value: `AI detected: ${sig.type} (${Math.round(sig.confidence * 100)}% confidence) — ${sig.evidence || ''}`,
+          severity: severityMap[sig.type] || 'warning',
+        });
+      }
+    }
+  } catch (err) {
+    logger.debug(`[signal-detector] AI sentiment analysis failed for ${customerId}: ${err.message}`);
+  }
+
+  return signals;
+}
 
 class SignalDetector {
   async detectAllSignals() {
@@ -100,16 +212,32 @@ class SignalDetector {
       }
     } catch { /* */ }
 
-    // ── Multiple Reschedules ─────────────────────────────────────
+    // ── Multiple Reschedules (30-day window, threshold 2) ─────────
     try {
-      const reschedules = await db('scheduled_services')
+      const thirtyDaysAgo = new Date(now - 30 * 86400000);
+
+      // Count by status = 'rescheduled'
+      const reschedulesByStatus = await db('scheduled_services')
         .where('customer_id', customerId)
         .where('status', 'rescheduled')
-        .where('scheduled_date', '>', new Date(now - 60 * 86400000))
+        .where('scheduled_date', '>', thirtyDaysAgo)
         .count('* as count').first();
 
-      if (parseInt(reschedules?.count || 0) >= 3 && !existing.has('RESCHEDULE_MULTIPLE')) {
-        newSignals.push({ signal_type: 'RESCHEDULE_MULTIPLE', signal_value: `${reschedules.count} reschedules in 60 days`, severity: 'warning' });
+      // Also count by notes containing reschedule/rain/pushed
+      const reschedulesByNotes = await db('scheduled_services')
+        .where('customer_id', customerId)
+        .where('scheduled_date', '>', thirtyDaysAgo)
+        .whereNot('status', 'rescheduled') // avoid double-counting
+        .where(function() {
+          this.where('notes', 'ilike', '%reschedule%')
+            .orWhere('notes', 'ilike', '%rain%')
+            .orWhere('notes', 'ilike', '%pushed%');
+        })
+        .count('* as count').first();
+
+      const totalReschedules = parseInt(reschedulesByStatus?.count || 0) + parseInt(reschedulesByNotes?.count || 0);
+      if (totalReschedules >= 2 && !existing.has('RESCHEDULE_MULTIPLE')) {
+        newSignals.push({ signal_type: 'RESCHEDULE_MULTIPLE', signal_value: `${totalReschedules} reschedules in 30 days`, severity: 'warning' });
       }
     } catch { /* */ }
 
@@ -153,6 +281,29 @@ class SignalDetector {
       }
     } catch { /* */ }
 
+    // ── Callback Ratio Tracking ────────────────────────────────────
+    try {
+      const sixMonthsAgo = new Date(now - 180 * 86400000);
+      const callbacks = await db('service_records')
+        .where('customer_id', customerId)
+        .where('service_date', '>', sixMonthsAgo)
+        .where(function() {
+          this.where('is_callback', true)
+            .orWhere('service_type', 'ilike', '%callback%')
+            .orWhere('service_type', 'ilike', '%re-service%');
+        })
+        .count('* as count').first();
+
+      const callbackCount = parseInt(callbacks?.count || 0);
+      if (callbackCount >= 3 && !existing.has('CALLBACK_PATTERN')) {
+        newSignals.push({ signal_type: 'CALLBACK_PATTERN', signal_value: `${callbackCount} callbacks in 6 months — pattern detected`, severity: 'critical' });
+      } else if (callbackCount >= 2 && !existing.has('CALLBACK_MULTIPLE')) {
+        newSignals.push({ signal_type: 'CALLBACK_MULTIPLE', signal_value: `${callbackCount} callbacks in 6 months`, severity: 'warning' });
+      } else if (callbackCount === 1 && !existing.has('CALLBACK_SINGLE')) {
+        newSignals.push({ signal_type: 'CALLBACK_SINGLE', signal_value: '1 callback in 6 months', severity: 'info' });
+      }
+    } catch { /* service_records may not have is_callback column */ }
+
     // ── Positive: Recent completed service ───────────────────────
     try {
       const recentComplete = await db('service_records')
@@ -165,6 +316,18 @@ class SignalDetector {
         newSignals.push({ signal_type: 'SERVICE_COMPLETED', signal_value: 'Service completed recently', severity: 'info' });
       }
     } catch { /* */ }
+
+    // ── AI Sentiment Mining ────────────────────────────────────────
+    try {
+      const aiSignals = await analyzeSentimentBatch(customerId);
+      for (const aiSig of aiSignals) {
+        if (!existing.has(aiSig.signal_type)) {
+          newSignals.push(aiSig);
+        }
+      }
+    } catch (err) {
+      logger.debug(`[signal-detector] AI sentiment step failed for ${customerId}: ${err.message}`);
+    }
 
     // Save new signals
     for (const signal of newSignals) {

@@ -122,6 +122,32 @@ async function computeServiceScore(customerId) {
       details.skippedCount = skipped.length;
     }
 
+    // Callback ratio tracking
+    details.callbackCount = 0;
+    details.callbackRatio = 0;
+    try {
+      if (await tableExists('service_records')) {
+        const sixMonthsAgo = new Date(Date.now() - 180 * 86400000);
+        const cbResult = await db('service_records')
+          .where('customer_id', customerId)
+          .where('service_date', '>', sixMonthsAgo)
+          .where(function() {
+            this.where('is_callback', true)
+              .orWhere('service_type', 'ilike', '%callback%')
+              .orWhere('service_type', 'ilike', '%re-service%');
+          })
+          .count('* as count').first();
+        details.callbackCount = parseInt(cbResult?.count || 0);
+
+        const totalRecent = await db('service_records')
+          .where('customer_id', customerId)
+          .where('service_date', '>', sixMonthsAgo)
+          .count('* as count').first();
+        const totalCount = parseInt(totalRecent?.count || 0);
+        details.callbackRatio = totalCount > 0 ? details.callbackCount / totalCount : 0;
+      }
+    } catch { /* is_callback column may not exist */ }
+
     // Calculate score
     if (details.completedCount > 0) {
       score = 50;
@@ -142,6 +168,10 @@ async function computeServiceScore(customerId) {
       // Penalties
       score -= details.cancelledCount * 3;
       score -= details.skippedCount * 2;
+
+      // Callback penalty: -5 per callback, -10 additional if ratio > 20%
+      score -= details.callbackCount * 5;
+      if (details.callbackRatio > 0.2) score -= 10;
     }
   } catch (err) {
     logger.debug(`[health] service score error for ${customerId}: ${err.message}`);
