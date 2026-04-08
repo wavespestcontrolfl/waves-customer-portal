@@ -317,4 +317,51 @@ router.post('/:badgeType/notify', async (req, res, next) => {
   }
 });
 
+// =========================================================================
+// ADMIN ENDPOINTS (used by BadgesPage.jsx)
+// =========================================================================
+
+// GET /api/badges/admin/definitions — all badge definitions
+router.get('/admin/definitions', async (req, res) => {
+  res.json({ badges: BADGE_DEFS });
+});
+
+// GET /api/badges/admin/stats — aggregate badge stats
+router.get('/admin/stats', async (req, res) => {
+  try {
+    const [earned, customers] = await Promise.all([
+      db('customer_badges').count('* as c').first().catch(() => ({ c: 0 })),
+      db('customer_badges').countDistinct('customer_id as c').first().catch(() => ({ c: 0 })),
+    ]);
+    res.json({
+      totalDefinitions: BADGE_DEFS.length,
+      totalEarned: parseInt(earned?.c || 0),
+      customersWithBadges: parseInt(customers?.c || 0),
+    });
+  } catch (err) {
+    res.json({ totalDefinitions: BADGE_DEFS.length, totalEarned: 0, customersWithBadges: 0 });
+  }
+});
+
+// GET /api/badges/admin/customer/:customerId — badges for a specific customer
+router.get('/admin/customer/:customerId', async (req, res) => {
+  try {
+    const { earned, progress } = await evaluateBadges(req.params.customerId);
+    const earnedList = BADGE_DEFS.filter(b => earned[b.type]).map(b => {
+      return { ...b, earned: true };
+    });
+    // Get earned dates from DB
+    const records = await db('customer_badges').where({ customer_id: req.params.customerId }).catch(() => []);
+    const dateMap = Object.fromEntries((records || []).map(r => [r.badge_type, r.earned_at || r.created_at]));
+    earnedList.forEach(b => { b.earnedAt = dateMap[b.type] || null; });
+
+    const progressList = BADGE_DEFS.filter(b => !earned[b.type] && progress[b.type]).map(b => ({
+      ...b, progressLabel: progress[b.type],
+    }));
+    res.json({ earned: earnedList, progress: progressList });
+  } catch (err) {
+    res.json({ earned: [], progress: [] });
+  }
+});
+
 module.exports = router;
