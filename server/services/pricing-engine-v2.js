@@ -24,7 +24,7 @@ const ADMIN_ANNUAL = 51;  // annual admin overhead per service
 // ─────────────────────────────────────────────
 // MAIN ENTRY POINT
 // ─────────────────────────────────────────────
-function calculateEstimate(profile, selectedServices, options = {}) {
+async function calculateEstimate(profile, selectedServices, options = {}) {
   const {
     grassType = 'A',
     pestFreq = 4,
@@ -429,7 +429,7 @@ function calculateEstimate(profile, selectedServices, options = {}) {
   // ═══════════════════════════════════════════
   // WAVEGUARD BUNDLE
   // ═══════════════════════════════════════════
-  result.waveguard = calcWaveGuard(result.recurring);
+  result.waveguard = await calcWaveGuard(result.recurring);
   result.totals = calcTotals(result);
 
   return result;
@@ -1157,7 +1157,7 @@ function calcExclusion(simple, moderate, advanced, waive, applyOT) {
 // ─────────────────────────────────────────────
 // WAVEGUARD BUNDLE CALCULATION
 // ─────────────────────────────────────────────
-function calcWaveGuard(recurring) {
+async function calcWaveGuard(recurring) {
   let serviceCount = 0;
   let annualBeforeDiscount = 0;
   const services = [];
@@ -1177,13 +1177,22 @@ function calcWaveGuard(recurring) {
     });
   });
 
-  // Determine tier and discount
-  // WaveGuard tier discounts: Bronze 0%, Silver 10%, Gold 15%, Platinum 20%
-  let tier = 'Bronze', discountPct = 0;
-  if (serviceCount >= 4) { tier = 'Platinum'; discountPct = 0.20; }
-  else if (serviceCount === 3) { tier = 'Gold'; discountPct = 0.15; }
-  else if (serviceCount === 2) { tier = 'Silver'; discountPct = 0.10; }
-  else if (serviceCount >= 1) { tier = 'Bronze'; discountPct = 0; }
+  // Determine tier from service count, then look up discount from DB
+  let tier = 'Bronze';
+  if (serviceCount >= 4) tier = 'Platinum';
+  else if (serviceCount === 3) tier = 'Gold';
+  else if (serviceCount === 2) tier = 'Silver';
+  else tier = 'Bronze';
+
+  let discountPct = 0;
+  try {
+    const DiscountEngine = require('./discount-engine');
+    discountPct = await DiscountEngine.getDiscountForTier(tier);
+  } catch {
+    // Fallback if discount engine unavailable
+    const fallback = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+    discountPct = fallback[tier] || 0;
+  }
 
   const discountAmount = Math.round(annualBeforeDiscount * discountPct * 100) / 100;
   const annualAfterDiscount = Math.round((annualBeforeDiscount - discountAmount) * 100) / 100;

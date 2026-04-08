@@ -1057,7 +1057,7 @@ router.post('/calculate-estimate', async (req, res) => {
     if (!profile) return res.status(400).json({ error: 'Profile required' });
 
     const { calculateEstimate } = require('../services/pricing-engine-v2');
-    const v2 = calculateEstimate(profile, selectedServices || [], options || {});
+    const v2 = await calculateEstimate(profile, selectedServices || [], options || {});
 
     // ── Build v1-compatible "results" (R) object from v2 ──
     const R = {};

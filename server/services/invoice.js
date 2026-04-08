@@ -4,6 +4,7 @@ const logger = require('./logger');
 const config = require('../config');
 const { v4: uuidv4 } = require('uuid');
 const TaxCalculator = require('./tax-calculator');
+const DiscountEngine = require('./discount-engine');
 
 let paymentsApi;
 try {
@@ -36,8 +37,9 @@ async function nextInvoiceNumber() {
   return `${prefix}${String(num).padStart(4, '0')}`;
 }
 
-// WaveGuard tier discount percentages
-const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+// WaveGuard tier discount percentages — now loaded from discount engine DB
+// Fallback map only used if discount-engine import fails
+const TIER_DISCOUNTS_FALLBACK = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE
@@ -94,8 +96,13 @@ const InvoiceService = {
     const items = lineItems || [];
     const subtotal = items.reduce((sum, item) => sum + (item.quantity * item.unit_price), 0);
 
-    // Apply WaveGuard discount
-    const tierDiscount = TIER_DISCOUNTS[customer.waveguard_tier] || 0;
+    // Apply WaveGuard tier discount via discount engine
+    let tierDiscount;
+    try {
+      tierDiscount = await DiscountEngine.getDiscountForTier(customer.waveguard_tier);
+    } catch {
+      tierDiscount = TIER_DISCOUNTS_FALLBACK[customer.waveguard_tier] || 0;
+    }
     const discountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
     const discountLabel = tierDiscount > 0
       ? `${customer.waveguard_tier} WaveGuard — ${Math.round(tierDiscount * 100)}% off`
@@ -142,6 +149,29 @@ const InvoiceService = {
       status: 'draft',
       ...serviceData,
     }).returning('*');
+
+    // Record applied discounts in invoice_discounts table
+    try {
+      if (discountAmount > 0) {
+        const tierDiscountRow = await db('discounts')
+          .where({ is_waveguard_tier_discount: true, requires_waveguard_tier: customer.waveguard_tier, is_active: true })
+          .first();
+        await DiscountEngine.recordInvoiceDiscounts(invoice.id, [{
+          id: tierDiscountRow?.id || null,
+          name: discountLabel,
+          discount_type: 'percentage',
+          amount: tierDiscount * 100,
+          discount_dollars: discountAmount,
+        }], 'system');
+      }
+      // Also record any non-tier discounts assigned to this customer
+      const extraResult = await DiscountEngine.calculateDiscounts(customerId, { subtotal, isEstimate: false });
+      if (extraResult.discounts.length > 0) {
+        await DiscountEngine.recordInvoiceDiscounts(invoice.id, extraResult.discounts, 'system');
+      }
+    } catch (err) {
+      logger.warn(`[invoice] Could not record invoice_discounts: ${err.message}`);
+    }
 
     logger.info(`[invoice] Created ${invoiceNumber} for customer ${customerId}: $${total}`);
     return invoice;
@@ -419,7 +449,12 @@ const InvoiceService = {
       const customer = await db('customers').where({ id: invoice.customer_id }).first();
       const items = updates.line_items;
       const subtotal = items.reduce((sum, i) => sum + (i.quantity * i.unit_price), 0);
-      const tierDiscount = TIER_DISCOUNTS[customer?.waveguard_tier] || 0;
+      let tierDiscount;
+      try {
+        tierDiscount = await DiscountEngine.getDiscountForTier(customer?.waveguard_tier);
+      } catch {
+        tierDiscount = TIER_DISCOUNTS_FALLBACK[customer?.waveguard_tier] || 0;
+      }
       const discountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
       const afterDiscount = subtotal - discountAmount;
       const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
