@@ -208,6 +208,7 @@ app.use('/api/admin/health', require('./routes/admin-health'));
 app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
+app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));
 
 // Health check
 app.get('/api/health', (req, res) => {

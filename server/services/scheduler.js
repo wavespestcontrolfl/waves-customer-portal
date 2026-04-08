@@ -703,6 +703,17 @@ function initScheduledJobs() {
     logger.error(`Time tracking crons failed to init: ${err.message}`);
   }
 
+  // =========================================================================
+  // EQUIPMENT MAINTENANCE CRONS (nightly checks, warranty alerts)
+  // =========================================================================
+  try {
+    const { initEquipmentCrons } = require('./equipment-crons');
+    initEquipmentCrons();
+    logger.info('Equipment maintenance crons initialized');
+  } catch (err) {
+    logger.error(`Equipment crons failed to init: ${err.message}`);
+  }
+
   logger.info('Scheduled jobs initialized');
 }
 
