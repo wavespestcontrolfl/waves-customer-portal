@@ -23,6 +23,8 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COUNT(DISTINCT service_type) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND status NOT IN ('cancelled')) as service_type_count"),
       // rating column may not exist — use satisfaction_rating from treatment_outcomes or skip
       db.raw("(SELECT NULL) as last_rating"),
+      db.raw("(SELECT COALESCE(SUM(amount_due - amount_paid), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status != 'paid') as balance_owed"),
+      db.raw("(SELECT health_score FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY scored_at DESC LIMIT 1) as health_score"),
     );
 
     if (search) {
@@ -82,6 +84,8 @@ router.get('/', async (req, res, next) => {
         lastRating: c.last_rating != null ? parseInt(c.last_rating) : null,
         tags: (c.tags_str || '').split(',').filter(Boolean),
         onboardingComplete: c.onboarding_complete,
+        balanceOwed: parseFloat(c.balance_owed || 0),
+        healthScore: c.health_score != null ? parseInt(c.health_score) : null,
       })),
       total: parseInt(total.count), page: parseInt(page), limit: parseInt(limit),
       totalPages: Math.ceil(parseInt(total.count) / parseInt(limit)),
@@ -252,7 +256,7 @@ router.get('/:id', async (req, res, next) => {
     const c = await db('customers').where({ id: req.params.id }).first();
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
-    const [tags, interactions, prefs, services, estimates, payments, scheduled, smsLog] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -261,6 +265,14 @@ router.get('/:id', async (req, res, next) => {
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
       db('sms_log').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(20),
+      db('customer_health_scores').where({ customer_id: c.id }).orderBy('scored_at', 'desc').first().catch(() => null),
+      db('invoices').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(10).catch(() => []),
+      db('payment_methods').where({ customer_id: c.id }).catch(() => []),
+      db('service_photos').where({ customer_id: c.id }).select('id', 's3_url', 'caption', 'service_record_id', 'created_at').orderBy('created_at', 'desc').limit(12).catch(() => []),
+      db('notification_prefs').where({ customer_id: c.id }).first().catch(() => null),
+      db('referral_promoters').where({ customer_id: c.id }).first().catch(() => null),
+      db('property_application_history').where({ customer_id: c.id }).orderBy('applied_at', 'desc').limit(10).catch(() => []),
+      db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.type as discount_type', 'discounts.value as discount_value').catch(() => []),
     ]);
 
     res.json({
@@ -281,9 +293,18 @@ router.get('/:id', async (req, res, next) => {
         annualValue: parseFloat(c.monthly_rate || 0) * 12,
         totalServices: c.total_services,
         referralCode: c.referral_code, crmNotes: c.crm_notes,
+        satelliteUrl: c.satellite_url,
       },
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, estimates, payments, scheduled, smsLog,
+      healthScore: healthScore || null,
+      invoices: invoices || [],
+      cards: cards || [],
+      photos: photos || [],
+      notificationPrefs: notificationPrefs || null,
+      referralInfo: referralInfo || null,
+      complianceRecords: complianceRecords || [],
+      customerDiscounts: customerDiscounts || [],
     });
   } catch (err) { next(err); }
 });

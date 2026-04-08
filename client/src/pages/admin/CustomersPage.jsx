@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import Customer360Profile from '../../components/admin/Customer360Profile';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
@@ -603,33 +604,18 @@ export default function CustomersPage() {
   const [squareSyncInfo, setSquareSyncInfo] = useState(null);
   const [filterCity, setFilterCity] = useState('all');
   const [fixingTiers, setFixingTiers] = useState(false);
+  const [filterHasBalance, setFilterHasBalance] = useState(false);
+  const [selected360Id, setSelected360Id] = useState(null);
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
-  const [expandedId, setExpandedId] = useState(null);
-  const [expandedData, setExpandedData] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
 
   const expandCustomer = async (id) => {
-    if (expandedId === id) { setExpandedId(null); setExpandedData(null); return; }
-    setExpandedId(id);
-    setExpandedData(null);
-    try {
-      // Auto-sync from Square first (non-blocking)
-      adminFetch(`/admin/customers/${id}/sync-square`, { method: 'POST' }).catch(() => {});
-      const data = await adminFetch(`/admin/customers/${id}`);
-      setExpandedData(data);
-    } catch { setExpandedData({ error: true }); }
-  };
-
-  const refreshExpanded = async (id) => {
-    try {
-      await adminFetch(`/admin/customers/${id}/sync-square`, { method: 'POST' });
-      const data = await adminFetch(`/admin/customers/${id}`);
-      setExpandedData(data);
-    } catch { /* ignore */ }
+    // Open the 360 slide-out panel instead of inline expansion
+    setSelected360Id(id);
   };
 
   const startEdit = (c) => {
@@ -765,6 +751,9 @@ export default function CustomersPage() {
     if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
     return 0;
   });
+
+  // Apply "Has Balance" filter
+  const filteredSorted = filterHasBalance ? sorted.filter(c => (c.balanceOwed || 0) > 0) : sorted;
 
   const totalCount = customers.length;
 
@@ -962,44 +951,53 @@ export default function CustomersPage() {
                 fontSize: 11, fontWeight: 600, cursor: 'pointer',
               }}>{s.label}</button>
             ))}
+            <button onClick={() => setFilterHasBalance(!filterHasBalance)} style={{
+              padding: '4px 10px', borderRadius: 9999,
+              border: `1px solid ${filterHasBalance ? D.red : D.border}`,
+              background: filterHasBalance ? `${D.red}22` : 'transparent',
+              color: filterHasBalance ? D.red : D.muted,
+              fontSize: 11, fontWeight: 600, cursor: 'pointer',
+            }}>Has Balance</button>
             <div style={{ flex: 1 }} />
             <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.muted, alignSelf: 'center' }}>
-              {sorted.length} result{sorted.length !== 1 ? 's' : ''}
+              {filteredSorted.length} result{filteredSorted.length !== 1 ? 's' : ''}
             </span>
           </div>
 
           {/* Table header */}
           <div className="customers-table-header" style={{
             display: 'grid',
-            gridTemplateColumns: '1.8fr 0.6fr 0.6fr 0.6fr 0.5fr 0.5fr 0.7fr 0.7fr 0.5fr 0.5fr',
+            gridTemplateColumns: '1.6fr 0.3fr 0.5fr 0.5fr 0.5fr 0.5fr 0.5fr 0.6fr 0.6fr 0.5fr 0.5fr',
             gap: 6, padding: '10px 16px', marginBottom: 4,
           }}>
             <SortHeader label="Name" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>HP</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Services</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Tier</div>
             <SortHeader label="$/Mo" sortKey="monthlyRate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Balance</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>City</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Next Svc</div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Last Svc</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Stage</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Rating</div>
             <div />
           </div>
 
           {/* Rows */}
-          {sorted.length === 0 ? (
+          {filteredSorted.length === 0 ? (
             <div style={{
               padding: 48, textAlign: 'center', color: D.muted, fontFamily: 'DM Sans, sans-serif',
               background: D.card, borderRadius: 12, border: `1px solid ${D.border}`,
             }}>
-              <div style={{ fontSize: 28, marginBottom: 12 }}>👥</div>
+              <div style={{ fontSize: 28, marginBottom: 12 }}>&#128101;</div>
               <div style={{ fontSize: 15 }}>No customers found</div>
               <div style={{ fontSize: 13, marginTop: 4 }}>Try adjusting your filters or add a new customer</div>
             </div>
           ) : (
-            sorted.map(c => {
+            filteredSorted.map(c => {
               const icons = serviceIcons(c);
               const computedTier = c.serviceCount != null ? tierFromServices(c.serviceCount) : null;
+              const hsColor = c.healthScore != null ? (c.healthScore >= 70 ? D.green : c.healthScore >= 40 ? D.amber : D.red) : D.border;
               return (
               <div key={c.id} style={{ marginBottom: 6 }}>
                 <div
@@ -1007,11 +1005,11 @@ export default function CustomersPage() {
                   onClick={() => expandCustomer(c.id)}
                   style={{
                     display: 'grid',
-                    gridTemplateColumns: '1.8fr 0.6fr 0.6fr 0.6fr 0.5fr 0.5fr 0.7fr 0.7fr 0.5fr 0.5fr',
+                    gridTemplateColumns: '1.6fr 0.3fr 0.5fr 0.5fr 0.5fr 0.5fr 0.5fr 0.6fr 0.6fr 0.5fr 0.5fr',
                     gap: 6, padding: '12px 16px', alignItems: 'center',
-                    background: expandedId === c.id ? `${D.teal}08` : D.card,
-                    border: `1px solid ${expandedId === c.id ? D.teal : D.border}`,
-                    borderRadius: expandedId === c.id ? '10px 10px 0 0' : 10,
+                    background: D.card,
+                    border: `1px solid ${D.border}`,
+                    borderRadius: 10,
                     cursor: 'pointer', transition: 'border-color 0.15s',
                   }}
                 >
@@ -1025,6 +1023,10 @@ export default function CustomersPage() {
                     ) : (
                       <span style={{ fontSize: 11, color: D.muted }}>{c.email || '--'}</span>
                     )}
+                  </div>
+                  {/* Health Score Dot */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: hsColor, display: 'inline-block' }} title={c.healthScore != null ? `Health: ${c.healthScore}` : 'No score'} />
                   </div>
                   {/* Services icons */}
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
@@ -1041,15 +1043,15 @@ export default function CustomersPage() {
                   <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: c.monthlyRate ? D.green : D.muted }}>
                     {c.monthlyRate ? `$${c.monthlyRate}` : '--'}
                   </div>
+                  {/* Balance Owed */}
+                  <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: (c.balanceOwed || 0) > 0 ? D.red : D.muted }}>
+                    {(c.balanceOwed || 0) > 0 ? `$${parseFloat(c.balanceOwed).toFixed(0)}` : '--'}
+                  </div>
                   {/* City */}
                   <div style={{ fontSize: 11, color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.city || '--'}</div>
                   {/* Next service date */}
                   <div style={{ fontSize: 11, color: c.nextServiceDate ? D.teal : D.muted }}>
                     {c.nextServiceDate ? new Date(c.nextServiceDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '--'}
-                  </div>
-                  {/* Last service date */}
-                  <div style={{ fontSize: 11, color: D.muted }}>
-                    {c.lastServiceDate ? new Date(c.lastServiceDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '--'}
                   </div>
                   {/* Stage */}
                   <div><StageBadge stage={c.pipelineStage} /></div>
@@ -1077,98 +1079,6 @@ export default function CustomersPage() {
                     }}>x</button>
                   </div>
                 </div>
-
-                {/* Expanded detail panel */}
-                {expandedId === c.id && (
-                  <div className="customer-expanded-detail" style={{
-                    background: D.card, border: `1px solid ${D.teal}`, borderTop: 'none',
-                    borderRadius: '0 0 10px 10px', padding: 20,
-                  }}>
-                    {!expandedData ? <div style={{ color: D.muted, textAlign: 'center', padding: 20 }}>Loading...</div> :
-                    expandedData.error ? <div style={{ color: D.red, textAlign: 'center' }}>Failed to load details</div> : (
-                      <><div className="detail-grid-3col" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
-                        {/* Column 1: Contact Info */}
-                        <div>
-                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Contact</div>
-                          {[
-                            ['Name', `${expandedData.customer.firstName} ${expandedData.customer.lastName}`],
-                            ['Email', expandedData.customer.email],
-                            ['Phone', expandedData.customer.phone],
-                            ['Address', `${expandedData.customer.address?.line1 || ''}, ${expandedData.customer.address?.city || ''}, ${expandedData.customer.address?.state || ''} ${expandedData.customer.address?.zip || ''}`],
-                            ['Company', expandedData.customer.companyName],
-                            ['Member Since', expandedData.customer.memberSince],
-                            ['Lead Source', expandedData.customer.leadSource],
-                            ['Lead Detail', expandedData.customer.leadSourceDetail],
-                            ['Landing URL', expandedData.customer.landingPageUrl],
-                            ['Total Revenue', expandedData.customer.lifetimeRevenue > 0 ? `$${expandedData.customer.lifetimeRevenue.toFixed(2)}` : null],
-                            ['Annual Value (ARR)', expandedData.customer.annualValue > 0 ? `$${expandedData.customer.annualValue.toFixed(2)}/yr` : null],
-                            ['Monthly Rate', expandedData.customer.monthlyRate > 0 ? `$${expandedData.customer.monthlyRate.toFixed(2)}/mo` : null],
-                          ].map(([l, v]) => v && (
-                            <div key={l} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 12 }}>
-                              <span style={{ color: D.muted }}>{l}</span>
-                              <span style={{ color: D.white, textAlign: 'right', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{v}</span>
-                            </div>
-                          ))}
-                          <div style={{ marginTop: 12, display: 'flex', gap: 6 }}>
-                            {expandedData.customer.phone && (
-                              <>
-                                <a href={`/admin/communications?phone=${encodeURIComponent(expandedData.customer.phone)}&action=sms`} style={{ padding: '6px 12px', background: D.teal, color: D.white, borderRadius: 6, fontSize: 11, fontWeight: 600, textDecoration: 'none' }}>💬 Text</a>
-                                <a href={`/admin/communications?phone=${encodeURIComponent(expandedData.customer.phone)}&action=call`} style={{ padding: '6px 12px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, fontSize: 11, textDecoration: 'none' }}>📞 Call</a>
-                              </>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Column 2: Services + Payments */}
-                        <div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                            <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1 }}>Service History ({(expandedData.services || []).length})</div>
-                            <button onClick={() => refreshExpanded(c.id)} style={{ padding: '3px 8px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 4, color: D.muted, fontSize: 10, cursor: 'pointer' }}>Sync Square</button>
-                          </div>
-                          {(expandedData.services || []).map((s, i) => (
-                            <div key={i} style={{ padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22` }}>
-                              <span style={{ color: D.white }}>{s.service_type}</span>
-                              <span style={{ color: D.muted, marginLeft: 8 }}>{s.service_date ? new Date(s.service_date).toLocaleDateString() : ''}</span>
-                              {s.total_cost > 0 && <span style={{ color: D.green, marginLeft: 8, fontFamily: 'JetBrains Mono, monospace' }}>${parseFloat(s.total_cost).toFixed(2)}</span>}
-                            </div>
-                          ))}
-                          {(expandedData.services || []).length === 0 && <div style={{ fontSize: 12, color: D.muted }}>No services — click "Sync Square" to import</div>}
-
-                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, marginTop: 16 }}>Payments ({(expandedData.payments || []).length})</div>
-                          {(expandedData.payments || []).map((p, i) => (
-                            <div key={i} style={{ padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22` }}>
-                              <span style={{ color: D.green, fontFamily: 'JetBrains Mono, monospace' }}>${parseFloat(p.amount || 0).toFixed(2)}</span>
-                              <span style={{ color: D.muted, marginLeft: 8 }}>{p.payment_date ? new Date(p.payment_date).toLocaleDateString() : ''}</span>
-                              <span style={{ color: D.muted, marginLeft: 8 }}>{p.description}</span>
-                            </div>
-                          ))}
-                          {(expandedData.payments || []).length === 0 && <div style={{ fontSize: 12, color: D.muted }}>No payments</div>}
-                        </div>
-
-                        {/* Column 3: Recent SMS + Interactions */}
-                        <div>
-                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Recent SMS ({(expandedData.smsLog || []).length})</div>
-                          {(expandedData.smsLog || []).slice(0, 5).map((s, i) => (
-                            <div key={i} style={{ padding: '4px 0', fontSize: 11, borderBottom: `1px solid ${D.border}22` }}>
-                              <span style={{ color: s.direction === 'inbound' ? D.teal : D.green }}>{s.direction === 'inbound' ? '← ' : '→ '}</span>
-                              <span style={{ color: D.muted }}>{(s.message_body || '').substring(0, 60)}</span>
-                              <div style={{ fontSize: 10, color: D.muted }}>{timeAgo(s.created_at)}</div>
-                            </div>
-                          ))}
-                          {(expandedData.smsLog || []).length === 0 && <div style={{ fontSize: 12, color: D.muted }}>No SMS</div>}
-
-                          <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, marginTop: 16 }}>Tags</div>
-                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                            {(expandedData.tags || []).map(t => <TagChip key={t} tag={t} />)}
-                            {(expandedData.tags || []).length === 0 && <span style={{ fontSize: 12, color: D.muted }}>No tags</span>}
-                          </div>
-                        </div>
-                      </div>
-                      <CustomerTimeline customerId={c.id} />
-                      </>
-                    )}
-                  </div>
-                )}
 
                 {/* Inline edit modal */}
                 {editingId === c.id && (
@@ -1256,6 +1166,14 @@ export default function CustomersPage() {
         <QuickAddModal
           onClose={() => setShowAddModal(false)}
           onCreated={() => { loadCustomers(); if (view === 'pipeline') loadPipeline(); }}
+        />
+      )}
+
+      {/* ====================== CUSTOMER 360 PROFILE ====================== */}
+      {selected360Id && (
+        <Customer360Profile
+          customerId={selected360Id}
+          onClose={() => setSelected360Id(null)}
         />
       )}
     </div>
