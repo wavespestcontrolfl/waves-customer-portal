@@ -584,9 +584,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY HOUR — Process any pending call recordings (batch catch-up)
+  // EVERY 5 MIN — Process any pending call recordings
   // =========================================================================
-  cron.schedule('0 * * * *', async () => {
+  cron.schedule('*/5 * * * *', async () => {
     try {
       const processor = require('./call-recording-processor');
       if (processor.processAllPending) await processor.processAllPending();
