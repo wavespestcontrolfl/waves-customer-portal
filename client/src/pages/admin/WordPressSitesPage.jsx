@@ -204,9 +204,6 @@ export default function WordPressSitesPage() {
                   <button onClick={() => testConnection(site.id)} disabled={testing === site.id} style={{ ...sBtn('transparent', D.muted), border: `1px solid ${D.border}`, padding: '4px 10px', fontSize: 11, opacity: testing === site.id ? 0.5 : 1 }}>
                     {testing === site.id ? 'Testing...' : 'Test'}
                   </button>
-                  <button onClick={() => scanSite(site.id)} disabled={scanning === site.id} style={{ ...sBtn('transparent', D.teal), border: `1px solid ${D.teal}33`, padding: '4px 10px', fontSize: 11, opacity: scanning === site.id ? 0.5 : 1 }}>
-                    {scanning === site.id ? 'Scanning...' : 'Scan Forms'}
-                  </button>
                   {(site.webhook_status === 'zapier' || site.webhook_status === 'mixed') && (
                     <button onClick={() => swapSite(site.id)} style={{ ...sBtn(D.green, D.white), padding: '4px 10px', fontSize: 11 }}>Swap to Portal</button>
                   )}
