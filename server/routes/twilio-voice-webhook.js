@@ -150,15 +150,31 @@ router.post('/recording-status', async (req, res) => {
     const { CallSid, RecordingSid, RecordingUrl, RecordingDuration, RecordingStatus } = req.body;
 
     if (RecordingStatus === 'completed' && CallSid) {
-      await db('call_log').where('twilio_call_sid', CallSid).update({
+      const recordingData = {
         recording_url: RecordingUrl ? RecordingUrl + '.mp3' : null,
         recording_sid: RecordingSid,
         recording_duration_seconds: parseInt(RecordingDuration || 0),
         transcription_status: 'pending',
         updated_at: new Date(),
-      });
+      };
 
-      logger.info(`Recording saved: ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
+      // Update existing call_log entry, or create one if missing
+      const updated = await db('call_log').where('twilio_call_sid', CallSid).update(recordingData);
+      if (updated === 0) {
+        // No call_log entry exists — create one so the recording isn't orphaned
+        await db('call_log').insert({
+          twilio_call_sid: CallSid,
+          call_sid: CallSid,
+          from_phone: req.body.From || null,
+          to_phone: req.body.To || null,
+          direction: 'inbound',
+          status: 'completed',
+          ...recordingData,
+        }).catch(e => logger.error(`[recording-status] Fallback insert failed: ${e.message}`));
+        logger.info(`Recording saved (new call_log entry): ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
+      } else {
+        logger.info(`Recording saved: ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
+      }
 
       // Auto-process recording when ready
       try {

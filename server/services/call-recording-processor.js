@@ -19,12 +19,32 @@ const { resolveLocation } = require('../config/locations');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-// ── Transcribe audio via Gemini ──
+// ── Download Twilio recording (authenticated) ──
+async function downloadRecording(mp3Url) {
+  const twilioAuth = Buffer.from(
+    `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+  ).toString('base64');
+
+  const res = await fetch(mp3Url, {
+    headers: { Authorization: `Basic ${twilioAuth}` },
+    redirect: 'follow',
+  });
+  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return buffer.toString('base64');
+}
+
+// ── Transcribe audio via Gemini (download + inline base64) ──
 async function transcribeWithGemini(mp3Url) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
   try {
+    // Download audio from Twilio (requires auth)
+    logger.info(`[call-proc] Downloading recording: ${mp3Url}`);
+    const audioBase64 = await downloadRecording(mp3Url);
+    logger.info(`[call-proc] Downloaded ${Math.round(audioBase64.length / 1024)}KB audio`);
+
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
@@ -33,19 +53,23 @@ async function transcribeWithGemini(mp3Url) {
         body: JSON.stringify({
           contents: [{
             parts: [
-              { fileData: { mimeType: 'audio/mpeg', fileUri: mp3Url } },
-              { text: 'Transcribe this phone call recording for Waves Pest Control. Output the full transcription only, no commentary.' },
+              { inlineData: { mimeType: 'audio/mpeg', data: audioBase64 } },
+              { text: 'Transcribe this phone call recording for Waves Pest Control. Output the full transcription with speaker labels (Caller/Agent) where possible. No commentary, just the transcript.' },
             ],
           }],
         }),
       }
     );
     if (!res.ok) {
-      logger.warn(`[call-proc] Gemini transcription failed: ${res.status}`);
+      const errBody = await res.text().catch(() => '');
+      logger.warn(`[call-proc] Gemini transcription failed: ${res.status} ${errBody.slice(0, 200)}`);
       return null;
     }
     const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    // Gemini 2.5 may return thinking parts — skip those
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    const textPart = parts.find(p => p.text && !p.thought);
+    return textPart?.text || parts[0]?.text || null;
   } catch (err) {
     logger.error(`[call-proc] Gemini transcription error: ${err.message}`);
     return null;
