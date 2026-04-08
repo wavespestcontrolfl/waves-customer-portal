@@ -3,9 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const StripeService = require('../services/stripe');
-const PaymentRouter = require('../services/payment-router');
 const stripeConfig = require('../config/stripe-config');
-const config = require('../config');
 const logger = require('../services/logger');
 
 /**
@@ -66,15 +64,10 @@ router.get('/:token', async (req, res, next) => {
         state: customer.state,
         zip: customer.zip,
       },
-      processor,
+      processor: 'stripe',
       stripe: {
         available: StripeService.isAvailable(),
         publishableKey: stripeConfig.publishableKey || null,
-      },
-      square: {
-        appId: process.env.SQUARE_APP_ID || null,
-        locationId: config.square?.locationId || null,
-        environment: config.square?.environment || 'sandbox',
       },
     });
   } catch (err) {
@@ -134,33 +127,6 @@ router.post('/:token/confirm', async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[pay-v2] Confirm error: ${err.message}`);
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// =========================================================================
-// POST /api/pay/:token/pay — Existing Square payment flow (backwards compat)
-// =========================================================================
-router.post('/:token/pay', async (req, res, next) => {
-  try {
-    const { sourceId, verificationToken, paymentMethod } = req.body;
-    if (!sourceId) return res.status(400).json({ error: 'sourceId required' });
-
-    const result = await InvoiceService.processPayment(req.params.token, {
-      sourceId, verificationToken, paymentMethod,
-    });
-
-    // Send receipt SMS in the background
-    const invoice = await db('invoices').where({ token: req.params.token }).first();
-    if (invoice) {
-      InvoiceService.sendReceipt(invoice.id).catch(err => {
-        logger.error(`[pay-v2] Receipt send failed: ${err.message}`);
-      });
-    }
-
-    res.json(result);
-  } catch (err) {
-    logger.error(`[pay-v2] Square payment error: ${err.message}`);
     res.status(400).json({ error: err.message });
   }
 });

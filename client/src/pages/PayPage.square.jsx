@@ -20,202 +20,21 @@ const TIER_COLORS = {
   Platinum: { bg: '#F3F1F0', text: '#6D6D6D', accent: '#E5E4E2' },
 };
 
-// ─── Stripe SDK loader (loads once, caches) ─────────────────────
-let stripePromise = null;
-function getStripe(publishableKey) {
-  if (stripePromise) return stripePromise;
-  stripePromise = new Promise((resolve, reject) => {
-    if (window.Stripe) {
-      resolve(window.Stripe(publishableKey));
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = 'https://js.stripe.com/v3/';
-    script.async = true;
-    script.onload = () => resolve(window.Stripe(publishableKey));
-    script.onerror = () => reject(new Error('Failed to load Stripe'));
-    document.head.appendChild(script);
-  });
-  return stripePromise;
-}
-
-// ─── Stripe Payment Element wrapper ─────────────────────────────
-function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, onError }) {
-  const mountRef = useRef(null);
-  const elementsRef = useRef(null);
-  const stripeRef = useRef(null);
-  const [ready, setReady] = useState(false);
-  const [processing, setProcessing] = useState(false);
-  const [elementError, setElementError] = useState(null);
-
-  useEffect(() => {
-    if (!publishableKey || !clientSecret) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const stripe = await getStripe(publishableKey);
-        if (cancelled) return;
-        stripeRef.current = stripe;
-
-        const elements = stripe.elements({
-          clientSecret,
-          appearance: {
-            theme: 'stripe',
-            variables: {
-              colorPrimary: W.blue,
-              colorBackground: W.white,
-              colorText: W.navy,
-              colorDanger: W.red,
-              fontFamily: "'Poppins', sans-serif",
-              borderRadius: '10px',
-              spacingUnit: '4px',
-            },
-            rules: {
-              '.Input': {
-                border: `1px solid ${W.border}`,
-                boxShadow: 'none',
-                padding: '12px 14px',
-              },
-              '.Input:focus': {
-                border: `1px solid ${W.blue}`,
-                boxShadow: `0 0 0 1px ${W.blue}`,
-              },
-              '.Label': {
-                fontSize: '13px',
-                fontWeight: '500',
-                color: W.textBody,
-              },
-              '.Tab': {
-                border: `1px solid ${W.border}`,
-                borderRadius: '10px',
-              },
-              '.Tab--selected': {
-                borderColor: W.blue,
-                backgroundColor: W.bluePale,
-              },
-            },
-          },
-        });
-
-        if (cancelled) return;
-        elementsRef.current = elements;
-
-        const paymentElement = elements.create('payment', {
-          layout: {
-            type: 'tabs',
-            defaultCollapsed: false,
-          },
-          wallets: {
-            applePay: 'auto',
-            googlePay: 'auto',
-          },
-          fields: {
-            billingDetails: {
-              address: {
-                country: 'never',
-              },
-            },
-          },
-        });
-
-        paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
-        paymentElement.on('change', (event) => {
-          if (!cancelled) setElementError(event.error?.message || null);
-        });
-
-        paymentElement.mount(mountRef.current);
-      } catch (err) {
-        if (!cancelled) onError?.(err.message || 'Failed to initialize payment form');
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [publishableKey, clientSecret]);
-
-  const handleSubmit = async () => {
-    if (!stripeRef.current || !elementsRef.current || processing) return;
-    setProcessing(true);
-    setElementError(null);
-
-    try {
-      const { error, paymentIntent } = await stripeRef.current.confirmPayment({
-        elements: elementsRef.current,
-        confirmParams: {
-          return_url: window.location.href,
-        },
-        redirect: 'if_required',
-      });
-
-      if (error) {
-        setElementError(error.message);
-        setProcessing(false);
-        return;
-      }
-
-      if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-        onSuccess?.(paymentIntent);
-      } else if (paymentIntent && paymentIntent.status === 'requires_action') {
-        setElementError('Additional verification required. Please follow the prompts.');
-        setProcessing(false);
-      } else {
-        onSuccess?.(paymentIntent);
-      }
-    } catch (err) {
-      setElementError(err.message || 'Payment failed');
-      setProcessing(false);
-    }
-  };
-
-  const isDisabled = !ready || processing;
-
-  return (
-    <div>
-      <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
-
-      {elementError && (
-        <div style={{
-          background: '#FFF3F3', border: `1px solid ${W.red}`, borderRadius: 10,
-          padding: '10px 14px', fontSize: 13, color: W.red, marginBottom: 12,
-        }}>
-          {elementError}
-        </div>
-      )}
-
-      <button
-        onClick={handleSubmit}
-        disabled={isDisabled}
-        style={{
-          width: '100%', padding: 16,
-          background: processing ? W.textCaption : W.blue,
-          color: W.white, border: 'none', borderRadius: 12,
-          fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 16,
-          cursor: isDisabled ? 'default' : 'pointer',
-          opacity: isDisabled ? 0.6 : 1,
-          transition: 'all 0.2s',
-        }}
-      >
-        {processing ? 'Processing...' : !ready ? 'Loading payment form...' : `Pay $${amount.toFixed(2)}`}
-      </button>
-
-      <div style={{ textAlign: 'center', marginTop: 12, fontSize: 11, color: W.textCaption }}>
-        256-bit encrypted — Processed by Stripe
-      </div>
-    </div>
-  );
-}
-
-// ─── Main PayPage ───────────────────────────────────────────────
 export default function PayPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [paymentState, setPaymentState] = useState('idle'); // idle, setup, ready, success, error
+  const [paymentState, setPaymentState] = useState('idle'); // idle, loading-sdk, ready, processing, success, error
   const [paymentError, setPaymentError] = useState(null);
   const [paymentResult, setPaymentResult] = useState(null);
-  const [stripeSetup, setStripeSetup] = useState(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 600);
+  const cardRef = useRef(null);
+  const paymentsRef = useRef(null);
+  const cardInstanceRef = useRef(null);
+  const applePayRef = useRef(null);
+  const googlePayRef = useRef(null);
+  const achRef = useRef(null);
 
   useEffect(() => {
     const handler = () => setIsMobile(window.innerWidth < 600);
@@ -231,72 +50,116 @@ export default function PayPage() {
       .catch(e => { setError(e.message); setLoading(false); });
   }, [token]);
 
-  // Check for Stripe redirect return (3D Secure, bank redirect, etc.)
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const piClientSecret = params.get('payment_intent_client_secret');
-    const redirectStatus = params.get('redirect_status');
+  // Initialize Square Web Payments SDK
+  const initSquare = useCallback(async () => {
+    if (!data?.square?.appId || !data?.square?.locationId) return;
+    if (data.invoice.status === 'paid') return;
 
-    if (piClientSecret && redirectStatus === 'succeeded') {
-      setPaymentState('success');
-      setPaymentResult({ redirected: true });
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, []);
+    setPaymentState('loading-sdk');
 
-  // Create Stripe PaymentIntent once invoice data loads
-  useEffect(() => {
-    if (!data || data.invoice.status === 'paid' || paymentState === 'success') return;
-    if (!data.stripe?.available || !data.stripe?.publishableKey) {
-      setPaymentError('Payment processing is temporarily unavailable. Please call (941) 318-7612.');
-      return;
-    }
-
-    setPaymentState('setup');
-
-    fetch(`${API_BASE}/pay/${token}/setup`, { method: 'POST' })
-      .then(r => {
-        if (!r.ok) throw new Error('Failed to initialize payment');
-        return r.json();
-      })
-      .then(setup => {
-        setStripeSetup({
-          clientSecret: setup.clientSecret,
-          publishableKey: setup.publishableKey || data.stripe.publishableKey,
-        });
-        setPaymentState('ready');
-      })
-      .catch(err => {
-        setPaymentState('error');
-        setPaymentError(err.message);
+    // Load Square SDK script
+    if (!document.getElementById('square-web-payments-sdk')) {
+      const script = document.createElement('script');
+      script.id = 'square-web-payments-sdk';
+      script.src = data.square.environment === 'production'
+        ? 'https://web.squarecdn.com/v1/square.js'
+        : 'https://sandbox.web.squarecdn.com/v1/square.js';
+      script.async = true;
+      document.head.appendChild(script);
+      await new Promise((resolve, reject) => {
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('Failed to load Square SDK'));
       });
-  }, [data, token]);
+    }
 
-  // Handle successful Stripe payment — confirm on backend + update UI
-  const handlePaymentSuccess = async (paymentIntent) => {
     try {
-      const res = await fetch(`${API_BASE}/pay/${token}/confirm`, {
+      const payments = window.Square.payments(data.square.appId, data.square.locationId);
+      paymentsRef.current = payments;
+
+      // Card form
+      const card = await payments.card();
+      await card.attach(cardRef.current);
+      cardInstanceRef.current = card;
+
+      // Apple Pay (if available)
+      try {
+        const applePayReq = payments.paymentRequest({
+          countryCode: 'US', currencyCode: 'USD',
+          total: { amount: String(Math.round(data.invoice.total * 100)), label: 'Waves Pest Control' },
+        });
+        const applePay = await payments.applePay(applePayReq);
+        applePayRef.current = applePay;
+      } catch { /* Apple Pay not available */ }
+
+      // Google Pay (if available)
+      try {
+        const googlePayReq = payments.paymentRequest({
+          countryCode: 'US', currencyCode: 'USD',
+          total: { amount: String(Math.round(data.invoice.total * 100)), label: 'Waves Pest Control' },
+        });
+        const googlePay = await payments.googlePay(googlePayReq);
+        await googlePay.attach('#google-pay-button');
+        googlePayRef.current = googlePay;
+      } catch { /* Google Pay not available */ }
+
+      // ACH
+      try {
+        const ach = await payments.ach();
+        achRef.current = ach;
+      } catch { /* ACH not available */ }
+
+      setPaymentState('ready');
+    } catch (err) {
+      console.error('Square init failed:', err);
+      setPaymentState('error');
+      setPaymentError('Payment form failed to load. Please refresh and try again.');
+    }
+  }, [data]);
+
+  useEffect(() => { if (data) initSquare(); }, [data, initSquare]);
+
+  // Process payment
+  const handlePay = async (method = 'card') => {
+    setPaymentState('processing');
+    setPaymentError(null);
+
+    try {
+      let result;
+      if (method === 'card' && cardInstanceRef.current) {
+        result = await cardInstanceRef.current.tokenize();
+      } else if (method === 'apple_pay' && applePayRef.current) {
+        result = await applePayRef.current.tokenize();
+      } else if (method === 'google_pay' && googlePayRef.current) {
+        result = await googlePayRef.current.tokenize();
+      } else if (method === 'ach' && achRef.current) {
+        result = await achRef.current.tokenize({
+          accountHolderName: `${data.customer.firstName} ${data.customer.lastName}`,
+        });
+      }
+
+      if (!result || result.status !== 'OK') {
+        throw new Error(result?.errors?.[0]?.message || 'Card tokenization failed');
+      }
+
+      const res = await fetch(`${API_BASE}/pay/${token}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paymentIntentId: paymentIntent.id }),
+        body: JSON.stringify({
+          sourceId: result.token,
+          verificationToken: result.verificationToken,
+          paymentMethod: method,
+        }),
       });
-      const result = await res.json();
 
-      if (!res.ok) {
-        // Payment succeeded on Stripe but backend confirm had an issue
-        // Still show success — stripe-webhook.js will reconcile
-        console.error('Backend confirm error (webhook will reconcile):', result.error);
-      }
+      const payResult = await res.json();
+      if (!res.ok) throw new Error(payResult.error || 'Payment failed');
+
+      setPaymentState('success');
+      setPaymentResult(payResult);
     } catch (err) {
-      // Network error on confirm — Stripe already charged, webhook handles it
-      console.error('Confirm call failed (webhook will reconcile):', err);
+      setPaymentState('ready');
+      setPaymentError(err.message);
     }
-
-    setPaymentState('success');
-    setPaymentResult({
-      amount: paymentIntent.amount / 100,
-      invoiceNumber: data?.invoice?.invoiceNumber,
-    });
   };
 
   // ── Loading ──
@@ -320,7 +183,7 @@ export default function PayPage() {
     </div>
   );
 
-  const { invoice, service, customer } = data;
+  const { invoice, service, customer, square } = data;
   const isPaid = invoice.status === 'paid';
   const tier = customer.tier;
   const tierColors = TIER_COLORS[tier] || TIER_COLORS.Bronze;
@@ -331,6 +194,7 @@ export default function PayPage() {
 
       {/* ── Header ── */}
       <div style={{ background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: isMobile ? '24px 16px 32px' : '32px 24px 40px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+        {/* Wave texture */}
         <div style={{ position: 'absolute', bottom: -2, left: 0, right: 0, height: 30 }}>
           <svg viewBox="0 0 1440 60" fill="none" style={{ width: '100%', height: '100%', display: 'block' }}>
             <path d="M0 30 C360 0 720 60 1080 30 C1260 15 1380 0 1440 10 L1440 60 L0 60 Z" fill={W.offWhite} />
@@ -342,13 +206,13 @@ export default function PayPage() {
 
       <div style={{ maxWidth: 560, margin: '0 auto', padding: isMobile ? '0 12px 40px' : '0 16px 60px' }}>
 
-        {/* ── Paid Banner ── */}
+        {/* ── Status Banner ── */}
         {isPaid && (
           <div style={{ background: W.greenLight, border: `1px solid ${W.green}`, borderRadius: 12, padding: '16px 20px', marginTop: -16, marginBottom: 20, textAlign: 'center' }}>
             <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
             <div style={{ fontSize: 13, color: W.textBody, marginTop: 4 }}>
               Paid {invoice.paidAt ? new Date(invoice.paidAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
-              {invoice.cardBrand && invoice.cardLastFour ? ` — ${invoice.cardBrand} ****${invoice.cardLastFour}` : ''}
+              {invoice.cardBrand && invoice.cardLastFour ? ` -- ${invoice.cardBrand} ****${invoice.cardLastFour}` : ''}
             </div>
           </div>
         )}
@@ -360,7 +224,7 @@ export default function PayPage() {
           </div>
           <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
             {isPaid
-              ? "Here's a summary of your recent service."
+              ? 'Here\'s a summary of your recent service.'
               : `Here's everything from your ${service.type || 'service'} today.`
             }
           </div>
@@ -378,6 +242,7 @@ export default function PayPage() {
             </div>
 
             <div style={{ padding: isMobile ? 14 : 20 }}>
+              {/* Products Applied */}
               {service.productsApplied?.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Products Applied</div>
@@ -397,6 +262,7 @@ export default function PayPage() {
                 </div>
               )}
 
+              {/* Tech Notes */}
               {service.techNotes && (
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Tech Notes</div>
@@ -406,6 +272,7 @@ export default function PayPage() {
                 </div>
               )}
 
+              {/* Before/After Photos */}
               {service.photos?.length > 0 && (
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Service Photos</div>
@@ -440,6 +307,7 @@ export default function PayPage() {
           </div>
 
           <div style={{ padding: isMobile ? 14 : 20 }}>
+            {/* Line Items */}
             {invoice.lineItems?.map((item, i) => (
               <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: i < invoice.lineItems.length - 1 ? `1px solid ${W.borderLight}` : 'none' }}>
                 <div>
@@ -450,6 +318,7 @@ export default function PayPage() {
               </div>
             ))}
 
+            {/* Totals */}
             <div style={{ borderTop: `2px solid ${W.border}`, marginTop: 12, paddingTop: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: W.textBody, marginBottom: 6 }}>
                 <span>Subtotal</span><span>${invoice.subtotal.toFixed(2)}</span>
@@ -478,54 +347,77 @@ export default function PayPage() {
           </div>
         </div>
 
-        {/* ── Payment Section (Stripe Payment Element) ── */}
+        {/* ── Payment Section ── */}
         {!isPaid && paymentState !== 'success' && (
           <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
             <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
               <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Pay Now</div>
-              <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>Card, Apple Pay, Google Pay, or bank transfer</div>
+              <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>Secure payment powered by Square</div>
             </div>
 
             <div style={{ padding: isMobile ? 14 : 20 }}>
-              {paymentError && !stripeSetup && (
-                <div style={{
-                  background: '#FFF3F3', border: `1px solid ${W.red}`, borderRadius: 10,
-                  padding: '10px 14px', fontSize: 13, color: W.red, marginBottom: 12,
-                }}>
+              {/* Digital wallets */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                {applePayRef.current && (
+                  <button onClick={() => handlePay('apple_pay')} disabled={paymentState === 'processing'}
+                    style={{ flex: 1, padding: 14, background: '#000', color: '#fff', border: 'none', borderRadius: 10, fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>
+                    Apple Pay
+                  </button>
+                )}
+                <div id="google-pay-button" style={{ flex: 1 }} />
+              </div>
+
+              {(applePayRef.current || googlePayRef.current) && (
+                <div style={{ textAlign: 'center', color: W.textCaption, fontSize: 12, margin: '12px 0', position: 'relative' }}>
+                  <span style={{ background: W.white, padding: '0 12px', position: 'relative', zIndex: 1 }}>or pay with card</span>
+                  <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, height: 1, background: W.border }} />
+                </div>
+              )}
+
+              {/* Card form */}
+              <div ref={cardRef} style={{ minHeight: 90, marginBottom: 16 }} />
+
+              {/* ACH option */}
+              {achRef.current && (
+                <button onClick={() => handlePay('ach')} disabled={paymentState === 'processing'}
+                  style={{ width: '100%', padding: 12, background: 'transparent', border: `1px solid ${W.border}`, borderRadius: 10, color: W.textBody, fontSize: 13, cursor: 'pointer', marginBottom: 12 }}>
+                  Pay with bank account (ACH)
+                </button>
+              )}
+
+              {paymentError && (
+                <div style={{ background: '#FFF3F3', border: `1px solid ${W.red}`, borderRadius: 10, padding: '10px 14px', fontSize: 13, color: W.red, marginBottom: 12 }}>
                   {paymentError}
                 </div>
               )}
 
-              {paymentState === 'setup' && (
-                <div style={{ textAlign: 'center', padding: '24px 0' }}>
-                  <div style={{ width: 32, height: 32, border: `3px solid ${W.border}`, borderTopColor: W.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
-                  <div style={{ fontSize: 13, color: W.textCaption }}>Preparing secure checkout...</div>
-                  <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-                </div>
-              )}
+              <button onClick={() => handlePay('card')} disabled={paymentState !== 'ready'}
+                style={{
+                  width: '100%', padding: 16, background: paymentState === 'processing' ? W.textCaption : W.blue,
+                  color: W.white, border: 'none', borderRadius: 12,
+                  fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 16,
+                  cursor: paymentState === 'ready' ? 'pointer' : 'default',
+                  opacity: paymentState === 'ready' ? 1 : 0.6,
+                  transition: 'all 0.2s',
+                }}>
+                {paymentState === 'processing' ? 'Processing...'
+                  : paymentState === 'loading-sdk' ? 'Loading payment form...'
+                    : `Pay $${invoice.total.toFixed(2)}`}
+              </button>
 
-              {stripeSetup && (
-                <StripePaymentForm
-                  publishableKey={stripeSetup.publishableKey}
-                  clientSecret={stripeSetup.clientSecret}
-                  amount={invoice.total}
-                  onSuccess={handlePaymentSuccess}
-                  onError={(msg) => setPaymentError(msg)}
-                />
-              )}
+              <div style={{ textAlign: 'center', marginTop: 12, fontSize: 11, color: W.textCaption }}>
+                256-bit encrypted -- Processed by Square
+              </div>
             </div>
           </div>
         )}
 
         {/* ── Payment Success ── */}
-        {paymentState === 'success' && (
+        {paymentState === 'success' && paymentResult && (
           <div style={{ background: W.greenLight, borderRadius: 16, border: `1px solid ${W.green}`, padding: 28, textAlign: 'center', marginBottom: 20 }}>
             <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 20, color: '#2E7D32', marginBottom: 8 }}>Payment Successful!</div>
             <div style={{ fontSize: 15, color: W.textBody, marginBottom: 4 }}>
-              {paymentResult?.amount
-                ? `$${paymentResult.amount.toFixed(2)} paid for ${paymentResult.invoiceNumber || invoice.invoiceNumber}`
-                : `Payment confirmed for ${invoice.invoiceNumber}`
-              }
+              ${paymentResult.amount?.toFixed(2)} paid for {paymentResult.invoiceNumber}
             </div>
             <div style={{ fontSize: 13, color: W.textCaption }}>
               A receipt has been sent to your phone.
@@ -540,7 +432,7 @@ export default function PayPage() {
               Save on every visit
             </div>
             <div style={{ fontSize: 13, color: W.textBody, lineHeight: 1.5 }}>
-              Upgrade to <strong style={{ color: '#F9A825' }}>Gold WaveGuard</strong> and save 15% on all services — that's ${(invoice.subtotal * 0.15).toFixed(2)} off today's service alone.
+              Upgrade to <strong style={{ color: '#F9A825' }}>Gold WaveGuard</strong> and save 15% on all services -- that's ${(invoice.subtotal * 0.15).toFixed(2)} off today's service alone.
               Reply to the text from Waves or call <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a>.
             </div>
           </div>
@@ -549,7 +441,7 @@ export default function PayPage() {
         {/* ── Footer ── */}
         <div style={{ textAlign: 'center', padding: '20px 0', color: W.textCaption, fontSize: 12 }}>
           <div style={{ marginBottom: 8 }}>Questions? Reply to the text or call <a href="tel:+19413187612" style={{ color: W.blue, textDecoration: 'none' }}>(941) 318-7612</a></div>
-          <div>Waves Pest Control — Southwest Florida</div>
+          <div>Waves Pest Control -- Southwest Florida</div>
           <div style={{ marginTop: 4 }}>wavespestcontrol.com</div>
         </div>
       </div>
