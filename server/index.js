@@ -207,6 +207,7 @@ app.use('/api/admin/wiki', require('./routes/admin-wiki'));
 app.use('/api/admin/health', require('./routes/admin-health'));
 app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
+app.use('/api/admin/leads', require('./routes/admin-leads'));
 
 // Health check
 app.get('/api/health', (req, res) => {
