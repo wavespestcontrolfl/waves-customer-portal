@@ -734,4 +734,488 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// P&L REPORTING
+// ═══════════════════════════════════════════════════════════════
+
+router.get('/pnl', async (req, res, next) => {
+  try {
+    const { period = 'mtd', start_date, end_date } = req.query;
+    const now = new Date();
+    let startDate, endDate;
+
+    switch (period) {
+      case 'monthly':
+      case 'mtd':
+        startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+        endDate = now.toISOString().split('T')[0];
+        break;
+      case 'last_month': {
+        const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        startDate = `${lm.getFullYear()}-${String(lm.getMonth() + 1).padStart(2, '0')}-01`;
+        const lmEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+        endDate = `${lmEnd.getFullYear()}-${String(lmEnd.getMonth() + 1).padStart(2, '0')}-${String(lmEnd.getDate()).padStart(2, '0')}`;
+        break;
+      }
+      case 'quarterly': {
+        const qMonth = Math.floor(now.getMonth() / 3) * 3;
+        startDate = `${now.getFullYear()}-${String(qMonth + 1).padStart(2, '0')}-01`;
+        endDate = now.toISOString().split('T')[0];
+        break;
+      }
+      case 'ytd':
+        startDate = `${now.getFullYear()}-01-01`;
+        endDate = now.toISOString().split('T')[0];
+        break;
+      case 'annual':
+      case 'last_year':
+        startDate = `${now.getFullYear() - 1}-01-01`;
+        endDate = `${now.getFullYear() - 1}-12-31`;
+        break;
+      case 'custom':
+        startDate = start_date;
+        endDate = end_date;
+        break;
+      default:
+        startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+        endDate = now.toISOString().split('T')[0];
+    }
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'start_date and end_date required for custom period' });
+    }
+
+    // Revenue from payments
+    let serviceRevenue = 0, otherRevenue = 0;
+    try {
+      const rev = await db('payments')
+        .where('created_at', '>=', startDate)
+        .where('created_at', '<=', endDate + ' 23:59:59')
+        .where('status', 'completed')
+        .select(
+          db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue"),
+          db.raw("COALESCE(SUM(CASE WHEN type = 'refund' THEN amount ELSE 0 END), 0) as refunds")
+        ).first();
+      serviceRevenue = parseFloat(rev?.revenue || 0) - parseFloat(rev?.refunds || 0);
+    } catch {
+      try {
+        const rev = await db('revenue_daily')
+          .where('date', '>=', startDate).where('date', '<=', endDate)
+          .sum('total_revenue as total').first();
+        serviceRevenue = parseFloat(rev?.total || 0);
+      } catch { /* tables may not exist */ }
+    }
+
+    // Labor costs from time_entry_daily_summary
+    let laborCost = 0;
+    try {
+      const labor = await db('time_entry_daily_summary')
+        .where('date', '>=', startDate).where('date', '<=', endDate)
+        .select(
+          db.raw('COALESCE(SUM(total_cost), 0) as total')
+        ).first();
+      laborCost = parseFloat(labor?.total || 0);
+    } catch { /* table may not exist */ }
+
+    // Materials / supplies expenses (COGS)
+    let materialsCost = 0;
+    try {
+      const mats = await db('expenses')
+        .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
+        .where('expenses.expense_date', '>=', startDate)
+        .where('expenses.expense_date', '<=', endDate)
+        .whereIn('expense_categories.name', ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'])
+        .sum('expenses.amount as total').first();
+      materialsCost = parseFloat(mats?.total || 0);
+    } catch { /* */ }
+
+    // Operating expenses by category (excluding COGS categories)
+    let opexCategories = [];
+    let opexTotal = 0;
+    try {
+      opexCategories = await db('expenses')
+        .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
+        .where('expenses.expense_date', '>=', startDate)
+        .where('expenses.expense_date', '<=', endDate)
+        .whereNotIn('expense_categories.name', ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'])
+        .select('expense_categories.name as category', 'expense_categories.irs_line')
+        .sum('expenses.amount as total')
+        .groupBy('expense_categories.name', 'expense_categories.irs_line')
+        .orderBy('total', 'desc');
+      opexTotal = opexCategories.reduce((s, c) => s + parseFloat(c.total || 0), 0);
+    } catch {
+      try {
+        const allExp = await db('expenses')
+          .where('expense_date', '>=', startDate).where('expense_date', '<=', endDate)
+          .sum('amount as total').first();
+        opexTotal = parseFloat(allExp?.total || 0) - materialsCost;
+      } catch { /* */ }
+    }
+
+    // Mileage deduction
+    let mileageDeduction = 0;
+    try {
+      const mil = await db('mileage_log')
+        .where('trip_date', '>=', startDate).where('trip_date', '<=', endDate)
+        .sum('deduction_amount as total').first();
+      mileageDeduction = parseFloat(mil?.total || 0);
+    } catch { /* */ }
+
+    // Depreciation
+    let depreciationTotal = 0;
+    try {
+      const depr = await db('equipment_register').where('active', true)
+        .sum('annual_depreciation as total').first();
+      // Prorate based on period length
+      const days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1;
+      const yearFraction = days / 365;
+      depreciationTotal = parseFloat(depr?.total || 0) * yearFraction;
+    } catch { /* */ }
+
+    const totalRevenue = serviceRevenue + otherRevenue;
+    const cogsTotal = laborCost + materialsCost;
+    const grossProfit = totalRevenue - cogsTotal;
+    const grossMargin = totalRevenue > 0 ? grossProfit / totalRevenue : 0;
+    const deductionsTotal = mileageDeduction + depreciationTotal;
+    const netIncome = grossProfit - opexTotal - deductionsTotal;
+    const netMargin = totalRevenue > 0 ? netIncome / totalRevenue : 0;
+
+    res.json({
+      period, startDate, endDate,
+      revenue: { serviceRevenue, otherRevenue, total: totalRevenue },
+      cogs: { labor: laborCost, materials: materialsCost, total: cogsTotal },
+      grossProfit,
+      grossMargin,
+      operatingExpenses: {
+        categories: opexCategories.map(c => ({
+          name: c.category || 'Uncategorized', irsLine: c.irs_line, amount: parseFloat(c.total || 0),
+        })),
+        total: opexTotal,
+      },
+      deductions: { mileage: mileageDeduction, depreciation: depreciationTotal, total: deductionsTotal },
+      netIncome,
+      netMargin,
+    });
+  } catch (err) { next(err); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ACCOUNTS RECEIVABLE
+// ═══════════════════════════════════════════════════════════════
+
+router.get('/accounts-receivable', async (req, res, next) => {
+  try {
+    let invoices = [];
+    try {
+      invoices = await db('invoices')
+        .leftJoin('customers', 'invoices.customer_id', 'customers.id')
+        .whereIn('invoices.status', ['sent', 'overdue', 'unpaid', 'pending'])
+        .select(
+          'invoices.*',
+          'customers.first_name', 'customers.last_name',
+          'customers.email', 'customers.phone'
+        )
+        .orderBy('invoices.due_date', 'asc');
+    } catch {
+      // invoices table may not exist — try payments with unpaid status
+      try {
+        invoices = await db('payments')
+          .leftJoin('customers', 'payments.customer_id', 'customers.id')
+          .whereIn('payments.status', ['pending', 'unpaid', 'overdue', 'sent'])
+          .select(
+            'payments.*',
+            'customers.first_name', 'customers.last_name',
+            'customers.email', 'customers.phone'
+          )
+          .orderBy('payments.created_at', 'asc');
+      } catch { /* */ }
+    }
+
+    const now = new Date();
+    let totalOutstanding = 0, current = 0, over30 = 0, over60 = 0, over90 = 0;
+    const items = invoices.map(inv => {
+      const amount = parseFloat(inv.amount || inv.total || inv.amount_due || 0);
+      const dueDate = inv.due_date || inv.created_at;
+      const daysOverdue = dueDate ? Math.max(0, Math.floor((now - new Date(dueDate)) / 86400000)) : 0;
+      let bucket = 'current';
+      if (daysOverdue >= 90) { bucket = '90+'; over90 += amount; }
+      else if (daysOverdue >= 60) { bucket = '60'; over60 += amount; }
+      else if (daysOverdue >= 30) { bucket = '30'; over30 += amount; }
+      else { current += amount; }
+      totalOutstanding += amount;
+
+      return {
+        id: inv.id,
+        customerId: inv.customer_id,
+        customerName: inv.customer_name || (inv.first_name ? `${inv.first_name} ${inv.last_name}` : 'Unknown'),
+        email: inv.email,
+        phone: inv.phone,
+        invoiceNumber: inv.invoice_number || inv.id,
+        amount,
+        dueDate,
+        daysOverdue,
+        bucket,
+        status: inv.status,
+        description: inv.description || inv.memo || '',
+      };
+    });
+
+    res.json({
+      summary: { total: totalOutstanding, current, over30, over60, over90, count: items.length },
+      invoices: items.sort((a, b) => b.daysOverdue - a.daysOverdue),
+    });
+  } catch (err) { next(err); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// CSV EXPORT ENDPOINTS
+// ═══════════════════════════════════════════════════════════════
+
+const csv = require('../services/csv-generators');
+
+router.get('/export/transactions', async (req, res, next) => {
+  try {
+    const { start_date, end_date } = req.query;
+    const year = new Date().getFullYear();
+    const sd = start_date || `${year}-01-01`;
+    const ed = end_date || `${year}-12-31`;
+
+    let payments = [];
+    try {
+      payments = await db('payments')
+        .where('created_at', '>=', sd).where('created_at', '<=', ed + ' 23:59:59')
+        .leftJoin('customers', 'payments.customer_id', 'customers.id')
+        .select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name"))
+        .orderBy('payments.created_at', 'desc');
+    } catch { /* */ }
+
+    const csvStr = csv.transactionsToCSV(payments);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="waves-transactions-${sd}-to-${ed}.csv"`);
+    res.send(csvStr);
+  } catch (err) { next(err); }
+});
+
+router.get('/export/expenses', async (req, res, next) => {
+  try {
+    const { start_date, end_date } = req.query;
+    const year = new Date().getFullYear();
+    const sd = start_date || `${year}-01-01`;
+    const ed = end_date || `${year}-12-31`;
+
+    let expenses = [];
+    try {
+      expenses = await db('expenses')
+        .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
+        .where('expenses.expense_date', '>=', sd).where('expenses.expense_date', '<=', ed)
+        .select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line')
+        .orderBy('expenses.expense_date', 'desc');
+    } catch { /* */ }
+
+    const csvStr = csv.expensesToCSV(expenses);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="waves-expenses-${sd}-to-${ed}.csv"`);
+    res.send(csvStr);
+  } catch (err) { next(err); }
+});
+
+router.get('/export/mileage', async (req, res, next) => {
+  try {
+    const { start_date, end_date } = req.query;
+    const year = new Date().getFullYear();
+    const sd = start_date || `${year}-01-01`;
+    const ed = end_date || `${year}-12-31`;
+
+    let trips = [];
+    try {
+      trips = await db('mileage_log')
+        .where('trip_date', '>=', sd).where('trip_date', '<=', ed)
+        .orderBy('trip_date', 'desc');
+    } catch { /* */ }
+
+    const csvStr = csv.mileageToCSV(trips);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="waves-mileage-${sd}-to-${ed}.csv"`);
+    res.send(csvStr);
+  } catch (err) { next(err); }
+});
+
+router.get('/export/depreciation', async (req, res, next) => {
+  try {
+    let equipment = [];
+    try {
+      equipment = await db('equipment_register').where('active', true).orderBy('name');
+    } catch { /* */ }
+
+    const csvStr = csv.depreciationToCSV(equipment);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="waves-depreciation-${new Date().getFullYear()}.csv"`);
+    res.send(csvStr);
+  } catch (err) { next(err); }
+});
+
+router.get('/export/labor', async (req, res, next) => {
+  try {
+    const { start_date, end_date } = req.query;
+    const year = new Date().getFullYear();
+    const sd = start_date || `${year}-01-01`;
+    const ed = end_date || `${year}-12-31`;
+
+    let summaries = [];
+    try {
+      summaries = await db('time_entry_daily_summary')
+        .where('date', '>=', sd).where('date', '<=', ed)
+        .orderBy('date', 'desc');
+    } catch { /* */ }
+
+    const csvStr = csv.laborToCSV(summaries);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="waves-labor-${sd}-to-${ed}.csv"`);
+    res.send(csvStr);
+  } catch (err) { next(err); }
+});
+
+router.get('/export/pnl', async (req, res, next) => {
+  try {
+    // Reuse the /pnl endpoint logic by making an internal call
+    const period = req.query.period || 'ytd';
+    const params = new URLSearchParams({ period, ...req.query });
+    const pnlRes = await new Promise((resolve, reject) => {
+      const mockReq = { ...req, query: Object.fromEntries(params) };
+      const data = {};
+      const mockRes = { json: (d) => resolve(d), status: () => mockRes, setHeader: () => {} };
+      // Inline the P&L logic instead
+      reject(new Error('use_fetch'));
+    }).catch(async () => {
+      // Fetch P&L data via the same route handler logic
+      const url = `${req.protocol}://${req.get('host')}/api/admin/tax/pnl?${params}`;
+      const resp = await fetch(url, { headers: { Authorization: req.headers.authorization } });
+      return resp.json();
+    }).catch(async () => {
+      // Fallback: build P&L inline
+      const now = new Date();
+      const year = now.getFullYear();
+      const startDate = req.query.start_date || `${year}-01-01`;
+      const endDate = req.query.end_date || now.toISOString().split('T')[0];
+
+      let serviceRevenue = 0;
+      try {
+        const rev = await db('payments').where('created_at', '>=', startDate).where('created_at', '<=', endDate + ' 23:59:59').where('status', 'completed')
+          .select(db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue")).first();
+        serviceRevenue = parseFloat(rev?.revenue || 0);
+      } catch { try { const rev = await db('revenue_daily').where('date', '>=', startDate).where('date', '<=', endDate).sum('total_revenue as total').first(); serviceRevenue = parseFloat(rev?.total || 0); } catch { /* */ } }
+
+      let laborCost = 0;
+      try { const l = await db('time_entry_daily_summary').where('date', '>=', startDate).where('date', '<=', endDate).sum('total_cost as total').first(); laborCost = parseFloat(l?.total || 0); } catch { /* */ }
+
+      let materialsCost = 0;
+      try { const m = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', startDate).where('expenses.expense_date', '<=', endDate).whereIn('expense_categories.name', ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals']).sum('expenses.amount as total').first(); materialsCost = parseFloat(m?.total || 0); } catch { /* */ }
+
+      let opexCats = [];
+      try { opexCats = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', startDate).where('expenses.expense_date', '<=', endDate).whereNotIn('expense_categories.name', ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals']).select('expense_categories.name as category').sum('expenses.amount as total').groupBy('expense_categories.name').orderBy('total', 'desc'); } catch { /* */ }
+      const opexTotal = opexCats.reduce((s, c) => s + parseFloat(c.total || 0), 0);
+
+      let mileageDed = 0;
+      try { const ml = await db('mileage_log').where('trip_date', '>=', startDate).where('trip_date', '<=', endDate).sum('deduction_amount as total').first(); mileageDed = parseFloat(ml?.total || 0); } catch { /* */ }
+
+      let depreciation = 0;
+      try { const dp = await db('equipment_register').where('active', true).sum('annual_depreciation as total').first(); const days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1; depreciation = parseFloat(dp?.total || 0) * (days / 365); } catch { /* */ }
+
+      const cogsTotal = laborCost + materialsCost;
+      const grossProfit = serviceRevenue - cogsTotal;
+      const deductionsTotal = mileageDed + depreciation;
+      const netIncome = grossProfit - opexTotal - deductionsTotal;
+
+      return {
+        revenue: { serviceRevenue, otherRevenue: 0, total: serviceRevenue },
+        cogs: { labor: laborCost, materials: materialsCost, total: cogsTotal },
+        grossProfit,
+        grossMargin: serviceRevenue > 0 ? grossProfit / serviceRevenue : 0,
+        operatingExpenses: { categories: opexCats.map(c => ({ name: c.category || 'Uncategorized', amount: parseFloat(c.total || 0) })), total: opexTotal },
+        deductions: { mileage: mileageDed, depreciation, total: deductionsTotal },
+        netIncome,
+        netMargin: serviceRevenue > 0 ? netIncome / serviceRevenue : 0,
+      };
+    });
+
+    const csvStr = csv.pnlToCSV(pnlRes);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="waves-pnl-${req.query.period || 'ytd'}-${new Date().toISOString().split('T')[0]}.csv"`);
+    res.send(csvStr);
+  } catch (err) { next(err); }
+});
+
+router.get('/export/tax-package', async (req, res, next) => {
+  try {
+    const archiver = require('archiver');
+    const year = req.query.year || String(new Date().getFullYear());
+    const sd = `${year}-01-01`;
+    const ed = `${year}-12-31`;
+
+    // Gather all data with fallbacks
+    let payments = [];
+    try { payments = await db('payments').where('created_at', '>=', sd).where('created_at', '<=', ed + ' 23:59:59').leftJoin('customers', 'payments.customer_id', 'customers.id').select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name")).orderBy('payments.created_at', 'desc'); } catch { /* */ }
+
+    let expenses = [];
+    try { expenses = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', sd).where('expenses.expense_date', '<=', ed).select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line').orderBy('expenses.expense_date', 'desc'); } catch { /* */ }
+
+    let trips = [];
+    try { trips = await db('mileage_log').where('trip_date', '>=', sd).where('trip_date', '<=', ed).orderBy('trip_date', 'desc'); } catch { /* */ }
+
+    let equipment = [];
+    try { equipment = await db('equipment_register').where('active', true).orderBy('name'); } catch { /* */ }
+
+    let laborSummaries = [];
+    try { laborSummaries = await db('time_entry_daily_summary').where('date', '>=', sd).where('date', '<=', ed).orderBy('date', 'desc'); } catch { /* */ }
+
+    // Build P&L data
+    let serviceRevenue = 0;
+    try { const rev = await db('payments').where('created_at', '>=', sd).where('created_at', '<=', ed + ' 23:59:59').where('status', 'completed').select(db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue")).first(); serviceRevenue = parseFloat(rev?.revenue || 0); } catch { /* */ }
+    const laborCost = laborSummaries.reduce((s, l) => s + parseFloat(l.total_cost || 0), 0);
+    const materialsCost = expenses.filter(e => ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'].includes(e.category_name)).reduce((s, e) => s + parseFloat(e.amount || 0), 0);
+    const opexItems = expenses.filter(e => !['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'].includes(e.category_name));
+    const opexByCategory = {};
+    opexItems.forEach(e => { const cat = e.category_name || 'Uncategorized'; opexByCategory[cat] = (opexByCategory[cat] || 0) + parseFloat(e.amount || 0); });
+    const opexTotal = Object.values(opexByCategory).reduce((s, v) => s + v, 0);
+    const mileageDed = trips.reduce((s, t) => s + parseFloat(t.deduction_amount || 0), 0);
+    const depreciation = equipment.reduce((s, e) => s + parseFloat(e.annual_depreciation || 0), 0);
+    const cogsTotal = laborCost + materialsCost;
+    const grossProfit = serviceRevenue - cogsTotal;
+    const deductionsTotal = mileageDed + depreciation;
+    const netIncome = grossProfit - opexTotal - deductionsTotal;
+
+    const pnlData = {
+      revenue: { serviceRevenue, otherRevenue: 0, total: serviceRevenue },
+      cogs: { labor: laborCost, materials: materialsCost, total: cogsTotal },
+      grossProfit,
+      grossMargin: serviceRevenue > 0 ? grossProfit / serviceRevenue : 0,
+      operatingExpenses: {
+        categories: Object.entries(opexByCategory).map(([name, amount]) => ({ name, amount })),
+        total: opexTotal,
+      },
+      deductions: { mileage: mileageDed, depreciation, total: deductionsTotal },
+      netIncome,
+      netMargin: serviceRevenue > 0 ? netIncome / serviceRevenue : 0,
+    };
+
+    // Stream ZIP
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="waves-tax-package-${year}.zip"`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => { throw err; });
+    archive.pipe(res);
+
+    archive.append(csv.transactionsToCSV(payments), { name: 'transactions.csv' });
+    archive.append(csv.expensesToCSV(expenses), { name: 'expenses.csv' });
+    archive.append(csv.mileageToCSV(trips), { name: 'mileage.csv' });
+    archive.append(csv.depreciationToCSV(equipment), { name: 'depreciation.csv' });
+    archive.append(csv.laborToCSV(laborSummaries), { name: 'labor.csv' });
+    archive.append(csv.pnlToCSV(pnlData), { name: 'pnl.csv' });
+    archive.append(csv.generateReadme(year, pnlData), { name: 'README.txt' });
+
+    await archive.finalize();
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

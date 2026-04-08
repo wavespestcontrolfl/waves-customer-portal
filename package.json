@@ -28,6 +28,7 @@
     "@anthropic-ai/sdk": "^0.82.0",
     "@google-analytics/data": "^5.2.1",
     "@sentry/node": "^10.47.0",
+    "archiver": "^7.0.1",
     "csv-parse": "^6.2.1",
     "google-ads-api": "^23.0.0",
     "imapflow": "^1.2.18",
