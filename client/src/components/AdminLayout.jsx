@@ -4,28 +4,39 @@ import NotificationBell from './NotificationBell';
 
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', red: '#ef4444' };
 
-const NAV_ITEMS = [
-  { path: '/admin/dashboard', icon: '📊', label: 'Dashboard' },
-  { path: '/admin/customers', icon: '👥', label: 'Customers' },
-  { path: '/admin/estimates', icon: '📋', label: 'Pipeline' },
-  { path: '/admin/schedule', icon: '📅', label: 'Schedule' },
-  { path: '/admin/communications', icon: '📱', label: 'Communications' },
-  { path: '/admin/reviews', icon: '⭐', label: 'Reviews' },
-  { path: '/admin/invoices', icon: '🧾', label: 'Invoices' },
-  { path: '/admin/referrals', icon: '🎁', label: 'Referrals' },
-  { path: '/admin/ppc', icon: '📣', label: 'PPC' },
-  { path: '/admin/social-media', icon: '📲', label: 'Social Media' },
-  { path: '/admin/seo', icon: '🔍', label: 'SEO' },
-  { path: '/admin/knowledge', icon: '📚', label: 'Knowledge Base' },
-  { path: '/admin/kb', icon: '🧠', label: 'Claudeopedia' },
-  { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },
-  { path: '/admin/equipment', icon: '🔧', label: 'Equipment' },
-  { path: '/admin/inventory', icon: '📦', label: 'Inventory' },
-  { path: '/admin/lawn-assessment', icon: '🌿', label: 'Lawn Assessment' },
-  { path: '/admin/pricing', icon: '🎯', label: 'Pricing Strategy' },
-  { path: '/admin/tax', icon: '💰', label: 'Tax' },
-  { path: '/admin/wordpress', icon: '🌐', label: 'WordPress Sites' },
-  { path: '/admin/settings', icon: '⚙️', label: 'Settings' },
+const NAV_SECTIONS = [
+  { section: 'Operations', items: [
+    { path: '/admin/dashboard', icon: '📊', label: 'Dashboard' },
+    { path: '/admin/customers', icon: '👥', label: 'Customers' },
+    { path: '/admin/health', icon: '💚', label: 'Customer Health' },
+    { path: '/admin/leads', icon: '🎯', label: 'Leads' },
+    { path: '/admin/estimates', icon: '📋', label: 'Pipeline' },
+    { path: '/admin/schedule', icon: '📅', label: 'Schedule' },
+    { path: '/admin/timetracking', icon: '⏱️', label: 'Time Tracking' },
+  ]},
+  { section: 'Communications', items: [
+    { path: '/admin/communications', icon: '📱', label: 'SMS & Calls' },
+    { path: '/admin/reviews', icon: '⭐', label: 'Reviews' },
+    { path: '/admin/referrals', icon: '🎁', label: 'Referrals' },
+    { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },
+  ]},
+  { section: 'Field & Equipment', items: [
+    { path: '/admin/equipment', icon: '🔧', label: 'Equipment' },
+    { path: '/admin/fleet', icon: '🚛', label: 'Fleet & Mileage' },
+    { path: '/admin/inventory', icon: '📦', label: 'Inventory' },
+    { path: '/admin/lawn-assessment', icon: '🌿', label: 'Compliance' },
+  ]},
+  { section: 'Intelligence', items: [
+    { path: '/admin/knowledge', icon: '📚', label: 'Knowledge Base' },
+    { path: '/admin/kb', icon: '🧠', label: 'Claudeopedia' },
+  ]},
+  { section: 'Finance', items: [
+    { path: '/admin/invoices', icon: '🧾', label: 'Invoices' },
+    { path: '/admin/tax', icon: '💰', label: 'Tax Center' },
+  ]},
+  { section: 'System', items: [
+    { path: '/admin/settings', icon: '⚙️', label: 'Settings' },
+  ]},
 ];
 
 export default function AdminLayout() {
@@ -121,23 +132,31 @@ export default function AdminLayout() {
 
         {/* Nav items - scrollable */}
         <nav style={{ flex: 1, padding: '0 12px', overflowY: 'auto' }}>
-          {NAV_ITEMS.map(item => {
-            const isActive = location.pathname === item.path || (item.path === '/admin/dashboard' && location.pathname === '/admin');
-            return (
-              <Link key={item.path} to={item.path} style={{
-                display: 'flex', alignItems: 'center', gap: 10,
-                padding: '10px 12px', borderRadius: 8, marginBottom: 2,
-                background: isActive ? D.card : 'transparent',
-                borderLeft: isActive ? `3px solid ${D.teal}` : '3px solid transparent',
-                color: isActive ? D.white : D.muted,
-                textDecoration: 'none', fontSize: 13, fontWeight: isActive ? 600 : 400,
-                transition: 'all 0.15s',
-              }}>
-                <span style={{ fontSize: 16, width: 20, textAlign: 'center' }}>{item.icon}</span>
-                <span>{item.label}</span>
-              </Link>
-            );
-          })}
+          {NAV_SECTIONS.map(({ section, items }) => (
+            <div key={section}>
+              <div style={{
+                fontSize: 10, fontWeight: 700, color: D.border, textTransform: 'uppercase',
+                letterSpacing: '0.08em', padding: '14px 12px 4px', userSelect: 'none',
+              }}>{section}</div>
+              {items.map(item => {
+                const isActive = location.pathname === item.path || (item.path === '/admin/dashboard' && location.pathname === '/admin');
+                return (
+                  <Link key={item.path} to={item.path} style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '10px 12px', borderRadius: 8, marginBottom: 2,
+                    background: isActive ? D.card : 'transparent',
+                    borderLeft: isActive ? `3px solid ${D.teal}` : '3px solid transparent',
+                    color: isActive ? D.white : D.muted,
+                    textDecoration: 'none', fontSize: 13, fontWeight: isActive ? 600 : 400,
+                    transition: 'all 0.15s',
+                  }}>
+                    <span style={{ fontSize: 16, width: 20, textAlign: 'center' }}>{item.icon}</span>
+                    <span>{item.label}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
         {/* Footer */}

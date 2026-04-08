@@ -1,3 +1,4 @@
+// DEPRECATED — replaced by billing-v2.js (Stripe + Square dual-processor support)
 const express = require('express');
 const router = express.Router();
 const Joi = require('joi');

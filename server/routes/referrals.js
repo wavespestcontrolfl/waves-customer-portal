@@ -1,3 +1,4 @@
+// DEPRECATED — replaced by referrals-v2.js (Clicki integration + promoter payouts)
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');

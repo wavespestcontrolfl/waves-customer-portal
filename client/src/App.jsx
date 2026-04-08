@@ -16,7 +16,7 @@ import AdminInventoryPage from './pages/admin/InventoryPage';
 import AdminRevenuePage from './pages/admin/RevenuePage';
 import AdminCommunicationsPage from './pages/admin/CommunicationsPage';
 import AdminCustomersPage from './pages/admin/CustomersPage';
-import AdminReferralsPage from './pages/admin/ReferralsPage';
+import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';
 import { lazy, Suspense } from 'react';
 const AdminEstimatePage = lazy(() => import('./pages/admin/EstimatePage'));
@@ -39,6 +39,10 @@ const AdminKnowledgeBasePage = lazy(() => import('./pages/admin/KnowledgeBasePag
 const AdminInvoicesPage = lazy(() => import('./pages/admin/AdminInvoicesPage'));
 const PayPage = lazy(() => import('./pages/PayPage'));
 const ReviewPage = lazy(() => import('./pages/ReviewPage'));
+const CustomerHealthPage = lazy(() => import('./pages/admin/CustomerHealthPage'));
+const TimeTrackingPage = lazy(() => import('./pages/admin/TimeTrackingPage'));
+const LeadsPage = lazy(() => import('./pages/admin/LeadsPage'));
+const EquipmentMaintenancePage = lazy(() => import('./pages/admin/EquipmentMaintenancePage'));
 import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
@@ -121,6 +125,10 @@ export default function App() {
             <Route path="inventory" element={<AdminInventoryPage />} />
             <Route path="wordpress" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading WordPress...</div>}><AdminWordPressSitesPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
+            <Route path="health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customer health...</div>}><CustomerHealthPage /></Suspense>} />
+            <Route path="timetracking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading time tracking...</div>}><TimeTrackingPage /></Suspense>} />
+            <Route path="leads" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading leads...</div>}><LeadsPage /></Suspense>} />
+            <Route path="fleet" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading fleet...</div>}><EquipmentMaintenancePage /></Suspense>} />
           </Route>
           <Route
             path="/*"
