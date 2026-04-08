@@ -338,6 +338,21 @@ router.put('/:id', async (req, res, next) => {
       }
     }
     if (Object.keys(updates).length) await db('customers').where({ id: req.params.id }).update(updates);
+
+    // Fire-and-forget: trigger cancellation save when deactivating a customer
+    if (updates.active === false) {
+      try {
+        const cancellationSave = require('../services/workflows/cancellation-save');
+        if (cancellationSave.initiate) {
+          cancellationSave.initiate(req.params.id, 'default').catch(err =>
+            logger.error(`[customers] Cancellation save on deactivation failed: ${err.message}`)
+          );
+        }
+      } catch (err) {
+        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
+      }
+    }
+
     res.json({ success: true });
   } catch (err) {
     if (err.message?.includes('customers_email_unique') || err.message?.includes('duplicate key')) {
@@ -363,8 +378,32 @@ router.put('/:id/stage', async (req, res, next) => {
       body: notes || '', admin_user_id: req.technicianId,
     });
 
-    // Email automations are manual-only for now (triggered from Communications → Email Automations tab)
-    // Future: auto-trigger based on Square service bookings
+    // Fire-and-forget: trigger cancellation save workflow when moving to churned or at_risk
+    if (stage === 'churned' || (stage === 'at_risk' && oldStage !== 'at_risk')) {
+      try {
+        const cancellationSave = require('../services/workflows/cancellation-save');
+        if (cancellationSave.initiate) {
+          const cancelReason = req.body.churnReason || 'default';
+          cancellationSave.initiate(req.params.id, cancelReason).catch(err =>
+            logger.error(`[customers] Cancellation save failed: ${err.message}`)
+          );
+        }
+      } catch (err) {
+        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
+      }
+    }
+
+    // Fire-and-forget: update health score on stage change
+    try {
+      const customerHealth = require('../services/customer-health');
+      if (customerHealth.scoreCustomer) {
+        customerHealth.scoreCustomer(req.params.id).catch(err =>
+          logger.error(`[customers] Health score update on stage change failed: ${err.message}`)
+        );
+      }
+    } catch (err) {
+      logger.error(`[customers] Customer health require failed: ${err.message}`);
+    }
 
     res.json({ success: true });
   } catch (err) { next(err); }

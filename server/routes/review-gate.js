@@ -97,6 +97,31 @@ router.post('/:token/submit', async (req, res, next) => {
     // Handle by category
     if (category === 'promoter') {
       // Score 8-10: redirect to Google review
+
+      // Fire-and-forget: trigger referral nudge workflow
+      try {
+        const referralNudge = require('../services/workflows/referral-nudge');
+        if (referralNudge.triggerAfterPositiveReview) {
+          referralNudge.triggerAfterPositiveReview(request.customer_id, score).catch(err =>
+            logger.error(`[review-gate] Referral nudge failed: ${err.message}`)
+          );
+        }
+      } catch (err) {
+        logger.error(`[review-gate] Referral nudge require failed: ${err.message}`);
+      }
+
+      // Fire-and-forget: update customer health score
+      try {
+        const customerHealth = require('../services/customer-health');
+        if (customerHealth.scoreCustomer) {
+          customerHealth.scoreCustomer(request.customer_id).catch(err =>
+            logger.error(`[review-gate] Health score update failed: ${err.message}`)
+          );
+        }
+      } catch (err) {
+        logger.error(`[review-gate] Customer health require failed: ${err.message}`);
+      }
+
       return res.json({
         category: 'promoter',
         redirect: loc.googleReviewUrl,
@@ -124,6 +149,35 @@ router.post('/:token/submit', async (req, res, next) => {
       );
     } catch (smsErr) {
       logger.error(`Detractor SMS alert failed: ${smsErr.message}`);
+    }
+
+    // Fire-and-forget: create health alert for detractor
+    try {
+      const healthAlerts = require('../services/health-alerts');
+      if (healthAlerts.generateAlerts) {
+        healthAlerts.generateAlerts(request.customer_id, {
+          overall: 0,
+          satisfaction: 0,
+          satisfactionDetails: { avgRating: score / 2 },
+          churnRisk: 'high',
+          churnSignals: [{ signal: 'low_nps', severity: 'high', message: `NPS score ${score}/10 (detractor)` }],
+          grade: 'F',
+        }).catch(err => logger.error(`[review-gate] Health alert failed: ${err.message}`));
+      }
+    } catch (err) {
+      logger.error(`[review-gate] Health alerts require failed: ${err.message}`);
+    }
+
+    // Fire-and-forget: update customer health score for detractor
+    try {
+      const customerHealth = require('../services/customer-health');
+      if (customerHealth.scoreCustomer) {
+        customerHealth.scoreCustomer(request.customer_id).catch(err =>
+          logger.error(`[review-gate] Detractor health score update failed: ${err.message}`)
+        );
+      }
+    } catch (err) {
+      logger.error(`[review-gate] Customer health require failed: ${err.message}`);
     }
 
     return res.json({

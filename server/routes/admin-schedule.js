@@ -533,6 +533,83 @@ router.put('/:id/status', async (req, res, next) => {
         const NotificationService = require('../services/notification-service');
         await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Service completed', `Your ${sanitizeServiceType(svc.service_type)} has been completed. View your report in Documents.`, { icon: '\u{1F3E0}', link: '/documents' });
       } catch (e) { logger.error(`[notifications] Service completed notification failed: ${e.message}`); }
+
+      // --- Post-service automation chain (all fire-and-forget, non-blocking) ---
+
+      // 1. Create compliance records
+      try {
+        const ComplianceService = require('../services/compliance');
+        if (ComplianceService.createComplianceRecords) {
+          // Find the service_record that matches this scheduled_service
+          db('service_records')
+            .where({ customer_id: svc.customer_id })
+            .orderBy('created_at', 'desc')
+            .first()
+            .then(sr => {
+              if (sr) {
+                ComplianceService.createComplianceRecords(sr.id).catch(err =>
+                  logger.error(`[post-service] Compliance records failed: ${err.message}`)
+                );
+              }
+            })
+            .catch(err => logger.error(`[post-service] Compliance lookup failed: ${err.message}`));
+        }
+      } catch (e) { logger.error(`[post-service] Compliance require failed: ${e.message}`); }
+
+      // 2. Update customer health score
+      try {
+        const customerHealth = require('../services/customer-health');
+        if (customerHealth.scoreCustomer) {
+          customerHealth.scoreCustomer(svc.customer_id).catch(err =>
+            logger.error(`[post-service] Health score update failed: ${err.message}`)
+          );
+        }
+      } catch (e) { logger.error(`[post-service] Customer health require failed: ${e.message}`); }
+
+      // 3. Close time tracking entry
+      try {
+        const timeTracking = require('../services/time-tracking');
+        if (timeTracking.endJob && svc.technician_id) {
+          timeTracking.endJob(svc.technician_id).catch(err =>
+            logger.error(`[post-service] Time tracking endJob failed: ${err.message}`)
+          );
+        }
+      } catch (e) { logger.error(`[post-service] Time tracking require failed: ${e.message}`); }
+
+      // 4. Schedule upsell evaluation (24hr delay)
+      try {
+        const upsellTrigger = require('../services/workflows/upsell-trigger');
+        if (upsellTrigger.checkAfterService) {
+          const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+          const upsellCustomerId = svc.customer_id;
+          setTimeout(() => {
+            upsellTrigger.checkAfterService(upsellCustomerId).catch(err =>
+              logger.error(`[post-service] Upsell evaluation failed: ${err.message}`)
+            );
+          }, TWENTY_FOUR_HOURS);
+        }
+      } catch (e) { logger.error(`[post-service] Upsell trigger require failed: ${e.message}`); }
+
+      // 5. Check for WaveGuard conversion opportunity (2+ one-time services, no WaveGuard tier)
+      try {
+        const convCustomerId = svc.customer_id;
+        Promise.all([
+          db('customers').where({ id: convCustomerId }).first(),
+          db('service_records').where({ customer_id: convCustomerId, status: 'completed' }).count('* as count').first(),
+        ]).then(([customer, svcCount]) => {
+          const count = parseInt(svcCount?.count || 0);
+          if (customer && count >= 2 && !customer.waveguard_tier) {
+            logger.info(`[post-service] WaveGuard conversion opportunity: customer ${convCustomerId} has ${count} services, no tier`);
+            db('customer_interactions').insert({
+              customer_id: convCustomerId,
+              interaction_type: 'task',
+              subject: 'WaveGuard conversion opportunity',
+              body: `Customer has ${count} completed one-time services but no WaveGuard plan. Consider reaching out with a plan offer.`,
+              status: 'pending',
+            }).catch(err => logger.error(`[post-service] WaveGuard task creation failed: ${err.message}`));
+          }
+        }).catch(err => logger.error(`[post-service] WaveGuard check failed: ${err.message}`));
+      } catch (e) { logger.error(`[post-service] WaveGuard check require failed: ${e.message}`); }
     }
 
     // Handle cancellation — notify via appointment reminders

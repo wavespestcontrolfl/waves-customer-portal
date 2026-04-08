@@ -24,19 +24,22 @@ class ReferralNudge {
       return null;
     }
 
-    // Get or generate referral code
-    let referral = await db('referrals')
-      .where({ referrer_id: customerId })
-      .first();
-
-    const referralCode = referral?.referral_code || `WAVES-${customer.first_name.toUpperCase()}-${customerId}`;
-
-    if (!referral) {
-      await db('referrals').insert({
-        referrer_id: customerId,
-        referral_code: referralCode,
-        status: 'active',
-      });
+    // Enroll as promoter via referral engine (or fall back to manual code)
+    let referralLink = null;
+    let referralCode = null;
+    try {
+      const referralEngine = require('../referral-engine');
+      const { promoter } = await referralEngine.enrollPromoter(customerId);
+      referralLink = promoter.referral_link;
+      referralCode = promoter.referral_code;
+    } catch (enrollErr) {
+      logger.warn(`Referral engine enrollment failed for ${customerId}, using fallback: ${enrollErr.message}`);
+      // Fallback: generate a simple code
+      const fallbackRef = await db('referrals').where({ referrer_id: customerId }).first();
+      referralCode = fallbackRef?.referral_code || `WAVES-${customer.first_name.toUpperCase()}-${customerId}`;
+      if (!fallbackRef) {
+        await db('referrals').insert({ referrer_id: customerId, referral_code: referralCode, status: 'active' });
+      }
     }
 
     // Schedule send after 4-hour delay
@@ -44,8 +47,12 @@ class ReferralNudge {
 
     setTimeout(async () => {
       try {
+        const shareText = referralLink
+          ? `Share your link: ${referralLink}`
+          : `Share your code ${referralCode}`;
+
         const body = `Hi ${customer.first_name}! Thanks for the amazing ${rating}-star review! ` +
-          `Know someone who could use pest-free living? Share your code ${referralCode} — ` +
+          `Know someone who could use pest-free living? ${shareText} — ` +
           `they get $25 off their first service, and you get a $25 credit! ` +
           `Also, if you have a moment, a Google review helps us a ton: ` +
           `https://g.page/r/wavespestcontrol/review\n` +

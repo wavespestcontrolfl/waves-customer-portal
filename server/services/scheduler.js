@@ -749,6 +749,100 @@ function initScheduledJobs() {
     logger.error(`Bouncie mileage crons failed to init: ${err.message}`);
   }
 
+  // =========================================================================
+  // DAILY 9AM — Payment expiry check (cards expiring this/next month)
+  // =========================================================================
+  cron.schedule('0 9 * * *', async () => {
+    logger.info('Running: payment expiry check');
+    try {
+      const paymentExpiry = require('./workflows/payment-expiry');
+      if (paymentExpiry.checkExpiringCards) {
+        const result = await paymentExpiry.checkExpiringCards();
+        logger.info(`Payment expiry check done: ${result.notified} notified, ${result.totalExpiring} expiring`);
+      }
+    } catch (err) {
+      logger.error(`Payment expiry check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 6PM — Missed appointment check
+  // =========================================================================
+  cron.schedule('0 18 * * *', async () => {
+    logger.info('Running: missed appointment check');
+    try {
+      const missedAppointment = require('./workflows/missed-appointment');
+      if (missedAppointment.onSkip) {
+        // Find today's services that were scheduled but not completed
+        const today = new Date().toISOString().split('T')[0];
+        const missedServices = await db('scheduled_services')
+          .where({ scheduled_date: today })
+          .whereIn('status', ['pending', 'confirmed'])
+          .select('id');
+        for (const svc of missedServices) {
+          try {
+            await missedAppointment.onSkip(svc.id, 'no_show');
+          } catch (skipErr) {
+            logger.error(`Missed appointment onSkip failed for ${svc.id}: ${skipErr.message}`);
+          }
+        }
+        logger.info(`Missed appointment check done: ${missedServices.length} services checked`);
+      }
+    } catch (err) {
+      logger.error(`Missed appointment check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 10AM — Renewal reminders (termite bond, mosquito season, WaveGuard)
+  // =========================================================================
+  cron.schedule('0 10 * * *', async () => {
+    logger.info('Running: renewal reminders');
+    try {
+      const renewalReminder = require('./workflows/renewal-reminder');
+      if (renewalReminder.checkAndSend) {
+        const result = await renewalReminder.checkAndSend();
+        logger.info(`Renewal reminders done: ${result.sent} sent`);
+      }
+    } catch (err) {
+      logger.error(`Renewal reminders failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY MONDAY 10AM — Seasonal reactivation campaign
+  // =========================================================================
+  cron.schedule('0 10 * * 1', async () => {
+    logger.info('Running: seasonal reactivation campaign');
+    try {
+      const seasonalReactivation = require('./workflows/seasonal-reactivation');
+      if (seasonalReactivation.run) {
+        const result = await seasonalReactivation.run();
+        logger.info(`Seasonal reactivation done: ${result.sent} sent (month ${result.month}, type: ${result.hookType})`);
+      }
+    } catch (err) {
+      logger.error(`Seasonal reactivation failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 11AM — Balance reminders (upcoming services with outstanding balance)
+  // =========================================================================
+  cron.schedule('0 11 * * *', async () => {
+    logger.info('Running: balance reminders');
+    try {
+      const balanceReminder = require('./workflows/balance-reminder');
+      if (balanceReminder.dailyCheck) {
+        await balanceReminder.dailyCheck();
+      }
+      if (balanceReminder.latePaymentCheck) {
+        await balanceReminder.latePaymentCheck();
+      }
+    } catch (err) {
+      logger.error(`Balance reminders failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
