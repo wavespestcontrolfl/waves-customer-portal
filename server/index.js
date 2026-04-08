@@ -165,6 +165,8 @@ app.use('/api/admin/referrals', adminReferralRoutes);
 app.use('/api/reviews', reviewsPublicRoutes);
 app.use('/api/admin/dispatch', adminDispatchRoutes);
 app.use('/api/admin/communications', adminCommsRoutes);
+// twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
+// /recording-status, /transcription, /outbound-admin-prompt — no path conflicts under same mount.
 app.use('/api/webhooks/twilio', twilioWebhookRoutes);
 app.use('/api/webhooks/lead', require('./routes/lead-webhook'));
 app.use('/api/reports', reportsPublicRoutes);
@@ -214,6 +216,8 @@ app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));
 app.use('/api/admin/mileage', require('./routes/admin-mileage'));
+app.use('/api/admin/compliance-v2', require('./routes/admin-compliance-v2'));
+app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));
 
 // Health check

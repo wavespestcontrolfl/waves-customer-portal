@@ -3,6 +3,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const config = require('../config');
 const { v4: uuidv4 } = require('uuid');
+const TaxCalculator = require('./tax-calculator');
 
 let paymentsApi;
 try {
@@ -102,11 +103,23 @@ const InvoiceService = {
 
     const afterDiscount = subtotal - discountAmount;
 
-    // Tax — Florida: residential pest control is NOT taxable
-    // Commercial/nonresidential: 6% state + 1% county surtax (Manatee/Sarasota/Charlotte) = 7%
-    const isCommercial = customer.property_type === 'commercial' || customer.property_type === 'business';
-    const rate = taxRate !== undefined ? taxRate : (isCommercial ? 0.07 : 0);
-    const taxAmount = Math.round(afterDiscount * rate * 100) / 100;
+    // Tax — use TaxCalculator for automatic county-aware tax when taxRate not explicit
+    let rate, taxAmount;
+    if (taxRate !== undefined) {
+      rate = taxRate;
+      taxAmount = Math.round(afterDiscount * rate * 100) / 100;
+    } else {
+      try {
+        const taxResult = await TaxCalculator.calculateTax(customerId, serviceData.service_type || title, afterDiscount);
+        rate = taxResult.rate;
+        taxAmount = taxResult.amount;
+      } catch (err) {
+        logger.warn(`[invoice] TaxCalculator failed, falling back to legacy logic: ${err.message}`);
+        const isCommercial = customer.property_type === 'commercial' || customer.property_type === 'business';
+        rate = isCommercial ? 0.07 : 0;
+        taxAmount = Math.round(afterDiscount * rate * 100) / 100;
+      }
+    }
     const total = Math.round((afterDiscount + taxAmount) * 100) / 100;
 
     const token = generateToken();
