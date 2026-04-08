@@ -118,11 +118,12 @@ router.post('/', async (req, res) => {
     let callConnected = false;
 
     try {
-      if (isDuringHours && TwilioService.client) {
+      const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      if (isDuringHours && twilioClient) {
         // During business hours: initiate call to admin connecting to the lead
         try {
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
-          await TwilioService.client.calls.create({
+          await twilioClient.calls.create({
             to: WAVES_ADMIN_PHONE,
             from: '+19412972606',
             url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(phoneFormatted)}&callerIdNumber=${encodeURIComponent('+19412972606')}`,
