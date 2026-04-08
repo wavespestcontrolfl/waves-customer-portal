@@ -43,6 +43,9 @@ const CustomerHealthPage = lazy(() => import('./pages/admin/CustomerHealthPage')
 const TimeTrackingPage = lazy(() => import('./pages/admin/TimeTrackingPage'));
 const LeadsPage = lazy(() => import('./pages/admin/LeadsPage'));
 const EquipmentMaintenancePage = lazy(() => import('./pages/admin/EquipmentMaintenancePage'));
+const ServiceLibraryPage = lazy(() => import('./pages/admin/ServiceLibraryPage'));
+const DiscountsPage = lazy(() => import('./pages/admin/DiscountsPage'));
+const CompliancePage = lazy(() => import('./pages/admin/CompliancePage'));
 import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
@@ -129,6 +132,12 @@ export default function App() {
             <Route path="timetracking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading time tracking...</div>}><TimeTrackingPage /></Suspense>} />
             <Route path="leads" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading leads...</div>}><LeadsPage /></Suspense>} />
             <Route path="fleet" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading fleet...</div>}><EquipmentMaintenancePage /></Suspense>} />
+            <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
+            <Route path="discounts" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading discounts...</div>}><DiscountsPage /></Suspense>} />
+            <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
+            <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
+            <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />
+            <Route path="badges" element={<Navigate to="/admin/settings" replace />} />
           </Route>
           <Route
             path="/*"
