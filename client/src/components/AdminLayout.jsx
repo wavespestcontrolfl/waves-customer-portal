@@ -19,7 +19,6 @@ const NAV_SECTIONS = [
   { section: 'Communications', items: [
     { path: '/admin/communications', icon: '📱', label: 'SMS & Calls' },
     { path: '/admin/call-recordings', icon: '🎧', label: 'Call Recordings' },
-    { path: '/admin/phone-numbers', icon: '📞', label: 'Phone Numbers' },
     { path: '/admin/reviews', icon: '⭐', label: 'Reviews' },
     { path: '/admin/referrals', icon: '🎁', label: 'Referrals' },
     { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },

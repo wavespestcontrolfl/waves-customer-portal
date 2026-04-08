@@ -152,12 +152,28 @@ router.get('/stats', async (req, res, next) => {
       .groupBy('message_type')
       .orderBy('sent', 'desc');
 
-    // Per-location counts
+    // Per-number counts (ALL Twilio numbers, not just locations)
+    const allNumbers = TWILIO_NUMBERS.allNumbers;
     const locationStats = await Promise.all(
-      Object.entries(TWILIO_NUMBERS.locations).map(async ([locId, loc]) => {
-        const sent = await db('sms_log').where({ from_phone: loc.number, direction: 'outbound' }).where('created_at', '>=', som).count('* as count').first();
-        const received = await db('sms_log').where({ to_phone: loc.number, direction: 'inbound' }).where('created_at', '>=', som).count('* as count').first();
-        return { locationId: locId, ...loc, sent: parseInt(sent?.count || 0), received: parseInt(received?.count || 0) };
+      allNumbers.map(async (n) => {
+        try {
+          const sent = await db('sms_log').where({ from_phone: n.number, direction: 'outbound' }).where('created_at', '>=', som).count('* as count').first();
+          const received = await db('sms_log').where({ to_phone: n.number, direction: 'inbound' }).where('created_at', '>=', som).count('* as count').first();
+          // Last inbound date (SMS or call)
+          const lastSms = await db('sms_log').where({ to_phone: n.number, direction: 'inbound' }).orderBy('created_at', 'desc').first();
+          const lastCall = await db('call_log').where({ to_phone: n.number, direction: 'inbound' }).orderBy('created_at', 'desc').first();
+          const lastSmsDate = lastSms?.created_at ? new Date(lastSms.created_at) : null;
+          const lastCallDate = lastCall?.created_at ? new Date(lastCall.created_at) : null;
+          const lastInbound = lastSmsDate && lastCallDate ? (lastSmsDate > lastCallDate ? lastSmsDate : lastCallDate) : (lastSmsDate || lastCallDate);
+          // Inbound this month
+          const inboundSms = await db('sms_log').where({ to_phone: n.number, direction: 'inbound' }).where('created_at', '>=', som).count('* as count').first();
+          const inboundCalls = await db('call_log').where({ to_phone: n.number, direction: 'inbound' }).where('created_at', '>=', som).count('* as count').first();
+          return {
+            ...n, sent: parseInt(sent?.count || 0), received: parseInt(received?.count || 0),
+            inboundThisMonth: parseInt(inboundSms?.count || 0) + parseInt(inboundCalls?.count || 0),
+            lastInboundDate: lastInbound ? lastInbound.toISOString() : null,
+          };
+        } catch { return { ...n, sent: 0, received: 0, inboundThisMonth: 0, lastInboundDate: null }; }
       })
     );
 
