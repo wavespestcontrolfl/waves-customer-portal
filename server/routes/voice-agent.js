@@ -31,32 +31,38 @@ function voiceAgentRoutes(app, httpServer) {
     const dialStatus = req.body?.DialCallStatus || req.query?.DialCallStatus;
 
     // Update call_log based on what happened with the dial
+    const dialDuration = parseInt(req.body?.DialCallDuration || req.query?.DialCallDuration || 0);
     if (callSid) {
       try {
-        if (dialStatus === 'completed') {
-          // Someone picked up — mark as human-answered
+        if (dialStatus === 'completed' && dialDuration > 15) {
+          // Human answered (call lasted > 15 seconds — not carrier voicemail)
           await db('call_log')
             .where(function () { this.where('twilio_call_sid', callSid).orWhere('call_sid', callSid); })
-            .update({ answered_by: 'human', status: 'completed' });
-          console.log(`[VoiceAgent] Call answered by human: ${callSid}`);
+            .update({ answered_by: 'human', status: 'completed', duration_seconds: dialDuration });
+          console.log(`[VoiceAgent] Call answered by human: ${callSid} (${dialDuration}s)`);
           return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
         } else {
+          // No answer, busy, or carrier voicemail (short duration)
+          const answeredBy = shouldAgentHandle() ? 'voice_agent' : 'voicemail';
           await db('call_log')
             .where(function () { this.where('twilio_call_sid', callSid).orWhere('call_sid', callSid); })
-            .update({
-              answered_by: shouldAgentHandle() ? 'voice_agent' : 'voicemail',
-              status: dialStatus || 'no-answer',
-            });
-          console.log(`[VoiceAgent] No answer (${dialStatus}) → ${shouldAgentHandle() ? 'voice agent' : 'voicemail'}`);
+            .update({ answered_by: answeredBy, status: dialStatus || 'no-answer' });
+          if (dialStatus === 'completed' && dialDuration <= 15) {
+            console.log(`[VoiceAgent] Carrier voicemail detected (${dialDuration}s) → routing to Waves voicemail`);
+          } else {
+            console.log(`[VoiceAgent] No answer (${dialStatus}) → ${answeredBy}`);
+          }
         }
       } catch (err) {
         console.error('[VoiceAgent] Failed to update call_log:', err.message);
       }
     }
 
+    // Waves custom voicemail (plays for ALL unanswered calls — no answer, busy, or carrier VM)
+    const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
+
     if (!shouldAgentHandle()) {
-      // Agent OFF → voicemail
-      const voicemailAudio = 'https://jet-wolverine-3713.twil.io/assets/lakewood-ranch-voicemail.mp3';
+      // Agent OFF → play Waves voicemail + record message
       return res.type('text/xml').send(
         `<?xml version="1.0" encoding="UTF-8"?>
          <Response>
