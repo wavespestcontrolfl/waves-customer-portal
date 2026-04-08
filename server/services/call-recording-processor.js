@@ -264,6 +264,57 @@ const CallRecordingProcessor = {
       updated_at: new Date(),
     });
 
+    // Step 4b: Create lead in leads table for pipeline tracking
+    let leadResult = null;
+    if (customerId && extracted.first_name && !extracted.is_spam) {
+      try {
+        const leadAttribution = require('./lead-attribution');
+        if (leadAttribution.attributeInboundContact) {
+          leadResult = await leadAttribution.attributeInboundContact({
+            from: phone,
+            to: call.to_phone,
+            type: 'call',
+            callSid: call.twilio_call_sid,
+            callDuration: call.duration_seconds,
+            recordingUrl: call.recording_url,
+          });
+          // Enrich lead with extracted data
+          if (leadResult?.type === 'new_lead' && leadResult.lead?.id) {
+            const leadUpdates = {};
+            if (extracted.first_name) leadUpdates.first_name = extracted.first_name;
+            if (extracted.last_name) leadUpdates.last_name = extracted.last_name;
+            if (extracted.email) leadUpdates.email = extracted.email;
+            if (extracted.address_line1) leadUpdates.address = extracted.address_line1;
+            if (extracted.city) leadUpdates.city = extracted.city;
+            if (extracted.zip) leadUpdates.zip = extracted.zip;
+            if (extracted.matched_service) leadUpdates.service_interest = extracted.matched_service;
+            if (extracted.lead_quality) leadUpdates.urgency = extracted.lead_quality === 'hot' ? 'urgent' : 'normal';
+            leadUpdates.transcript_summary = extracted.call_summary;
+            leadUpdates.extracted_data = JSON.stringify({
+              pain_points: extracted.pain_points,
+              preferred_date_time: extracted.preferred_date_time,
+              sentiment: extracted.sentiment,
+            });
+            leadUpdates.is_qualified = extracted.lead_quality !== 'spam';
+            if (Object.keys(leadUpdates).length) {
+              await db('leads').where({ id: leadResult.lead.id }).update(leadUpdates);
+            }
+            // Log AI triage activity
+            await db('lead_activities').insert({
+              lead_id: leadResult.lead.id,
+              activity_type: 'ai_triage',
+              description: `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`,
+              performed_by: 'AI Call Processor',
+              metadata: JSON.stringify({ call_summary: extracted.call_summary, pain_points: extracted.pain_points, sentiment: extracted.sentiment }),
+            }).catch(() => {});
+          }
+          logger.info(`[call-proc] Lead created/updated: ${leadResult.type} (${leadResult.lead?.id || 'existing'})`);
+        }
+      } catch (leadErr) {
+        logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
+      }
+    }
+
     // Step 5: If appointment detected, send confirmation SMS
     let appointmentResult = null;
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId) {
