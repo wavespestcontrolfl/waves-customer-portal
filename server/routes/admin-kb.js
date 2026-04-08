@@ -122,6 +122,14 @@ router.post('/audit/run', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /auto-sync — trigger auto-sync from live data sources
+router.post('/auto-sync', async (req, res, next) => {
+  try {
+    const result = await KBService.autoSync();
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // ═══════════════════════════════════════════
 // TOKEN HEALTH
 // ═══════════════════════════════════════════

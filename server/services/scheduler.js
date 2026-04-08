@@ -554,6 +554,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:30AM — Auto-sync Knowledge Base from live data (products, protocols, pricing, COGS)
+  // =========================================================================
+  cron.schedule('30 3 * * *', async () => {
+    logger.info('Running: Knowledge Base auto-sync');
+    try {
+      const KBService = require('./knowledge-base');
+      const result = await KBService.autoSync();
+      logger.info(`KB auto-sync done: ${result.created} created, ${result.updated} updated, ${result.skipped} unchanged`);
+    } catch (err) {
+      logger.error(`KB auto-sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY FRIDAY 7 AM — AI Knowledge Base Audit ("Question Your Assumptions")
   // Reviews stale and low-confidence entries via Claude, flags anything outdated.
   // =========================================================================

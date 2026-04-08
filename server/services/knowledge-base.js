@@ -391,6 +391,160 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     if (!results.length) return 'No knowledge base entries found for that query.';
     return results.map(r => `[${r.category}] ${r.title}\n${r.content?.substring(0, 500)}`).join('\n\n---\n\n');
   },
+
+  // ══════════════════════════════════════════════════════════════
+  // AUTO-SYNC — populate KB from live data sources
+  // ══════════════════════════════════════════════════════════════
+  async autoSync() {
+    let created = 0, updated = 0, skipped = 0;
+
+    // Helper: upsert by slug
+    async function upsert(slug, title, content, category, tags = []) {
+      const existing = await db('knowledge_base').where({ slug }).first();
+      if (existing) {
+        if (existing.content !== content) {
+          await db('knowledge_base').where({ id: existing.id }).update({
+            content, title, tags: JSON.stringify(tags),
+            last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
+          });
+          updated++;
+        } else { skipped++; }
+      } else {
+        await db('knowledge_base').insert({
+          slug, title, content, category, tags: JSON.stringify(tags),
+          source: 'auto-sync', confidence: 'high', status: 'active',
+          last_verified_at: new Date(), verified_by: 'auto-sync',
+        }).catch(e => {
+          if (!e.message?.includes('duplicate')) logger.error(`[kb-sync] Insert failed: ${e.message}`);
+          skipped++;
+        });
+        created++;
+      }
+    }
+
+    // ── 1. PRODUCTS from products_catalog ──
+    try {
+      const products = await db('products_catalog').where({ active: true }).orderBy('name');
+      for (const p of products) {
+        const lines = [`**${p.name}**`];
+        if (p.active_ingredient) lines.push(`Active Ingredient: ${p.active_ingredient}`);
+        if (p.moa_group) lines.push(`MOA Group: ${p.moa_group}`);
+        if (p.formulation) lines.push(`Formulation: ${p.formulation}`);
+        if (p.container_size) lines.push(`Container: ${p.container_size}`);
+        if (p.default_rate) lines.push(`Default Rate: ${p.default_rate} ${p.default_unit || ''}`);
+        if (p.best_price) lines.push(`Best Price: $${parseFloat(p.best_price).toFixed(2)} (${p.best_vendor || 'unknown'})`);
+        if (p.signal_word) lines.push(`Signal Word: ${p.signal_word}`);
+        if (p.rei_hours) lines.push(`REI: ${p.rei_hours} hours`);
+        if (p.rain_free_hours) lines.push(`Rain-Free: ${p.rain_free_hours} hours`);
+        if (p.max_wind_mph) lines.push(`Max Wind: ${p.max_wind_mph} mph`);
+        if (p.restricted_use) lines.push(`⚠ RESTRICTED USE PRODUCT`);
+        if (p.pollinator_precautions) lines.push(`🐝 Pollinator: ${p.pollinator_precautions}`);
+        if (p.compatibility_notes) lines.push(`Compatibility: ${p.compatibility_notes}`);
+
+        const slug = `product-${slugify(p.name)}`;
+        const tags = [p.category, p.moa_group, p.active_ingredient].filter(Boolean);
+        await upsert(slug, p.name, lines.join('\n'), 'chemicals', tags);
+      }
+      logger.info(`[kb-sync] Products: ${products.length} processed`);
+    } catch (e) { logger.error(`[kb-sync] Products sync failed: ${e.message}`); }
+
+    // ── 2. PROTOCOLS from protocols.json ──
+    try {
+      const protocols = require('../config/protocols.json');
+      for (const [trackId, track] of Object.entries(protocols.lawn || {})) {
+        const lines = [`**${track.name}**\n`];
+        if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
+        if (track.visits?.length) {
+          lines.push(`**${track.visits.length} Visits/Year:**\n`);
+          for (const v of track.visits) {
+            const tierList = Object.entries(v.tiers || {}).filter(([,on]) => on).map(([t]) => t).join(', ');
+            lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
+            lines.push(`  Materials: $${v.material_cost} | Labor: $${v.labor_cost} | Tiers: ${tierList}`);
+            if (v.notes) lines.push(`  Notes: ${v.notes}`);
+          }
+        }
+        const slug = `protocol-${slugify(trackId)}`;
+        await upsert(slug, track.name, lines.join('\n'), 'protocols', ['lawn', trackId]);
+      }
+      for (const [trackId, track] of Object.entries(protocols.pest || {})) {
+        const lines = [`**${track.name}**\n`];
+        if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
+        if (track.visits?.length) {
+          lines.push(`**${track.visits.length} Visits/Year:**\n`);
+          for (const v of track.visits) {
+            lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
+            lines.push(`  Materials: $${v.material_cost} | Labor: $${v.labor_cost}`);
+          }
+        }
+        const slug = `protocol-${slugify(trackId)}`;
+        await upsert(slug, track.name, lines.join('\n'), 'protocols', ['pest', trackId]);
+      }
+      logger.info(`[kb-sync] Protocols synced`);
+    } catch (e) { logger.error(`[kb-sync] Protocols sync failed: ${e.message}`); }
+
+    // ── 3. PRICING ENGINE snapshot ──
+    try {
+      const pricingContent = [
+        '**Pest Control Pricing**',
+        'Base price: $117/visit | Floor: $89',
+        '',
+        'Footprint modifiers (round down to nearest tier):',
+        '800sf: -$20 | 1,200sf: -$12 | 1,500sf: -$6 | 2,000sf: $0 | 2,500sf: +$6 | 3,000sf: +$12 | 4,000sf: +$20 | 5,500sf: +$28',
+        '',
+        'Property features:',
+        'Pool cage: +$10 | Pool (no cage): +$5 | Heavy shrubs: +$10 | Moderate shrubs: +$5',
+        'Heavy trees: +$10 | Moderate trees: +$5 | Complex landscape: +$5',
+        'Near water: +$5 | Large driveway: +$5',
+        '',
+        'Property type: Townhome end -$8 | Townhome interior -$15 | Duplex -$10 | Condo ground -$20 | Condo upper -$25',
+        '',
+        'Frequency discounts (server): Quarterly 1.0x | Bi-Monthly 0.85x | Monthly 0.70x',
+        'Roach modifier: +15% of base | WaveGuard Membership: flat $99 (waived with annual prepay)',
+        '',
+        'WaveGuard tiers: Bronze 0% | Silver 10% | Gold 15% | Platinum 20%',
+        'Tier qualification: 1 service = Bronze | 2 = Silver | 3 = Gold | 4+ = Platinum',
+        '',
+        '**Lawn Care Pricing**',
+        'Track-based lookup tables (Lawn_Pricing_v4_TimeScaled)',
+        'Tracks: A (St. Aug Sun) | B (St. Aug Shade) | C1 (Bermuda) | C2 (Zoysia) | D (Bahia)',
+        'Turf area: fixed hardscape (800sf base + 3% excess) + complexity scoring + smoothed turf factor',
+      ].join('\n');
+      await upsert('pricing-engine-current', 'Pest & Lawn Pricing Engine', pricingContent, 'pricing', ['pest', 'lawn', 'modifiers']);
+      logger.info('[kb-sync] Pricing snapshot synced');
+    } catch (e) { logger.error(`[kb-sync] Pricing sync failed: ${e.message}`); }
+
+    // ── 4. SERVICE COGS from service_product_usage ──
+    try {
+      const usage = await db('service_product_usage')
+        .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
+        .select('service_product_usage.*', 'products_catalog.name as product_name',
+          'products_catalog.best_price', 'products_catalog.active_ingredient')
+        .orderBy('service_type');
+
+      const grouped = {};
+      usage.forEach(u => {
+        if (!grouped[u.service_type]) grouped[u.service_type] = [];
+        grouped[u.service_type].push(u);
+      });
+
+      for (const [svcType, products] of Object.entries(grouped)) {
+        const lines = [`**${svcType} — Cost of Goods**\n`];
+        let totalCost = 0;
+        for (const p of products) {
+          const cost = p.best_price && p.usage_amount ? parseFloat(p.best_price) * parseFloat(p.usage_amount) : 0;
+          totalCost += cost;
+          lines.push(`- ${p.product_name} (${p.active_ingredient || 'n/a'}): ${p.usage_amount || '?'} ${p.usage_unit || ''} @ $${parseFloat(p.best_price || 0).toFixed(2)} = $${cost.toFixed(2)}`);
+        }
+        lines.push(`\nTotal COGS per application: $${totalCost.toFixed(2)}`);
+        const slug = `cogs-${slugify(svcType)}`;
+        await upsert(slug, `${svcType} — COGS Breakdown`, lines.join('\n'), 'pricing', ['cogs', svcType.toLowerCase()]);
+      }
+      logger.info('[kb-sync] COGS synced');
+    } catch (e) { logger.error(`[kb-sync] COGS sync failed: ${e.message}`); }
+
+    logger.info(`[kb-sync] Auto-sync complete: ${created} created, ${updated} updated, ${skipped} unchanged`);
+    return { created, updated, skipped };
+  },
 };
 
 module.exports = KnowledgeBaseService;
