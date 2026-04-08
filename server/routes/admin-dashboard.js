@@ -66,12 +66,30 @@ router.get('/', async (req, res, next) => {
       db('activity_log').orderBy('created_at', 'desc').limit(15),
       // Tier revenue
       db('customers').where({ active: true }).select('waveguard_tier').count('* as count').sum('monthly_rate as revenue').groupBy('waveguard_tier'),
-      // Google reviews (live from local cache)
-      db('google_reviews').select(
-        db.raw('COUNT(*) as total'),
-        db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
-        db.raw("COUNT(*) FILTER (WHERE review_reply IS NULL AND review_text IS NOT NULL) as unresponded")
-      ).first(),
+      // Google reviews — use Places API totals from _stats rows, fallback to actual review count
+      (async () => {
+        try {
+          const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+          let totalFromPlaces = 0, ratingSum = 0, ratingCount = 0;
+          for (const row of statsRows) {
+            try {
+              const parsed = JSON.parse(row.review_text);
+              totalFromPlaces += parsed.totalReviews || 0;
+              if (parsed.rating) { ratingSum += parsed.rating; ratingCount++; }
+            } catch {}
+          }
+          if (totalFromPlaces > 0) {
+            const unresponded = await db('google_reviews').where('reviewer_name', '!=', '_stats').whereNull('review_reply').whereNotNull('review_text').count('* as c').first();
+            return { total: totalFromPlaces, avg_rating: ratingCount > 0 ? (ratingSum / ratingCount).toFixed(1) : '5.0', unresponded: parseInt(unresponded?.c || 0) };
+          }
+          // Fallback to actual review rows
+          return await db('google_reviews').where('reviewer_name', '!=', '_stats').select(
+            db.raw('COUNT(*) as total'),
+            db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
+            db.raw("COUNT(*) FILTER (WHERE review_reply IS NULL AND review_text IS NOT NULL) as unresponded")
+          ).first();
+        } catch { return { total: 0, avg_rating: '0', unresponded: 0 }; }
+      })(),
     ]);
 
     const revMTDVal = parseFloat(revMTD?.total || 0);
