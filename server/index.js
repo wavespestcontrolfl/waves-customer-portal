@@ -217,6 +217,7 @@ app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));
 app.use('/api/admin/mileage', require('./routes/admin-mileage'));
 app.use('/api/admin/compliance-v2', require('./routes/admin-compliance-v2'));
+app.use('/api/admin/services', require('./routes/admin-services'));
 app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));
 
