@@ -204,6 +204,9 @@ app.use('/api/customer-notifications', require('./routes/customer-notifications'
 app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
 app.use('/api/admin/wiki', require('./routes/admin-wiki'));
+app.use('/api/admin/health', require('./routes/admin-health'));
+app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
+app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 
 // Health check
 app.get('/api/health', (req, res) => {

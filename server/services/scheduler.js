@@ -649,6 +649,60 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // NIGHTLY 2:15AM — Customer Health Scoring v3 (churn prediction engine)
+  // =========================================================================
+  cron.schedule('15 2 * * *', async () => {
+    logger.info('Running: customer health scoring v3');
+    try {
+      const { scoreAllCustomers } = require('./customer-health');
+      const result = await scoreAllCustomers();
+      logger.info(`Health scoring v3 complete: ${result.scored} scored, ${result.failed} failed`);
+    } catch (err) {
+      logger.error(`Health scoring v3 failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // HOURLY — Process save sequences (churn_save, win_back step advancement)
+  // =========================================================================
+  cron.schedule('45 * * * *', async () => {
+    try {
+      const { processSequences } = require('./save-sequences');
+      const result = await processSequences();
+      if (result.processed > 0) {
+        logger.info(`Save sequences processed: ${result.processed} steps, ${result.errors} errors`);
+      }
+    } catch (err) {
+      logger.error(`Save sequence processing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUNDAY 4AM — Cleanup health history older than 365 days
+  // =========================================================================
+  cron.schedule('0 4 * * 0', async () => {
+    logger.info('Running: health history cleanup');
+    try {
+      const cutoff = new Date(Date.now() - 365 * 86400000).toISOString().split('T')[0];
+      const deleted = await db('customer_health_history').where('scored_at', '<', cutoff).del();
+      logger.info(`Health history cleanup: ${deleted} old records deleted`);
+    } catch (err) {
+      logger.error(`Health history cleanup failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // TIME TRACKING CRONS (daily summaries, weekly summaries, auto clock-out)
+  // =========================================================================
+  try {
+    const { initTimeTrackingCrons } = require('./time-tracking-crons');
+    initTimeTrackingCrons();
+    logger.info('Time tracking crons initialized');
+  } catch (err) {
+    logger.error(`Time tracking crons failed to init: ${err.message}`);
+  }
+
   logger.info('Scheduled jobs initialized');
 }
 
