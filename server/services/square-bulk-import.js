@@ -1,14 +1,17 @@
 /**
  * Square Bulk Import Service
  *
- * 5-phase import from Square into the Waves portal DB:
- *   1. syncAllCustomers — reuses SquareCustomerSync
- *   2. syncAllHistory   — pages portal customers, calls SquareHistorySync per batch
- *   3. syncAllBookings  — pages Square Bookings API → scheduled_services
- *   4. syncAllInvoices  — pages Square Invoices API → invoices table
- *   5. syncAllPayments  — pages Square Payments API → payments table
+ * 8-phase import from Square into the Waves portal DB:
+ *   1. syncAllCustomers     — reuses SquareCustomerSync + notes parsing
+ *   2. syncAllHistory       — pages portal customers, calls SquareHistorySync per batch
+ *   3. syncAllBookings      — pages Square Bookings API → scheduled_services (with no_show/booking_source)
+ *   4. syncAllInvoices      — pages Square Invoices API → invoices table
+ *   5. syncAllPayments      — pages Square Payments API → payments table
+ *   6. syncAllSubscriptions — cross-ref customer_subscriptions with recurring customers
+ *   7. syncRefunds          — sweep payments for refund status + card details
+ *   8. recalculate totals
  *
- * Master: runFullImport() — runs all 5 then recalculates customer totals.
+ * Master: runFullImport() — runs all 8 then recalculates customer totals.
  * Cleanup: cleanupImportedData() — dedup, fix descriptions, update totals.
  */
 
@@ -20,7 +23,7 @@ const SquareHistorySync = require('./square-history-sync');
 const { Client, Environment } = require('square');
 const crypto = require('crypto');
 
-let squareClient, bookingsApi, invoicesApi, paymentsApi;
+let squareClient, bookingsApi, invoicesApi, paymentsApi, customersApi;
 if (config.square?.accessToken) {
   squareClient = new Client({
     accessToken: config.square.accessToken,
@@ -29,6 +32,7 @@ if (config.square?.accessToken) {
   bookingsApi = squareClient.bookingsApi;
   invoicesApi = squareClient.invoicesApi;
   paymentsApi = squareClient.paymentsApi;
+  customersApi = squareClient.customersApi;
 }
 
 function cleanPhone(raw) {
@@ -53,8 +57,86 @@ const SquareBulkImport = {
 
     const result = await SquareCustomerSync.sync();
 
-    logger.info(`[bulk-import] Phase 1 done: ${result.totalFetched} fetched, ${result.created} created, ${result.updated} updated`);
+    // ── Enhanced: parse Square notes for gate codes, pet info, etc. ──
+    let notesParsed = 0;
+    try {
+      if (customersApi) {
+        const customers = await db('customers')
+          .whereNotNull('square_customer_id')
+          .select('id', 'square_customer_id');
+
+        for (const cust of customers) {
+          try {
+            const { result: sqResult } = await customersApi.retrieveCustomer(cust.square_customer_id);
+            const sqCust = sqResult?.customer;
+            if (!sqCust) continue;
+
+            const updates = {};
+            if (sqCust.note) {
+              updates.square_notes = sqCust.note;
+              const parsed = this._parseCustomerNotes(sqCust.note);
+              if (parsed.gate_code) updates.gate_code = parsed.gate_code;
+              if (parsed.pet_info) updates.pet_info = parsed.pet_info;
+              if (parsed.preferred_time) updates.preferred_time = parsed.preferred_time;
+              if (parsed.access_notes) updates.access_notes = parsed.access_notes;
+              if (parsed.is_commercial) updates.tags = JSON.stringify(['commercial']);
+            }
+            if (sqCust.groups?.length) {
+              updates.square_groups = JSON.stringify(sqCust.groups.map(g => ({ id: g.id, name: g.name })));
+            }
+            if (sqCust.createdAt) {
+              updates.square_created_at = new Date(sqCust.createdAt);
+            }
+
+            if (Object.keys(updates).length > 0) {
+              updates.updated_at = new Date();
+              await db('customers').where({ id: cust.id }).update(updates);
+              notesParsed++;
+            }
+
+            await delay(50); // light rate limiting
+          } catch { /* skip individual customer note errors */ }
+        }
+      }
+    } catch (err) {
+      logger.warn(`[bulk-import] Notes parsing partial failure: ${err.message}`);
+    }
+
+    result.notesParsed = notesParsed;
+    logger.info(`[bulk-import] Phase 1 done: ${result.totalFetched} fetched, ${result.created} created, ${result.updated} updated, ${notesParsed} notes parsed`);
     if (onProgress) onProgress({ phase: 'customers', status: 'done', ...result });
+    return result;
+  },
+
+  /**
+   * Parse Square customer notes for structured data
+   */
+  _parseCustomerNotes(note) {
+    if (!note) return {};
+    const lower = note.toLowerCase();
+    const result = {};
+
+    // Gate code patterns: "gate code: 1234", "gate: #5678", "code 9999"
+    const gateMatch = note.match(/gate\s*(?:code)?[:\s#-]*(\w{2,10})/i);
+    if (gateMatch) result.gate_code = gateMatch[1];
+
+    // Pet info: "dog", "cat", "2 dogs", "pit bull", "pets in yard"
+    const petMatch = note.match(/((?:\d+\s+)?(?:dog|cat|puppy|kitten|pit\s*bull|german\s*shepherd|lab|retriever|pet)s?(?:\s+(?:in\s+)?(?:yard|backyard|house|inside|outside))?)/i);
+    if (petMatch) result.pet_info = petMatch[1].trim();
+
+    // Time preferences: "morning", "afternoon", "after 2pm", "before 10am", "8am-12pm"
+    const timeMatch = note.match(/((?:morning|afternoon|evening|(?:after|before)\s+\d{1,2}\s*(?:am|pm)|\d{1,2}\s*(?:am|pm)\s*[-–]\s*\d{1,2}\s*(?:am|pm)))/i);
+    if (timeMatch) result.preferred_time = timeMatch[1].trim();
+
+    // Commercial detection
+    if (lower.includes('commercial') || lower.includes('business') || lower.includes('office') || lower.includes('restaurant') || lower.includes('warehouse')) {
+      result.is_commercial = true;
+    }
+
+    // Access notes — anything about access, lock, key, side gate, back door
+    const accessMatch = note.match(/((?:side|back|rear|front)\s+(?:gate|door|entrance)|locked|key\s+(?:under|in|at)|let\s+(?:yourself|self)\s+in|knock|ring|call\s+(?:before|when|on).*)/i);
+    if (accessMatch) result.access_notes = accessMatch[0].trim();
+
     return result;
   },
 
@@ -164,9 +246,11 @@ const SquareBulkImport = {
 
           // Map booking status
           let status = 'pending';
+          const isNoShow = bk.status === 'NO_SHOW';
           if (bk.status === 'ACCEPTED') status = 'confirmed';
           else if (bk.status === 'CANCELLED_BY_CUSTOMER' || bk.status === 'CANCELLED_BY_SELLER') status = 'cancelled';
-          else if (bk.status === 'DECLINED' || bk.status === 'NO_SHOW') status = 'cancelled';
+          else if (bk.status === 'DECLINED') status = 'cancelled';
+          else if (isNoShow) status = 'cancelled';
 
           await db('scheduled_services').insert({
             customer_id: customerId,
@@ -178,6 +262,8 @@ const SquareBulkImport = {
             square_booking_id: bk.id,
             source: 'square',
             notes: bk.customerNote || bk.sellerNote || null,
+            no_show: isNoShow,
+            booking_source: bk.source || 'SQUARE',
           });
           created++;
         } catch (err) {
@@ -394,17 +480,238 @@ const SquareBulkImport = {
   },
 
   // =========================================================================
+  // Phase 6: Sync All Subscriptions
+  // =========================================================================
+  async syncAllSubscriptions({ onProgress } = {}) {
+    logger.info('[bulk-import] Phase 6: syncAllSubscriptions starting');
+    if (onProgress) onProgress({ phase: 'subscriptions', status: 'running', message: 'Verifying subscription records...' });
+
+    let created = 0, updated = 0, alreadyValid = 0;
+    const errors = [];
+
+    try {
+      // Get all customers with monthly_rate > 0 (recurring customers)
+      const recurringCustomers = await db('customers')
+        .where('monthly_rate', '>', 0)
+        .whereNotNull('square_customer_id')
+        .select('id', 'first_name', 'last_name', 'square_customer_id', 'monthly_rate', 'waveguard_tier', 'status');
+
+      for (const cust of recurringCustomers) {
+        try {
+          // Check if they already have an active subscription record
+          const existing = await db('customer_subscriptions')
+            .where({ customer_id: cust.id, status: 'active' })
+            .first();
+
+          if (existing) {
+            // Update monthly amount if it has changed
+            if (Number(existing.monthly_amount) !== Number(cust.monthly_rate)) {
+              await db('customer_subscriptions').where({ id: existing.id }).update({
+                monthly_amount: cust.monthly_rate,
+                service_type: cust.waveguard_tier || existing.service_type,
+                updated_at: new Date(),
+              });
+              updated++;
+            } else {
+              alreadyValid++;
+            }
+            continue;
+          }
+
+          // Create a subscription record for this recurring customer
+          await db('customer_subscriptions').insert({
+            customer_id: cust.id,
+            square_customer_id: cust.square_customer_id,
+            service_type: cust.waveguard_tier || 'Pest Control',
+            status: cust.status === 'active' ? 'active' : 'paused',
+            start_date: new Date().toISOString().split('T')[0],
+            monthly_amount: cust.monthly_rate,
+            created_at: new Date(),
+            updated_at: new Date(),
+          });
+          created++;
+        } catch (err) {
+          errors.push({ customerId: cust.id, name: `${cust.first_name} ${cust.last_name}`, error: err.message });
+        }
+      }
+
+      // Calculate MRR from active subscriptions
+      const [{ mrr }] = await db('customer_subscriptions')
+        .where({ status: 'active' })
+        .sum('monthly_amount as mrr');
+
+      const [{ count: activeCount }] = await db('customer_subscriptions')
+        .where({ status: 'active' })
+        .count('id as count');
+
+      const result = {
+        totalRecurring: recurringCustomers.length,
+        created,
+        updated,
+        alreadyValid,
+        activeSubscriptions: parseInt(activeCount) || 0,
+        mrr: Number(mrr) || 0,
+        errors: errors.slice(0, 50),
+      };
+
+      logger.info(`[bulk-import] Phase 6 done: ${created} created, ${updated} updated, ${alreadyValid} valid, MRR=$${result.mrr}`);
+      if (onProgress) onProgress({ phase: 'subscriptions', status: 'done', ...result });
+      return result;
+    } catch (err) {
+      logger.error(`[bulk-import] Phase 6 failed: ${err.message}`);
+      throw err;
+    }
+  },
+
+  // =========================================================================
+  // Phase 7: Sync Refunds — sweep payments for refund data + card details
+  // =========================================================================
+  async syncRefunds({ onProgress } = {}) {
+    logger.info('[bulk-import] Phase 7: syncRefunds starting');
+    if (!paymentsApi) throw new Error('Square Payments API not configured');
+    if (onProgress) onProgress({ phase: 'refunds', status: 'running', message: 'Sweeping payments for refund data...' });
+
+    // Get all payments with a square_payment_id that haven't been checked
+    const payments = await db('payments')
+      .whereNotNull('square_payment_id')
+      .select('id', 'square_payment_id', 'status', 'receipt_url');
+
+    let checked = 0, refundsFound = 0, cardDetailsAdded = 0;
+    const errors = [];
+
+    for (const pmt of payments) {
+      try {
+        const { result } = await paymentsApi.getPayment(pmt.square_payment_id);
+        const sqPmt = result?.payment;
+        if (!sqPmt) { checked++; continue; }
+
+        const updates = {};
+
+        // Capture receipt URL
+        if (sqPmt.receiptUrl && !pmt.receipt_url) {
+          updates.receipt_url = sqPmt.receiptUrl;
+        }
+
+        // Capture card details
+        if (sqPmt.cardDetails) {
+          if (sqPmt.cardDetails.card?.cardBrand) updates.card_brand = sqPmt.cardDetails.card.cardBrand;
+          if (sqPmt.cardDetails.card?.last4) updates.card_last_four = sqPmt.cardDetails.card.last4;
+          if (updates.card_brand || updates.card_last_four) cardDetailsAdded++;
+        }
+
+        // Capture order ID
+        if (sqPmt.orderId) {
+          updates.square_order_id = sqPmt.orderId;
+        }
+
+        // Check for refunds
+        if (sqPmt.refundedMoney?.amount) {
+          const refundAmount = Number(sqPmt.refundedMoney.amount) / 100;
+          updates.refund_amount = refundAmount;
+          updates.refunded_at = sqPmt.updatedAt ? new Date(sqPmt.updatedAt) : new Date();
+
+          // Determine refund status
+          const totalAmount = sqPmt.amountMoney?.amount ? Number(sqPmt.amountMoney.amount) / 100 : 0;
+          if (refundAmount >= totalAmount) {
+            updates.status = 'refunded';
+            updates.refund_status = 'full';
+          } else {
+            updates.refund_status = 'partial';
+          }
+          refundsFound++;
+        }
+
+        if (Object.keys(updates).length > 0) {
+          await db('payments').where({ id: pmt.id }).update(updates);
+        }
+
+        checked++;
+        await delay(100); // Rate limit: 100ms between calls
+
+        if (onProgress && checked % 50 === 0) {
+          onProgress({ phase: 'refunds', status: 'running', checked, total: payments.length, refundsFound, cardDetailsAdded });
+        }
+      } catch (err) {
+        errors.push({ paymentId: pmt.square_payment_id, error: err.message });
+        checked++;
+        await delay(100);
+      }
+    }
+
+    const result = {
+      totalChecked: checked,
+      refundsFound,
+      cardDetailsAdded,
+      errors: errors.slice(0, 50),
+    };
+
+    logger.info(`[bulk-import] Phase 7 done: ${checked} checked, ${refundsFound} refunds found, ${cardDetailsAdded} card details added`);
+    if (onProgress) onProgress({ phase: 'refunds', status: 'done', ...result });
+    return result;
+  },
+
+  // =========================================================================
+  // Subscription Report
+  // =========================================================================
+  async getSubscriptionReport() {
+    const subs = await db('customer_subscriptions as cs')
+      .join('customers as c', 'cs.customer_id', 'c.id')
+      .where('cs.status', 'active')
+      .select(
+        'c.id as customer_id',
+        'c.first_name',
+        'c.last_name',
+        'c.waveguard_tier',
+        'cs.monthly_amount',
+        'cs.start_date',
+        'cs.service_type',
+        'c.square_customer_id'
+      )
+      .orderBy('cs.monthly_amount', 'desc');
+
+    // Check which customers have a Stripe card on file
+    const customerIds = subs.map(s => s.customer_id);
+    let cardMap = {};
+    if (customerIds.length > 0) {
+      const cards = await db('payment_methods')
+        .whereIn('customer_id', customerIds)
+        .select('customer_id');
+      for (const c of cards) cardMap[c.customer_id] = true;
+    }
+
+    const subscribers = subs.map(s => ({
+      customer_id: s.customer_id,
+      name: `${s.first_name} ${s.last_name}`,
+      tier: s.waveguard_tier || s.service_type || 'Standard',
+      monthly_rate: Number(s.monthly_amount) || 0,
+      start_date: s.start_date,
+      has_card: !!cardMap[s.customer_id],
+    }));
+
+    const mrr = subscribers.reduce((sum, s) => sum + s.monthly_rate, 0);
+
+    return {
+      subscribers,
+      count: subscribers.length,
+      mrr,
+      arr: mrr * 12,
+    };
+  },
+
+  // =========================================================================
   // Master: Run Full Import
   // =========================================================================
   async runFullImport({ onProgress } = {}) {
-    logger.info('[bulk-import] === FULL IMPORT STARTING ===');
+    logger.info('[bulk-import] === FULL 8-PHASE IMPORT STARTING ===');
     const startTime = Date.now();
     const results = {};
     const allErrors = [];
 
+    const totalPhases = 8;
+
     // Phase 1
     try {
-      if (onProgress) onProgress({ phase: 'customers', status: 'starting', phaseNumber: 1, totalPhases: 5 });
+      if (onProgress) onProgress({ phase: 'customers', status: 'starting', phaseNumber: 1, totalPhases });
       results.customers = await this.syncAllCustomers({ onProgress });
     } catch (err) {
       results.customers = { error: err.message };
@@ -414,7 +721,7 @@ const SquareBulkImport = {
 
     // Phase 2
     try {
-      if (onProgress) onProgress({ phase: 'history', status: 'starting', phaseNumber: 2, totalPhases: 5 });
+      if (onProgress) onProgress({ phase: 'history', status: 'starting', phaseNumber: 2, totalPhases });
       results.history = await this.syncAllHistory({ onProgress, batchSize: 10, delayBetweenBatches: 2000 });
     } catch (err) {
       results.history = { error: err.message };
@@ -424,7 +731,7 @@ const SquareBulkImport = {
 
     // Phase 3
     try {
-      if (onProgress) onProgress({ phase: 'bookings', status: 'starting', phaseNumber: 3, totalPhases: 5 });
+      if (onProgress) onProgress({ phase: 'bookings', status: 'starting', phaseNumber: 3, totalPhases });
       results.bookings = await this.syncAllBookings({ onProgress });
     } catch (err) {
       results.bookings = { error: err.message };
@@ -434,7 +741,7 @@ const SquareBulkImport = {
 
     // Phase 4
     try {
-      if (onProgress) onProgress({ phase: 'invoices', status: 'starting', phaseNumber: 4, totalPhases: 5 });
+      if (onProgress) onProgress({ phase: 'invoices', status: 'starting', phaseNumber: 4, totalPhases });
       results.invoices = await this.syncAllInvoices({ onProgress });
     } catch (err) {
       results.invoices = { error: err.message };
@@ -444,7 +751,7 @@ const SquareBulkImport = {
 
     // Phase 5
     try {
-      if (onProgress) onProgress({ phase: 'payments', status: 'starting', phaseNumber: 5, totalPhases: 5 });
+      if (onProgress) onProgress({ phase: 'payments', status: 'starting', phaseNumber: 5, totalPhases });
       results.payments = await this.syncAllPayments({ onProgress });
     } catch (err) {
       results.payments = { error: err.message };
@@ -452,13 +759,34 @@ const SquareBulkImport = {
       logger.error(`[bulk-import] Phase 5 failed: ${err.message}`);
     }
 
-    // Recalculate customer totals
+    // Phase 6
     try {
-      if (onProgress) onProgress({ phase: 'totals', status: 'running', message: 'Recalculating customer totals...' });
+      if (onProgress) onProgress({ phase: 'subscriptions', status: 'starting', phaseNumber: 6, totalPhases });
+      results.subscriptions = await this.syncAllSubscriptions({ onProgress });
+    } catch (err) {
+      results.subscriptions = { error: err.message };
+      allErrors.push({ phase: 'subscriptions', error: err.message });
+      logger.error(`[bulk-import] Phase 6 failed: ${err.message}`);
+    }
+
+    // Phase 7
+    try {
+      if (onProgress) onProgress({ phase: 'refunds', status: 'starting', phaseNumber: 7, totalPhases });
+      results.refunds = await this.syncRefunds({ onProgress });
+    } catch (err) {
+      results.refunds = { error: err.message };
+      allErrors.push({ phase: 'refunds', error: err.message });
+      logger.error(`[bulk-import] Phase 7 failed: ${err.message}`);
+    }
+
+    // Phase 8: Recalculate customer totals
+    try {
+      if (onProgress) onProgress({ phase: 'totals', status: 'starting', phaseNumber: 8, totalPhases });
       await this._recalculateCustomerTotals();
+      if (onProgress) onProgress({ phase: 'totals', status: 'done', message: 'Customer totals recalculated' });
     } catch (err) {
       allErrors.push({ phase: 'totals', error: err.message });
-      logger.error(`[bulk-import] Totals recalculation failed: ${err.message}`);
+      logger.error(`[bulk-import] Phase 8 totals recalculation failed: ${err.message}`);
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);

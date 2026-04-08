@@ -35,12 +35,20 @@ export default function SquareImportDashboard() {
   const [errors, setErrors] = useState([]);
   const [showErrors, setShowErrors] = useState(false);
   const [toast, setToast] = useState('');
+  const [subReport, setSubReport] = useState(null);
+  const [showSubReport, setShowSubReport] = useState(false);
 
   const loadStatus = useCallback(() => {
     adminFetch('/admin/square-import/status').then(setStatus).catch(() => setToast('Failed to load status'));
   }, []);
 
   useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  const loadSubReport = () => {
+    adminFetch('/admin/square-import/subscription-report')
+      .then(data => { setSubReport(data); setShowSubReport(true); })
+      .catch(() => setToast('Failed to load subscription report'));
+  };
 
   const runPhase = async (endpoint, label) => {
     if (running) return;
@@ -127,6 +135,28 @@ export default function SquareImportDashboard() {
               </div>
             )}
 
+            {/* Subscription + Refund stats row */}
+            {(status.activeSubscriptions > 0 || status.mrr > 0 || status.totalRefunds > 0) && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 12, padding: '12px 0', borderTop: `1px solid ${D.border}` }}>
+                <div style={sStat}>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: D.green }}>{status.activeSubscriptions}</div>
+                  <div style={{ fontSize: 11, color: D.muted }}>Active Subs</div>
+                </div>
+                <div style={sStat}>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: D.green }}>${status.mrr?.toLocaleString()}</div>
+                  <div style={{ fontSize: 11, color: D.muted }}>MRR</div>
+                </div>
+                <div style={sStat}>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: D.red }}>{status.totalRefunds}</div>
+                  <div style={{ fontSize: 11, color: D.muted }}>Refunds</div>
+                </div>
+                <div style={sStat}>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: D.amber }}>{status.noShowCount}</div>
+                  <div style={{ fontSize: 11, color: D.muted }}>No-Shows</div>
+                </div>
+              </div>
+            )}
+
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 12, fontSize: 11, color: D.muted }}>
               <span>Service Records: {status.totalServiceRecords}</span>
               <span>Payments: {status.totalPayments}</span>
@@ -149,7 +179,7 @@ export default function SquareImportDashboard() {
           {running && currentPhase === 'Full Import' ? 'Importing...' : 'Full Import from Square'}
         </button>
         <div style={{ fontSize: 11, color: D.muted, marginTop: 8 }}>
-          Runs all 5 phases: Customers, History, Bookings, Invoices, Payments
+          Runs all 8 phases: Customers, History, Bookings, Invoices, Payments, Subscriptions, Refunds, Totals
         </div>
       </div>
 
@@ -167,6 +197,27 @@ export default function SquareImportDashboard() {
               {running && currentPhase === p.label ? `${p.label}...` : p.label}
             </button>
           ))}
+          <button
+            onClick={() => runPhase('subscriptions', 'Subscriptions')}
+            disabled={running}
+            style={sBtn(D.green, running)}
+          >
+            {running && currentPhase === 'Subscriptions' ? 'Syncing...' : 'Subscriptions'}
+          </button>
+          <button
+            onClick={() => runPhase('refunds', 'Refunds')}
+            disabled={running}
+            style={sBtn(D.red, running)}
+          >
+            {running && currentPhase === 'Refunds' ? 'Sweeping...' : 'Refunds'}
+          </button>
+          <button
+            onClick={() => runPhase('recalculate', 'Recalculate')}
+            disabled={running}
+            style={sBtn(D.purple, running)}
+          >
+            {running && currentPhase === 'Recalculate' ? 'Calculating...' : 'Recalculate'}
+          </button>
           <button
             onClick={() => runPhase('cleanup', 'Cleanup')}
             disabled={running}
@@ -203,8 +254,10 @@ export default function SquareImportDashboard() {
                   <span style={{ textTransform: 'capitalize', fontWeight: 500 }}>{phase}</span>
                   <span style={{ color: data.error ? D.red : D.green }}>
                     {data.error ? `Error: ${data.error}` :
-                      phase === 'customers' ? `${data.created || 0} created, ${data.updated || 0} updated` :
+                      phase === 'customers' ? `${data.created || 0} created, ${data.updated || 0} updated, ${data.notesParsed || 0} notes` :
                       phase === 'history' ? `${data.totalServices || 0} services, ${data.totalPayments || 0} payments` :
+                      phase === 'subscriptions' ? `${data.activeSubscriptions || 0} active, MRR $${data.mrr || 0}` :
+                      phase === 'refunds' ? `${data.totalChecked || 0} checked, ${data.refundsFound || 0} refunds` :
                       `${data.created || 0} created, ${data.skipped || 0} skipped`}
                   </span>
                 </div>
@@ -222,8 +275,111 @@ export default function SquareImportDashboard() {
               {results.processed !== undefined && <div>Customers processed: <b>{results.processed}/{results.total}</b></div>}
               {results.deduped !== undefined && <div>Duplicates removed: <b>{results.deduped}</b></div>}
               {results.descFixed !== undefined && <div>Descriptions fixed: <b>{results.descFixed}</b></div>}
+              {results.activeSubscriptions !== undefined && <div>Active subscriptions: <b>{results.activeSubscriptions}</b></div>}
+              {results.mrr !== undefined && <div>MRR: <b>${results.mrr}</b></div>}
+              {results.notesParsed !== undefined && <div>Notes parsed: <b>{results.notesParsed}</b></div>}
+              {results.refundsFound !== undefined && <div>Refunds found: <b>{results.refundsFound}</b></div>}
+              {results.cardDetailsAdded !== undefined && <div>Card details added: <b>{results.cardDetailsAdded}</b></div>}
+              {results.totalChecked !== undefined && <div>Payments checked: <b>{results.totalChecked}</b></div>}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Subscription Verification */}
+      <div style={sCard}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.green }}>Subscription Verification</div>
+          <button onClick={loadSubReport} disabled={running} style={sBtn(D.green, running)}>
+            {showSubReport ? 'Refresh' : 'Load Report'}
+          </button>
+        </div>
+        {showSubReport && subReport && (
+          <>
+            <div style={{ display: 'flex', gap: 20, marginBottom: 14, padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
+              <div style={sStat}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: D.green }}>{subReport.count}</div>
+                <div style={{ fontSize: 11, color: D.muted }}>Active Subscribers</div>
+              </div>
+              <div style={sStat}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: D.green }}>${subReport.mrr?.toLocaleString()}</div>
+                <div style={{ fontSize: 11, color: D.muted }}>Monthly (MRR)</div>
+              </div>
+              <div style={sStat}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: D.teal }}>${subReport.arr?.toLocaleString()}</div>
+                <div style={{ fontSize: 11, color: D.muted }}>Annual (ARR)</div>
+              </div>
+            </div>
+            <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${D.border}`, color: D.muted, textAlign: 'left' }}>
+                    <th style={{ padding: '6px 8px' }}>Name</th>
+                    <th style={{ padding: '6px 8px' }}>Tier</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>Monthly Rate</th>
+                    <th style={{ padding: '6px 8px' }}>Since</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'center' }}>Card</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {subReport.subscribers?.map((s, i) => (
+                    <tr key={i} style={{ borderBottom: `1px solid ${D.border}22` }}>
+                      <td style={{ padding: '6px 8px', fontWeight: 500 }}>{s.name}</td>
+                      <td style={{ padding: '6px 8px', color: D.teal }}>{s.tier}</td>
+                      <td style={{ padding: '6px 8px', textAlign: 'right', color: D.green }}>${s.monthly_rate}</td>
+                      <td style={{ padding: '6px 8px', color: D.muted }}>{s.start_date || '—'}</td>
+                      <td style={{ padding: '6px 8px', textAlign: 'center' }}>{s.has_card ? 'Yes' : <span style={{ color: D.red }}>No</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Post-Import Verification */}
+      {results && !running && results.phases && (
+        <div style={{ ...sCard, border: `1px solid ${D.green}44` }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: D.green }}>Post-Import Verification</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+            <div style={sStat}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: D.teal }}>
+                {(results.phases.customers?.created || 0) + (results.phases.customers?.updated || 0)}
+              </div>
+              <div style={{ fontSize: 11, color: D.muted }}>Customers Synced</div>
+            </div>
+            <div style={sStat}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: D.amber }}>
+                {results.phases.customers?.notesParsed || 0}
+              </div>
+              <div style={{ fontSize: 11, color: D.muted }}>Notes Parsed</div>
+            </div>
+            <div style={sStat}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: D.green }}>
+                {results.phases.subscriptions?.activeSubscriptions || 0}
+              </div>
+              <div style={{ fontSize: 11, color: D.muted }}>Active Subs</div>
+            </div>
+            <div style={sStat}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: D.green }}>
+                ${results.phases.subscriptions?.mrr || 0}
+              </div>
+              <div style={{ fontSize: 11, color: D.muted }}>MRR</div>
+            </div>
+            <div style={sStat}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: D.red }}>
+                {results.phases.refunds?.refundsFound || 0}
+              </div>
+              <div style={{ fontSize: 11, color: D.muted }}>Refunds Found</div>
+            </div>
+            <div style={sStat}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: D.purple }}>
+                {results.phases.refunds?.cardDetailsAdded || 0}
+              </div>
+              <div style={{ fontSize: 11, color: D.muted }}>Card Details</div>
+            </div>
+          </div>
         </div>
       )}
 

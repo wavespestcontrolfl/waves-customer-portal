@@ -1,14 +1,18 @@
 /**
  * Admin Square Bulk Import Routes
  *
- * POST /full      — run all 5 phases
- * POST /customers — phase 1 only
- * POST /history   — phase 2 only
- * POST /bookings  — phase 3 only
- * POST /invoices  — phase 4 only
- * POST /payments  — phase 5 only
- * POST /cleanup   — run data cleanup
- * GET  /status    — import completeness stats
+ * POST /full           — run all 8 phases
+ * POST /customers      — phase 1 only
+ * POST /history        — phase 2 only
+ * POST /bookings       — phase 3 only
+ * POST /invoices       — phase 4 only
+ * POST /payments       — phase 5 only
+ * POST /subscriptions  — phase 6: subscription verification
+ * POST /refunds        — phase 7: refund sweep
+ * POST /recalculate    — recalculate customer totals
+ * POST /cleanup        — run data cleanup
+ * GET  /status         — import completeness stats
+ * GET  /subscription-report — active subscriber list with MRR
  */
 
 const express = require('express');
@@ -58,6 +62,23 @@ router.get('/status', async (req, res, next) => {
     const totalCust = parseInt(totalCustomers) || 1;
     const sqCust = parseInt(withSquareId) || 0;
 
+    // Subscription + refund stats
+    let activeSubscriptions = 0, mrr = 0, totalRefunds = 0, noShowCount = 0;
+    try {
+      const [{ count: subCount }] = await db('customer_subscriptions').where({ status: 'active' }).count('id as count');
+      activeSubscriptions = parseInt(subCount) || 0;
+      const [{ total: mrrTotal }] = await db('customer_subscriptions').where({ status: 'active' }).sum('monthly_amount as total');
+      mrr = Number(mrrTotal) || 0;
+    } catch { /* table may not exist yet */ }
+    try {
+      const [{ count: refCount }] = await db('payments').whereNotNull('refunded_at').count('id as count');
+      totalRefunds = parseInt(refCount) || 0;
+    } catch { /* column may not exist yet */ }
+    try {
+      const [{ count: nsCount }] = await db('scheduled_services').where({ no_show: true }).count('id as count');
+      noShowCount = parseInt(nsCount) || 0;
+    } catch { /* column may not exist yet */ }
+
     res.json({
       totalCustomers: parseInt(totalCustomers),
       withSquareId: sqCust,
@@ -68,6 +89,10 @@ router.get('/status', async (req, res, next) => {
       totalScheduled: parseInt(totalScheduled),
       totalInvoices,
       totalRecords,
+      activeSubscriptions,
+      mrr,
+      totalRefunds,
+      noShowCount,
       completeness: totalCust > 0 ? Math.round((sqCust / totalCust) * 100) : 0,
       historyCompleteness: sqCust > 0 ? Math.round((withHistoryCount / sqCust) * 100) : 0,
     });
@@ -126,6 +151,38 @@ router.post('/payments', async (req, res, next) => {
     const { startDate } = req.body || {};
     const result = await SquareBulkImport.syncAllPayments({ startDate });
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /subscriptions — phase 6: subscription verification
+router.post('/subscriptions', async (req, res, next) => {
+  try {
+    const result = await SquareBulkImport.syncAllSubscriptions({});
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /refunds — phase 7: refund sweep
+router.post('/refunds', async (req, res, next) => {
+  try {
+    const result = await SquareBulkImport.syncRefunds({});
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /recalculate — recalculate all customer totals
+router.post('/recalculate', async (req, res, next) => {
+  try {
+    await SquareBulkImport._recalculateCustomerTotals();
+    res.json({ success: true, message: 'Customer totals recalculated' });
+  } catch (err) { next(err); }
+});
+
+// GET /subscription-report — active subscriber list with MRR
+router.get('/subscription-report', async (req, res, next) => {
+  try {
+    const report = await SquareBulkImport.getSubscriptionReport();
+    res.json(report);
   } catch (err) { next(err); }
 });
 
