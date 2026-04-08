@@ -128,14 +128,15 @@ function StatCard({ label, value, color }) {
 }
 
 // --- Stat Card with health indicator ---
-function StatCardWithHealth({ label, value, color, shouldHaveActivity }) {
+function StatCardWithHealth({ label, value, color, shouldHaveActivity, onClick, active }) {
   const isHealthy = value > 0;
   const showDot = shouldHaveActivity !== false;
   const dotColor = isHealthy ? D.green : D.red;
   return (
-    <div style={{
-      background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center', minWidth: 0,
+    <div onClick={onClick} style={{
+      background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${active ? color : D.border}`, textAlign: 'center', minWidth: 0,
       flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 100px',
+      cursor: onClick ? 'pointer' : 'default', transition: 'border-color 0.15s',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 4 }}>
         <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
@@ -356,6 +357,7 @@ function CallLogTab() {
   const [callResult, setCallResult] = useState(null);
   const [dispositions, setDispositions] = useState({}); // { callId: value }
   const [savingDisp, setSavingDisp] = useState(null);
+  const [callFilter, setCallFilter] = useState('all');
 
   const loadCalls = () => {
     adminFetch('/ai/admin/calls?days=365&limit=200').then(d => { setCalls(d.calls || []); setLoading(false); }).catch(() => setLoading(false));
@@ -436,13 +438,13 @@ function CallLogTab() {
       {/* Stats */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         {[
-          { label: 'Total', value: calls.length, color: D.white },
-          { label: 'Answered', value: answered, color: D.green },
-          { label: 'AI Agent', value: aiHandled, color: D.teal },
-          { label: 'Voicemail', value: voicemail, color: D.amber },
-          { label: 'Missed', value: missed, color: D.red },
+          { label: 'Total', value: calls.length, color: D.white, filter: 'all' },
+          { label: 'Answered', value: answered, color: D.green, filter: 'answered' },
+          { label: 'AI Agent', value: aiHandled, color: D.teal, filter: 'ai_agent' },
+          { label: 'Voicemail', value: voicemail, color: D.amber, filter: 'voicemail' },
+          { label: 'Missed', value: missed, color: D.red, filter: 'missed' },
         ].map((s, i) => (
-          <div key={i} style={{ flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${D.border}`, textAlign: 'center', minWidth: 0 }}>
+          <div key={i} onClick={() => setCallFilter(prev => prev === s.filter ? 'all' : s.filter)} style={{ flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 100px', background: D.card, borderRadius: 10, padding: '12px 14px', border: `1px solid ${callFilter === s.filter && s.filter !== 'all' ? s.color : D.border}`, textAlign: 'center', minWidth: 0, cursor: 'pointer', transition: 'border-color 0.15s' }}>
             <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s.label}</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
           </div>
@@ -571,7 +573,14 @@ function CallLogTab() {
           <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No calls recorded yet.</div>
         ) : (
           <div style={{ maxHeight: 600, overflowY: 'auto' }}>
-            {calls.map(c => {
+            {calls.filter(c => {
+              if (callFilter === 'all') return true;
+              if (callFilter === 'answered') return c.answered_by === 'human';
+              if (callFilter === 'ai_agent') return c.answered_by === 'voice_agent';
+              if (callFilter === 'voicemail') return c.answered_by === 'voicemail';
+              if (callFilter === 'missed') return !c.answered_by || c.answered_by === 'missed';
+              return true;
+            }).map(c => {
               const isMissed = !c.answered_by || c.answered_by === 'missed';
               const answeredColor = c.answered_by === 'human' ? D.green : c.answered_by === 'voice_agent' ? D.teal : c.answered_by === 'voicemail' ? D.amber : D.red;
               const answeredLabel = c.answered_by === 'human' ? 'Answered' : c.answered_by === 'voice_agent' ? 'AI Agent' : c.answered_by === 'voicemail' ? 'Voicemail' : 'Missed';
@@ -1144,6 +1153,7 @@ export default function CommunicationsPage() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [commsTab, setCommsTab] = useState('sms');
+  const [smsFilter, setSmsFilter] = useState('all');
 
   // Import state
   const [importing, setImporting] = useState(null);
@@ -1313,9 +1323,17 @@ export default function CommunicationsPage() {
 
   const unansweredCount = threads.filter(t => t.unanswered).length;
 
-  const filteredThreads = threadFilter === 'unanswered'
-    ? threads.filter(t => t.unanswered)
-    : threads;
+  const filteredThreads = threads.filter(t => {
+    if (threadFilter === 'unanswered' && !t.unanswered) return false;
+    if (smsFilter === 'all') return true;
+    if (smsFilter === 'sent') return t.messages.some(m => m.direction === 'outbound');
+    if (smsFilter === 'received') return t.messages.some(m => m.direction === 'inbound');
+    if (smsFilter === 'auto_reply') return t.messages.some(m => m.message_type === 'auto_reply' || m.message_type === 'ai_draft');
+    if (smsFilter === 'reminder') return t.messages.some(m => m.message_type === 'reminder' || m.message_type === 'confirmation' || m.message_type === 'appointment_confirmation');
+    if (smsFilter === 'review_request') return t.messages.some(m => m.message_type === 'review_request');
+    if (smsFilter === 'estimate') return t.messages.some(m => m.message_type === 'estimate');
+    return true;
+  });
 
   // Handle reply from thread — auto-set From to the number customer texted
   const handleThreadReply = (contactPhone, ourNumber) => {
@@ -1386,12 +1404,12 @@ export default function CommunicationsPage() {
 
       {/* --- SMS Stats with health indicators --- */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
-        <StatCardWithHealth label="Sent This Month" value={totalSent} color={D.green} shouldHaveActivity={false} />
-        <StatCardWithHealth label="Received This Month" value={totalReceived} color={D.teal} shouldHaveActivity={false} />
-        <StatCardWithHealth label="Auto-Replies" value={channelStats.find(c => c.type === 'auto_reply')?.sent || 0} color="#0ea5e9" shouldHaveActivity={true} />
-        <StatCardWithHealth label="Reminders" value={channelStats.find(c => c.type === 'reminder')?.sent || channelStats.find(c => c.type === 'confirmation')?.sent || 0} color={D.amber} shouldHaveActivity={true} />
-        <StatCardWithHealth label="Review Requests" value={channelStats.find(c => c.type === 'review_request')?.sent || 0} color="#8b5cf6" shouldHaveActivity={true} />
-        <StatCardWithHealth label="Estimates" value={channelStats.find(c => c.type === 'estimate')?.sent || 0} color="#3b82f6" shouldHaveActivity={true} />
+        <StatCardWithHealth label="Sent This Month" value={totalSent} color={D.green} shouldHaveActivity={false} onClick={() => setSmsFilter(f => f === 'sent' ? 'all' : 'sent')} active={smsFilter === 'sent'} />
+        <StatCardWithHealth label="Received This Month" value={totalReceived} color={D.teal} shouldHaveActivity={false} onClick={() => setSmsFilter(f => f === 'received' ? 'all' : 'received')} active={smsFilter === 'received'} />
+        <StatCardWithHealth label="Auto-Replies" value={channelStats.find(c => c.type === 'auto_reply')?.sent || 0} color="#0ea5e9" shouldHaveActivity={true} onClick={() => setSmsFilter(f => f === 'auto_reply' ? 'all' : 'auto_reply')} active={smsFilter === 'auto_reply'} />
+        <StatCardWithHealth label="Reminders" value={channelStats.find(c => c.type === 'reminder')?.sent || channelStats.find(c => c.type === 'confirmation')?.sent || 0} color={D.amber} shouldHaveActivity={true} onClick={() => setSmsFilter(f => f === 'reminder' ? 'all' : 'reminder')} active={smsFilter === 'reminder'} />
+        <StatCardWithHealth label="Review Requests" value={channelStats.find(c => c.type === 'review_request')?.sent || 0} color="#8b5cf6" shouldHaveActivity={true} onClick={() => setSmsFilter(f => f === 'review_request' ? 'all' : 'review_request')} active={smsFilter === 'review_request'} />
+        <StatCardWithHealth label="Estimates" value={channelStats.find(c => c.type === 'estimate')?.sent || 0} color="#3b82f6" shouldHaveActivity={true} onClick={() => setSmsFilter(f => f === 'estimate' ? 'all' : 'estimate')} active={smsFilter === 'estimate'} />
       </div>
 
       {/* --- Send SMS --- */}
