@@ -19,6 +19,24 @@ const {
 } = require('../services/voice-agent/agent');
 const { analyzeSentiment } = require('../services/call-sentiment');
 
+// ── Missed call SMS — fires when call goes to voicemail ──
+async function sendMissedCallSMS(callerPhone, callerName, callSid) {
+  try {
+    const TwilioService = require('../services/twilio');
+    const firstName = callerName ? callerName.split(/\s+/)[0] : null;
+    const greeting = firstName
+      ? `Hey ${firstName}, this is Waves Pest Control.`
+      : `Hey, this is Waves Pest Control.`;
+    const msg = `${greeting} Sorry we missed your call — we're currently on the other line. How can we help you? Just reply to this text or call us back at (941) 318-7612.`;
+    await TwilioService.sendSMS(callerPhone, msg, {
+      messageType: 'missed_call_followup',
+    });
+    console.log(`[VoiceAgent] Missed call SMS sent to ${callerPhone}`);
+  } catch (err) {
+    console.error(`[VoiceAgent] Missed call SMS failed: ${err.message}`);
+  }
+}
+
 function voiceAgentRoutes(app, httpServer) {
   // WebSocket is set up separately in index.js after app.listen()
 
@@ -63,6 +81,10 @@ function voiceAgentRoutes(app, httpServer) {
 
     if (!shouldAgentHandle()) {
       // Agent OFF → play Waves voicemail + record message
+      // Send missed call SMS regardless (caller may hang up without leaving VM)
+      if (from) {
+        sendMissedCallSMS(from, callerName, callSid).catch(() => {});
+      }
       return res.type('text/xml').send(
         `<?xml version="1.0" encoding="UTF-8"?>
          <Response>
