@@ -714,6 +714,17 @@ function initScheduledJobs() {
     logger.error(`Equipment crons failed to init: ${err.message}`);
   }
 
+  // =========================================================================
+  // BOUNCIE MILEAGE CRONS (daily sync, monthly summary, trip re-matching)
+  // =========================================================================
+  try {
+    const { initBouncieMileageCrons } = require('./bouncie-mileage-crons');
+    initBouncieMileageCrons();
+    logger.info('Bouncie mileage crons initialized');
+  } catch (err) {
+    logger.error(`Bouncie mileage crons failed to init: ${err.message}`);
+  }
+
   logger.info('Scheduled jobs initialized');
 }
 
