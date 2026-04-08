@@ -10,6 +10,7 @@
  *      → OFF: voicemail with custom audio
  */
 const db = require('../models/db');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
   initVoiceAgent, shouldAgentHandle, handleVoiceWebSocket,
@@ -101,6 +102,7 @@ function voiceAgentRoutes(app, httpServer) {
     const callerState = req.body?.CallerState || req.query?.CallerState;
 
     // Log every inbound call immediately
+    let callerName = null;
     if (callSid) {
       try {
         const logEntry = {
@@ -115,7 +117,6 @@ function voiceAgentRoutes(app, httpServer) {
         try {
           await db('call_log').insert({ ...logEntry, caller_city: callerCity || null, caller_state: callerState || null });
         } catch {
-          // Fallback without optional columns
           await db('call_log').insert(logEntry);
         }
         console.log(`[VoiceAgent] Inbound call logged: ${callSid} from ${from}`);
@@ -126,17 +127,79 @@ function voiceAgentRoutes(app, httpServer) {
       }
     }
 
-    // Match caller to customer
+    // Match caller to customer — or create from CNAM lookup
+    let customer = null;
     if (from) {
       try {
         const normalized = from.replace(/\D/g, '').slice(-10);
-        const customer = await db('customers').where(function () {
+        customer = await db('customers').where(function () {
           this.where('phone', 'like', `%${normalized}`);
         }).first();
+
         if (customer) {
+          // Existing customer — link to call_log
           await db('call_log')
             .where(function () { this.where('twilio_call_sid', callSid).orWhere('call_sid', callSid); })
             .update({ customer_id: customer.id });
+          callerName = `${customer.first_name} ${customer.last_name}`.trim();
+          console.log(`[VoiceAgent] Matched caller: ${callerName} (${customer.id})`);
+        } else {
+          // Unknown caller — CNAM lookup to get name and auto-create lead
+          try {
+            const twilioAuth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+            const lookupRes = await fetch(`https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(from)}?Fields=caller_name`, {
+              headers: { Authorization: `Basic ${twilioAuth}` },
+            });
+            if (lookupRes.ok) {
+              const lookupData = await lookupRes.json();
+              callerName = lookupData.caller_name?.caller_name;
+              const callerType = lookupData.caller_name?.caller_type; // CONSUMER or BUSINESS
+
+              if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 1) {
+                const nameParts = callerName.trim().split(/\s+/);
+                const firstName = nameParts[0] || 'Unknown';
+                const lastName = nameParts.slice(1).join(' ') || '';
+                const numberConfig = TWILIO_NUMBERS.findByNumber(to);
+                const leadSource = numberConfig ? TWILIO_NUMBERS.getLeadSourceFromNumber(to) : { source: 'phone_call' };
+
+                try {
+                  const [newCust] = await db('customers').insert({
+                    first_name: firstName,
+                    last_name: lastName,
+                    phone: from,
+                    source: 'cnam_lookup',
+                    lead_source: leadSource.source || 'phone_call',
+                    lead_source_detail: numberConfig?.domain || 'inbound call',
+                    pipeline_stage: 'new_lead',
+                    pipeline_stage_changed_at: new Date(),
+                    last_contact_date: new Date(),
+                    last_contact_type: 'call_inbound',
+                    waveguard_tier: 'none',
+                    crm_notes: `Auto-created from CNAM: ${callerName}${callerType ? ` (${callerType})` : ''}`,
+                  }).returning('*');
+                  customer = newCust;
+                  await db('call_log')
+                    .where(function () { this.where('twilio_call_sid', callSid).orWhere('call_sid', callSid); })
+                    .update({ customer_id: newCust.id });
+                  console.log(`[VoiceAgent] CNAM lead created: ${callerName} (${from}) → ${newCust.id}`);
+
+                  // Sync to Square (non-blocking)
+                  try {
+                    const SquareService = require('../services/square');
+                    await SquareService.ensureSquareCustomer(newCust.id);
+                  } catch { /* non-blocking */ }
+                } catch (insertErr) {
+                  if (!insertErr.message?.includes('duplicate') && !insertErr.message?.includes('unique')) {
+                    console.error('[VoiceAgent] CNAM customer insert failed:', insertErr.message);
+                  }
+                }
+              } else {
+                console.log(`[VoiceAgent] CNAM returned no usable name for ${from}`);
+              }
+            }
+          } catch (lookupErr) {
+            console.log(`[VoiceAgent] CNAM lookup skipped: ${lookupErr.message}`);
+          }
         }
       } catch { /* non-critical */ }
     }
