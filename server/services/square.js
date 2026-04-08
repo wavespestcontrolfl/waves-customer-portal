@@ -304,7 +304,7 @@ const SquareService = {
       // Ensure customer exists in Square
       let squareCustomerId = customer.square_customer_id;
       if (!squareCustomerId) {
-        try { squareCustomerId = await this.getOrCreateSquareCustomer(customer); } catch { return null; }
+        try { squareCustomerId = await this.ensureSquareCustomer(customerId); } catch { return null; }
       }
       if (!squareCustomerId) return null;
 

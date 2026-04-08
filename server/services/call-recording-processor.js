@@ -212,6 +212,17 @@ const CallRecordingProcessor = {
           }).returning('*');
           customerId = newCust.id;
           logger.info(`[call-proc] Created customer: ${extracted.first_name} ${extracted.last_name} (${customerId})`);
+
+          // Sync new customer to Square
+          try {
+            const SquareService = require('./square');
+            const squareId = await SquareService.ensureSquareCustomer(customerId);
+            if (squareId) {
+              logger.info(`[call-proc] Synced to Square: ${squareId}`);
+            }
+          } catch (sqErr) {
+            logger.error(`[call-proc] Square sync failed (non-blocking): ${sqErr.message}`);
+          }
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
         }
