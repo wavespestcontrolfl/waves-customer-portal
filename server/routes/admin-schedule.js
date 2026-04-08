@@ -373,21 +373,92 @@ router.get('/month', async (req, res, next) => {
 // POST /api/admin/schedule — create new service
 router.post('/', async (req, res, next) => {
   try {
-    const { customerId, technicianId, scheduledDate, windowStart, windowEnd, serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, sendConfirmation } = req.body;
+    const {
+      customerId, technicianId, scheduledDate, windowStart, windowEnd,
+      serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount,
+      sendConfirmation, serviceId, serviceAddons, assignmentMode,
+      estimatedPrice, urgency, internalNotes, customerNotes, isCallback,
+      parentServiceId, sendConfirmationSms, sendTechNotification,
+    } = req.body;
 
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
 
     const customer = await db('customers').where({ id: customerId }).first();
     const zone = getZone(customer?.city, customer?.zip);
-    const duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
+    let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
 
-    const [svc] = await db('scheduled_services').insert({
-      customer_id: customerId, technician_id: technicianId || null,
-      scheduled_date: scheduledDate, window_start: windowStart, window_end: windowEnd,
+    // Look up service from services table for duration/pricing
+    let serviceRecord = null;
+    if (serviceId) {
+      try {
+        serviceRecord = await db('services').where({ id: serviceId }).first();
+        if (serviceRecord?.default_duration_minutes) duration = serviceRecord.default_duration_minutes;
+      } catch (e) { logger.warn(`[schedule] services table lookup failed: ${e.message}`); }
+    }
+
+    // Calculate end time from start + duration if not provided
+    let computedEnd = windowEnd;
+    if (windowStart && !windowEnd) {
+      const [h, m] = windowStart.split(':').map(Number);
+      const endMin = h * 60 + m + duration;
+      computedEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+    }
+
+    // Auto-assign tech if requested
+    let resolvedTechId = technicianId || null;
+    if (assignmentMode === 'auto') {
+      try {
+        const TechMatcher = require('../services/tech-matcher');
+        const match = await TechMatcher.findBestTech({ customerId, date: scheduledDate, serviceType, zone });
+        if (match?.technicianId) resolvedTechId = match.technicianId;
+      } catch (e) { logger.warn(`[schedule] Auto-assign failed, leaving unassigned: ${e.message}`); }
+    } else if (assignmentMode === 'unassigned') {
+      resolvedTechId = null;
+    }
+
+    // WaveGuard callback: free if customer has tier
+    let finalPrice = estimatedPrice != null ? estimatedPrice : (serviceRecord?.base_price || null);
+    if (isCallback && customer?.waveguard_tier) {
+      finalPrice = 0;
+    }
+
+    // Merge notes
+    const combinedNotes = [notes, customerNotes].filter(Boolean).join('\n') || null;
+
+    const insertData = {
+      customer_id: customerId, technician_id: resolvedTechId,
+      scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
       service_type: serviceType, status: 'pending',
       time_window: timeWindow, zone, estimated_duration_minutes: duration,
-      notes, is_recurring: isRecurring || false, recurring_pattern: recurringPattern,
-    }).returning('*');
+      notes: combinedNotes, is_recurring: isRecurring || false, recurring_pattern: recurringPattern,
+    };
+
+    // Add new workflow columns (safe — migration may not have run yet)
+    try {
+      const cols = await db('scheduled_services').columnInfo();
+      if (cols.service_id && serviceId) insertData.service_id = serviceId;
+      if (cols.estimated_price && finalPrice != null) insertData.estimated_price = finalPrice;
+      if (cols.urgency) insertData.urgency = urgency || 'routine';
+      if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
+      if (cols.is_callback) insertData.is_callback = isCallback || false;
+      if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
+    } catch (e) { logger.warn(`[schedule] Column check failed (non-blocking): ${e.message}`); }
+
+    const [svc] = await db('scheduled_services').insert(insertData).returning('*');
+
+    // Create addon entries
+    if (serviceAddons && serviceAddons.length > 0) {
+      try {
+        for (const addon of serviceAddons) {
+          await db('scheduled_service_addons').insert({
+            scheduled_service_id: svc.id,
+            service_id: addon.serviceId || null,
+            service_name: addon.name || addon.serviceName,
+            estimated_price: addon.price || null,
+          });
+        }
+      } catch (e) { logger.warn(`[schedule] Addon insert failed (non-blocking): ${e.message}`); }
+    }
 
     // Create recurring instances
     if (isRecurring && recurringPattern && recurringCount > 1) {
@@ -398,9 +469,9 @@ router.post('/', async (req, res, next) => {
         const nextDate = new Date(scheduledDate + 'T12:00:00');
         nextDate.setDate(nextDate.getDate() + interval * i);
         await db('scheduled_services').insert({
-          customer_id: customerId, technician_id: technicianId,
+          customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDate.toISOString().split('T')[0],
-          window_start: windowStart, window_end: windowEnd,
+          window_start: windowStart, window_end: computedEnd,
           service_type: serviceType, status: 'pending',
           time_window: timeWindow, zone, estimated_duration_minutes: duration,
           is_recurring: true, recurring_pattern: recurringPattern,
@@ -1110,6 +1181,120 @@ FORMATTING:
     logger.error(`[generate-report] AI failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
+});
+
+// GET /api/admin/schedule/services-dropdown — service list for appointment modal
+router.get('/services-dropdown', async (req, res, next) => {
+  try {
+    let groups = [];
+    try {
+      const services = await db('services').where({ is_active: true }).orderBy('sort_order');
+      if (services.length > 0) {
+        const byCategory = {};
+        for (const s of services) {
+          const cat = s.category || 'other';
+          if (!byCategory[cat]) byCategory[cat] = { category: cat, items: [] };
+          byCategory[cat].items.push({
+            id: s.id, name: s.name, duration: s.default_duration_minutes,
+            priceMin: parseFloat(s.price_range_min || s.base_price || 0),
+            priceMax: parseFloat(s.price_range_max || s.base_price || 0),
+            base_price: parseFloat(s.base_price || 0),
+            default_duration_minutes: s.default_duration_minutes,
+          });
+        }
+        groups = Object.values(byCategory);
+      }
+    } catch (e) { logger.warn(`[services-dropdown] services table query failed: ${e.message}`); }
+
+    // Fallback to hardcoded list
+    if (groups.length === 0) {
+      groups = [
+        { category: 'recurring', items: [
+          { name: 'Pest Control Service', duration: 30, priceMin: 35, priceMax: 65 },
+          { name: 'Lawn Care Service', duration: 20, priceMin: 45, priceMax: 85 },
+          { name: 'Mosquito Barrier Treatment', duration: 20, priceMin: 45, priceMax: 75 },
+          { name: 'Tree & Shrub Care Service', duration: 30, priceMin: 55, priceMax: 95 },
+          { name: 'Termite Bait Monitoring', duration: 20, priceMin: 40, priceMax: 60 },
+          { name: 'Rodent Bait Service', duration: 25, priceMin: 45, priceMax: 75 },
+        ]},
+        { category: 'one_time', items: [
+          { name: 'Initial Pest Treatment', duration: 45, priceMin: 150, priceMax: 300 },
+          { name: 'WDO Inspection', duration: 45, priceMin: 100, priceMax: 175 },
+          { name: 'Rodent Exclusion', duration: 120, priceMin: 350, priceMax: 800 },
+          { name: 'Rodent Trapping', duration: 30, priceMin: 75, priceMax: 150 },
+          { name: 'Flea Treatment', duration: 45, priceMin: 150, priceMax: 275 },
+          { name: 'Cockroach Treatment', duration: 45, priceMin: 125, priceMax: 250 },
+          { name: 'Bed Bug Treatment', duration: 90, priceMin: 300, priceMax: 600 },
+          { name: 'Termite Trenching', duration: 120, priceMin: 500, priceMax: 1200 },
+          { name: 'Termite Attic Remediation', duration: 90, priceMin: 400, priceMax: 900 },
+        ]},
+        { category: 'assessment', items: [
+          { name: 'Property Assessment', duration: 30, priceMin: 0, priceMax: 0 },
+          { name: 'Lawn Assessment', duration: 30, priceMin: 0, priceMax: 0 },
+          { name: 'Termite Inspection', duration: 45, priceMin: 0, priceMax: 75 },
+        ]},
+      ];
+    }
+
+    res.json({ groups });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/recommend-slots — smart slot recommendations
+router.get('/recommend-slots', async (req, res, next) => {
+  try {
+    const { customerId, serviceType, date, serviceId } = req.query;
+    if (!date) return res.status(400).json({ error: 'date required' });
+
+    // Try CSR booker first
+    try {
+      const CSRBooker = require('../services/csr-booker');
+      if (CSRBooker.recommendSlots) {
+        const result = await CSRBooker.recommendSlots({ customerId, serviceType, date, serviceId });
+        if (result?.slots?.length) return res.json(result);
+      }
+    } catch (e) { logger.warn(`[recommend-slots] CSR booker unavailable: ${e.message}`); }
+
+    // Basic slot finder: check existing services on that date
+    const existing = await db('scheduled_services')
+      .where({ scheduled_date: date })
+      .whereNotIn('status', ['cancelled'])
+      .select('window_start', 'window_end', 'estimated_duration_minutes');
+
+    const busySlots = existing.map(s => {
+      const start = s.window_start || '08:00';
+      const [sh, sm] = start.split(':').map(Number);
+      const dur = s.estimated_duration_minutes || 60;
+      return { startMin: sh * 60 + sm, endMin: sh * 60 + sm + dur };
+    });
+
+    // Find open 30-min windows between 7 AM (420) and 5 PM (1020)
+    const candidates = [];
+    for (let min = 420; min <= 1020; min += 30) {
+      const conflicts = busySlots.filter(b => min < b.endMin && min + 30 > b.startMin).length;
+      candidates.push({ min, conflicts });
+    }
+
+    // Sort by fewest conflicts, pick top 3, spread across morning/midday/afternoon
+    candidates.sort((a, b) => a.conflicts - b.conflicts);
+    const morning = candidates.find(c => c.min >= 420 && c.min < 660);
+    const midday = candidates.find(c => c.min >= 660 && c.min < 840);
+    const afternoon = candidates.find(c => c.min >= 840 && c.min <= 1020);
+
+    const picks = [morning, midday, afternoon].filter(Boolean).slice(0, 3);
+    if (picks.length === 0) picks.push(...candidates.slice(0, 3));
+
+    const slots = picks.map(p => {
+      const h = Math.floor(p.min / 60);
+      const m = p.min % 60;
+      const start = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      const label = p.conflicts === 0 ? 'Open' : `${p.conflicts} overlap${p.conflicts > 1 ? 's' : ''}`;
+      const period = h < 11 ? 'Morning' : h < 14 ? 'Midday' : 'Afternoon';
+      return { start, conflicts: p.conflicts, label: `${period} — ${label}` };
+    });
+
+    res.json({ slots });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

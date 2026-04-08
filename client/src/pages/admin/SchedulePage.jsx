@@ -6,6 +6,7 @@ const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanel'));
 const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanel'));
 const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanel'));
 import { ViewModeSelector, WeekView, MonthView } from '../../components/schedule/CalendarViews';
+import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -2291,118 +2292,8 @@ export default function SchedulePage() {
       </div>
       {syncMsg && <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>{syncMsg}</div>}
 
-      {/* New Appointment Form */}
-      {showNewAppt && (
-        <div style={{ background: D.card, borderRadius: 12, padding: 16, border: `1px solid ${D.green}44`, marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>New Appointment</div>
-            <button onClick={() => setShowNewAppt(false)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer', minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
-          </div>
-
-          {/* Customer search */}
-          <div style={{ marginBottom: 10, position: 'relative' }}>
-            <input type="text" value={newAppt.customerSearch} onChange={async (e) => {
-              const val = e.target.value;
-              setNewAppt(a => ({ ...a, customerSearch: val }));
-              if (val.length >= 2) {
-                try {
-                  const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8`);
-                  setNewAppt(a => ({ ...a, customerResults: r.customers || [] }));
-                } catch {}
-              } else {
-                setNewAppt(a => ({ ...a, customerResults: [] }));
-              }
-            }} placeholder="Search customer by name or phone..." style={{ width: '100%', padding: '12px 14px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, color: D.white, fontSize: 15, outline: 'none', boxSizing: 'border-box' }} />
-            {newAppt.customerResults.length > 0 && (
-              <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', zIndex: 20 }}>
-                {newAppt.customerResults.map(c => (
-                  <div key={c.id} onClick={() => setNewAppt(a => ({ ...a, customerId: c.id, customerSearch: `${c.firstName} ${c.lastName}`, customerResults: [] }))} style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: D.white, minHeight: 44, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <strong>{c.firstName} {c.lastName}</strong>
-                    <span style={{ color: D.muted }}>{c.phone || ''}</span>
-                    {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${D.teal}22`, color: D.teal }}>{c.tier}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
-            {newAppt.customerId && <div style={{ fontSize: 12, color: D.green, marginTop: 4 }}>✓ {newAppt.customerSearch}</div>}
-          </div>
-
-          {/* Date + Service + Time — stacks on mobile */}
-          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 8, marginBottom: 10 }}>
-            <div>
-              <label style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 3 }}>Date</label>
-              <input type="date" value={newAppt.apptDate || date} onChange={e => setNewAppt(a => ({ ...a, apptDate: e.target.value }))} style={{ width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 14, outline: 'none', boxSizing: 'border-box', minHeight: 44 }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 3 }}>Service</label>
-              <select value={newAppt.serviceType} onChange={e => setNewAppt(a => ({ ...a, serviceType: e.target.value }))} style={{ width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 14, outline: 'none', minHeight: 44 }}>
-                <optgroup label="Recurring">
-                  <option value="Pest Control Service">Pest Control Service</option>
-                  <option value="Lawn Care Service">Lawn Care Service</option>
-                  <option value="Mosquito Barrier Treatment">Mosquito Barrier Treatment</option>
-                  <option value="Tree & Shrub Care Service">Tree & Shrub Care Service</option>
-                  <option value="Termite Bait Monitoring">Termite Bait Monitoring</option>
-                  <option value="Rodent Bait Service">Rodent Bait Service</option>
-                </optgroup>
-                <optgroup label="One-Time">
-                  <option value="Initial Pest Treatment">Initial Pest Treatment</option>
-                  <option value="WDO Inspection">WDO Inspection</option>
-                  <option value="Rodent Exclusion">Rodent Exclusion</option>
-                  <option value="Rodent Trapping">Rodent Trapping</option>
-                  <option value="Flea Treatment">Flea Treatment</option>
-                  <option value="Cockroach Treatment">Cockroach Treatment</option>
-                  <option value="Bed Bug Treatment">Bed Bug Treatment</option>
-                  <option value="Termite Trenching">Termite Trenching</option>
-                  <option value="Termite Attic Remediation">Termite Attic Remediation</option>
-                </optgroup>
-                <optgroup label="Assessment">
-                  <option value="Property Assessment">Property Assessment</option>
-                  <option value="Lawn Assessment">Lawn Assessment</option>
-                  <option value="Termite Inspection">Termite Inspection</option>
-                </optgroup>
-              </select>
-            </div>
-            <div>
-              <label style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 3 }}>Start Time</label>
-              <select value={newAppt.windowStart} onChange={e => {
-                const start = e.target.value;
-                const [h, m] = start.split(':').map(Number);
-                const endH = h + 1;
-                const end = `${String(endH).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-                setNewAppt(a => ({ ...a, windowStart: start, windowEnd: end }));
-              }} style={{ width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 14, outline: 'none', minHeight: 44 }}>
-                {Array.from({ length: 12 }, (_, i) => i + 7).map(h => (
-                  <option key={h} value={`${String(h).padStart(2, '0')}:00`}>{h > 12 ? h - 12 : h}:00 {h >= 12 ? 'PM' : 'AM'}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <button disabled={!newAppt.customerId || savingAppt} onClick={async () => {
-            setSavingAppt(true);
-            try {
-              const apptDate = newAppt.apptDate || date;
-              await adminFetch('/admin/schedule', {
-                method: 'POST',
-                body: JSON.stringify({
-                  customerId: newAppt.customerId,
-                  scheduledDate: apptDate,
-                  serviceType: newAppt.serviceType,
-                  windowStart: newAppt.windowStart,
-                  windowEnd: newAppt.windowEnd,
-                  sendConfirmation: true,
-                }),
-              });
-              setShowNewAppt(false);
-              setNewAppt({ customerId: '', customerSearch: '', customerResults: [], serviceType: 'Pest Control Service', windowStart: '09:00', windowEnd: '10:00', apptDate: '' });
-              fetchSchedule(apptDate);
-            } catch (e) { alert('Failed: ' + e.message); }
-            setSavingAppt(false);
-          }} style={{ ...btnBase, background: D.green, color: D.white, fontSize: 14, height: 48, width: '100%', opacity: !newAppt.customerId || savingAppt ? 0.5 : 1 }}>
-            {savingAppt ? 'Creating...' : 'Create Appointment'}
-          </button>
-        </div>
-      )}
+      {/* New Appointment Modal */}
+      {showNewAppt && <CreateAppointmentModal defaultDate={date} onClose={() => setShowNewAppt(false)} onCreated={(appt) => { setShowNewAppt(false); fetchSchedule(appt.scheduledDate || date); }} />}
 
       {/* Week / Month calendar views */}
       {viewMode === 'week' && <WeekView startDate={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}

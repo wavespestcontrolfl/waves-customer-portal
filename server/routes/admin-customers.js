@@ -519,4 +519,41 @@ router.post('/fix-tiers', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
+router.post('/quick-add', async (req, res, next) => {
+  try {
+    const { firstName, lastName, phone, address, city, zip } = req.body;
+    if (!firstName || !lastName || !phone) {
+      return res.status(400).json({ error: 'firstName, lastName, phone required' });
+    }
+
+    const [customer] = await db('customers').insert({
+      first_name: firstName,
+      last_name: lastName,
+      phone,
+      address_line1: address || null,
+      city: city || null,
+      state: 'FL',
+      zip: zip || null,
+      pipeline_stage: 'new_lead',
+      lead_source: 'admin_manual',
+      active: true,
+    }).returning('*');
+
+    logger.info(`[customers] Quick-add: ${firstName} ${lastName} (${phone})`);
+
+    res.status(201).json({
+      customer: {
+        id: customer.id,
+        firstName: customer.first_name,
+        lastName: customer.last_name,
+        phone: customer.phone,
+        address: `${customer.address_line1 || ''}, ${customer.city || ''}, ${customer.state || ''} ${customer.zip || ''}`.trim(),
+        city: customer.city,
+        tier: customer.waveguard_tier,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
