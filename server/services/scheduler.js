@@ -715,6 +715,30 @@ function initScheduledJobs() {
   }
 
   // =========================================================================
+  // STRIPE BILLING — Monthly autopay + payment retries
+  // =========================================================================
+  cron.schedule('0 8 1 * *', async () => {
+    logger.info('Running: monthly billing (Stripe/Square)');
+    try {
+      const BillingCron = require('./billing-cron');
+      const result = await BillingCron.processMonthlyBilling();
+      logger.info(`Monthly billing done: ${result.charged} charged, ${result.failed} failed, ${result.skipped} skipped`);
+    } catch (err) {
+      logger.error(`Monthly billing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  cron.schedule('0 10 * * *', async () => {
+    try {
+      const BillingCron = require('./billing-cron');
+      const result = await BillingCron.processPaymentRetries();
+      if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded`);
+    } catch (err) {
+      logger.error(`Payment retry failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // BOUNCIE MILEAGE CRONS (daily sync, monthly summary, trip re-matching)
   // =========================================================================
   try {

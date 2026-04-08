@@ -18,7 +18,7 @@ const { initScheduledJobs } = require('./services/scheduler');
 const authRoutes = require('./routes/auth');
 const serviceRoutes = require('./routes/services');
 const scheduleRoutes = require('./routes/schedule');
-const billingRoutes = require('./routes/billing');
+const billingRoutes = require('./routes/billing-v2');
 const notificationRoutes = require('./routes/notifications');
 const requestRoutes = require('./routes/requests');
 const bouncieRoutes = require('./routes/bouncie');
@@ -116,6 +116,9 @@ app.use('/api/auth/send-code', authLimiter);
 app.use('/api/auth/verify-code', authLimiter);
 
 // Body parsing
+// Stripe webhook must use raw body for signature verification — mount BEFORE json parser
+app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }), require('./routes/stripe-webhook'));
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -190,7 +193,7 @@ app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 app.use('/api/admin/call-recordings', require('./routes/admin-call-recordings'));
 
 app.use('/api/admin/invoices', require('./routes/admin-invoices'));
-app.use('/api/pay', require('./routes/pay'));
+app.use('/api/pay', require('./routes/pay-v2'));
 app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
