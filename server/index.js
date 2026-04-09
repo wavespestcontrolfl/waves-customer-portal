@@ -221,6 +221,7 @@ app.use('/api/admin/services', require('./routes/admin-services'));
 app.use('/api/admin/square-import', require('./routes/admin-square-import'));
 app.use('/api/admin/discounts', require('./routes/admin-discounts'));
 app.use('/api/admin/dashboard-ops', require('./routes/admin-dashboard-ops'));
+app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
 app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));

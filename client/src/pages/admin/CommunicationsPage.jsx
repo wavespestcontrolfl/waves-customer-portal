@@ -891,6 +891,90 @@ const CHANNEL_TYPE_META = {
   inbound: { icon: '📥', label: 'Inbound', color: D.teal },
 };
 
+function SmsTemplatesTab() {
+  const [templates, setTemplates] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const [editBody, setEditBody] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [filter, setFilter] = useState('all');
+
+  useEffect(() => {
+    adminFetch('/admin/sms-templates').then(d => { setTemplates(d.templates || []); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  const handleSave = async (id) => {
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/sms-templates/${id}`, { method: 'PUT', body: JSON.stringify({ body: editBody }) });
+      setTemplates(prev => prev.map(t => t.id === id ? { ...t, body: editBody } : t));
+      setEditing(null);
+    } catch { alert('Save failed'); }
+    setSaving(false);
+  };
+
+  const toggleActive = async (t) => {
+    await adminFetch(`/admin/sms-templates/${t.id}`, { method: 'PUT', body: JSON.stringify({ is_active: !t.is_active }) });
+    setTemplates(prev => prev.map(x => x.id === t.id ? { ...x, is_active: !x.is_active } : x));
+  };
+
+  const categories = [...new Set(templates.map(t => t.category))];
+  const filtered = filter === 'all' ? templates : templates.filter(t => t.category === filter);
+
+  const catColors = { service: '#0ea5e9', billing: '#10b981', estimates: '#f59e0b', reviews: '#a855f7', referrals: '#3b82f6', retention: '#ef4444', onboarding: '#22c55e', internal: '#64748b', custom: '#94a3b8' };
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading templates...</div>;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{filtered.length} SMS Templates</div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <button onClick={() => setFilter('all')} style={{ padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer', background: filter === 'all' ? D.teal : D.card, color: filter === 'all' ? D.white : D.muted }}>All</button>
+          {categories.map(c => (
+            <button key={c} onClick={() => setFilter(c)} style={{ padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer', background: filter === c ? (catColors[c] || D.teal) : D.card, color: filter === c ? D.white : D.muted, textTransform: 'capitalize' }}>{c}</button>
+          ))}
+        </div>
+      </div>
+
+      {filtered.map(t => (
+        <div key={t.id} style={{ background: D.card, borderRadius: 10, padding: '14px 16px', border: `1px solid ${D.border}`, marginBottom: 8, borderLeft: `3px solid ${catColors[t.category] || D.muted}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{t.name}</span>
+              <span style={{ fontSize: 10, marginLeft: 8, padding: '2px 6px', borderRadius: 4, background: (catColors[t.category] || D.muted) + '22', color: catColors[t.category] || D.muted, textTransform: 'capitalize' }}>{t.category}</span>
+              {t.is_internal && <span style={{ fontSize: 10, marginLeft: 6, padding: '2px 6px', borderRadius: 4, background: '#64748b22', color: '#64748b' }}>Internal</span>}
+            </div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <button onClick={() => toggleActive(t)} style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, border: 'none', cursor: 'pointer', background: t.is_active ? D.green + '22' : D.red + '22', color: t.is_active ? D.green : D.red }}>{t.is_active ? 'Active' : 'Disabled'}</button>
+              {editing === t.id ? (
+                <>
+                  <button onClick={() => handleSave(t.id)} disabled={saving} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.green, color: D.white }}>{saving ? '...' : 'Save'}</button>
+                  <button onClick={() => setEditing(null)} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: 'transparent', color: D.muted, border: `1px solid ${D.border}` }}>Cancel</button>
+                </>
+              ) : (
+                <button onClick={() => { setEditing(t.id); setEditBody(t.body); }} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.teal + '22', color: D.teal }}>Edit</button>
+              )}
+            </div>
+          </div>
+          {editing === t.id ? (
+            <textarea value={editBody} onChange={e => setEditBody(e.target.value)} rows={4} style={{ width: '100%', padding: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none', boxSizing: 'border-box' }} />
+          ) : (
+            <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{t.body}</div>
+          )}
+          {t.variables && (
+            <div style={{ marginTop: 6, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {(typeof t.variables === 'string' ? JSON.parse(t.variables) : t.variables).map(v => (
+                <span key={v} style={{ fontSize: 9, padding: '1px 5px', borderRadius: 3, background: D.bg, color: D.muted, border: `1px solid ${D.border}` }}>{`{${v}}`}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
   // Build per-number stats from the stats API data
   const numberStats = {};
@@ -1388,7 +1472,7 @@ export default function CommunicationsPage() {
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
-        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'recordings', label: 'Call Recordings' }, { key: 'numbers', label: 'Phone Numbers' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
+        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'recordings', label: 'Call Recordings' }, { key: 'numbers', label: 'Phone Numbers' }, { key: 'templates', label: 'SMS Templates' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
           <button key={t.key} onClick={() => setCommsTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
@@ -1398,7 +1482,9 @@ export default function CommunicationsPage() {
         ))}
       </div>
 
-      {commsTab === 'recordings' ? <CallRecordingsPanel /> : commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'numbers' ? (
+      {commsTab === 'recordings' ? <CallRecordingsPanel /> : commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'templates' ? (
+        <SmsTemplatesTab />
+      ) : commsTab === 'numbers' ? (
         <PhoneNumbersTab channelStats={channelStats} maxChannel={maxChannel} stats={stats} />
       ) : <>
 
