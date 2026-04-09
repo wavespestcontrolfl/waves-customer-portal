@@ -1,8 +1,8 @@
 // Lazy-load googleapis (~71MB) — only when GBP methods are called
-let _google;
-function google() {
-  if (!_google) { _google = require('googleapis').google; }
-  return _google;
+let _googleapis;
+function getGoogle() {
+  if (!_googleapis) { try { _googleapis = require('googleapis').google; } catch { _googleapis = null; } }
+  return _googleapis;
 }
 const logger = require('./logger');
 const db = require('../models/db');
@@ -61,7 +61,7 @@ class GoogleBusinessService {
 
     if (!clientId || !clientSecret || !refreshToken) return null;
 
-    const client = new google.auth.OAuth2(clientId, clientSecret, this.redirectUri);
+    const client = new (getGoogle()).auth.OAuth2(clientId, clientSecret, this.redirectUri);
     client.setCredentials({ refresh_token: refreshToken });
     this._clients[locationId] = client;
     return client;
@@ -344,7 +344,7 @@ class GoogleBusinessService {
     const clientId = process.env[`GBP_CLIENT_ID_${envKey}`];
     const clientSecret = process.env[`GBP_CLIENT_SECRET_${envKey}`];
     if (!clientId || !clientSecret) throw new Error(`GBP_CLIENT_ID_${envKey} and GBP_CLIENT_SECRET_${envKey} must be set first`);
-    const client = new google.auth.OAuth2(clientId, clientSecret, this.redirectUri);
+    const client = new (getGoogle()).auth.OAuth2(clientId, clientSecret, this.redirectUri);
     return client.generateAuthUrl({
       access_type: 'offline', prompt: 'consent',
       scope: ['https://www.googleapis.com/auth/business.manage'],
@@ -356,7 +356,7 @@ class GoogleBusinessService {
     const envKey = LOCATION_ENV_KEYS[locationId];
     const clientId = process.env[`GBP_CLIENT_ID_${envKey}`];
     const clientSecret = process.env[`GBP_CLIENT_SECRET_${envKey}`];
-    const client = new google.auth.OAuth2(clientId, clientSecret, this.redirectUri);
+    const client = new (getGoogle()).auth.OAuth2(clientId, clientSecret, this.redirectUri);
     const { tokens } = await client.getToken(code);
     return tokens;
   }

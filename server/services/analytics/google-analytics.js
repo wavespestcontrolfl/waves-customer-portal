@@ -10,10 +10,10 @@
  */
 
 // Lazy-load googleapis (~71MB) — only when GA4 methods are called
-let _google;
-function google() {
-  if (!_google) { _google = require('googleapis').google; }
-  return _google;
+let _googleapis;
+function getGoogle() {
+  if (!_googleapis) { try { _googleapis = require('googleapis').google; } catch { _googleapis = null; } }
+  return _googleapis;
 }
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -46,12 +46,14 @@ async function initialize() {
     }
 
     const credentials = JSON.parse(jsonStr);
-    const auth = new google.auth.GoogleAuth({
+    const g = getGoogle();
+    if (!g) { logger.error('[GA4] googleapis not installed'); return null; }
+    const auth = new g.auth.GoogleAuth({
       credentials,
       scopes: ['https://www.googleapis.com/auth/analytics.readonly'],
     });
 
-    analyticsClient = google.analyticsdata({ version: 'v1beta', auth });
+    analyticsClient = g.analyticsdata({ version: 'v1beta', auth });
     logger.info(`[GA4] Initialized for property ${propertyId}`);
     return analyticsClient;
   } catch (err) {
