@@ -13,7 +13,7 @@ exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('customer_subscriptions'))) {
     await knex.schema.createTable('customer_subscriptions', t => {
       t.increments('id').primary();
-      t.integer('customer_id').notNullable().references('id').inTable('customers').onDelete('CASCADE');
+      t.uuid('customer_id').notNullable();
       t.string('square_subscription_id', 100).unique();
       t.string('square_customer_id', 100);
       t.string('service_type', 100);
