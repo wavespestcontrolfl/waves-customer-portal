@@ -7,11 +7,53 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Auto-create tables if missing
+async function ensureTables() {
+  if (!(await db.schema.hasTable('time_entries'))) {
+    await db.schema.createTable('time_entries', t => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('technician_id').notNullable(); t.string('entry_type', 20).defaultTo('shift');
+      t.string('status', 20).defaultTo('active'); t.timestamp('clock_in').notNullable();
+      t.timestamp('clock_out'); t.decimal('duration_minutes', 8, 2); t.uuid('job_id'); t.uuid('customer_id');
+      t.decimal('clock_in_lat', 10, 7); t.decimal('clock_in_lng', 10, 7);
+      t.decimal('clock_out_lat', 10, 7); t.decimal('clock_out_lng', 10, 7);
+      t.string('service_type', 50); t.string('pay_type', 20).defaultTo('regular');
+      t.text('notes'); t.text('edit_reason'); t.string('edited_by', 100);
+      t.string('source', 20).defaultTo('tech_app'); t.timestamps(true, true);
+    });
+    logger.info('[timetracking] Auto-created time_entries table');
+  }
+  if (!(await db.schema.hasTable('time_entry_daily_summary'))) {
+    await db.schema.createTable('time_entry_daily_summary', t => {
+      t.increments('id'); t.uuid('technician_id').notNullable(); t.date('work_date').notNullable();
+      t.decimal('total_shift_minutes', 8, 2).defaultTo(0); t.decimal('total_job_minutes', 8, 2).defaultTo(0);
+      t.decimal('total_drive_minutes', 8, 2).defaultTo(0); t.decimal('total_break_minutes', 8, 2).defaultTo(0);
+      t.integer('job_count').defaultTo(0); t.decimal('overtime_minutes', 8, 2).defaultTo(0);
+      t.decimal('utilization_pct', 5, 2); t.decimal('revenue_generated', 10, 2).defaultTo(0);
+      t.string('status', 20).defaultTo('pending'); t.timestamps(true, true);
+      t.unique(['technician_id', 'work_date']);
+    });
+    logger.info('[timetracking] Auto-created time_entry_daily_summary table');
+  }
+  if (!(await db.schema.hasTable('time_weekly_summary'))) {
+    await db.schema.createTable('time_weekly_summary', t => {
+      t.increments('id'); t.uuid('technician_id').notNullable(); t.date('week_start').notNullable();
+      t.date('week_end').notNullable(); t.decimal('total_shift_minutes', 8, 2).defaultTo(0);
+      t.decimal('regular_minutes', 8, 2).defaultTo(0); t.decimal('overtime_minutes', 8, 2).defaultTo(0);
+      t.integer('days_worked').defaultTo(0); t.integer('job_count').defaultTo(0);
+      t.string('status', 20).defaultTo('pending'); t.timestamps(true, true);
+      t.unique(['technician_id', 'week_start']);
+    });
+    logger.info('[timetracking] Auto-created time_weekly_summary table');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // GET /  — Dashboard: who's clocked in, today's labor, weekly stats
 // ---------------------------------------------------------------------------
 router.get('/', async (req, res, next) => {
   try {
+    await ensureTables();
     const today = new Date().toISOString().split('T')[0];
 
     // Active shifts
