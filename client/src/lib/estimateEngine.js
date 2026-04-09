@@ -1,7 +1,14 @@
 /**
- * Waves Pest Control — Estimate Calculation Engine v1.3
+ * Waves Pest Control — Estimate Calculation Engine v1.4
  * Ported from waves-estimator.html weCalculate() function.
  * Pure calculation — no DOM, no side effects.
+ *
+ * v1.4 changes:
+ * - Split roach modifier: Regular 10%, German 25% (was both 15%)
+ * - Tiered hardscape marginal: 3% up to 15k, 5% above (was flat 3%)
+ * - Fungicide multiplier: 1.55 (was 1.38) — covers real COGS on curative apps
+ * - Margin floor check: warns if any line goes below 35% margin at Platinum
+ * - Tier commitment notes in output for downstream reconciliation
  */
 
 /* ── helpers ────────────────────────────────────────────────── */
@@ -203,8 +210,9 @@ export function calculateEstimate(inputs) {
   // Recurring customer
   if (isRC) addMod('one-time', 'Recurring customer: -15% one-time services', null, 'down');
 
-  // Roach modifier
-  if (roachMod === 'GERMAN' || roachMod === 'REGULAR') addMod('pest', `Roach modifier (${roachMod}): +15%/visit`, null, 'up');
+  // Roach modifier — German is far more labor-intensive (gel bait, IGR, monitoring, callbacks)
+  if (roachMod === 'GERMAN') addMod('pest', 'Roach modifier (German): +25%/visit', null, 'up');
+  else if (roachMod === 'REGULAR') addMod('pest', 'Roach modifier (American/Smoky Brown): +10%/visit', null, 'up');
 
   /* ═══════════ RECURRING ═══════════ */
   let hasRec = false;
@@ -219,10 +227,17 @@ export function calculateEstimate(inputs) {
     if (pt.includes('commercial')) {
       hardscape = Math.round(lotSqFt * 0.15);
     } else {
-      let base = 800, marginal = 0.03;
-      if (pt.includes('town') || pt.includes('duplex')) { base = 400; marginal = 0.02; }
-      else if (pt.includes('condo')) { base = 200; marginal = 0.05; }
-      hardscape = base + Math.max(0, Math.round((lotSqFt - 7500) * marginal));
+      let base = 800;
+      if (pt.includes('town') || pt.includes('duplex')) {
+        hardscape = 400 + Math.max(0, Math.round((lotSqFt - 7500) * 0.02));
+      } else if (pt.includes('condo')) {
+        hardscape = 200 + Math.max(0, Math.round((lotSqFt - 7500) * 0.05));
+      } else {
+        // Tiered marginal: 3% up to 15k, 5% above — tracks better on larger LWR estate lots
+        const tier1 = Math.max(0, Math.min(lotSqFt, 15000) - 7500) * 0.03;
+        const tier2 = Math.max(0, lotSqFt - 15000) * 0.05;
+        hardscape = base + Math.round(tier1 + tier2);
+      }
     }
     // Fixed deductions for features (not percentage-based)
     if (hasPoolCage) hardscape += 600;
@@ -308,7 +323,9 @@ export function calculateEstimate(inputs) {
     if (hasLargeDriveway) adj += 5;
     adj += propTypeAdj; // Property type adjustment
     let pp = Math.max(89, 117 + adj), rOG = 0;
-    if (roachMod === 'REGULAR' || roachMod === 'GERMAN') rOG = Math.round(pp * 0.15 * 100) / 100;
+    // Split roach modifier: German 25% (labor-intensive: gel bait, IGR, monitoring), Regular 10%
+    if (roachMod === 'GERMAN') rOG = Math.round(pp * 0.25 * 100) / 100;
+    else if (roachMod === 'REGULAR') rOG = Math.round(pp * 0.10 * 100) / 100;
     const freqTiers = [
       { f: 4, label: 'Quarterly', disc: 1.0, rec: pestFreq === 4 },
       { f: 6, label: 'Bi-Monthly', disc: 0.92, rec: pestFreq === 6 },
@@ -446,7 +463,8 @@ export function calculateEstimate(inputs) {
   /* ── One-Time Pest ───────────────────────────────────────── */
   if (svcOnetimePest && footprint > 0) {
     hasOT = true;
-    let bpp = R.pest ? R.pest.pa / (R.pest.rOG > 0 ? (1 + 0.15) : 1) : 117;
+    const roachBackout = roachMod === 'GERMAN' ? 1.25 : roachMod === 'REGULAR' ? 1.10 : 1;
+    let bpp = R.pest ? R.pest.pa / (R.pest.rOG > 0 ? roachBackout : 1) : 117;
     if (!R.pest) {
       let adj = 0;
       adj += interpolate(footprint, [
@@ -481,7 +499,7 @@ export function calculateEstimate(inputs) {
     let tm = 1.0, tl = 'Fertilization';
     if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
-    else if (otLawnType === 'FUNGICIDE') { tm = 1.38; tl = 'Fungicide'; }
+    else if (otLawnType === 'FUNGICIDE') { tm = 1.55; tl = 'Fungicide'; }
     const fp = otP(Math.max(85, Math.round(bl * tm)));
     otItems.push({ name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl });
   }
@@ -724,15 +742,17 @@ export function calculateEstimate(inputs) {
 
   /* ═══════════ WAVEGUARD TOTALS ═══════════ */
   let ac = 0, ra = 0;
-  if (R.lawn) { ac++; ra += R.lawn[2].ann; }
-  if (R.pest) { ac++; ra += R.pest.ann; }
-  if (R.ts) { ac++; ra += R.ts[1].ann; }
-  if (R.injection) { ac++; ra += R.injection.ann; }
+  // Track per-line revenue for margin check
+  const lineItems = [];
+  if (R.lawn) { ac++; ra += R.lawn[2].ann; lineItems.push({ name: 'Lawn Care', ann: R.lawn[2].ann }); }
+  if (R.pest) { ac++; ra += R.pest.ann; lineItems.push({ name: 'Pest Control', ann: R.pest.ann }); }
+  if (R.ts) { ac++; ra += R.ts[1].ann; lineItems.push({ name: 'Tree & Shrub', ann: R.ts[1].ann }); }
+  if (R.injection) { ac++; ra += R.injection.ann; lineItems.push({ name: 'Palm Injection', ann: R.injection.ann }); }
   if (R.mq) {
     const ri = treeDensity === 'HEAVY' ? 2 : 1;
-    if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; }
+    if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', ann: R.mq[ri].ann }); }
   }
-  if (R.tmBait) { ac++; ra += 35 * 12; }
+  if (R.tmBait) { ac++; ra += 35 * 12; lineItems.push({ name: 'Termite Bait', ann: 420 }); }
 
   let wt = 'Bronze', wd = 0;
   if (ac >= 4) { wt = 'Platinum'; wd = 0.20; }
@@ -742,6 +762,28 @@ export function calculateEstimate(inputs) {
   const da = Math.round(ra * wd * 100) / 100;
   const ad = Math.round((ra - da) * 100) / 100;
   const mm = Math.round(ad / 12 * 100) / 100;
+
+  // Margin floor check - flag any line that drops below 35% margin at current tier discount
+  // Loaded labor rate ~$35/hr, typical service 45-60 min = ~$30-35 labor + $10-15 materials = ~$45 COGS floor
+  const MARGIN_FLOOR = 0.35;
+  const marginWarnings = [];
+  if (wd > 0) {
+    lineItems.forEach(li => {
+      const discountedAnn = li.ann * (1 - wd);
+      // Estimate COGS at ~55% of pre-discount (conservative: labor + materials + drive)
+      const estimatedCOGS = li.ann * 0.55;
+      const margin = (discountedAnn - estimatedCOGS) / discountedAnn;
+      if (margin < MARGIN_FLOOR) {
+        marginWarnings.push({
+          service: li.name,
+          preDiscount: Math.round(li.ann),
+          afterDiscount: Math.round(discountedAnn),
+          estimatedMargin: Math.round(margin * 100),
+          tier: wt,
+        });
+      }
+    });
+  }
 
   let ot = 0;
   otItems.forEach(i => ot += i.price);
@@ -780,6 +822,11 @@ export function calculateEstimate(inputs) {
       savings: da,
       rodentBaitMo: R.rodBaitMo || 0,
       serviceCount: ac,
+      // Tier commitment: if customer cancels services and drops below tier threshold,
+      // downstream billing should reconcile to the new tier rate retroactively for that period.
+      // tierServiceMin: minimum services required to maintain this tier
+      tierServiceMin: wt === 'Platinum' ? 4 : wt === 'Gold' ? 3 : wt === 'Silver' ? 2 : 1,
+      marginWarnings, // any lines below 35% margin at this tier discount
     },
     oneTime: {
       items: otItems,
