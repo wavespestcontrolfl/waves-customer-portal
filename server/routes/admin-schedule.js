@@ -1197,32 +1197,74 @@ router.get('/services-dropdown', async (req, res, next) => {
       }
     } catch (e) { logger.warn(`[services-dropdown] services table query failed: ${e.message}`); }
 
-    // Fallback to hardcoded list
+    // Fallback to full service library
     if (groups.length === 0) {
       groups = [
-        { category: 'recurring', items: [
-          { name: 'Pest Control Service', duration: 30, priceMin: 35, priceMax: 65 },
-          { name: 'Lawn Care Service', duration: 20, priceMin: 45, priceMax: 85 },
-          { name: 'Mosquito Barrier Treatment', duration: 20, priceMin: 45, priceMax: 75 },
-          { name: 'Tree & Shrub Care Service', duration: 30, priceMin: 55, priceMax: 95 },
-          { name: 'Termite Bait Monitoring', duration: 20, priceMin: 40, priceMax: 60 },
-          { name: 'Rodent Bait Service', duration: 25, priceMin: 45, priceMax: 75 },
+        { category: 'specialty', items: [
+          { name: 'WaveGuard Membership', duration: 30, priceMin: 0, priceMax: 0 },
+          { name: 'WaveGuard Initial Setup', duration: 60, priceMin: 99, priceMax: 99 },
+          { name: 'Fire Ant Treatment', duration: 30, priceMin: 55, priceMax: 150 },
+          { name: 'Flea & Tick Yard Treatment', duration: 40, priceMin: 150, priceMax: 350 },
+          { name: 'Bee / Wasp Nest Removal', duration: 30, priceMin: 150, priceMax: 250 },
+          { name: 'Tick Control Service', duration: 30, priceMin: 100, priceMax: 200 },
+          { name: 'Mud Dauber Nest Removal', duration: 20, priceMin: 75, priceMax: 150 },
+          { name: 'Wildlife Trapping Service', duration: 30, priceMin: 150, priceMax: 400 },
         ]},
-        { category: 'one_time', items: [
-          { name: 'Initial Pest Treatment', duration: 45, priceMin: 150, priceMax: 300 },
-          { name: 'WDO Inspection', duration: 45, priceMin: 100, priceMax: 175 },
-          { name: 'Rodent Exclusion', duration: 120, priceMin: 350, priceMax: 800 },
-          { name: 'Rodent Trapping', duration: 30, priceMin: 75, priceMax: 150 },
-          { name: 'Flea Treatment', duration: 45, priceMin: 150, priceMax: 275 },
-          { name: 'Cockroach Treatment', duration: 45, priceMin: 125, priceMax: 250 },
-          { name: 'Bed Bug Treatment', duration: 90, priceMin: 300, priceMax: 600 },
-          { name: 'Termite Trenching', duration: 120, priceMin: 500, priceMax: 1200 },
-          { name: 'Termite Attic Remediation', duration: 90, priceMin: 400, priceMax: 900 },
+        { category: 'pest_control', items: [
+          { name: 'General Pest Control (Quarterly)', duration: 45, priceMin: 55, priceMax: 95 },
+          { name: 'General Pest Control (Monthly)', duration: 30, priceMin: 40, priceMax: 75 },
+          { name: 'Initial Pest Cleanout', duration: 90, priceMin: 125, priceMax: 300 },
+          { name: 'General Pest Control (Semiannual)', duration: 45, priceMin: 65, priceMax: 110 },
+          { name: 'General Pest Control (Bi-Monthly)', duration: 40, priceMin: 50, priceMax: 85 },
         ]},
-        { category: 'assessment', items: [
-          { name: 'Property Assessment', duration: 30, priceMin: 0, priceMax: 0 },
-          { name: 'Lawn Assessment', duration: 30, priceMin: 0, priceMax: 0 },
-          { name: 'Termite Inspection', duration: 45, priceMin: 0, priceMax: 75 },
+        { category: 'lawn_care', items: [
+          { name: 'Lawn Fertilization & Weed Control', duration: 45, priceMin: 45, priceMax: 120 },
+          { name: 'Lawn Fungicide Treatment', duration: 40, priceMin: 55, priceMax: 150 },
+          { name: 'Lawn Insect Control', duration: 45, priceMin: 50, priceMax: 130 },
+          { name: 'Core Aeration', duration: 60, priceMin: 100, priceMax: 350 },
+        ]},
+        { category: 'mosquito', items: [
+          { name: 'Mosquito Control (Monthly)', duration: 30, priceMin: 39, priceMax: 85 },
+          { name: 'Mosquito Event Spray', duration: 30, priceMin: 125, priceMax: 125 },
+        ]},
+        { category: 'termite', items: [
+          { name: 'Termite Liquid Treatment', duration: 240, priceMin: 800, priceMax: 3500 },
+          { name: 'Termite Bait Station System', duration: 180, priceMin: 1000, priceMax: 4000 },
+          { name: 'Termite Warranty Renewal', duration: 60, priceMin: 175, priceMax: 400 },
+          { name: 'Termite Bond (10-Year Term)', duration: 60, priceMin: 500, priceMax: 1500 },
+          { name: 'Termite Bond (5-Year Term)', duration: 60, priceMin: 350, priceMax: 900 },
+          { name: 'Termite Bond (1-Year Term)', duration: 60, priceMin: 175, priceMax: 400 },
+          { name: 'Termite Monitoring Service', duration: 30, priceMin: 35, priceMax: 65 },
+          { name: 'Termite Active Annual Bait Station Service', duration: 60, priceMin: 250, priceMax: 500 },
+          { name: 'Termite Active Bait Station Service (Quarterly)', duration: 45, priceMin: 65, priceMax: 150 },
+          { name: 'Termite Trenching Service', duration: 120, priceMin: 600, priceMax: 2500 },
+          { name: 'Termite Installation Setup', duration: 180, priceMin: 500, priceMax: 2000 },
+          { name: 'Termite Pretreatment Service', duration: 120, priceMin: 300, priceMax: 1200 },
+          { name: 'Termite Bait Station Cartridge Replacement', duration: 30, priceMin: 25, priceMax: 50 },
+          { name: 'Slab Pre-Treat Termite Service', duration: 120, priceMin: 300, priceMax: 1000 },
+          { name: 'Termite Spot Treatment Service', duration: 45, priceMin: 150, priceMax: 500 },
+        ]},
+        { category: 'rodent', items: [
+          { name: 'Rodent Exclusion & Trapping', duration: 120, priceMin: 250, priceMax: 1200 },
+          { name: 'Rodent Monitoring (Monthly)', duration: 20, priceMin: 45, priceMax: 109 },
+          { name: 'Rodent Trapping Service', duration: 30, priceMin: 150, priceMax: 400 },
+          { name: 'Rodent Exclusion Service', duration: 90, priceMin: 200, priceMax: 800 },
+          { name: 'Rodent Trapping & Sanitation Service', duration: 60, priceMin: 250, priceMax: 600 },
+          { name: 'Rodent Trapping, Exclusion & Sanitation Service', duration: 120, priceMin: 400, priceMax: 1200 },
+          { name: 'Rodent Pest Control', duration: 30, priceMin: 75, priceMax: 200 },
+        ]},
+        { category: 'tree_shrub', items: [
+          { name: 'Tree & Shrub Care Program', duration: 45, priceMin: 45, priceMax: 150 },
+          { name: 'Palm Tree Nutritional Treatment', duration: 30, priceMin: 15, priceMax: 45 },
+          { name: 'Tree & Shrub Care (Every 6 Weeks)', duration: 45, priceMin: 55, priceMax: 130 },
+        ]},
+        { category: 'inspection', items: [
+          { name: 'WDO Inspection (Termite Letter)', duration: 60, priceMin: 0, priceMax: 125 },
+          { name: 'Lawn Health Inspection', duration: 45, priceMin: 0, priceMax: 75 },
+          { name: 'New Customer Property Inspection', duration: 60, priceMin: 0, priceMax: 0 },
+        ]},
+        { category: 'other', items: [
+          { name: 'Waves Pest Control Appointment', duration: 60, priceMin: 0, priceMax: 0 },
         ]},
       ];
     }
