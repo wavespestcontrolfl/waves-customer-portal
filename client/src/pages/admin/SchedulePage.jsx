@@ -73,15 +73,19 @@ const SKIP_REASONS = [
 function stripSquareBoilerplate(notes) {
   if (!notes) return '';
   return notes
-    .replace(/\*{3}\s*Please make changes.*?(?:\.|\n|$)/gi, '')
+    .replace(/\*{3}\s*Please make changes.*?(?:\*{3}|$)/gis, '')
+    .replace(/Please make changes to this appointment in the Square Appointments calendar[\s\S]*?next sync\./gi, '')
     .replace(/https?:\/\/app\.squareup\.com\S*/g, '')
+    .replace(/https?:\/\/squareup\.com\S*/g, '')
     .replace(/New customer\s*[-\u2013\u2014]\s*first visit/gi, '')
     .replace(/New customer\s*[-\u2013\u2014]\s*first time/gi, '')
     .replace(/First[-\s]time customer/gi, '')
     .replace(/Booked via Square Online/gi, '')
     .replace(/Booked online/gi, '')
     .replace(/Created by Square/gi, '')
+    .replace(/Any changes made here will be overwritten.*$/gim, '')
     .replace(/\|\s*$/g, '').replace(/^\s*\|/g, '')
+    .replace(/\n{3,}/g, '\n\n')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
@@ -1769,9 +1773,9 @@ function CurrentVisitCard({ visit, trackName }) {
         </div>
 
         {/* Notes/SOP */}
-        {visit.notes && (
+        {visit.notes && stripSquareBoilerplate(visit.notes) && (
           <div style={{ marginTop: 10, fontSize: 12, color: D.muted, lineHeight: 1.5, padding: '8px 10px', background: D.bg + '88', borderRadius: 6 }}>
-            {visit.notes}
+            {stripSquareBoilerplate(visit.notes)}
           </div>
         )}
       </div>

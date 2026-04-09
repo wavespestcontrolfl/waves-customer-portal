@@ -216,6 +216,7 @@ app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));
+app.use('/api/admin/ical-history', require('./routes/admin-ical-history'));
 app.use('/api/admin/mileage', require('./routes/admin-mileage'));
 app.use('/api/admin/compliance-v2', require('./routes/admin-compliance-v2'));
 app.use('/api/admin/services', require('./routes/admin-services'));
