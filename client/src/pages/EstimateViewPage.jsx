@@ -850,64 +850,7 @@ export default function EstimateViewPage() {
           )}
         </div>
 
-        {/* ============================================================= */}
-        {/* 5. ALSO AVAILABLE section                                      */}
-        {/* ============================================================= */}
-        {missingServices.length > 0 && (() => {
-          const APPROX_MONTHLY = { lawn: 85, pest: 45, mosquito: 35, treeShrub: 55, termite: 50 };
-          const TIER_THRESHOLDS = [
-            { count: 4, name: 'Platinum', discount: '20%' },
-            { count: 3, name: 'Gold', discount: '15%' },
-            { count: 2, name: 'Silver', discount: '10%' },
-          ];
-          const currentCount = includedKeys.length;
-          const currentTier = e.tier || 'Bronze';
-          return (
-            <div style={{ marginTop: 32 }}>
-              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>
-                Enhance Your Plan
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {missingServices.slice(0, 2).map((svc, i) => {
-                  const approx = APPROX_MONTHLY[svc.key] || 50;
-                  const newCount = currentCount + 1 + i;
-                  const nextTier = TIER_THRESHOLDS.find(t => newCount >= t.count);
-                  return (
-                    <div key={i} style={{
-                      background: '#fff', borderRadius: 16, padding: '16px 18px',
-                      border: `1px solid ${SAND_DARK}`,
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
-                          {svc.emoji} {svc.label}
-                        </div>
-                        <div style={{ fontSize: 13, color: B.grayDark, marginTop: 3 }}>
-                          ~${approx}/mo standalone
-                        </div>
-                        {nextTier && nextTier.name !== currentTier && (
-                          <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginTop: 2 }}>
-                            Unlocks {nextTier.name} tier ({nextTier.discount} off everything)
-                          </div>
-                        )}
-                      </div>
-                      <a
-                        href={`sms:+19413187612?body=${encodeURIComponent(`Hi! I'd like to add ${svc.label} to my estimate for ${e.address}.`)}`}
-                        style={{
-                          ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
-                          background: B.wavesBlue, color: '#fff', textDecoration: 'none',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        Text Us
-                      </a>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })()}
+        {/* Enhance Your Plan — removed */}
 
         {/* ============================================================= */}
         {/* 6. PERKS THAT ACTUALLY MATTER — comparison table               */}
