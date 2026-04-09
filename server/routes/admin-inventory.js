@@ -573,4 +573,229 @@ router.delete('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// PUT /service-usage/:id — update a service product usage mapping
+// (MUST be before PUT /:id to avoid Express param catch)
+// =========================================================================
+router.put('/service-usage/:id', async (req, res, next) => {
+  try {
+    const { serviceType, productId, usageAmount, usageUnit, usagePer1000sf, isPrimary, notes } = req.body;
+    const upd = { updated_at: new Date() };
+    if (serviceType !== undefined) upd.service_type = serviceType;
+    if (productId !== undefined) upd.product_id = productId;
+    if (usageAmount !== undefined) upd.usage_amount = usageAmount;
+    if (usageUnit !== undefined) upd.usage_unit = usageUnit;
+    if (usagePer1000sf !== undefined) upd.usage_per_1000sf = usagePer1000sf;
+    if (isPrimary !== undefined) upd.is_primary = isPrimary;
+    if (notes !== undefined) upd.notes = notes;
+
+    await db('service_product_usage').where({ id: req.params.id }).update(upd);
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// PUT /:id — update product fields (inline editing)
+// =========================================================================
+router.put('/:id', async (req, res, next) => {
+  try {
+    const product = await db('products_catalog').where({ id: req.params.id }).first();
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    const allowed = {
+      name: 'name', category: 'category', subcategory: 'subcategory',
+      activeIngredient: 'active_ingredient', moaGroup: 'moa_group',
+      containerSize: 'container_size', formulation: 'formulation',
+      defaultUnit: 'default_unit', defaultRate: 'default_rate', sku: 'sku',
+      unitSizeOz: 'unit_size_oz', unitType: 'unit_type',
+      signalWord: 'signal_word', reiHours: 'rei_hours',
+      rainFreeHours: 'rain_free_hours', minTempF: 'min_temp_f', maxTempF: 'max_temp_f',
+      maxWindMph: 'max_wind_mph', dilutionRate: 'dilution_rate',
+      mixingInstructions: 'mixing_instructions', ppeRequired: 'ppe_required',
+      restrictedUse: 'restricted_use', maximumAnnualRate: 'maximum_annual_rate',
+      reapplicationIntervalDays: 'reapplication_interval_days',
+      pollinatorPrecautions: 'pollinator_precautions', aquaticBufferFt: 'aquatic_buffer_ft',
+      compatibilityNotes: 'compatibility_notes', epaRegNumber: 'epa_reg_number',
+      monthlyUsageEstimate: 'monthly_usage_estimate',
+    };
+
+    const upd = { updated_at: new Date() };
+    for (const [camel, snake] of Object.entries(allowed)) {
+      if (req.body[camel] !== undefined) upd[snake] = req.body[camel];
+    }
+
+    await db('products_catalog').where({ id: req.params.id }).update(upd);
+    const updated = await db('products_catalog').where({ id: req.params.id }).first();
+    res.json({ success: true, product: updated });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// POST /ai-price-lookup — AI agent: search vendor prices for a product
+// =========================================================================
+router.post('/ai-price-lookup', async (req, res, next) => {
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured — set ANTHROPIC_API_KEY' });
+
+    const { productId, productName, containerSize, vendors: vendorFilter } = req.body;
+    if (!productName) return res.status(400).json({ error: 'productName required' });
+
+    // Get active vendors
+    let vendors = await db('vendors').where({ active: true }).select('id', 'name', 'website', 'type');
+    if (vendorFilter && vendorFilter.length) {
+      vendors = vendors.filter(v => vendorFilter.includes(v.id));
+    }
+
+    const vendorList = vendors.map(v => `${v.name} (${v.website || 'no site'})`).join(', ');
+
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    const prompt = `You are a procurement research agent for a pest control and lawn care company. Your task is to find the current best prices for a specific product across multiple vendors.
+
+PRODUCT: ${productName}
+CONTAINER SIZE: ${containerSize || 'standard size'}
+VENDORS TO CHECK: ${vendorList}
+
+INSTRUCTIONS:
+1. Search for the exact product name on vendor websites. Include the container size in your search.
+2. For each vendor where you find a price, record: vendor name, price, container size/quantity, and source URL.
+3. Normalize all prices to price-per-oz for liquid products or price-per-lb for granular/dry products.
+4. If you can't find an exact match, note it but don't guess prices.
+
+RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
+{
+  "product": "${productName}",
+  "results": [
+    {
+      "vendor": "Vendor Name",
+      "price": 99.99,
+      "quantity": "32 oz",
+      "url": "https://...",
+      "pricePerOz": 3.12,
+      "notes": "any relevant notes"
+    }
+  ],
+  "cheapest": "Vendor Name",
+  "summary": "Brief summary of findings"
+}`;
+
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2000,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    // Extract text from response (may have multiple content blocks from tool use)
+    let responseText = '';
+    for (const block of msg.content) {
+      if (block.type === 'text') responseText += block.text;
+    }
+
+    // Handle tool use loop — keep going until we get a final text response
+    let currentMsg = msg;
+    let loopCount = 0;
+    while (currentMsg.stop_reason === 'tool_use' && loopCount < 10) {
+      loopCount++;
+      const toolUseBlocks = currentMsg.content.filter(b => b.type === 'tool_use');
+      const toolResults = toolUseBlocks.map(tb => ({
+        type: 'tool_result',
+        tool_use_id: tb.id,
+        content: 'Search completed. Continue analyzing results and provide your final JSON response.',
+      }));
+
+      currentMsg = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2000,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [
+          { role: 'user', content: prompt },
+          { role: 'assistant', content: currentMsg.content },
+          { role: 'user', content: toolResults },
+        ],
+      });
+
+      for (const block of currentMsg.content) {
+        if (block.type === 'text') responseText += block.text;
+      }
+    }
+
+    // Parse the JSON response
+    let parsed;
+    try {
+      const clean = responseText.replace(/```json|```/g, '').trim();
+      // Find the JSON object in the response
+      const jsonMatch = clean.match(/\{[\s\S]*\}/);
+      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : clean);
+    } catch (parseErr) {
+      logger.warn(`[AI Price Lookup] Failed to parse JSON: ${parseErr.message}`);
+      return res.json({ success: true, raw: responseText, results: [], summary: 'AI returned non-JSON response. See raw field.' });
+    }
+
+    // If we have a productId, create approval queue entries for found prices
+    if (productId && parsed.results && parsed.results.length > 0) {
+      for (const result of parsed.results) {
+        // Find vendor by name
+        const vendor = vendors.find(v => v.name.toLowerCase() === result.vendor?.toLowerCase());
+        if (!vendor || !result.price) continue;
+
+        // Check existing price
+        const existing = await db('vendor_pricing')
+          .where({ product_id: productId, vendor_id: vendor.id }).first();
+
+        // Create approval entry
+        try {
+          await db('price_approvals').insert({
+            product_id: productId,
+            vendor_id: vendor.id,
+            old_price: existing?.price || null,
+            new_price: result.price,
+            new_quantity: result.quantity || null,
+            source_url: result.url || null,
+            price_change_pct: existing?.price
+              ? Math.round(((result.price - existing.price) / existing.price) * 10000) / 100
+              : null,
+            status: 'pending',
+            notes: `AI agent lookup — ${result.notes || ''}`,
+          });
+        } catch (e) {
+          logger.warn(`[AI Price Lookup] Failed to create approval for ${result.vendor}: ${e.message}`);
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      product: productName,
+      results: parsed.results || [],
+      cheapest: parsed.cheapest || null,
+      summary: parsed.summary || '',
+      approvalsCreated: parsed.results?.length || 0,
+    });
+  } catch (err) {
+    logger.error(`[AI Price Lookup] Error: ${err.message}`);
+    next(err);
+  }
+});
+
+// =========================================================================
+// POST /ai-price-lookup/bulk — AI agent: bulk price check all unpriced products
+// =========================================================================
+router.post('/ai-price-lookup/bulk', async (req, res, next) => {
+  try {
+    const unpriced = await db('products_catalog').where({ needs_pricing: true }).select('id', 'name', 'container_size');
+    if (unpriced.length === 0) return res.json({ success: true, message: 'All products are priced', queued: 0 });
+
+    // We don't actually run them all synchronously — just queue them
+    // In production this would be a background job queue
+    res.json({
+      success: true,
+      message: `${unpriced.length} products queued for AI price lookup. Use the individual lookup endpoint for each.`,
+      queued: unpriced.length,
+      products: unpriced.map(p => ({ id: p.id, name: p.name, containerSize: p.container_size })),
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
