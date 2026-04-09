@@ -80,8 +80,8 @@ async function ensureLeadsTables(db) {
 let _tablesChecked = false;
 router.use(async (req, res, next) => {
   if (!_tablesChecked) {
-    try { await ensureLeadsTables(db); } catch (e) { console.error('[leads] Auto-create error:', e.message); }
     _tablesChecked = true;
+    try { await ensureLeadsTables(db); } catch (e) { console.error('[leads] Auto-create error:', e.message); }
   }
   next();
 });
@@ -499,7 +499,7 @@ router.get('/', async (req, res, next) => {
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
-        db.raw("COALESCE(technicians.first_name || ' ' || technicians.last_name, NULL) as assigned_name"),
+        db.raw("technicians.name as assigned_name"),
       );
 
     if (status) query = query.where('leads.status', status);
@@ -606,7 +606,7 @@ router.get('/:id', async (req, res, next) => {
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
-        db.raw("COALESCE(technicians.first_name || ' ' || technicians.last_name, NULL) as assigned_name"),
+        db.raw("technicians.name as assigned_name"),
       )
       .where('leads.id', req.params.id)
       .first();

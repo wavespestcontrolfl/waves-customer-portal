@@ -89,8 +89,8 @@ async function ensureHealthTables() {
 let _healthTablesChecked = false;
 router.use(async (req, res, next) => {
   if (!_healthTablesChecked) {
-    try { await ensureHealthTables(); } catch (e) { console.error('[health] Auto-create error:', e.message); }
     _healthTablesChecked = true;
+    try { await ensureHealthTables(); } catch (e) { console.error('[health] Auto-create error:', e.message); }
   }
   next();
 });
