@@ -237,4 +237,37 @@ router.get('/weather', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// WEEKLY BI BRIEFING AGENT
+// =========================================================================
+
+// POST /api/admin/dashboard-ops/bi/run — trigger the Monday briefing manually
+router.post('/bi/run', async (req, res, next) => {
+  try {
+    const BIAgent = require('../services/bi-agent');
+    const { skipSMS } = req.body;
+
+    const promise = BIAgent.run({ skipSMS: skipSMS || false });
+
+    if (req.query.wait === 'true') {
+      const result = await promise;
+      return res.json(result);
+    }
+
+    promise.catch(err => logger.error(`BI agent failed: ${err.message}`));
+    res.json({ status: 'started', message: 'BI briefing agent running. Check /bi/reports for results.' });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard-ops/bi/reports — view weekly reports
+router.get('/bi/reports', async (req, res, next) => {
+  try {
+    const { limit = 10 } = req.query;
+    const reports = await db('weekly_bi_reports')
+      .orderBy('created_at', 'desc')
+      .limit(parseInt(limit));
+    res.json({ reports });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

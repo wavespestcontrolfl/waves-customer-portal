@@ -110,7 +110,7 @@ async function executeBITool(toolName, input) {
       // Tomorrow's weather
       let tomorrowForecast = null;
       try {
-        const ForecastAnalyzer = require('../forecast-analyzer');
+        const ForecastAnalyzer = require('./forecast-analyzer');
         tomorrowForecast = await ForecastAnalyzer.analyzeTomorrow();
       } catch { /* non-critical */ }
 
@@ -203,9 +203,9 @@ async function executeBITool(toolName, input) {
         db('seo_content_decay_alerts').where('status', 'open').count('* as count').first(),
         (async () => {
           try {
-            const current = await db('gsc_sitewide').where('date', '>=', weekAgo)
+            const current = await db('gsc_performance_daily').where('date', '>=', weekAgo)
               .select(db.raw('SUM(clicks) as clicks'), db.raw('SUM(impressions) as impressions')).first();
-            const previous = await db('gsc_sitewide').where('date', '>=', daysAgo(14)).where('date', '<', weekAgo)
+            const previous = await db('gsc_performance_daily').where('date', '>=', daysAgo(14)).where('date', '<', weekAgo)
               .select(db.raw('SUM(clicks) as clicks'), db.raw('SUM(impressions) as impressions')).first();
             return {
               clicksThisWeek: parseInt(current?.clicks || 0),
@@ -284,7 +284,7 @@ async function executeBITool(toolName, input) {
     }
 
     case 'send_briefing_sms': {
-      const TwilioService = require('../twilio');
+      const TwilioService = require('./twilio');
       if (!process.env.ADAM_PHONE) return { error: 'ADAM_PHONE not set' };
 
       await TwilioService.sendSMS(process.env.ADAM_PHONE, input.message, { messageType: 'bi_briefing' });

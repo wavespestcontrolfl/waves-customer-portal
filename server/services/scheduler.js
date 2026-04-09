@@ -56,6 +56,17 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Site audit failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // WEEKLY MONDAY 5:00AM — BI Briefing Agent (Monday morning SMS to Adam)
+  cron.schedule('0 5 * * 1', async () => {
+    logger.info('Running: Weekly BI Briefing Agent');
+    try {
+      const BIAgent = require('./bi-agent');
+      await BIAgent.run();
+    } catch (err) {
+      logger.error(`BI Briefing Agent failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY MONDAY 5:30AM — Content decay check
   cron.schedule('30 5 * * 1', async () => {
     if (!isEnabled('seoIntelligence')) return;
