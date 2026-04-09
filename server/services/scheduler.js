@@ -81,20 +81,8 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY HOUR — Sync Square + Google Calendar into Schedule & Dispatch
-  // =========================================================================
-  cron.schedule('0 * * * *', async () => {
-    try {
-      const CalendarSync = require('./calendar-sync');
-      const result = await CalendarSync.syncAll(14);
-      const sq = result.square, gc = result.google;
-      if (sq.created > 0 || gc.created > 0) {
-        logger.info(`Calendar sync: Square ${sq.created} new, Google ${gc.created} new`);
-      }
-    } catch (err) {
-      logger.error(`Calendar sync failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
+  // Square calendar sync removed — migrated to Stripe
+  // Google Calendar sync still available via manual trigger
 
   // =========================================================================
   // DAILY 10AM (weekdays) — 7-Day Late Payment SMS (#24)
@@ -111,37 +99,8 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // =========================================================================
-  // 1ST OF MONTH 6AM — Process monthly autopay charges
-  // =========================================================================
-  cron.schedule('0 6 1 * *', async () => {
-    logger.info('Running: monthly billing job');
-    try {
-      const activeCustomers = await db('customers')
-        .where({ active: true })
-        .whereNotNull('monthly_rate')
-        .where('monthly_rate', '>', 0)
-        .select('id', 'first_name', 'last_name', 'waveguard_tier');
-
-      let successCount = 0;
-      let failCount = 0;
-
-      for (const customer of activeCustomers) {
-        try {
-          await SquareService.chargeMonthly(customer.id);
-          successCount++;
-        } catch (err) {
-          failCount++;
-          logger.error(`Monthly charge failed for ${customer.first_name} ${customer.last_name}: ${err.message}`);
-          // TODO: Send failed payment notification, retry logic
-        }
-      }
-
-      logger.info(`Monthly billing complete: ${successCount} succeeded, ${failCount} failed`);
-    } catch (err) {
-      logger.error(`Monthly billing job failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
+  // Old Square monthly billing removed — replaced by Stripe billing cron (billing-cron.js)
+  // which runs at 8 AM on the 1st via the scheduler entry below
 
   // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends

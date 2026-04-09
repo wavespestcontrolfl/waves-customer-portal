@@ -1,3 +1,6 @@
+// DEPRECATED — Square has been removed. Migrated to Stripe.
+// This file is kept for reference only. Safe to delete.
+
 const { Client, Environment } = require('square');
 const config = require('../config');
 const db = require('../models/db');

@@ -496,16 +496,7 @@ router.post('/', async (req, res, next) => {
       await AppointmentTagger.onServiceScheduled(svc.id);
     } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 
-    // Sync to Square Bookings
-    try {
-      const SquareService = require('../services/square');
-      const bookingId = await SquareService.createBookingFromSchedule(
-        customerId, scheduledDate, windowStart, windowEnd, serviceType
-      );
-      if (bookingId) {
-        await db('scheduled_services').where({ id: svc.id }).update({ square_booking_id: bookingId, source: 'portal' });
-      }
-    } catch (e) { logger.error(`Square booking sync failed (non-blocking): ${e.message}`); }
+    // Square booking sync removed — migrated to Stripe
 
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
   } catch (err) { next(err); }

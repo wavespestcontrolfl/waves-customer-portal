@@ -1,3 +1,6 @@
+// DEPRECATED — Square has been removed. Migrated to Stripe.
+// This file is kept for reference only. Safe to delete.
+
 /**
  * Square History Sync — pulls orders/payments from Square into
  * service_records, payments, and sms_log tables for customer detail views.

@@ -1,3 +1,6 @@
+// DEPRECATED — Square has been removed. Migrated to Stripe.
+// This file is kept for reference only. Safe to delete.
+
 /**
  * Square Customer Sync — pulls all customers from Square into the portal DB.
  *

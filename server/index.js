@@ -184,7 +184,8 @@ app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, 
 app.use('/api/booking', require('./routes/booking'));
 app.use('/api/ai', aiAssistantRoutes);
 app.use('/api/webhooks/twilio', twilioVoiceWebhookRoutes);
-app.use('/api/webhooks/square', require('./routes/square-webhook'));
+// Square webhook disabled — migrated to Stripe
+// app.use('/api/webhooks/square', require('./routes/square-webhook'));
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
@@ -218,7 +219,8 @@ app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-ma
 app.use('/api/admin/mileage', require('./routes/admin-mileage'));
 app.use('/api/admin/compliance-v2', require('./routes/admin-compliance-v2'));
 app.use('/api/admin/services', require('./routes/admin-services'));
-app.use('/api/admin/square-import', require('./routes/admin-square-import'));
+// Square import disabled — migration complete
+// app.use('/api/admin/square-import', require('./routes/admin-square-import'));
 app.use('/api/admin/discounts', require('./routes/admin-discounts'));
 app.use('/api/admin/dashboard-ops', require('./routes/admin-dashboard-ops'));
 app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));

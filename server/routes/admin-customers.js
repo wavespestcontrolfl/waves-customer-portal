@@ -135,15 +135,9 @@ router.get('/pipeline/view', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/customers/:id/sync-square — pull service history from Square
-router.post('/:id/sync-square', async (req, res, next) => {
-  try {
-    const SquareHistorySync = require('../services/square-history-sync');
-    const result = await SquareHistorySync.syncCustomer(req.params.id);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+// POST /api/admin/customers/:id/sync-square — DEPRECATED (Square removed)
+router.post('/:id/sync-square', (req, res) => {
+  res.json({ message: 'Square sync disabled — migrated to Stripe', synced: 0 });
 });
 
 // GET /api/admin/customers/:id/timeline — unified customer timeline
@@ -469,15 +463,9 @@ router.post('/:id/follow-up', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/customers/sync-square — pull all customers from Square
-router.post('/sync-square', async (req, res, next) => {
-  try {
-    const SquareCustomerSync = require('../services/square-customer-sync');
-    const result = await SquareCustomerSync.sync();
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+// POST /api/admin/customers/sync-square — DEPRECATED (Square removed)
+router.post('/sync-square', (req, res) => {
+  res.json({ message: 'Square sync disabled — migrated to Stripe', synced: 0 });
 });
 
 // DELETE /api/admin/customers/:id — delete a customer and related records
