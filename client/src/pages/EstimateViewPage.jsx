@@ -408,11 +408,13 @@ export default function EstimateViewPage() {
 
   // ---- Main estimate view ----
   const e = data.estimate;
-  const ed = e.data || {};
+  const rawData = e.data || {};
+  // estimateData is stored as { inputs, result } — the pricing result is in .result
+  const ed = rawData.result || rawData;
   const recurring = ed.recurring || {};
   const oneTime = ed.oneTime || {};
   const totals = ed.totals || {};
-  const property = ed.property || {};
+  const property = ed.property || rawData.inputs || {};
   const services = recurring.services || [];
   const otItems = [...(oneTime.items || []), ...(oneTime.specItems || [])];
   const fmt = (n) => '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
