@@ -345,41 +345,44 @@ const server = app.listen(PORT, () => {
       const knex = require('./models/db');
       logger.info('Running database migrations...');
       const migConfig = { directory: path.join(__dirname, 'models', 'migrations') };
-      let migrationAttempts = 0;
-      const maxSkips = 20; // safety limit
-      while (migrationAttempts < maxSkips) {
-        try {
-          await knex.migrate.latest(migConfig);
-          logger.info('Migrations complete');
-          break;
-        } catch (migErr) {
-          migrationAttempts++;
-          const msg = migErr.message || '';
-          if (msg.includes('already exists') || msg.includes('duplicate key') || msg.includes('current transaction is aborted')) {
-            logger.warn(`Migration ${migrationAttempts} failed (skipping): ${msg.substring(0, 120)}`);
-            try {
-              const [, pending] = await knex.migrate.list(migConfig);
-              if (pending.length === 0) { logger.info('No more pending migrations'); break; }
-              const failedMigration = pending[0].file || pending[0].name || pending[0];
-              const migName = typeof failedMigration === 'string' ? failedMigration : failedMigration.file;
-              logger.info(`Marking as complete: ${migName}`);
-              await knex('knex_migrations').insert({
-                name: migName,
-                batch: ((await knex('knex_migrations').max('batch as b').first())?.b || 0) + 1,
-                migration_time: new Date(),
-              }).catch(() => {}); // ignore if already marked
-            } catch (skipErr) {
-              logger.error(`Migration skip failed: ${skipErr.message?.substring(0, 100)}`);
-              break;
+
+      // Wrap migrations in a timeout so they don't block startup forever
+      const migrationPromise = (async () => {
+        let migrationAttempts = 0;
+        const maxSkips = 15;
+        while (migrationAttempts < maxSkips) {
+          try {
+            await knex.migrate.latest(migConfig);
+            logger.info('Migrations complete');
+            return;
+          } catch (migErr) {
+            migrationAttempts++;
+            const msg = migErr.message || '';
+            if (msg.includes('already exists') || msg.includes('duplicate key') || msg.includes('current transaction is aborted')) {
+              logger.warn(`Migration ${migrationAttempts} skip: ${msg.substring(0, 100)}`);
+              try {
+                const [, pending] = await knex.migrate.list(migConfig);
+                if (!pending.length) { logger.info('No more pending migrations'); return; }
+                const f = pending[0]; const migName = typeof f === 'string' ? f : (f.file || f.name);
+                await knex('knex_migrations').insert({
+                  name: migName,
+                  batch: ((await knex('knex_migrations').max('batch as b').first())?.b || 0) + 1,
+                  migration_time: new Date(),
+                }).catch(() => {});
+              } catch (e) { logger.error(`Skip failed: ${e.message?.substring(0, 80)}`); return; }
+            } else {
+              logger.error(`Migration failed: ${msg.substring(0, 150)}`);
+              return;
             }
-          } else {
-            logger.error(`Migration failed (non-recoverable): ${msg.substring(0, 200)}`);
-            break;
           }
         }
-      }
-      if (migrationAttempts >= maxSkips) logger.warn(`Reached max migration skip limit (${maxSkips})`);
+      })();
 
+      // Don't let migrations block startup for more than 30s
+      await Promise.race([
+        migrationPromise,
+        new Promise(resolve => setTimeout(() => { logger.warn('Migration timeout (30s) — continuing startup'); resolve(); }, 30000)),
+      ]);
     } catch (err) {
       logger.error(`Migration setup failed: ${err.message}`);
     }
