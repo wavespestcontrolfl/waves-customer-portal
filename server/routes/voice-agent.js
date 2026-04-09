@@ -82,6 +82,8 @@ function voiceAgentRoutes(app, httpServer) {
     if (!shouldAgentHandle()) {
       // Agent OFF → play Waves voicemail + record message
       // Send missed call SMS regardless (caller may hang up without leaving VM)
+      const from = req.body?.From || req.query?.From;
+      const callerName = req.body?.CallerName || req.query?.CallerName || null;
       if (from) {
         sendMissedCallSMS(from, callerName, callSid).catch(() => {});
       }
@@ -314,18 +316,18 @@ function voiceAgentRoutes(app, httpServer) {
   });
 
   app.post('/api/admin/voice-agent/toggle', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
-    const config = await updateConfig(req.body);
-    res.json({ success: true, config });
+    try { const config = await updateConfig(req.body); res.json({ success: true, config }); }
+    catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   app.post('/api/admin/voice-agent/config', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
-    const config = await updateConfig(req.body);
-    res.json({ success: true, config });
+    try { const config = await updateConfig(req.body); res.json({ success: true, config }); }
+    catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   app.get('/api/admin/voice-agent/calls', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
-    const calls = await getRecentVoiceAgentCalls(parseInt(req.query.limit) || 50);
-    res.json({ total: calls.length, calls });
+    try { const calls = await getRecentVoiceAgentCalls(parseInt(req.query.limit) || 50); res.json({ total: calls.length, calls }); }
+    catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   app.get('/api/admin/voice-agent/stats', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
@@ -544,14 +546,13 @@ function voiceAgentRoutes(app, httpServer) {
 
   // ── #8: Inject a message into an active call ──────────────
   app.post('/api/admin/voice-agent/inject/:callSid', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
-    const { message } = req.body;
-    if (!message) return res.status(400).json({ error: 'Message is required' });
-
-    const result = await injectMessage(req.params.callSid, message);
-    if (!result.success) {
-      return res.status(404).json(result);
-    }
-    res.json(result);
+    try {
+      const { message } = req.body;
+      if (!message) return res.status(400).json({ error: 'Message is required' });
+      const result = await injectMessage(req.params.callSid, message);
+      if (!result.success) return res.status(404).json(result);
+      res.json(result);
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 }
 

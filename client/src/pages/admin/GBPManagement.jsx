@@ -476,7 +476,7 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
     setLoadingSugg(false);
   };
 
-  useEffect(() => { loadSuggestions(); }, []);
+  useEffect(() => { loadSuggestions(); }, [gbp?.primary_category]);
 
   const addService = (name) => {
     if (!name.trim() || services.includes(name.trim())) return;
@@ -652,7 +652,7 @@ function ChangeHistoryTab({ updates, locations, filter, setFilter, loadUpdates }
   const fieldLabel = (f) => f.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   const statusColor = { pending: D.amber, approved: D.green, rejected: D.red };
 
-  useEffect(() => { loadUpdates(filter); }, [filter]);
+  useEffect(() => { loadUpdates(filter); }, [filter, loadUpdates]);
 
   return (
     <div>
