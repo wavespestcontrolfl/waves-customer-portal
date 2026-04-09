@@ -565,4 +565,18 @@ router.post('/quick-add', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// POST /api/admin/customers/:id/refund — Refund a Stripe payment
+// =========================================================================
+router.post('/:id/refund', async (req, res, next) => {
+  try {
+    const { paymentId, amount, reason } = req.body;
+    if (!paymentId) return res.status(400).json({ error: 'paymentId required' });
+
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.refund(paymentId, { amount, reason: reason || 'requested_by_customer' });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

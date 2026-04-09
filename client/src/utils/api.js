@@ -142,6 +142,24 @@ class ApiClient {
     });
   }
 
+  getProcessor() {
+    return this.request('/billing/processor');
+  }
+
+  createSetupIntent(paymentMethodType = 'card') {
+    return this.request('/billing/cards/setup-intent', {
+      method: 'POST',
+      body: JSON.stringify({ paymentMethodType }),
+    });
+  }
+
+  saveStripeCard(paymentMethodId) {
+    return this.request('/billing/cards', {
+      method: 'POST',
+      body: JSON.stringify({ paymentMethodId }),
+    });
+  }
+
   removeCard(cardId) {
     return this.request(`/billing/cards/${cardId}`, { method: 'DELETE' });
   }

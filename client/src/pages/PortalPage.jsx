@@ -2570,6 +2570,16 @@ function ScheduleTab({ customer }) {
 // =========================================================================
 // BILLING TAB
 // =========================================================================
+function loadStripeJs(publishableKey) {
+  return new Promise((resolve) => {
+    if (window.Stripe) return resolve(window.Stripe(publishableKey));
+    const script = document.createElement('script');
+    script.src = 'https://js.stripe.com/v3/';
+    script.onload = () => resolve(window.Stripe(publishableKey));
+    document.head.appendChild(script);
+  });
+}
+
 function BillingTab({ customer }) {
   const [payments, setPayments] = useState([]);
   const [balance, setBalance] = useState(null);
@@ -2581,12 +2591,97 @@ function BillingTab({ customer }) {
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
 
+  // Stripe card management state
+  const [showAddCard, setShowAddCard] = useState(false);
+  const [stripeLoading, setStripeLoading] = useState(false);
+  const [stripeError, setStripeError] = useState('');
+  const [stripeReady, setStripeReady] = useState(false);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const paymentElementRef = useRef(null);
+  const cardMountRef = useRef(null);
+
+  const refreshCards = () => api.getCards().then(d => setCards(d.cards)).catch(console.error);
+
   useEffect(() => {
     Promise.all([api.getPayments(), api.getBalance(), api.getCards()])
       .then(([payData, balData, cardData]) => {
         setPayments(payData.payments); setBalance(balData); setCards(cardData.cards); setLoading(false);
       }).catch(console.error);
   }, []);
+
+  const handleAddCard = async () => {
+    setStripeLoading(true);
+    setStripeError('');
+    setStripeReady(false);
+    try {
+      const setupData = await api.createSetupIntent('card');
+      const stripe = await loadStripeJs(setupData.publishableKey);
+      stripeRef.current = stripe;
+      const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
+      elementsRef.current = elements;
+      setShowAddCard(true);
+      // Mount after modal renders
+      setTimeout(() => {
+        if (cardMountRef.current) {
+          const pe = elements.create('payment');
+          pe.mount(cardMountRef.current);
+          paymentElementRef.current = pe;
+          pe.on('ready', () => setStripeReady(true));
+        }
+      }, 100);
+    } catch (err) {
+      setStripeError(err.message || 'Failed to initialize payment form');
+    }
+    setStripeLoading(false);
+  };
+
+  const handleConfirmCard = async () => {
+    if (!stripeRef.current || !elementsRef.current) return;
+    setStripeLoading(true);
+    setStripeError('');
+    try {
+      const { error, setupIntent } = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        redirect: 'if_required',
+      });
+      if (error) {
+        setStripeError(error.message);
+        setStripeLoading(false);
+        return;
+      }
+      if (setupIntent && setupIntent.payment_method) {
+        await api.saveStripeCard(setupIntent.payment_method);
+      }
+      setShowAddCard(false);
+      paymentElementRef.current = null;
+      elementsRef.current = null;
+      stripeRef.current = null;
+      await refreshCards();
+    } catch (err) {
+      setStripeError(err.message || 'Failed to save card');
+    }
+    setStripeLoading(false);
+  };
+
+  const handleRemoveCard = async (cardId) => {
+    if (!window.confirm('Remove this payment method?')) return;
+    try {
+      await api.removeCard(cardId);
+      await refreshCards();
+    } catch (err) {
+      alert(err.message || 'Failed to remove card');
+    }
+  };
+
+  const handleSetDefault = async (cardId) => {
+    try {
+      await api.setDefaultCard(cardId);
+      await refreshCards();
+    } catch (err) {
+      alert(err.message || 'Failed to set default card');
+    }
+  };
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading billing...</div>;
 
@@ -2850,10 +2945,11 @@ function BillingTab({ customer }) {
       <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Manage Payment Methods</div>
-          <button style={{
+          <button onClick={handleAddCard} disabled={stripeLoading} style={{
             padding: '6px 14px', borderRadius: 8, border: `1px solid ${B.wavesBlue}`,
             background: 'transparent', color: B.wavesBlue, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-          }}>+ Add New</button>
+            opacity: stripeLoading ? 0.6 : 1,
+          }}>{stripeLoading && !showAddCard ? 'Loading...' : '+ Add New'}</button>
         </div>
 
         {cards.map(c => (
@@ -2866,19 +2962,25 @@ function BillingTab({ customer }) {
               background: `linear-gradient(135deg, ${B.navy}, ${B.navyLight})`,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 1, fontFamily: FONTS.ui,
-            }}>{c.brand}</div>
+            }}>{c.brand || 'CARD'}</div>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{c.brand} ending in {c.lastFour}</div>
-              <div style={{ fontSize: 12, color: B.grayMid }}>Expires {c.expMonth}/{c.expYear}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{c.brand || 'Card'} ending in {c.lastFour}</div>
+              {c.expMonth && <div style={{ fontSize: 12, color: B.grayMid }}>Expires {c.expMonth}/{c.expYear}</div>}
+              {c.methodType === 'ach' && c.bankName && <div style={{ fontSize: 12, color: B.grayMid }}>{c.bankName}</div>}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {c.isDefault && (
+              {c.isDefault ? (
                 <span style={{ fontSize: 11, fontWeight: 600, color: B.green, background: `${B.green}15`, padding: '3px 8px', borderRadius: 6 }}>Default</span>
+              ) : (
+                <button onClick={() => handleSetDefault(c.id)} style={{
+                  padding: '4px 10px', borderRadius: 6, border: `1px solid ${B.wavesBlue}`,
+                  background: 'transparent', color: B.wavesBlue, fontSize: 11, cursor: 'pointer',
+                }}>Set Default</button>
               )}
-              <button style={{
+              <button onClick={() => handleRemoveCard(c.id)} style={{
                 padding: '4px 10px', borderRadius: 6, border: `1px solid ${B.grayLight}`,
-                background: 'transparent', color: B.grayMid, fontSize: 11, cursor: 'pointer',
-              }}>Edit</button>
+                background: 'transparent', color: B.red, fontSize: 11, cursor: 'pointer',
+              }}>Remove</button>
             </div>
           </div>
         ))}
@@ -2888,7 +2990,49 @@ function BillingTab({ customer }) {
             No payment methods on file. Add a card to enable Auto Pay.
           </div>
         )}
+
+        {stripeError && !showAddCard && (
+          <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: '#C62828', marginTop: 8 }}>
+            {stripeError}
+          </div>
+        )}
       </div>
+
+      {/* ── Stripe Add Card Modal ── */}
+      {showAddCard && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 9999, padding: 20,
+        }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
+          <div style={{
+            background: '#fff', borderRadius: 16, padding: 28, width: '100%', maxWidth: 440,
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Add Payment Method</div>
+              <button onClick={() => { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; }} style={{
+                background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: B.grayMid, lineHeight: 1,
+              }}>x</button>
+            </div>
+            <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
+            {stripeError && (
+              <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: '#C62828', marginBottom: 12 }}>
+                {stripeError}
+              </div>
+            )}
+            <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} style={{
+              ...BUTTON_BASE, width: '100%', padding: 14, fontSize: 15,
+              background: stripeReady ? B.wavesBlue : B.grayLight,
+              color: stripeReady ? '#fff' : B.grayMid,
+              opacity: stripeLoading ? 0.6 : 1,
+            }}>{stripeLoading ? 'Saving...' : 'Save Card'}</button>
+            <div style={{ fontSize: 11, color: '#90A4AE', marginTop: 10, textAlign: 'center' }}>
+              Secured by Stripe. We never store your card details directly.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── 8. Credits & Adjustments ── */}
       {(totalCredits > 0 || credits.length > 0) && (

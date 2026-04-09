@@ -137,15 +137,43 @@ router.get('/:token', loadSession, async (req, res, next) => {
 });
 
 // =========================================================================
-// PUT /api/onboarding/:token/payment — process payment
+// POST /api/onboarding/:token/setup-intent — Create Stripe SetupIntent
+// =========================================================================
+router.post('/:token/setup-intent', loadSession, async (req, res, next) => {
+  try {
+    const StripeService = require('../services/stripe');
+    const stripeConfig = require('../config/stripe-config');
+    const result = await StripeService.createSetupIntent(req.customer.id);
+    res.json({ ...result, publishableKey: stripeConfig.publishableKey });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// POST /api/onboarding/:token/save-card — Save card after Stripe confirmation
+// =========================================================================
+router.post('/:token/save-card', loadSession, async (req, res, next) => {
+  try {
+    const { paymentMethodId } = req.body;
+    if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+
+    const StripeService = require('../services/stripe');
+    const card = await StripeService.savePaymentMethod(req.customer.id, paymentMethodId);
+
+    await db('onboarding_sessions')
+      .where({ id: req.session.id })
+      .update({ payment_collected: true, status: 'payment_complete' });
+
+    res.json({ card });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// PUT /api/onboarding/:token/payment — process payment (legacy)
 // =========================================================================
 router.put('/:token/payment', loadSession, async (req, res, next) => {
   try {
-    // For demo: simulate payment success
     const { cardNonce, autopayEnabled } = req.body;
 
-    // In production, this calls SquareService.saveCard(cardNonce) etc.
-    // For now, mark as collected
     await db('onboarding_sessions')
       .where({ id: req.session.id })
       .update({ payment_collected: true, status: 'payment_complete' });

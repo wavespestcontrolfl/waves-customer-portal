@@ -65,8 +65,25 @@ const BillingCron = {
         const service = await PaymentRouter.getServiceForCustomer(customer.id);
 
         // Charge
-        await service.chargeMonthly(customer.id);
+        const paymentResult = await service.chargeMonthly(customer.id);
         charged++;
+
+        // Extract receipt URL and include in confirmation SMS
+        let receiptUrl = null;
+        try {
+          const meta = paymentResult.metadata ? JSON.parse(paymentResult.metadata) : {};
+          receiptUrl = meta.stripe_receipt_url || null;
+        } catch (e) { /* ignore parse error */ }
+
+        try {
+          const receiptLine = receiptUrl ? ` View your receipt: ${receiptUrl}` : '';
+          await TwilioService.sendSMS(
+            customer.phone,
+            `Hi ${customer.first_name}, your WaveGuard monthly payment of $${customer.monthly_rate} was successfully processed. Thank you!${receiptLine}`
+          );
+        } catch (smsErr) {
+          logger.error(`[billing-cron] Payment confirmation SMS failed: ${smsErr.message}`);
+        }
 
         logger.info(`[billing-cron] Charged $${customer.monthly_rate} for ${customer.first_name} ${customer.last_name}`);
       } catch (err) {
@@ -176,11 +193,17 @@ const BillingCron = {
 
         succeeded++;
 
-        // Send success SMS
+        // Send success SMS with receipt
+        let retryReceiptUrl = null;
         try {
+          const meta = newPayment?.metadata ? JSON.parse(newPayment.metadata) : {};
+          retryReceiptUrl = meta.stripe_receipt_url || null;
+        } catch (e) { /* ignore */ }
+        try {
+          const receiptLine = retryReceiptUrl ? ` View your receipt: ${retryReceiptUrl}` : '';
           await TwilioService.sendSMS(
             customer.phone,
-            `Hi ${customer.first_name}, great news! Your payment of $${amount.toFixed(2)} has been successfully processed. Thank you for being a Waves customer!`
+            `Hi ${customer.first_name}, great news! Your payment of $${amount.toFixed(2)} has been successfully processed. Thank you for being a Waves customer!${receiptLine}`
           );
         } catch (smsErr) {
           logger.error(`[billing-cron] Success SMS failed: ${smsErr.message}`);

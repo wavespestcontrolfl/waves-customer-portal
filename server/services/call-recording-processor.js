@@ -237,7 +237,11 @@ const CallRecordingProcessor = {
           customerId = newCust.id;
           logger.info(`[call-proc] Created customer: ${extracted.first_name} ${extracted.last_name} (${customerId})`);
 
-          // Square sync removed — migrated to Stripe
+          // Auto-create Stripe customer
+          try {
+            const StripeService = require('./stripe');
+            await StripeService.ensureStripeCustomer(customerId);
+          } catch (e) { /* non-blocking */ }
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
         }

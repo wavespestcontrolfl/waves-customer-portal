@@ -211,7 +211,11 @@ function voiceAgentRoutes(app, httpServer) {
                     .update({ customer_id: newCust.id });
                   console.log(`[VoiceAgent] CNAM lead created: ${callerName} (${from}) → ${newCust.id}`);
 
-                  // Square sync removed — migrated to Stripe
+                  // Auto-create Stripe customer
+                  try {
+                    const StripeService = require('../services/stripe');
+                    await StripeService.ensureStripeCustomer(newCust.id);
+                  } catch (e) { /* non-blocking */ }
                 } catch (insertErr) {
                   if (!insertErr.message?.includes('duplicate') && !insertErr.message?.includes('unique')) {
                     console.error('[VoiceAgent] CNAM customer insert failed:', insertErr.message);

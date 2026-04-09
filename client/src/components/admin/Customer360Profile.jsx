@@ -449,10 +449,21 @@ export default function Customer360Profile({ customerId, onClose }) {
 
               <SectionTitle>Payment History ({payments.length})</SectionTitle>
               {payments.slice(0, 10).map((p, i) => (
-                <div key={i} style={{ padding: '6px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22`, display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: D.green, fontFamily: MONO }}>{fmtCurrency(p.amount)}</span>
+                <div key={i} style={{ padding: '6px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: p.refund_status ? D.muted : D.green, fontFamily: MONO }}>{fmtCurrency(p.amount)}</span>
                   <span style={{ color: D.muted }}>{p.card_brand} ...{p.last_four}</span>
                   <span style={{ color: D.muted }}>{fmtDate(p.payment_date)}</span>
+                  <span style={{ color: p.status === 'paid' ? D.green : p.status === 'failed' ? D.red : p.status === 'refunded' ? D.muted : D.amber, fontSize: 10, fontWeight: 700 }}>{p.refund_status ? 'REFUNDED' : (p.status || '').toUpperCase()}</span>
+                  {p.processor === 'stripe' && p.status === 'paid' && !p.refund_status && (
+                    <button onClick={async () => {
+                      if (!window.confirm(`Refund $${parseFloat(p.amount).toFixed(2)} to ${c.firstName} ${c.lastName}?`)) return;
+                      try {
+                        await adminFetch(`/admin/customers/${c.id}/refund`, { method: 'POST', body: JSON.stringify({ paymentId: p.id, amount: parseFloat(p.amount), reason: 'requested_by_customer' }) });
+                        const fresh = await adminFetch(`/admin/customers/${customerId}`);
+                        setData(fresh);
+                      } catch (err) { alert('Refund failed: ' + err.message); }
+                    }} style={{ padding: '2px 8px', borderRadius: 4, border: `1px solid ${D.red}`, background: 'transparent', color: D.red, fontSize: 10, cursor: 'pointer', fontWeight: 600, whiteSpace: 'nowrap' }}>Refund</button>
+                  )}
                 </div>
               ))}
 

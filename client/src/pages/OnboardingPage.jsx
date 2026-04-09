@@ -4,6 +4,16 @@ import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+function loadStripeJs(publishableKey) {
+  return new Promise((resolve) => {
+    if (window.Stripe) return resolve(window.Stripe(publishableKey));
+    const script = document.createElement('script');
+    script.src = 'https://js.stripe.com/v3/';
+    script.onload = () => resolve(window.Stripe(publishableKey));
+    document.head.appendChild(script);
+  });
+}
+
 async function apiFetch(path, opts = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json', ...opts.headers },
@@ -112,6 +122,15 @@ export default function OnboardingPage() {
   const [hasPets, setHasPets] = useState(false);
   const [hasHoa, setHasHoa] = useState(false);
 
+  // Stripe payment state
+  const [stripeReady, setStripeReady] = useState(false);
+  const [stripeError, setStripeError] = useState('');
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const paymentElementRef = useRef(null);
+  const cardMountRef = useRef(null);
+  const stripeInitRef = useRef(false);
+
   useEffect(() => {
     apiFetch(`/onboarding/${token}`)
       .then(d => {
@@ -152,13 +171,58 @@ export default function OnboardingPage() {
 
   useEffect(() => { if (screen === 2) autoSave(); }, [prefs, referralSource, referredBy]);
 
+  // Initialize Stripe when payment screen is shown
+  useEffect(() => {
+    if (screen !== 1 || stripeInitRef.current) return;
+    stripeInitRef.current = true;
+    (async () => {
+      try {
+        const setupData = await apiFetch(`/onboarding/${token}/setup-intent`, { method: 'POST' });
+        const stripe = await loadStripeJs(setupData.publishableKey);
+        stripeRef.current = stripe;
+        const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
+        elementsRef.current = elements;
+        setTimeout(() => {
+          if (cardMountRef.current) {
+            const pe = elements.create('payment');
+            pe.mount(cardMountRef.current);
+            paymentElementRef.current = pe;
+            pe.on('ready', () => setStripeReady(true));
+          }
+        }, 100);
+      } catch (e) {
+        setStripeError(e.message || 'Failed to load payment form');
+      }
+    })();
+  }, [screen, token]);
+
   const handlePayment = async () => {
+    if (!stripeRef.current || !elementsRef.current) return;
     setSubmitting(true);
+    setStripeError('');
     try {
-      await apiFetch(`/onboarding/${token}/payment`, { method: 'PUT', body: JSON.stringify({ cardNonce: 'demo', autopayEnabled: true }) });
-      setData(prev => ({ ...prev, status: { ...prev.status, paymentCollected: true }, card: { brand: 'VISA', lastFour: '4821', autopay: true } }));
-      setTimeout(() => setScreen(2), 1000);
-    } catch (e) { setError(e.message); }
+      const { error, setupIntent } = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        redirect: 'if_required',
+      });
+      if (error) {
+        setStripeError(error.message);
+        setSubmitting(false);
+        return;
+      }
+      if (setupIntent && setupIntent.payment_method) {
+        const result = await apiFetch(`/onboarding/${token}/save-card`, {
+          method: 'POST',
+          body: JSON.stringify({ paymentMethodId: setupIntent.payment_method }),
+        });
+        setData(prev => ({
+          ...prev,
+          status: { ...prev.status, paymentCollected: true },
+          card: { brand: result.card?.card_brand || 'CARD', lastFour: result.card?.last_four || '****', autopay: true },
+        }));
+        setTimeout(() => setScreen(2), 1000);
+      }
+    } catch (e) { setStripeError(e.message || 'Payment setup failed'); }
     setSubmitting(false);
   };
 
@@ -310,20 +374,19 @@ export default function OnboardingPage() {
         {screen === 1 && (
           <div>
             <div style={{ background: '#fff', borderRadius: 16, padding: 24 }}>
-              <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>💳 Payment Setup</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Payment Setup</div>
               <div style={{ fontSize: 15, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
                 Add a card and you're set — no more thinking about payments.
               </div>
 
               <div style={{ marginTop: 20 }}>
-                <div style={{ padding: '14px', borderRadius: 12, border: `2px solid ${B.bluePale}`, marginBottom: 12 }}>
-                  <div style={{ fontSize: 14, color: B.grayMid, textAlign: 'center' }}>
-                    Square Web Payments form loads here in production
+                <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 12 }} />
+
+                {stripeError && (
+                  <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: '#C62828', marginBottom: 12 }}>
+                    {stripeError}
                   </div>
-                  <div style={{ fontSize: 12, color: '#90A4AE', textAlign: 'center', marginTop: 4 }}>
-                    For demo: click below to simulate payment
-                  </div>
-                </div>
+                )}
 
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                   <span style={{ fontSize: 14, color: B.navy, fontWeight: 500 }}>Auto-pay monthly on the 1st</span>
@@ -336,13 +399,15 @@ export default function OnboardingPage() {
                   </div>
                 )}
 
-                <button onClick={handlePayment} disabled={submitting} style={{
+                <button onClick={handlePayment} disabled={submitting || !stripeReady} style={{
                   ...BUTTON_BASE, width: '100%', padding: 16, fontSize: 15,
-                  background: B.red, color: '#fff', opacity: submitting ? 0.7 : 1,
-                }}>{submitting ? 'Processing...' : 'Save Payment Method →'}</button>
+                  background: stripeReady ? B.red : B.grayLight,
+                  color: stripeReady ? '#fff' : B.grayMid,
+                  opacity: submitting ? 0.7 : 1,
+                }}>{submitting ? 'Processing...' : !stripeReady ? 'Loading payment form...' : 'Save Payment Method'}</button>
 
                 <div style={{ fontSize: 11, color: '#90A4AE', marginTop: 10, textAlign: 'center' }}>
-                  🔒 Secure payment processing by Square. We never store your card details directly.
+                  Secured by Stripe. We never store your card details directly.
                 </div>
               </div>
             </div>
