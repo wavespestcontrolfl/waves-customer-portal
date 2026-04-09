@@ -1247,6 +1247,13 @@ router.get('/services-dropdown', async (req, res, next) => {
           { name: 'Termite Bait Station Cartridge Replacement', duration: 60, priceMin: 20, priceMax: 20 },
           S('Slab Pre-Treat Termite'),
         ]},
+        { category: 'lawn_care', items: [
+          S('Lawn Care Service'),
+          S('Lawn Fertilization Service'),
+          S('Lawn Fungicide Treatment Service'),
+          S('Lawn Insect Control Service'),
+          S('Lawn Aeration Service'),
+        ]},
         { category: 'tree_shrub', items: [
           S('Every 6 Weeks Tree & Shrub Care Service'),
           S('Bi-Monthly Tree & Shrub Care Service'),
