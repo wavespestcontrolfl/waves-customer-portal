@@ -2,10 +2,13 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const BudgetManager = require('../services/ads/budget-manager');
-const CampaignAdvisor = require('../services/ads/campaign-advisor');
-const googleAds = require('../services/ads/google-ads');
 const logger = require('../services/logger');
+
+// Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
+let _BudgetManager, _CampaignAdvisor, _googleAds;
+function getBudgetManager() { return _BudgetManager || (_BudgetManager = require('../services/ads/budget-manager')); }
+function getCampaignAdvisor() { return _CampaignAdvisor || (_CampaignAdvisor = require('../services/ads/campaign-advisor')); }
+function getGoogleAds() { return _googleAds || (_googleAds = require('../services/ads/google-ads')); }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -60,7 +63,7 @@ router.put('/campaigns/:id', async (req, res, next) => {
 router.post('/campaigns/:id/mode', async (req, res, next) => {
   try {
     const { mode, reason } = req.body;
-    const result = await BudgetManager.setMode(req.params.id, mode, reason || 'manual');
+    const result = await getBudgetManager().setMode(req.params.id, mode, reason || 'manual');
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -69,12 +72,12 @@ router.post('/campaigns/:id/mode', async (req, res, next) => {
 router.post('/campaigns/:id/budget', async (req, res, next) => {
   try {
     const { budget, reason } = req.body;
-    const result = await BudgetManager.setBudget(req.params.id, budget, reason || 'manual');
+    const result = await getBudgetManager().setBudget(req.params.id, budget, reason || 'manual');
 
     // Also update on Google Ads if campaign is linked
     const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
-    if (campaign && campaign.platform_campaign_id && googleAds.isConfigured()) {
-      const gResult = await googleAds.updateBudget(campaign.platform_campaign_id, budget);
+    if (campaign && campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+      const gResult = await getGoogleAds().updateBudget(campaign.platform_campaign_id, budget);
       if (gResult) result.googleAdsUpdated = true;
     }
 
@@ -90,8 +93,8 @@ router.post('/campaigns/:id/pause', async (req, res, next) => {
 
     // Pause on Google Ads if linked
     let googleAdsResult = null;
-    if (campaign.platform_campaign_id && googleAds.isConfigured()) {
-      googleAdsResult = await googleAds.pauseCampaign(campaign.platform_campaign_id);
+    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+      googleAdsResult = await getGoogleAds().pauseCampaign(campaign.platform_campaign_id);
     }
 
     // Update local DB
@@ -112,8 +115,8 @@ router.post('/campaigns/:id/enable', async (req, res, next) => {
 
     // Enable on Google Ads if linked
     let googleAdsResult = null;
-    if (campaign.platform_campaign_id && googleAds.isConfigured()) {
-      googleAdsResult = await googleAds.enableCampaign(campaign.platform_campaign_id);
+    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+      googleAdsResult = await getGoogleAds().enableCampaign(campaign.platform_campaign_id);
     }
 
     // Update local DB
@@ -129,13 +132,13 @@ router.post('/campaigns/:id/enable', async (req, res, next) => {
 // POST /api/admin/ads/sync — trigger full Google Ads sync
 router.post('/sync', async (req, res, next) => {
   try {
-    if (!googleAds.isConfigured()) {
+    if (!getGoogleAds().isConfigured()) {
       return res.status(400).json({ error: 'Google Ads API not configured. Set GOOGLE_ADS_* environment variables.' });
     }
 
-    const campaigns = await googleAds.syncCampaigns();
-    const performance = await googleAds.syncDailyPerformance(7);
-    const searchTerms = await googleAds.syncSearchTerms(30);
+    const campaigns = await getGoogleAds().syncCampaigns();
+    const performance = await getGoogleAds().syncDailyPerformance(7);
+    const searchTerms = await getGoogleAds().syncSearchTerms(30);
 
     res.json({
       success: true,
@@ -302,7 +305,7 @@ router.get('/advisor/history', async (req, res, next) => {
 // POST /api/admin/ads/advisor/generate — manually trigger
 router.post('/advisor/generate', async (req, res, next) => {
   try {
-    const advice = await CampaignAdvisor.generateDailyAdvice();
+    const advice = await getCampaignAdvisor().generateDailyAdvice();
     res.json({ report: advice });
   } catch (err) { next(err); }
 });
@@ -316,10 +319,10 @@ router.post('/advisor/apply', async (req, res, next) => {
     switch (action) {
       case 'increase_budget':
       case 'decrease_budget':
-        result = await BudgetManager.setBudget(campaignId, value, reason || `Advisor: ${action}`);
+        result = await getBudgetManager().setBudget(campaignId, value, reason || `Advisor: ${action}`);
         break;
       case 'change_mode':
-        result = await BudgetManager.setMode(campaignId, value, reason || `Advisor: set ${value}`);
+        result = await getBudgetManager().setMode(campaignId, value, reason || `Advisor: set ${value}`);
         break;
       case 'add_negative':
         // Store the negative keyword request (actual Google Ads API integration later)
@@ -345,7 +348,7 @@ router.post('/advisor/apply', async (req, res, next) => {
 // GET /api/admin/ads/capacity-heatmap
 router.get('/capacity-heatmap', async (req, res, next) => {
   try {
-    const result = await BudgetManager.getWeeklyHeatmap(req.query.week);
+    const result = await getBudgetManager().getWeeklyHeatmap(req.query.week);
     res.json(result);
   } catch (err) { next(err); }
 });

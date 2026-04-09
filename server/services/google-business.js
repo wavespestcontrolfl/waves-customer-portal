@@ -1,4 +1,9 @@
-const { google } = require('googleapis');
+// Lazy-load googleapis (~71MB) — only when GBP methods are called
+let _google;
+function google() {
+  if (!_google) { _google = require('googleapis').google; }
+  return _google;
+}
 const logger = require('./logger');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');

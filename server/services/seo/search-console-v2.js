@@ -12,8 +12,14 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 
+// Lazy-load googleapis (~71MB) — only when first GSC method is called
 let google;
-try { google = require('googleapis').google; } catch { google = null; }
+function getGoogle() {
+  if (google === undefined) {
+    try { google = require('googleapis').google; } catch { google = null; }
+  }
+  return google;
+}
 
 const DEFAULT_SITE_URL = process.env.GSC_SITE_URL || 'https://wavespestcontrol.com';
 
@@ -90,9 +96,11 @@ class SearchConsoleService {
         };
       }
 
-      this.auth = new google.auth.GoogleAuth(authOptions);
+      const g = getGoogle();
+      if (!g) { logger.error('[GSC] googleapis not installed'); return false; }
+      this.auth = new g.auth.GoogleAuth(authOptions);
 
-      this.webmasters = google.searchconsole({ version: 'v1', auth: this.auth });
+      this.webmasters = g.searchconsole({ version: 'v1', auth: this.auth });
       return true;
     } catch (err) {
       logger.error(`GSC init failed: ${err.message}`);

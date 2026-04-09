@@ -9,7 +9,12 @@
  *   GOOGLE_SERVICE_ACCOUNT_JSON — JSON string of service account credentials
  */
 
-const { google } = require('googleapis');
+// Lazy-load googleapis (~71MB) — only when GA4 methods are called
+let _google;
+function google() {
+  if (!_google) { _google = require('googleapis').google; }
+  return _google;
+}
 const db = require('../../models/db');
 const logger = require('../logger');
 
