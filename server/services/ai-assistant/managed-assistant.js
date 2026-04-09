@@ -29,7 +29,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const ContextAggregator = require('../context-aggregator');
-const { executeToolCall } = require('./tools');
+const { executeToolCall } = require('./tools-expanded');
 
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MANAGED_AGENT_ID = process.env.MANAGED_AGENT_ID;
@@ -221,7 +221,7 @@ class ManagedAssistant {
    */
   async processSessionEvents(sessionId, conversation, customerId) {
     let finalReply = '';
-    let maxIterations = 20; // safety valve
+    let maxIterations = 30; // expanded assistant needs more room for multi-step workflows
 
     for await (const { event, data } of streamSessionEvents(sessionId)) {
       if (--maxIterations <= 0) {
