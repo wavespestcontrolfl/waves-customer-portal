@@ -66,13 +66,20 @@ class SearchConsoleService {
       // Support both a JSON string (Railway) and a file path (local dev)
       let authOptions;
       try {
-        const credentials = JSON.parse(saEnv);
+        // Try parsing as JSON — fix common issues (missing closing brace, trailing whitespace)
+        let jsonStr = saEnv.trim();
+        if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) {
+          jsonStr += '\n}';
+          logger.info('[GSC] Fixed missing closing brace in GOOGLE_SERVICE_ACCOUNT_JSON');
+        }
+        const credentials = JSON.parse(jsonStr);
         authOptions = {
           credentials,
           scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
         };
-      } catch {
+      } catch (parseErr) {
         // Not valid JSON — treat as a file path
+        logger.warn(`[GSC] JSON parse failed (${parseErr.message}), trying as file path`);
         authOptions = {
           keyFile: saEnv,
           scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],

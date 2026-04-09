@@ -76,13 +76,14 @@ class SearchConsoleService {
       // Support both a JSON string (Railway) and a file path (local dev)
       let authOptions;
       try {
-        const credentials = JSON.parse(saEnv);
+        let jsonStr = saEnv.trim();
+        if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) jsonStr += '\n}';
+        const credentials = JSON.parse(jsonStr);
         authOptions = {
           credentials,
           scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
         };
       } catch {
-        // Not valid JSON — treat as a file path
         authOptions = {
           keyFile: saEnv,
           scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
