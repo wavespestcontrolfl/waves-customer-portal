@@ -34,7 +34,7 @@ exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('email_automation_sends'))) {
     await knex.schema.createTable('email_automation_sends', t => {
       t.increments('id').primary();
-      t.integer('customer_id').notNullable().references('id').inTable('customers').onDelete('CASCADE');
+      t.uuid('customer_id').notNullable();
       t.string('automation_key', 100).notNullable(); // 'new_recurring', 'lawn_onboarding', etc.
       t.string('status', 30).defaultTo('queued'); // queued, sent, failed
       t.jsonb('metadata');

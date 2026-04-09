@@ -849,29 +849,6 @@ export default function CustomersPage() {
               color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', width: 200,
             }}
           />
-          {/* Sync Square */}
-          <button onClick={async () => {
-            setSyncingSquare(true);
-            try {
-              const r = await fetch(`${API_BASE}/admin/customers/sync-square`, {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
-              });
-              const result = await r.json();
-              if (!r.ok) {
-                alert(`Sync failed: ${result.error}`);
-              } else {
-                setSquareSyncInfo({ count: result.totalFetched || 0, lastSync: new Date().toISOString() });
-                alert(`Square sync: ${result.totalFetched} fetched, ${result.created} new, ${result.updated} updated, ${result.skipped} unchanged${result.errors?.length ? '\n' + result.errors.length + ' errors' : ''}`);
-                loadCustomers();
-              }
-            } catch (e) { alert('Sync failed: ' + e.message); }
-            setSyncingSquare(false);
-          }} disabled={syncingSquare} style={{
-            padding: '8px 18px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 8,
-            fontSize: 13, fontFamily: 'DM Sans, sans-serif', color: D.muted, cursor: 'pointer',
-            opacity: syncingSquare ? 0.5 : 1, whiteSpace: 'nowrap',
-          }}>{syncingSquare ? 'Syncing...' : 'Sync from Square'}</button>
           {/* Add button */}
           <button onClick={() => setShowAddModal(true)} style={{
             padding: '8px 18px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
@@ -889,11 +866,6 @@ export default function CustomersPage() {
             display: 'flex', gap: 10, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center',
             padding: '8px 14px', background: `${D.card}cc`, border: `1px solid ${D.border}`, borderRadius: 10,
           }}>
-            {squareSyncInfo && (
-              <span style={{ fontSize: 11, color: D.muted, fontFamily: 'JetBrains Mono, monospace' }}>
-                Square sync: {squareSyncInfo.count || 0} records · {squareSyncInfo.lastSync ? timeAgo(squareSyncInfo.lastSync) : 'never'}
-              </span>
-            )}
             <div style={{ flex: 1 }} />
             <button onClick={handleFixTiers} disabled={fixingTiers} style={{
               padding: '5px 12px', background: 'transparent', border: `1px solid ${D.amber}66`, borderRadius: 6,
