@@ -2262,12 +2262,6 @@ export default function SchedulePage() {
                   <strong style={{ color: D.green }}>${estRevenue.toLocaleString()}</strong> revenue
                 </span>
               </div>
-              <button onClick={handleSyncCalendar} disabled={syncingCal} style={{
-                ...btnBase, background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, fontSize: 13, height: 38,
-                opacity: syncingCal ? 0.6 : 1,
-              }}>
-                {syncingCal ? 'Syncing...' : 'Sync Calendar'}
-              </button>
               <button onClick={handleOptimize} disabled={optimizing} style={{
                 ...btnBase, background: D.teal, color: D.white, fontSize: 13, height: 38,
                 opacity: optimizing ? 0.6 : 1,
