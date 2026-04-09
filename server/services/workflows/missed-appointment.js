@@ -28,13 +28,14 @@ class MissedAppointment {
     await db('reschedule_log').insert({
       customer_id: customerId,
       scheduled_service_id: scheduledServiceId,
-      action: 'skip',
-      reason,
+      reason_code: 'customer_noshow',
+      initiated_by: 'system',
+      notes: reason || 'skip',
     });
 
     // Count skips in the last 90 days
     const skipCount = await db('reschedule_log')
-      .where({ customer_id: customerId, action: 'skip' })
+      .where({ customer_id: customerId, reason_code: 'customer_noshow' })
       .where('created_at', '>', db.raw("NOW() - INTERVAL '90 days'"))
       .count('id as count')
       .first();
