@@ -7,6 +7,36 @@ const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+let _discountsChecked = false;
+router.use(async (req, res, next) => {
+  if (!_discountsChecked) {
+    _discountsChecked = true;
+    try {
+      await db.raw(`CREATE TABLE IF NOT EXISTS discounts (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        discount_key varchar(80) UNIQUE NOT NULL, name varchar(200) NOT NULL, description text,
+        discount_type varchar(20) NOT NULL DEFAULT 'percentage', amount decimal(10,2) NOT NULL DEFAULT 0,
+        max_discount_dollars decimal(10,2), applies_to varchar(30) DEFAULT 'all',
+        service_category_filter varchar(200), service_key_filter varchar(200),
+        requires_waveguard_tier varchar(20), is_waveguard_tier_discount boolean DEFAULT false,
+        requires_military boolean DEFAULT false, requires_senior boolean DEFAULT false,
+        requires_referral boolean DEFAULT false, requires_new_customer boolean DEFAULT false,
+        requires_multi_home boolean DEFAULT false, requires_prepayment boolean DEFAULT false,
+        min_service_count integer, min_subtotal decimal(10,2),
+        is_stackable boolean DEFAULT true, stack_group varchar(30), priority integer DEFAULT 100,
+        promo_code varchar(50) UNIQUE, promo_code_expiry timestamptz,
+        promo_code_max_uses integer, promo_code_current_uses integer DEFAULT 0,
+        is_active boolean DEFAULT true, is_auto_apply boolean DEFAULT false,
+        show_in_estimates boolean DEFAULT true, show_in_invoices boolean DEFAULT true,
+        show_in_scheduling boolean DEFAULT false, sort_order integer, color varchar(30), icon varchar(50),
+        times_applied integer DEFAULT 0, total_discount_given decimal(12,2) DEFAULT 0,
+        created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
+      )`);
+    } catch (e) { /* already exists */ }
+  }
+  next();
+});
+
 // GET /api/admin/discounts — list all discounts
 router.get('/', async (req, res, next) => {
   try {

@@ -7,89 +7,73 @@ const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Auto-create leads tables if missing
+// Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
-  if (!(await db.schema.hasTable('lead_sources'))) {
-    await db.schema.createTable('lead_sources', t => {
-      t.uuid('id').primary().defaultTo(db.raw("gen_random_uuid()"));
-      t.string('name', 200).notNullable();
-      t.string('source_type', 30).notNullable().defaultTo('other');
-      t.string('channel', 50);
-      t.string('twilio_phone_number', 20);
-      t.string('twilio_phone_sid');
-      t.string('domain');
-      t.string('landing_page_url');
-      t.string('gbp_location_id');
-      t.string('cost_type', 20).defaultTo('free');
-      t.decimal('monthly_cost', 10, 2).defaultTo(0);
-      t.decimal('cost_per_lead', 10, 2).defaultTo(0);
-      t.decimal('setup_cost', 10, 2).defaultTo(0);
-      t.boolean('is_active').defaultTo(true);
-      t.text('notes');
-      t.timestamps(true, true);
-      t.index('source_type'); t.index('channel'); t.index('is_active');
-    });
-    console.log('[leads] Auto-created lead_sources table');
+  const tables = [
+    { name: 'lead_sources', sql: `CREATE TABLE IF NOT EXISTS lead_sources (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      name varchar(200) NOT NULL, source_type varchar(30) NOT NULL DEFAULT 'other',
+      channel varchar(50), twilio_phone_number varchar(20), twilio_phone_sid varchar(255),
+      domain varchar(255), landing_page_url varchar(255), gbp_location_id varchar(255),
+      cost_type varchar(20) DEFAULT 'free', monthly_cost decimal(10,2) DEFAULT 0,
+      cost_per_lead decimal(10,2) DEFAULT 0, setup_cost decimal(10,2) DEFAULT 0,
+      is_active boolean DEFAULT true, notes text,
+      created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
+    )` },
+    { name: 'leads', sql: `CREATE TABLE IF NOT EXISTS leads (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      lead_source_id uuid, first_name varchar(255), last_name varchar(255),
+      phone varchar(255), email varchar(255), address varchar(255), city varchar(255), zip varchar(255),
+      lead_type varchar(30), service_interest varchar(255), urgency varchar(20) DEFAULT 'normal',
+      is_residential boolean DEFAULT true, is_commercial boolean DEFAULT false,
+      first_contact_at timestamptz DEFAULT NOW(), first_contact_channel varchar(255),
+      twilio_call_sid varchar(255), twilio_message_sid varchar(255),
+      call_duration_seconds integer, call_recording_url varchar(255),
+      transcript_summary text, extracted_data jsonb,
+      is_qualified boolean, disqualification_reason varchar(255),
+      status varchar(30) DEFAULT 'new',
+      assigned_to uuid, estimate_id uuid, customer_id uuid, converted_at timestamptz,
+      monthly_value decimal(10,2), initial_service_value decimal(10,2),
+      waveguard_tier varchar(255), lost_reason varchar(255), lost_to_competitor varchar(255), lost_notes text,
+      next_follow_up_at timestamptz, follow_up_count integer DEFAULT 0,
+      last_follow_up_at timestamptz, response_time_minutes integer,
+      created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
+    )` },
+    { name: 'lead_activities', sql: `CREATE TABLE IF NOT EXISTS lead_activities (
+      id serial PRIMARY KEY, lead_id uuid NOT NULL,
+      activity_type varchar(30), description text, performed_by varchar(100),
+      metadata jsonb, created_at timestamptz DEFAULT NOW()
+    )` },
+    { name: 'lead_source_costs', sql: `CREATE TABLE IF NOT EXISTS lead_source_costs (
+      id serial PRIMARY KEY, lead_source_id uuid NOT NULL,
+      month date NOT NULL, cost_amount decimal(10,2) NOT NULL,
+      cost_category varchar(30), notes text, created_at timestamptz DEFAULT NOW(),
+      UNIQUE(lead_source_id, month, cost_category)
+    )` },
+    { name: 'marketing_campaigns', sql: `CREATE TABLE IF NOT EXISTS marketing_campaigns (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      name varchar(200) NOT NULL, channel varchar(50), lead_source_id uuid,
+      status varchar(20) DEFAULT 'active', start_date date, end_date date,
+      budget decimal(10,2), spend_to_date decimal(10,2) DEFAULT 0,
+      target_leads integer, target_conversions integer,
+      offer_details text, utm_source varchar(255), utm_medium varchar(255), utm_campaign varchar(255),
+      notes text, created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
+    )` },
+  ];
+  for (const { name, sql } of tables) {
+    try { await db.raw(sql); } catch (e) { console.error(`[leads] Create ${name} error:`, e.message); }
   }
-  if (!(await db.schema.hasTable('leads'))) {
-    await db.schema.createTable('leads', t => {
-      t.uuid('id').primary().defaultTo(db.raw("gen_random_uuid()"));
-      t.uuid('lead_source_id');
-      t.string('first_name'); t.string('last_name'); t.string('phone'); t.string('email');
-      t.string('address'); t.string('city'); t.string('zip');
-      t.string('lead_type', 30); t.string('service_interest');
-      t.string('urgency', 20).defaultTo('normal');
-      t.boolean('is_residential').defaultTo(true); t.boolean('is_commercial').defaultTo(false);
-      t.timestamp('first_contact_at').defaultTo(db.fn.now());
-      t.string('first_contact_channel');
-      t.string('twilio_call_sid'); t.string('twilio_message_sid');
-      t.integer('call_duration_seconds'); t.string('call_recording_url');
-      t.text('transcript_summary'); t.jsonb('extracted_data');
-      t.boolean('is_qualified'); t.string('disqualification_reason');
-      t.string('status', 30).defaultTo('new');
-      t.uuid('assigned_to'); t.uuid('estimate_id'); t.uuid('customer_id');
-      t.timestamp('converted_at');
-      t.decimal('monthly_value', 10, 2); t.decimal('initial_service_value', 10, 2);
-      t.string('waveguard_tier'); t.string('lost_reason'); t.string('lost_to_competitor'); t.text('lost_notes');
-      t.timestamp('next_follow_up_at'); t.integer('follow_up_count').defaultTo(0);
-      t.timestamp('last_follow_up_at'); t.integer('response_time_minutes');
-      t.timestamps(true, true);
-      t.index('lead_source_id'); t.index('status'); t.index('phone'); t.index('email');
-      t.index('customer_id'); t.index('first_contact_at'); t.index('assigned_to');
-    });
-    console.log('[leads] Auto-created leads table');
-  }
-  if (!(await db.schema.hasTable('lead_activities'))) {
-    await db.schema.createTable('lead_activities', t => {
-      t.increments('id'); t.uuid('lead_id').notNullable();
-      t.string('activity_type', 30); t.text('description'); t.string('performed_by', 100);
-      t.jsonb('metadata'); t.timestamp('created_at').defaultTo(db.fn.now());
-      t.index('lead_id'); t.index('created_at');
-    });
-    console.log('[leads] Auto-created lead_activities table');
-  }
-  if (!(await db.schema.hasTable('lead_source_costs'))) {
-    await db.schema.createTable('lead_source_costs', t => {
-      t.increments('id'); t.uuid('lead_source_id').notNullable();
-      t.date('month').notNullable(); t.decimal('cost_amount', 10, 2).notNullable();
-      t.string('cost_category', 30); t.text('notes');
-      t.timestamp('created_at').defaultTo(db.fn.now());
-      t.unique(['lead_source_id', 'month', 'cost_category']);
-    });
-    console.log('[leads] Auto-created lead_source_costs table');
-  }
-  if (!(await db.schema.hasTable('marketing_campaigns'))) {
-    await db.schema.createTable('marketing_campaigns', t => {
-      t.uuid('id').primary().defaultTo(db.raw("gen_random_uuid()"));
-      t.string('name', 200).notNullable(); t.string('channel', 50); t.uuid('lead_source_id');
-      t.string('status', 20).defaultTo('active'); t.date('start_date'); t.date('end_date');
-      t.decimal('budget', 10, 2); t.decimal('spend_to_date', 10, 2).defaultTo(0);
-      t.integer('target_leads'); t.integer('target_conversions');
-      t.text('offer_details'); t.string('utm_source'); t.string('utm_medium'); t.string('utm_campaign');
-      t.text('notes'); t.timestamps(true, true);
-      t.index('status'); t.index('channel');
-    });
-    console.log('[leads] Auto-created marketing_campaigns table');
+  // Add indexes safely
+  const indexes = [
+    'CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)',
+    'CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone)',
+    'CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email)',
+    'CREATE INDEX IF NOT EXISTS idx_leads_customer_id ON leads(customer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_leads_first_contact_at ON leads(first_contact_at)',
+    'CREATE INDEX IF NOT EXISTS idx_lead_sources_is_active ON lead_sources(is_active)',
+  ];
+  for (const idx of indexes) {
+    try { await db.raw(idx); } catch (e) { /* index may exist */ }
   }
 }
 

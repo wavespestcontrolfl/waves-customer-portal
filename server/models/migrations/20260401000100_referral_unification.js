@@ -22,33 +22,22 @@ exports.up = async function (knex) {
     }
   }
 
-  // Add new unified columns
-  await knex.schema.alterTable('referral_promoters', async (t) => {
-    if (!(await knex.schema.hasColumn('referral_promoters', 'referral_code'))) {
-      t.string('referral_code', 20).unique();
+  // Add new unified columns — hasColumn must be OUTSIDE alterTable callback
+  const rpCols = {
+    referral_code: (t) => t.string('referral_code', 20).unique(),
+    referral_link: (t) => t.string('referral_link', 500),
+    milestone_level: (t) => t.string('milestone_level', 30).defaultTo('none'),
+    milestone_earned_at: (t) => t.timestamp('milestone_earned_at'),
+    available_balance_cents: (t) => t.integer('available_balance_cents').defaultTo(0),
+    pending_earnings_cents: (t) => t.integer('pending_earnings_cents').defaultTo(0),
+    last_share_at: (t) => t.timestamp('last_share_at'),
+    last_referral_at: (t) => t.timestamp('last_referral_at'),
+  };
+  for (const [col, addFn] of Object.entries(rpCols)) {
+    if (!(await knex.schema.hasColumn('referral_promoters', col))) {
+      await knex.schema.alterTable('referral_promoters', addFn);
     }
-    if (!(await knex.schema.hasColumn('referral_promoters', 'referral_link'))) {
-      t.string('referral_link', 500);
-    }
-    if (!(await knex.schema.hasColumn('referral_promoters', 'milestone_level'))) {
-      t.string('milestone_level', 30).defaultTo('none');
-    }
-    if (!(await knex.schema.hasColumn('referral_promoters', 'milestone_earned_at'))) {
-      t.timestamp('milestone_earned_at');
-    }
-    if (!(await knex.schema.hasColumn('referral_promoters', 'available_balance_cents'))) {
-      t.integer('available_balance_cents').defaultTo(0);
-    }
-    if (!(await knex.schema.hasColumn('referral_promoters', 'pending_earnings_cents'))) {
-      t.integer('pending_earnings_cents').defaultTo(0);
-    }
-    if (!(await knex.schema.hasColumn('referral_promoters', 'last_share_at'))) {
-      t.timestamp('last_share_at');
-    }
-    if (!(await knex.schema.hasColumn('referral_promoters', 'last_referral_at'))) {
-      t.timestamp('last_referral_at');
-    }
-  });
+  }
 
   // Backfill referral_code from customers.referral_code where customer_id matches
   try {

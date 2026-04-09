@@ -5,7 +5,9 @@
  * Alters: service_records, scheduled_services (adds service_id FK)
  */
 exports.up = async function (knex) {
+  const servicesExist = await knex.schema.hasTable('services');
   // ---- Services ----
+  if (!servicesExist) {
   await knex.schema.createTable('services', (t) => {
     t.uuid('id').primary().defaultTo(knex.fn.uuid());
     t.string('service_key', 80).notNullable().unique();
@@ -58,8 +60,10 @@ exports.up = async function (knex) {
     t.index('is_active');
     t.index('billing_type');
   });
+  } // end if !servicesExist
 
   // ---- Service Add-ons ----
+  if (!(await knex.schema.hasTable('service_addons'))) {
   await knex.schema.createTable('service_addons', (t) => {
     t.uuid('id').primary().defaultTo(knex.fn.uuid());
     t.uuid('parent_service_id').notNullable().references('id').inTable('services').onDelete('CASCADE');
@@ -69,8 +73,10 @@ exports.up = async function (knex) {
     t.integer('sort_order').defaultTo(0);
     t.timestamp('created_at').defaultTo(knex.fn.now());
   });
+  } // end if !service_addons
 
   // ---- Service Packages (WaveGuard tiers) ----
+  if (!(await knex.schema.hasTable('service_packages'))) {
   await knex.schema.createTable('service_packages', (t) => {
     t.uuid('id').primary().defaultTo(knex.fn.uuid());
     t.string('package_key', 50).notNullable().unique();
@@ -85,8 +91,10 @@ exports.up = async function (knex) {
     t.integer('sort_order').defaultTo(0);
     t.timestamps(true, true);
   });
+  } // end if !service_packages
 
   // ---- Package → Service Items ----
+  if (!(await knex.schema.hasTable('service_package_items'))) {
   await knex.schema.createTable('service_package_items', (t) => {
     t.uuid('id').primary().defaultTo(knex.fn.uuid());
     t.uuid('package_id').notNullable().references('id').inTable('service_packages').onDelete('CASCADE');
@@ -96,6 +104,7 @@ exports.up = async function (knex) {
     t.decimal('addon_discount_pct', 5, 2);
     t.integer('sort_order').defaultTo(0);
   });
+  } // end if !service_package_items
 
   // ---- ALTER service_records ----
   const srHasCol = await knex.schema.hasColumn('service_records', 'service_id');
@@ -387,7 +396,9 @@ exports.up = async function (knex) {
     },
   ];
 
-  await knex('services').insert(services);
+  if (!servicesExist) {
+    await knex('services').insert(services).catch(() => {});
+  }
 
   // ========== SEED PACKAGES ==========
   const svcRows = await knex('services').select('id', 'service_key');
@@ -421,7 +432,7 @@ exports.up = async function (knex) {
     },
   ];
 
-  await knex('service_packages').insert(packages);
+  await knex('service_packages').insert(packages).catch(() => {});
 
   // Seed package items
   const pkgRows = await knex('service_packages').select('id', 'package_key');

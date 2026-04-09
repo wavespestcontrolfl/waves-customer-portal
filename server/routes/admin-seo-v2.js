@@ -281,9 +281,75 @@ const ContentDecayDetector = require('../services/seo/content-decay');
 const CitationAuditor = require('../services/seo/citation-auditor');
 const ConversionFunnel = require('../services/seo/conversion-funnel');
 
+// Auto-seed SEO keywords if table is empty
+const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];
+const SERVICES_LIST = ['pest control', 'lawn care', 'mosquito control', 'termite inspection', 'termite treatment', 'fire ant treatment', 'rodent control', 'tree and shrub care', 'lawn fertilization', 'mosquito spraying', 'exterminator', 'weed control'];
+const PRIORITY_1 = [
+  'pest control bradenton', 'pest control sarasota', 'pest control lakewood ranch',
+  'lawn care bradenton', 'lawn care sarasota', 'mosquito control bradenton',
+  'mosquito control sarasota', 'termite inspection bradenton', 'termite treatment sarasota',
+  'lawn care lakewood ranch', 'pest control near me', 'exterminator bradenton',
+  'fire ant treatment bradenton', 'rat control sarasota', 'tree spraying sarasota',
+  'mosquito spraying lakewood ranch', 'pest control parrish fl', 'lawn fertilization bradenton',
+  'pest control north port', 'termite inspection venice fl',
+];
+
+let _seoSeeded = false;
+async function ensureSeoKeywords() {
+  if (_seoSeeded) return;
+  _seoSeeded = true;
+  try {
+    if (!(await db.schema.hasTable('seo_target_keywords'))) return;
+    const { count } = await db('seo_target_keywords').count('* as count').first();
+    if (parseInt(count) > 0) return;
+
+    console.log('[seo] Auto-seeding target keywords...');
+    let seeded = 0;
+    for (const city of CITIES) {
+      for (const service of SERVICES_LIST) {
+        const keyword = `${service} ${city.toLowerCase()}`;
+        const isPriority1 = PRIORITY_1.some(p => keyword.includes(p.replace(/ fl$/, '')));
+        await db('seo_target_keywords').insert({
+          keyword, primary_city: city, service_category: service.replace(/\s+/g, '_'),
+          priority: isPriority1 ? 1 : 2,
+        }).catch(() => {});
+        seeded++;
+      }
+    }
+    const nearMe = ['pest control near me', 'exterminator near me', 'lawn care near me', 'mosquito control near me', 'termite inspection near me'];
+    for (const kw of nearMe) {
+      await db('seo_target_keywords').insert({
+        keyword: kw, service_category: kw.split(' near')[0].replace(/\s+/g, '_'),
+        priority: kw === 'pest control near me' ? 1 : 2,
+      }).catch(() => {});
+      seeded++;
+    }
+
+    // Seed competitors
+    const COMPETITORS = [
+      { name: 'Turner Pest Control', domain: 'turnerpest.com', market_area: 'SWFL' },
+      { name: 'Hoskins Pest Control', domain: 'hoskinspest.com', market_area: 'SWFL' },
+      { name: 'HomeTeam Pest Defense', domain: 'hometeampestdefense.com', market_area: 'National' },
+      { name: 'Orkin', domain: 'orkin.com', market_area: 'National' },
+      { name: 'Terminix', domain: 'terminix.com', market_area: 'National' },
+      { name: 'Truly Nolen', domain: 'trulynolen.com', market_area: 'Regional' },
+      { name: 'Nozzle Nolen', domain: 'nozzlenolen.com', market_area: 'Regional' },
+      { name: 'ABC Home & Commercial', domain: 'abchomeandcommercial.com', market_area: 'Regional' },
+    ];
+    if (await db.schema.hasTable('seo_competitors')) {
+      for (const comp of COMPETITORS) {
+        await db('seo_competitors').insert(comp).catch(() => {});
+      }
+    }
+
+    console.log(`[seo] Auto-seeded ${seeded} keywords + 8 competitors`);
+  } catch (e) { console.error('[seo] Auto-seed error:', e.message); }
+}
+
 // Rankings
 router.get('/rankings', async (req, res, next) => {
   try {
+    await ensureSeoKeywords();
     const data = await RankTracker.getDashboard(parseInt(req.query.days || 7));
     res.json(data);
   } catch (err) { next(err); }
@@ -354,8 +420,18 @@ router.post('/backlinks/llm-mentions', async (req, res, next) => {
 // AI Overview
 router.get('/ai-overview', async (req, res, next) => {
   try {
+    await ensureSeoKeywords();
     const data = await AIOverviewTracker.getDashboard();
     res.json(data);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/seo/ai-overview/scan — manually trigger AI Overview scan
+router.post('/ai-overview/scan', async (req, res, next) => {
+  try {
+    await ensureSeoKeywords();
+    const result = await AIOverviewTracker.trackDaily();
+    res.json({ success: true, message: 'AI Overview scan completed', result });
   } catch (err) { next(err); }
 });
 

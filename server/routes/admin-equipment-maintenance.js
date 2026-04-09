@@ -13,6 +13,72 @@ const equipmentService = require('../services/equipment-maintenance');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Auto-create maintenance tables if migration hasn't run
+let _maintTablesChecked = false;
+router.use(async (req, res, next) => {
+  if (!_maintTablesChecked) {
+    _maintTablesChecked = true;
+    try {
+      const tables = [
+        `CREATE TABLE IF NOT EXISTS maintenance_schedules (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          equipment_id uuid NOT NULL, task_name varchar(200) NOT NULL, description text,
+          interval_miles integer, interval_hours integer, interval_days integer, interval_months integer,
+          last_performed_at timestamptz, last_performed_miles integer, last_performed_hours decimal(10,1),
+          last_performed_by varchar(200), next_due_at date, next_due_miles integer, next_due_hours decimal(10,1),
+          is_overdue boolean DEFAULT false, priority varchar(20) DEFAULT 'normal',
+          notify_days_before integer DEFAULT 7, notify_technician boolean DEFAULT true, notify_admin boolean DEFAULT true,
+          estimated_cost decimal(10,2), estimated_downtime_hours decimal(6,1),
+          is_active boolean DEFAULT true, created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
+        )`,
+        `CREATE TABLE IF NOT EXISTS maintenance_records (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          equipment_id uuid NOT NULL, schedule_id uuid, maintenance_type varchar(20) DEFAULT 'scheduled',
+          task_name varchar(200) NOT NULL, description text, performed_at timestamptz DEFAULT NOW(),
+          performed_by varchar(200), vendor_name varchar(200),
+          miles_at_service integer, hours_at_service decimal(10,1),
+          condition_before integer, condition_after integer,
+          parts_cost decimal(10,2) DEFAULT 0, labor_cost decimal(10,2) DEFAULT 0,
+          vendor_cost decimal(10,2) DEFAULT 0, total_cost decimal(10,2) DEFAULT 0,
+          receipt_url varchar(500), downtime_hours decimal(8,1) DEFAULT 0,
+          equipment_was_down boolean DEFAULT false, parts_used jsonb,
+          follow_up_needed boolean DEFAULT false, follow_up_notes text, follow_up_date date,
+          warranty_claim boolean DEFAULT false, warranty_claim_status varchar(30),
+          created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
+        )`,
+        `CREATE TABLE IF NOT EXISTS equipment_downtime_log (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          equipment_id uuid NOT NULL, maintenance_record_id uuid,
+          reason varchar(200), started_at timestamptz NOT NULL, ended_at timestamptz,
+          duration_hours decimal(8,1), jobs_affected integer DEFAULT 0,
+          revenue_impact decimal(10,2) DEFAULT 0, backup_equipment_used varchar(200),
+          operational_notes text, created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
+        )`,
+        `CREATE TABLE IF NOT EXISTS vehicle_mileage_log (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          equipment_id uuid NOT NULL, logged_by uuid,
+          odometer_reading integer NOT NULL, trip_miles decimal(8,1),
+          log_date date NOT NULL DEFAULT CURRENT_DATE, source varchar(30) DEFAULT 'manual',
+          notes text, created_at timestamptz DEFAULT NOW()
+        )`,
+        `CREATE TABLE IF NOT EXISTS maintenance_alerts (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          equipment_id uuid NOT NULL, schedule_id uuid,
+          alert_type varchar(30) NOT NULL, severity varchar(10) DEFAULT 'info',
+          title varchar(300) NOT NULL, description text,
+          status varchar(20) DEFAULT 'new', acknowledged_by varchar(200),
+          acknowledged_at timestamptz, resolved_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
+        )`,
+      ];
+      for (const sql of tables) {
+        await db.raw(sql).catch(e => console.error('[equipment] Table create error:', e.message));
+      }
+    } catch (e) { console.error('[equipment] Auto-create error:', e.message); }
+  }
+  next();
+});
+
 // ═══════════════════════════════════════════════════════════════════
 // EQUIPMENT CRUD
 // ═══════════════════════════════════════════════════════════════════
