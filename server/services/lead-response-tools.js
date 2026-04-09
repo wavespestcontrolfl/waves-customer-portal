@@ -60,7 +60,7 @@ async function executeLeadTool(toolName, input) {
     }
 
     case 'triage_lead': {
-      const { aiTriageLead } = require('../lead-triage');
+      const { aiTriageLead } = require('./lead-triage');
       const result = await aiTriageLead({
         name: input.name,
         phone: input.phone,
@@ -74,7 +74,7 @@ async function executeLeadTool(toolName, input) {
     }
 
     case 'score_lead': {
-      const LeadScorer = require('../lead-scorer');
+      const LeadScorer = require('./lead-scorer');
       const score = await LeadScorer.calculateScore(input.customer_id);
       return { customerId: input.customer_id, score };
     }
@@ -82,7 +82,7 @@ async function executeLeadTool(toolName, input) {
     // ── Customer context ────────────────────────────────────────
 
     case 'get_customer_context': {
-      const ContextAggregator = require('../context-aggregator');
+      const ContextAggregator = require('./context-aggregator');
       const phone = input.phone || null;
       const customerId = input.customer_id || null;
 
@@ -143,7 +143,7 @@ async function executeLeadTool(toolName, input) {
     // ── Availability & pest context ─────────────────────────────
 
     case 'check_next_availability': {
-      const Availability = require('../availability');
+      const Availability = require('./availability');
       const result = await Availability.getAvailableSlots(input.city);
 
       // Return just the first 3 days with slots
@@ -177,7 +177,7 @@ async function executeLeadTool(toolName, input) {
       // Knowledge base
       let kbAnswer = null;
       try {
-        const WikiQA = require('../knowledge/wiki-qa');
+        const WikiQA = require('./knowledge/wiki-qa');
         const kb = await WikiQA.query(input.topic, { source: 'lead_agent' });
         kbAnswer = kb.answer;
       } catch { /* KB unavailable */ }
@@ -199,7 +199,7 @@ async function executeLeadTool(toolName, input) {
       const customer = await db('customers').where('id', input.customer_id).first();
       if (!customer?.phone) return { error: 'Customer has no phone number' };
 
-      const TwilioService = require('../twilio');
+      const TwilioService = require('./twilio');
       await TwilioService.sendSMS(customer.phone, input.message, {
         customerId: customer.id,
         messageType: 'lead_response',
@@ -230,7 +230,7 @@ async function executeLeadTool(toolName, input) {
       }
 
       // Update pipeline
-      const PipelineManager = require('../pipeline-manager');
+      const PipelineManager = require('./pipeline-manager');
       await PipelineManager.onEvent(input.customer_id, 'first_contact');
 
       logger.info(`[lead-agent] Auto-sent response to ${customer.first_name} ${customer.last_name}`);
@@ -257,7 +257,7 @@ async function executeLeadTool(toolName, input) {
 
       // SMS Adam with the lead details + suggested reply
       try {
-        const TwilioService = require('../twilio');
+        const TwilioService = require('./twilio');
         const slaLabel = { urgent: '15 min', normal: '1 hour', low: '4 hours' }[input.urgency || 'normal'];
         const adamMsg = `📋 Lead needs your reply (${slaLabel} SLA):\n` +
           `${customer ? customer.first_name + ' ' + customer.last_name : 'Unknown'}\n` +
@@ -277,7 +277,7 @@ async function executeLeadTool(toolName, input) {
     // ── Pipeline & follow-up ────────────────────────────────────
 
     case 'update_lead_pipeline': {
-      const PipelineManager = require('../pipeline-manager');
+      const PipelineManager = require('./pipeline-manager');
 
       // Map stage names to pipeline events
       const eventMap = {

@@ -255,6 +255,25 @@ router.post('/', async (req, res) => {
         .catch(err => logger.error(`[lead-webhook] AI triage fire-and-forget error: ${err.message}`));
     }
 
+    // Fire-and-forget Lead Response Agent — personalized response in <60s
+    // The generic auto-reply above is the safety net; this replaces it with something specific
+    try {
+      const LeadResponseAgent = require('../services/lead-response-agent');
+      const messageText = body.message || body['Message'] || body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn|message/i) || '';
+      LeadResponseAgent.processLead({
+        leadId: leadRecord?.id,
+        customerId: customer.id,
+        phone: phoneFormatted,
+        name: `${firstName} ${lastName}`,
+        message: messageText,
+        address: address || '',
+        city: leadSource.area || '',
+        leadSource: leadSource.source,
+        pageUrl: pageUrl || '',
+        formName: formName || '',
+      }).catch(err => logger.error(`[lead-agent] Fire-and-forget error: ${err.message}`));
+    } catch (e) { logger.error(`[lead-agent] Init error: ${e.message}`); }
+
     await db('activity_log').insert({
       customer_id: customer.id, action: 'customer_created',
       description: `New lead: ${firstName} ${lastName} from ${leadSource.detail || leadSource.source}`,

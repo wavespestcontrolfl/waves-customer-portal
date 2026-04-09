@@ -707,4 +707,90 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// LEAD RESPONSE AGENT
+// =========================================================================
+
+// GET /api/admin/leads/agent/responses — agent response history
+router.get('/agent/responses', async (req, res, next) => {
+  try {
+    const { limit = 30 } = req.query;
+    const responses = await db('lead_agent_responses')
+      .leftJoin('leads', 'lead_agent_responses.lead_id', 'leads.id')
+      .leftJoin('customers', 'lead_agent_responses.customer_id', 'customers.id')
+      .select(
+        'lead_agent_responses.*',
+        'leads.first_name as lead_first_name',
+        'leads.last_name as lead_last_name',
+        'leads.service_interest',
+        'leads.urgency as lead_urgency',
+        'leads.lead_type',
+        'customers.first_name',
+        'customers.last_name',
+        'customers.phone'
+      )
+      .orderBy('lead_agent_responses.created_at', 'desc')
+      .limit(parseInt(limit));
+
+    res.json({
+      responses: responses.map(r => ({
+        id: r.id,
+        leadName: r.lead_first_name ? `${r.lead_first_name} ${r.lead_last_name}` : `${r.first_name} ${r.last_name}`,
+        phone: r.phone,
+        serviceInterest: r.service_interest,
+        actionTaken: r.action_taken,
+        responseMessage: r.response_message,
+        responseTimeSeconds: r.response_time_seconds,
+        triageSummary: r.triage_summary,
+        followUpScheduled: r.follow_up_scheduled,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/leads/agent/test — manually trigger the agent for a specific lead
+router.post('/agent/test', async (req, res, next) => {
+  try {
+    const { lead_id } = req.body;
+    if (!lead_id) return res.status(400).json({ error: 'lead_id required' });
+
+    const lead = await db('leads').where('id', lead_id).first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    const customer = lead.customer_id
+      ? await db('customers').where('id', lead.customer_id).first()
+      : null;
+
+    const LeadResponseAgent = require('../services/lead-response-agent');
+
+    if (req.query.wait === 'true') {
+      const result = await LeadResponseAgent.processLead({
+        leadId: lead.id,
+        customerId: lead.customer_id,
+        phone: lead.phone,
+        name: `${lead.first_name} ${lead.last_name}`,
+        message: lead.service_interest || '',
+        address: lead.address || '',
+        city: lead.city || customer?.city || '',
+        leadSource: lead.lead_type || '',
+      });
+      return res.json(result);
+    }
+
+    LeadResponseAgent.processLead({
+      leadId: lead.id,
+      customerId: lead.customer_id,
+      phone: lead.phone,
+      name: `${lead.first_name} ${lead.last_name}`,
+      message: lead.service_interest || '',
+      address: lead.address || '',
+      city: lead.city || customer?.city || '',
+      leadSource: lead.lead_type || '',
+    }).catch(err => logger.error(`[lead-agent] Test run failed: ${err.message}`));
+
+    res.json({ status: 'started', leadId: lead.id });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
