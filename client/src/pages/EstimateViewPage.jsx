@@ -621,39 +621,6 @@ export default function EstimateViewPage() {
         </div>
 
         {/* ============================================================= */}
-        {/* FIRST 90 DAYS TIMELINE                                         */}
-        {/* ============================================================= */}
-        <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
-          <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>
-            Your First 90 Days
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-            {[
-              { period: 'Week 1', text: 'Initial treatment — dramatic reduction in visible pests within 48 hours' },
-              { period: 'Month 1', text: 'Perimeter barrier established, interior activity drops significantly' },
-              { period: 'Month 2', text: 'Follow-up treatment reinforces barrier, remaining harborage addressed' },
-              { period: 'Month 3', text: 'Full protection in place. Not satisfied? Full refund.' },
-            ].map((step, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 10 }}>
-                  <div style={{
-                    width: 10, height: 10, borderRadius: '50%',
-                    background: i === 3 ? B.green : B.wavesBlue, flexShrink: 0, marginTop: 4,
-                  }} />
-                  {i < 3 && (
-                    <div style={{ width: 2, height: 28, background: `${B.wavesBlue}33` }} />
-                  )}
-                </div>
-                <div style={{ paddingBottom: i < 3 ? 8 : 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{step.period}</div>
-                  <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.5, fontFamily: FONTS.body, marginTop: 1 }}>{step.text}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* ============================================================= */}
         {/* 2. SERVICE LINE ITEMS                                          */}
         {/* ============================================================= */}
         <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
