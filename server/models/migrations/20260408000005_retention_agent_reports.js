@@ -22,11 +22,13 @@ exports.up = async function (knex) {
   });
 
   // Add pitch_message and pitched_at to upsell_opportunities if missing
-  if (!(await knex.schema.hasColumn('upsell_opportunities', 'pitch_message'))) {
-    await knex.schema.alterTable('upsell_opportunities', (t) => {
-      t.text('pitch_message');
-      t.timestamp('pitched_at');
-    });
+  if (await knex.schema.hasTable('upsell_opportunities')) {
+    if (!(await knex.schema.hasColumn('upsell_opportunities', 'pitch_message'))) {
+      await knex.schema.alterTable('upsell_opportunities', (t) => { t.text('pitch_message'); });
+    }
+    if (!(await knex.schema.hasColumn('upsell_opportunities', 'pitched_at'))) {
+      await knex.schema.alterTable('upsell_opportunities', (t) => { t.timestamp('pitched_at'); });
+    }
   }
 };
 
