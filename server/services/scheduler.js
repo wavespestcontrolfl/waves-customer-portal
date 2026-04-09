@@ -813,6 +813,17 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // GA4 ANALYTICS CRONS (daily sync)
+  // =========================================================================
+  try {
+    const { initGA4Crons } = require('./analytics/ga4-crons');
+    initGA4Crons();
+    logger.info('GA4 analytics crons initialized');
+  } catch (err) {
+    logger.error(`GA4 crons failed to init: ${err.message}`);
+  }
+
   logger.info('Scheduled jobs initialized');
 }
 
