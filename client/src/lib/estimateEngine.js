@@ -1,14 +1,24 @@
 /**
- * Waves Pest Control — Estimate Calculation Engine v1.4
+ * Waves Pest Control — Estimate Calculation Engine v1.5
  * Ported from waves-estimator.html weCalculate() function.
  * Pure calculation — no DOM, no side effects.
+ *
+ * v1.5 changes:
+ * - Tree & Shrub: bed area cap raised 8k→12k, access difficulty modifier (+8/+15 min)
+ * - Palm Injection: prefers manual injectable count, flags when estimated
+ * - Mosquito: irrigation modifier (+0.08 pressure), cap raised 1.50→1.60
+ * - Rodent Bait: matrix scoring (footprint + lot + water + trees) replaces OR logic
+ * - One-Time Lawn: higher standalone fungicide base ($95 floor vs $73)
+ * - Trenching: concrete cap raised 0.50→0.60 for full-cage + 3-car garage
+ * - Bora-Care: multi-day pricing for 4,500+ sf attics, labor cap raised 6→10 hrs
+ * - Bed Bug Heat: equipment cost for in-house treatments ($150 + $75/extra room)
  *
  * v1.4 changes:
  * - Split roach modifier: Regular 10%, German 25% (was both 15%)
  * - Tiered hardscape marginal: 3% up to 15k, 5% above (was flat 3%)
- * - Fungicide multiplier: 1.55 (was 1.38) — covers real COGS on curative apps
- * - Margin floor check: warns if any line goes below 35% margin at Platinum
- * - Tier commitment notes in output for downstream reconciliation
+ * - Fungicide multiplier: 1.55 (was 1.38)
+ * - Margin floor check at 35% for WaveGuard tiers
+ * - Tier commitment data for billing reconciliation
  */
 
 /* ── helpers ────────────────────────────────────────────────── */
@@ -97,6 +107,11 @@ export function calculateEstimate(inputs) {
     svcRoach,
     svcBedbug,
     svcExclusion,
+    // v1.5 inputs
+    accessDifficulty,   // 'EASY' | 'MODERATE' | 'DIFFICULT' — gate access, narrow side yards
+    hasIrrigation,      // boolean — extensive irrigation creates standing water
+    injectablePalms: _injectablePalms, // manual override for injectable palm count
+    bedbugEquipment,    // 'SUBCONTRACT' | 'INHOUSE' — heat treatment equipment source
   } = inputs;
 
   const homeSqFt = Number(_homeSqFt) || 0;
@@ -352,12 +367,16 @@ export function calculateEstimate(inputs) {
     if (eb <= 0) {
       let bp = shrubDensity === 'HEAVY' ? 0.25 : shrubDensity === 'MODERATE' ? 0.18 : 0.10;
       if (landscapeComplexity === 'COMPLEX') bp += 0.05;
-      eb = Math.min(8000, Math.round(lotSqFt * bp));
+      // v1.5: raised cap from 8,000 to 12,000 — 1-acre heavy-shrub properties can exceed 10k sf beds
+      eb = Math.min(12000, Math.round(lotSqFt * bp));
       fieldVerify.push('bed area');
     }
     let et = treeCount || (treeDensity === 'HEAVY' ? 12 : treeDensity === 'MODERATE' ? 5 : 2);
-    const osm = Math.max(25, 20 + Math.round(eb / 500) + Math.round(et * 1.5));
+    // v1.5: access difficulty adds time for gate access, narrow side yards, split beds
+    const accessMin = accessDifficulty === 'DIFFICULT' ? 15 : accessDifficulty === 'MODERATE' ? 8 : 0;
+    const osm = Math.max(25, 20 + Math.round(eb / 500) + Math.round(et * 1.5) + accessMin);
     const lpv = LABOR * ((osm + 10) / 60);
+    // v1.5: material rates benchmarked from SiteOne invoices avg Q1-Q4 2025
     const mps = { 6: 220.60 / 3500, 9: 364.10 / 3500, 12: 413.60 / 3500 };
     const tst = [
       { n: 'Standard', v: 6, f: 50 },
@@ -382,10 +401,20 @@ export function calculateEstimate(inputs) {
   /* ── PALM INJECTION ──────────────────────────────────────── */
   if (svcInjection) {
     hasRec = true;
-    let ep = palmCount || (treeDensity === 'HEAVY' ? 6 : treeDensity === 'MODERATE' ? 5 : 3);
-    let ip = Math.max(1, Math.round(ep * 0.30));
+    // v1.5: prefer manual injectable count — the 30% estimate is unreliable
+    // (10 Washingtonia + 2 Canary Islands = 12 palms but only 2 injectable)
+    let ip;
+    let palmEstimated = false;
+    if (Number(_injectablePalms) > 0) {
+      ip = Number(_injectablePalms);
+    } else {
+      let ep = palmCount || (treeDensity === 'HEAVY' ? 6 : treeDensity === 'MODERATE' ? 5 : 3);
+      ip = Math.max(1, Math.round(ep * 0.30));
+      palmEstimated = true;
+      fieldVerify.push('injectable palm count');
+    }
     const inja = ip * 35 * 3, injMo = Math.round(inja / 12 * 100) / 100;
-    R.injection = { palms: ip, ann: inja, mo: injMo };
+    R.injection = { palms: ip, ann: inja, mo: injMo, estimated: palmEstimated };
     wgServices.push({ name: 'Palm Injection', mo: injMo });
   }
 
@@ -404,9 +433,12 @@ export function calculateEstimate(inputs) {
     else if (landscapeComplexity === 'MODERATE') pr += 0.05;
     if (hasPool) pr += 0.05;
     if (nearWater) pr += 0.10;
+    // v1.5: irrigation creates standing water in valve boxes, low spots, overflow areas
+    if (hasIrrigation) pr += 0.08;
     if (sz === 'ACRE') pr += 0.15;
     else if (sz === 'HALF') pr += 0.05;
-    pr = Math.min(1.50, Math.round(pr * 100) / 100);
+    // v1.5: raised cap from 1.50 to 1.60 — irrigation+water+trees can exceed old cap
+    pr = Math.min(1.60, Math.round(pr * 100) / 100);
     const bp = {
       SMALL:   { b: 80, s: 90, g: 100, p: 110 },
       QUARTER: { b: 90, s: 100, g: 115, p: 125 },
@@ -450,11 +482,17 @@ export function calculateEstimate(inputs) {
   /* ── RODENT BAIT ─────────────────────────────────────────── */
   if (svcRodentBait && footprint > 0) {
     hasRec = true;
-    const lg = footprint > 2500 || lotSqFt > 15000;
-    const sm = footprint < 1500 && lotSqFt < 8000;
-    const rmo = lg ? 109 : sm ? 75 : 89;
+    // v1.5: matrix classification — both footprint AND lot matter for rodent pressure
+    // A 2,600sf home on a 40,000sf lot has very different pressure than 2,600sf on 10,000sf
+    let rodentScore = 0;
+    if (footprint >= 2500) rodentScore += 2; else if (footprint >= 1800) rodentScore += 1;
+    if (lotSqFt >= 20000) rodentScore += 2; else if (lotSqFt >= 12000) rodentScore += 1;
+    if (nearWater) rodentScore += 1;
+    if (treeDensity === 'HEAVY') rodentScore += 1;
+    const rmo = rodentScore >= 3 ? 109 : rodentScore <= 1 ? 75 : 89;
     R.rodBaitMo = rmo;
-    R.rodBaitSize = lg ? 'Large' : sm ? 'Small' : 'Medium';
+    R.rodBaitSize = rodentScore >= 3 ? 'Large' : rodentScore <= 1 ? 'Small' : 'Medium';
+    R.rodBaitScore = rodentScore;
   }
 
   /* ═══════════ ONE-TIME ═══════════ */
@@ -493,9 +531,13 @@ export function calculateEstimate(inputs) {
   /* ── One-Time Lawn ───────────────────────────────────────── */
   if (svcOnetimeLawn && lotSqFt > 0) {
     hasOT = true;
+    // v1.5: standalone fungicide fallback base raised — Headway G + liquid follow-up
+    // is $80+ materials on a 6k sf lawn, $73 base was underpricing mid-size properties
     let enhPA = 55 * 12 / 9;
     if (R.lawn && R.lawn[2]) enhPA = R.lawn[2].pa;
-    let bl = Math.max(85, Math.round(enhPA * 1.30));
+    const isFungicide = otLawnType === 'FUNGICIDE';
+    const standaloneFungBase = Math.max(enhPA, 95); // higher floor for standalone fungicide
+    let bl = Math.max(85, Math.round((isFungicide && !R.lawn ? standaloneFungBase : enhPA) * 1.30));
     let tm = 1.0, tl = 'Fertilization';
     if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
@@ -564,7 +606,8 @@ export function calculateEstimate(inputs) {
     if (hasPoolCage) cp = 0.35;
     else if (hasPool) cp = 0.30;
     if (hasLargeDriveway) cp += 0.05;
-    cp = Math.min(0.50, cp);
+    // v1.5: raised cap from 0.50 to 0.60 — full cage + 3-car garage can hit 55-60%
+    cp = Math.min(0.60, cp);
     const dl = Math.round(perim * (1 - cp)), cl = Math.round(perim * cp);
     const fp = otP(Math.max(600, dl * 10 + cl * 14));
     R.trench = { price: fp, ren: 325, dl, cl };
@@ -576,10 +619,15 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     const BC_GAL = 91.98, BC_COV = 275, BC_EQUIP = 17.50;
     const gal = Math.max(3, Math.ceil(bcSqft / BC_COV));
-    const lhr = Math.min(6, Math.max(2, 1.5 + bcSqft / 1000));
+    // v1.5: raised labor cap from 6 to 10 hrs — 4,500+ sf attics are multi-day in SWFL heat
+    const isMultiDay = bcSqft > 4500;
+    const lhr = isMultiDay
+      ? Math.min(10, Math.max(6, 1.5 + bcSqft / 800))  // more aggressive rate for large attics
+      : Math.min(6, Math.max(2, 1.5 + bcSqft / 1000));
     const cost = gal * BC_GAL + lhr * LABOR + BC_EQUIP;
     const fp = otP(Math.round(cost / 0.45));
-    otItems.push({ name: 'Bora-Care', price: fp, detail: '~' + bcSqft.toLocaleString() + ' sf | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs', atticIsEstimated, bcSqft, gal, lhr });
+    const detail = '~' + bcSqft.toLocaleString() + ' sf | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
+    otItems.push({ name: 'Bora-Care', price: fp, detail, atticIsEstimated, bcSqft, gal, lhr, isMultiDay });
   }
 
   /* ── Pre-Slab Termidor ───────────────────────────────────── */
@@ -721,10 +769,16 @@ export function calculateEstimate(inputs) {
     if (meth !== 'CHEMICAL') {
       let hpr = rm === 1 ? 1000 : rm === 2 ? 850 : 750;
       let hp = hpr * rm;
+      // v1.5: in-house heat adds equipment cost (heaters, fans, monitoring)
+      // Subcontract rate already includes equipment in the per-room price
+      if (bedbugEquipment === 'INHOUSE') {
+        const equipCost = 150 + (rm - 1) * 75; // heater rental/depreciation + fans + monitors
+        hp += equipCost;
+      }
       if (footprint > 2500) hp = Math.round(hp * 1.10);
       else if (footprint < 1200) hp = Math.round(hp * 0.95);
       const fp = otP(hp);
-      specItems.push({ name: 'Bed Bug Heat', price: fp, det: rm + ' room' + (rm > 1 ? 's' : '') + ' — ' + fmtInt(fp / rm) + '/room' });
+      specItems.push({ name: 'Bed Bug Heat', price: fp, det: rm + ' room' + (rm > 1 ? 's' : '') + ' — ' + fmtInt(fp / rm) + '/room' + (bedbugEquipment === 'INHOUSE' ? ' (in-house)' : '') });
     }
   }
 
