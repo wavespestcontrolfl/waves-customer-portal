@@ -266,7 +266,7 @@ router.get('/:id', async (req, res, next) => {
       db('notification_prefs').where({ customer_id: c.id }).first().catch(() => null),
       db('referral_promoters').where({ customer_id: c.id }).first().catch(() => null),
       db('property_application_history').where({ customer_id: c.id }).orderBy('applied_at', 'desc').limit(10).catch(() => []),
-      db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.type as discount_type', 'discounts.value as discount_value').catch(() => []),
+      db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.discount_type', 'discounts.amount as discount_value').catch(() => []),
     ]);
 
     res.json({
