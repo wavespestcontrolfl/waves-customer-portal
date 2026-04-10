@@ -2,13 +2,11 @@
 builder = "nixpacks"
 
 [build.nixpacks]
-aptPkgs = ["libnss3", "libatk1.0-0", "libatk-bridge2.0-0", "libcups2", "libdrm2", "libxkbcommon0", "libxcomposite1", "libxdamage1", "libxrandr2", "libgbm1", "libpango-1.0-0", "libcairo2", "libasound2", "libxshmfence1", "libx11-xcb1"]
-buildCmd = "npm install && npx playwright install chromium && npm run build"
+buildCmd = "npm install && npm run build"
 
 [deploy]
 startCommand = "npm start"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 60
+healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 3
-# Trigger rebuild Fri Apr  3 15:25:33 EDT 2026
+restartPolicyMaxRetries = 5
