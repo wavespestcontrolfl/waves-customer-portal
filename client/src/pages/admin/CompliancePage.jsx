@@ -21,7 +21,7 @@ function StatCard({ label, value, sub, color = '#00e5ff' }) {
     <div style={{ background: '#1e1e2e', borderRadius: 10, padding: '18px 22px', minWidth: 160, flex: 1 }}>
       <div style={{ color: '#999', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>{label}</div>
       <div style={{ color, fontSize: 28, fontWeight: 700, margin: '6px 0 2px' }}>{value ?? '—'}</div>
-      {sub && <div style={{ color: '#777', fontSize: 12 }}>{sub}</div>}
+      {sub && <div style={{ color: '#94a3b8', fontSize: 12 }}>{sub}</div>}
     </div>
   );
 }
@@ -83,7 +83,7 @@ function DashboardTab({ token }) {
             </tr>
           ))}
           {!data.recentApplications?.length && (
-            <tr><td colSpan={4} style={{ padding: 20, color: '#666', textAlign: 'center' }}>No applications recorded yet</td></tr>
+            <tr><td colSpan={4} style={{ padding: 20, color: '#94a3b8', textAlign: 'center' }}>No applications recorded yet</td></tr>
           )}
         </tbody>
       </table>
@@ -154,7 +154,7 @@ function ApplicationLogTab({ token }) {
                   </tr>
                 ))}
                 {!data?.applications?.length && (
-                  <tr><td colSpan={8} style={{ padding: 20, color: '#666', textAlign: 'center' }}>No applications found</td></tr>
+                  <tr><td colSpan={8} style={{ padding: 20, color: '#94a3b8', textAlign: 'center' }}>No applications found</td></tr>
                 )}
               </tbody>
             </table>
@@ -260,7 +260,7 @@ function ProductLimitsTab({ token }) {
             ))}
           </tbody>
         </table>
-      ) : <div style={{ color: '#666' }}>No lawn customers found</div>}
+      ) : <div style={{ color: '#94a3b8' }}>No lawn customers found</div>}
     </div>
   );
 }

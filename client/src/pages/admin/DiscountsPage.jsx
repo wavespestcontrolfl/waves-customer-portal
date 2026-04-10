@@ -12,7 +12,7 @@ const sBtn = (bg, c) => ({ padding: '8px 16px', background: bg, color: c, border
 const sBadge = (bg, c) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color: c, fontWeight: 600, display: 'inline-block' });
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box' };
 const thS = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${D.border}` };
-const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13 };
+const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13, color: D.text };
 
 const TYPE_COLORS = { percentage: { bg: '#0ea5e920', c: D.teal }, fixed_amount: { bg: '#f59e0b20', c: D.amber }, free_service: { bg: '#10b98120', c: D.green } };
 const EMPTY = { discount_key: '', name: '', description: '', discount_type: 'percentage', amount: 0, max_discount_dollars: '', applies_to: 'all', service_category_filter: '', service_key_filter: '', requires_waveguard_tier: '', is_waveguard_tier_discount: false, requires_military: false, requires_senior: false, requires_referral: false, requires_new_customer: false, requires_multi_home: false, requires_prepayment: false, min_service_count: '', min_subtotal: '', is_stackable: true, stack_group: '', priority: 100, promo_code: '', promo_code_expiry: '', promo_code_max_uses: '', is_active: true, is_auto_apply: false, show_in_estimates: true, show_in_invoices: true, show_in_scheduling: false, sort_order: '', color: '#0ea5e9', icon: '' };

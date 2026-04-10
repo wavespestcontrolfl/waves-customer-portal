@@ -30,16 +30,16 @@ function Toggle({ checked, onChange, label, sublabel }) {
     <label style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
       padding: "16px 20px", borderRadius: 12,
-      background: "var(--card-bg)", border: "1px solid var(--border)",
+      background: "#1e293b", border: "1px solid #334155",
       cursor: "pointer", transition: "all 0.2s",
     }}>
       <div>
-        <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text)" }}>{label}</div>
-        {sublabel && <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{sublabel}</div>}
+        <div style={{ fontSize: 15, fontWeight: 600, color: "#e2e8f0" }}>{label}</div>
+        {sublabel && <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>{sublabel}</div>}
       </div>
       <div style={{
         width: 48, height: 26, borderRadius: 13, padding: 2,
-        background: checked ? "#0ea5e9" : "var(--toggle-off)",
+        background: checked ? "#0ea5e9" : "#475569",
         transition: "background 0.25s", position: "relative",
       }} onClick={(e) => { e.preventDefault(); onChange(!checked); }}>
         <div style={{
@@ -77,8 +77,8 @@ function AnalyticsSection({ demoMode }) {
   if (loading || !analytics) return null;
 
   return (
-    <div style={{ marginBottom: 24, padding: "16px 20px", borderRadius: 12, background: "var(--card-bg)", border: "1px solid var(--border)" }}>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 16, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Call Analytics</div>
+    <div style={{ marginBottom: 24, padding: "16px 20px", borderRadius: 12, background: "#1e293b", border: "1px solid #334155" }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 16, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.5px" }}>Call Analytics</div>
 
       <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
         {[
@@ -90,7 +90,7 @@ function AnalyticsSection({ demoMode }) {
         ].map(s => (
           <div key={s.label} style={{ flex: '1 1 100px', textAlign: 'center', padding: '10px 0' }}>
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
-            <div style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
+            <div style={{ fontSize: 9, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
           </div>
         ))}
       </div>
@@ -98,7 +98,7 @@ function AnalyticsSection({ demoMode }) {
       {/* Top Categories */}
       {analytics.topCategories?.length > 0 && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginRight: 4 }}>Top inquiries:</span>
+          <span style={{ fontSize: 11, color: '#94a3b8', marginRight: 4 }}>Top inquiries:</span>
           {analytics.topCategories.map(c => (
             <span key={c.category} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'rgba(14,165,233,0.1)', color: '#0ea5e9' }}>
               {c.category.replace(/_/g, ' ')} ({c.count})
@@ -110,18 +110,18 @@ function AnalyticsSection({ demoMode }) {
       {/* Calls by Hour mini chart */}
       {analytics.byHour && (
         <div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Calls by hour</div>
+          <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>Calls by hour</div>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1, height: 40 }}>
             {analytics.byHour.map((h, i) => {
               const max = Math.max(...analytics.byHour.map(x => x.count), 1);
               const ht = Math.max(2, (h.count / max) * 36);
               const isBusinessHour = i >= 8 && i < 18;
               return (
-                <div key={i} style={{ flex: 1, height: ht, background: h.count > 0 ? (isBusinessHour ? '#0ea5e9' : '#f59e0b') : 'var(--border)', borderRadius: 2 }} title={`${i}:00 — ${h.count} calls`} />
+                <div key={i} style={{ flex: 1, height: ht, background: h.count > 0 ? (isBusinessHour ? '#0ea5e9' : '#f59e0b') : '#334155', borderRadius: 2 }} title={`${i}:00 — ${h.count} calls`} />
               );
             })}
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: 'var(--text-muted)', marginTop: 2 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#94a3b8', marginTop: 2 }}>
             <span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>12am</span>
           </div>
         </div>
@@ -149,16 +149,16 @@ function CallCard({ call }) {
   return (
     <div style={{
       padding: "14px 18px", borderRadius: 10,
-      background: "var(--card-bg)", border: "1px solid var(--border)",
+      background: "#1e293b", border: "1px solid #334155",
       marginBottom: 8,
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
         <div>
-          <span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: "#e2e8f0" }}>
             {call.customer_name || call.caller_phone || "Unknown"}
           </span>
           {call.caller_phone && (
-            <span style={{ fontSize: 12, color: "var(--text-muted)", marginLeft: 8 }}>{call.caller_phone}</span>
+            <span style={{ fontSize: 12, color: "#94a3b8", marginLeft: 8 }}>{call.caller_phone}</span>
           )}
         </div>
         <span style={{
@@ -169,10 +169,10 @@ function CallCard({ call }) {
           {cat.replace("_", " ")}
         </span>
       </div>
-      <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.5, marginBottom: 6 }}>
+      <div style={{ fontSize: 13, color: "#cbd5e1", lineHeight: 1.5, marginBottom: 6 }}>
         {call.summary || "No summary available"}
       </div>
-      <div style={{ display: "flex", gap: 12, fontSize: 11, color: "var(--text-muted)" }}>
+      <div style={{ display: "flex", gap: 12, fontSize: 11, color: "#94a3b8" }}>
         {call.outcome && <span style={{ fontWeight: 500 }}>{outcomeLabels[call.outcome] || call.outcome}</span>}
         {call.urgency && <span>Urgency: {"⬤".repeat(call.urgency)}{"◯".repeat(5 - call.urgency)}</span>}
         {call.timestamp && <span>{new Date(call.timestamp).toLocaleString()}</span>}
@@ -187,12 +187,12 @@ function StatCard({ label, value, sub, accent }) {
   return (
     <div style={{
       padding: "18px 20px", borderRadius: 12,
-      background: "var(--card-bg)", border: "1px solid var(--border)",
+      background: "#1e293b", border: "1px solid #334155",
       flex: "1 1 140px", minWidth: 140,
     }}>
-      <div style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.5px" }}>{label}</div>
-      <div style={{ fontSize: 28, fontWeight: 700, color: accent || "var(--text)", lineHeight: 1.2 }}>{value}</div>
-      {sub && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{sub}</div>}
+      <div style={{ fontSize: 12, color: "#94a3b8", fontWeight: 500, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.5px" }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 700, color: accent || "#e2e8f0", lineHeight: 1.2 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>{sub}</div>}
     </div>
   );
 }
@@ -291,7 +291,7 @@ export default function WavesVoiceAgentAdmin() {
       "--text": "#e2e8f0", "--text-secondary": "#94a3b8", "--text-muted": "#64748b",
       "--accent": "#0ea5e9", "--toggle-off": "#334155",
       fontFamily: "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif",
-      background: "var(--bg)", color: "var(--text)",
+      background: "#0f1923", color: "#e2e8f0",
       minHeight: "100vh", padding: "24px 20px",
     }}>
       <style>{`
@@ -309,7 +309,7 @@ export default function WavesVoiceAgentAdmin() {
             </span>
             <StatusBadge active={agentEnabled} label={agentEnabled ? "Active" : "Off"} />
           </div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+          <div style={{ fontSize: 12, color: "#94a3b8" }}>
             Twilio ConversationRelay + Claude API • {afterHoursOnly ? "After-hours only" : "Always on"} • {
               new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/New_York" })
             } ET
@@ -374,7 +374,7 @@ export default function WavesVoiceAgentAdmin() {
               background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)",
             }}>
               <div style={{ fontSize: 14, fontWeight: 600 }}>{call.customer?.name || call.phone || "Unknown"}</div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              <div style={{ fontSize: 12, color: "#94a3b8" }}>
                 {call.classification?.category || "Classifying..."} • {call.message_count} messages • Started {new Date(call.start_time).toLocaleTimeString()}
               </div>
             </div>
@@ -385,23 +385,23 @@ export default function WavesVoiceAgentAdmin() {
       {/* Pipeline Overview */}
       <div style={{
         padding: "16px 20px", borderRadius: 12, marginBottom: 24,
-        background: "var(--card-bg)", border: "1px solid var(--border)",
+        background: "#1e293b", border: "1px solid #334155",
       }}>
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Call → Estimate Pipeline</div>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.5px" }}>Call → Estimate Pipeline</div>
         <div style={{ display: "flex", alignItems: "center", gap: 0, flexWrap: "wrap", fontSize: 12 }}>
           {["Missed Call", "AI Agent", "Lead Capture", "RentCast + Satellite", "Pricing Engine", "SMS Estimate"].map((step, i, arr) => (
             <div key={step} style={{ display: "flex", alignItems: "center" }}>
               <div style={{
                 padding: "8px 14px", borderRadius: 8,
                 background: i === 1 ? "rgba(14,165,233,0.12)" : "rgba(255,255,255,0.04)",
-                border: `1px solid ${i === 1 ? "rgba(14,165,233,0.3)" : "var(--border)"}`,
-                color: i === 1 ? "#0ea5e9" : "var(--text-secondary)",
+                border: `1px solid ${i === 1 ? "rgba(14,165,233,0.3)" : "#334155"}`,
+                color: i === 1 ? "#0ea5e9" : "#cbd5e1",
                 fontWeight: 500, whiteSpace: "nowrap",
               }}>
                 {step}
               </div>
               {i < arr.length - 1 && (
-                <span style={{ margin: "0 4px", color: "var(--text-muted)", fontSize: 16 }}>→</span>
+                <span style={{ margin: "0 4px", color: "#94a3b8", fontSize: 16 }}>→</span>
               )}
             </div>
           ))}
@@ -412,7 +412,7 @@ export default function WavesVoiceAgentAdmin() {
       <div>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Recent Calls</div>
         {displayCalls.length === 0 ? (
-          <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+          <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>
             No calls yet. Agent is standing by.
           </div>
         ) : (
@@ -426,9 +426,9 @@ export default function WavesVoiceAgentAdmin() {
       {/* Config Panel */}
       <div style={{
         marginTop: 24, padding: "16px 20px", borderRadius: 12,
-        background: "var(--card-bg)", border: "1px solid var(--border)",
+        background: "#1e293b", border: "1px solid #334155",
       }}>
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Agent Config</div>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.5px" }}>Agent Config</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, fontSize: 13 }}>
           {[
             ['Model', status?.config?.model || 'claude-sonnet-4'],
@@ -441,7 +441,7 @@ export default function WavesVoiceAgentAdmin() {
             ['Knowledge Base', 'Auto-synced with services'],
           ].map(([label, value]) => (
             <div key={label}>
-              <span style={{ color: "var(--text-muted)" }}>{label}: </span>
+              <span style={{ color: "#94a3b8" }}>{label}: </span>
               <span style={{ fontWeight: 500 }}>{value}</span>
             </div>
           ))}

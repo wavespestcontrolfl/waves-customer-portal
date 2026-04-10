@@ -34,7 +34,7 @@ const STAGES = [
   { key: 'new_lead', label: 'New Lead', color: D.teal, bg: `${D.teal}22` },
   { key: 'contacted', label: 'Contacted', color: D.teal, bg: D.teal, textColor: D.white },
   { key: 'estimate_sent', label: 'Est. Sent', color: D.amber, bg: `${D.amber}22` },
-  { key: 'estimate_viewed', label: 'Est. Viewed', color: D.amber, bg: D.amber, textColor: '#000' },
+  { key: 'estimate_viewed', label: 'Est. Viewed', color: D.amber, bg: D.amber, textColor: '#1e293b' },
   { key: 'follow_up', label: 'Follow Up', color: '#a855f7', bg: `${'#a855f7'}22` },
   { key: 'won', label: 'Won', color: D.green, bg: `${D.green}22` },
   { key: 'active_customer', label: 'Active', color: D.green, bg: D.green, textColor: D.white },

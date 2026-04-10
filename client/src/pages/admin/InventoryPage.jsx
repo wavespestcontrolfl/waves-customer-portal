@@ -15,7 +15,7 @@ const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, borde
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600 });
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
 const thS = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${D.border}` };
-const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13 };
+const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13, color: D.text };
 
 export default function InventoryPage() {
   const [tab, setTab] = useState('products');
