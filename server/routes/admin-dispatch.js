@@ -11,7 +11,10 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // GET /api/admin/dispatch/today (or /:date)
 router.get('/:date?', async (req, res, next) => {
   try {
-    const date = req.params.date || new Date().toISOString().split('T')[0];
+    // Validate date param — reject non-date strings like "technicians", "products", etc.
+    const rawDate = req.params.date;
+    if (rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) return next();
+    const date = rawDate || new Date().toISOString().split('T')[0];
 
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })
