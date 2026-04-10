@@ -2,6 +2,17 @@
 require("./instrument.js");
 const Sentry = require("@sentry/node");
 
+// Prevent unhandled promise rejections from crashing the process
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[UNHANDLED REJECTION]', reason?.message || reason);
+  Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
+});
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT EXCEPTION]', err.message);
+  Sentry.captureException(err);
+  // Don't exit — let the process recover
+});
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
