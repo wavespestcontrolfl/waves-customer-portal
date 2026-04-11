@@ -168,7 +168,8 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
         messages: [{ role: 'user', content: userMessage }],
       });
 
-      const text = response.content[0]?.text || '';
+      const block = response.content[0];
+      const text = typeof block === 'string' ? block : (block?.text || JSON.stringify(block));
       // Parse JSON — strip markdown fences if present
       const clean = text.replace(/```json\s*|```/g, '').trim();
       return JSON.parse(clean);

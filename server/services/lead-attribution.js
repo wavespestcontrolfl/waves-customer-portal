@@ -41,9 +41,8 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
       await db('customer_interactions').insert({
         customer_id: existingCustomer.id,
         interaction_type: type === 'call' ? 'inbound_call' : 'inbound_sms',
-        channel: type,
-        notes: `Inbound ${type} via ${leadSource?.name || normalizedTo || 'unknown'}`,
-        metadata: JSON.stringify({ callSid, messageSid, leadSourceId: leadSource?.id }),
+        subject: `Inbound ${type} via ${leadSource?.name || normalizedTo || 'unknown'}`,
+        metadata: JSON.stringify({ callSid, messageSid, leadSourceId: leadSource?.id, channel: type }),
         created_at: new Date(),
       });
     } catch (e) {

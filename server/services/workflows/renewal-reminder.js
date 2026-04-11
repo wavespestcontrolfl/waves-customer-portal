@@ -26,7 +26,7 @@ class RenewalReminder {
           .whereNotNull(field.column)
           .whereRaw(`DATE(${field.column}) = ?`, [dateStr])
           .whereNotNull('phone')
-          .select('id', 'first_name', 'phone', 'location_id', field.column);
+          .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', field.column);
 
         for (const customer of customers) {
           try {
