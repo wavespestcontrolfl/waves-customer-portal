@@ -242,7 +242,7 @@ async function computeSatisfactionScore(customerId) {
 
   try {
     // Check for ratings in service_records
-    if (await tableExists('service_records')) {
+    if (await tableExists('service_records') && await db.schema.hasColumn('service_records', 'rating')) {
       try {
         const ratings = await db('service_records')
           .where('customer_id', customerId)
@@ -252,7 +252,6 @@ async function computeSatisfactionScore(customerId) {
           const avg = ratings.reduce((sum, r) => sum + parseFloat(r.rating), 0) / ratings.length;
           details.avgRating = Math.round(avg * 10) / 10;
           details.reviewCount = ratings.length;
-          // 5-star scale → 0-100
           score = Math.round((avg / 5) * 80) + 10;
         }
       } catch { /* rating column may not exist */ }
@@ -615,26 +614,80 @@ async function scoreCustomer(customerId) {
       updated_at: now,
     };
 
+    // Ensure sub-score columns exist before writing (Railway auto-heal may have created table without them)
+    try {
+      const hasPmtScore = await db.schema.hasColumn('customer_health_scores', 'payment_score');
+      if (!hasPmtScore) {
+        for (const col of ['payment_score', 'service_score', 'engagement_score', 'satisfaction_score', 'loyalty_score', 'growth_score']) {
+          if (!(await db.schema.hasColumn('customer_health_scores', col))) {
+            await db.schema.alterTable('customer_health_scores', t => { t.integer(col).defaultTo(50); });
+          }
+        }
+        for (const col of ['payment_details', 'service_details', 'engagement_details', 'satisfaction_details', 'loyalty_details', 'growth_details', 'churn_signals']) {
+          if (!(await db.schema.hasColumn('customer_health_scores', col))) {
+            await db.schema.alterTable('customer_health_scores', t => { t.jsonb(col); });
+          }
+        }
+        for (const col of ['score_grade', 'churn_risk', 'score_trend']) {
+          if (!(await db.schema.hasColumn('customer_health_scores', col))) {
+            await db.schema.alterTable('customer_health_scores', t => { t.string(col, col === 'score_grade' ? 1 : 10); });
+          }
+        }
+        for (const col of ['churn_probability']) {
+          if (!(await db.schema.hasColumn('customer_health_scores', col))) {
+            await db.schema.alterTable('customer_health_scores', t => { t.decimal(col, 5, 4); });
+          }
+        }
+        for (const col of ['days_until_predicted_churn', 'previous_score', 'score_change_30d']) {
+          if (!(await db.schema.hasColumn('customer_health_scores', col))) {
+            await db.schema.alterTable('customer_health_scores', t => { t.integer(col); });
+          }
+        }
+        if (!(await db.schema.hasColumn('customer_health_scores', 'scored_at'))) {
+          await db.schema.alterTable('customer_health_scores', t => { t.timestamp('scored_at').defaultTo(db.fn.now()); });
+        }
+        if (!(await db.schema.hasColumn('customer_health_scores', 'overall_score'))) {
+          await db.schema.alterTable('customer_health_scores', t => { t.integer('overall_score').defaultTo(50); });
+        }
+        console.log('[health] Auto-added missing sub-score columns');
+      }
+    } catch (e) { console.error('[health] Column check error:', e.message); }
+
     const existing = await db('customer_health_scores').where('customer_id', customerId).first();
-    if (existing) {
-      await db('customer_health_scores').where('customer_id', customerId).update(record);
-    } else {
-      await db('customer_health_scores').insert({ ...record, created_at: now });
+    try {
+      if (existing) {
+        await db('customer_health_scores').where('customer_id', customerId).update(record);
+      } else {
+        await db('customer_health_scores').insert({ ...record, created_at: now });
+      }
+    } catch (e) {
+      // Fallback: write only columns that exist
+      console.error('[health] Score write error, trying minimal:', e.message);
+      const minimal = { customer_id: customerId, overall_score: overall, updated_at: now };
+      if (existing) await db('customer_health_scores').where('customer_id', customerId).update(minimal).catch(() => {});
+      else await db('customer_health_scores').insert({ ...minimal, created_at: now }).catch(() => {});
     }
 
     // Insert history snapshot
-    await db('customer_health_history').insert({
-      customer_id: customerId,
-      overall_score: overall,
-      payment_score: payment.score,
-      service_score: service.score,
-      engagement_score: engagement.score,
-      satisfaction_score: satisfaction.score,
-      loyalty_score: loyalty.score,
-      growth_score: growth.score,
-      churn_risk: churnRisk,
-      scored_at: today,
-    });
+    try {
+      await db('customer_health_history').insert({
+        customer_id: customerId,
+        overall_score: overall,
+        payment_score: payment.score,
+        service_score: service.score,
+        engagement_score: engagement.score,
+        satisfaction_score: satisfaction.score,
+        loyalty_score: loyalty.score,
+        growth_score: growth.score,
+        churn_risk: churnRisk,
+        scored_at: today,
+      });
+    } catch (e) {
+      // Fallback: minimal history
+      await db('customer_health_history').insert({
+        customer_id: customerId, overall_score: overall, scored_at: today,
+      }).catch(() => {});
+    }
 
     // Generate alerts
     try {
