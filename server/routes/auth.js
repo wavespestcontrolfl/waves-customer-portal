@@ -114,9 +114,10 @@ router.post('/refresh', async (req, res, next) => {
 // =========================================================================
 // GET /api/auth/me — Get current authenticated customer
 // =========================================================================
-router.get('/me', authenticate, async (req, res) => {
+router.get('/me', authenticate, async (req, res, next) => {
+  try {
   const customer = req.customer;
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
 
   res.json({
     id: customer.id,
@@ -153,6 +154,7 @@ router.get('/me', authenticate, async (req, res) => {
       emailEnabled: prefs.email_enabled,
     } : null,
   });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

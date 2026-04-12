@@ -91,7 +91,7 @@ export default function ReferralsPageV2() {
   useEffect(() => {
     if (tab === 'settings' && !settings) af('/admin/referrals/settings').then(r => setSettings(r.settings)).catch(() => {});
     if (tab === 'analytics' && !analytics) af('/admin/referrals/analytics').then(r => setAnalytics(r)).catch(() => {});
-  }, [tab, settings, analytics]);
+  }, [tab]);
 
   const searchCustomers = async (q) => {
     setCustSearch(q);
