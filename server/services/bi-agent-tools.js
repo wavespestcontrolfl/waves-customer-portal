@@ -56,12 +56,12 @@ async function executeBITool(toolName, input) {
         db('leads').where('first_contact_at', '>=', somDate).select('status').count('* as count').groupBy('status'),
         // Top 5 at-risk by value
         db('customer_health_scores as h')
-          .innerJoin(db.raw(`(SELECT customer_id, MAX(score_date) as max_date FROM customer_health_scores GROUP BY customer_id) as latest`),
-            function () { this.on('h.customer_id', 'latest.customer_id').andOn('h.score_date', 'latest.max_date'); })
+          .innerJoin(db.raw(`(SELECT customer_id, MAX(scored_at) as max_date FROM customer_health_scores GROUP BY customer_id) as latest`),
+            function () { this.on('h.customer_id', 'latest.customer_id').andOn('h.scored_at', 'latest.max_date'); })
           .innerJoin('customers as c', 'h.customer_id', 'c.id')
-          .whereIn('h.churn_risk_level', ['critical', 'at_risk'])
+          .whereIn('h.churn_risk', ['critical', 'at_risk'])
           .where('c.active', true)
-          .select('c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'h.health_score', 'h.churn_risk_level', 'h.risk_factors')
+          .select('c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'h.overall_score', 'h.churn_risk', 'h.churn_signals')
           .orderBy('c.monthly_rate', 'desc')
           .limit(5),
       ]);
@@ -71,7 +71,7 @@ async function executeBITool(toolName, input) {
       const totalLeads = Object.values(pipelineMap).reduce((s, v) => s + v, 0);
       const won = pipelineMap.won || 0;
 
-      const criticalCount = atRisk.filter(c => c.churn_risk_level === 'critical').length;
+      const criticalCount = atRisk.filter(c => c.churn_risk === 'critical').length;
       const atRiskCount = atRisk.length;
 
       return {
@@ -88,9 +88,9 @@ async function executeBITool(toolName, input) {
           name: `${c.first_name} ${c.last_name}`,
           tier: c.waveguard_tier,
           monthlyRate: parseFloat(c.monthly_rate || 0),
-          health: c.health_score,
-          risk: c.churn_risk_level,
-          topFactor: (typeof c.risk_factors === 'string' ? JSON.parse(c.risk_factors) : (c.risk_factors || []))[0]?.signal || 'unknown',
+          health: c.overall_score,
+          risk: c.churn_risk,
+          topFactor: (typeof c.churn_signals === 'string' ? JSON.parse(c.churn_signals) : (c.churn_signals || []))[0]?.signal || 'unknown',
         })),
       };
     }
@@ -257,8 +257,8 @@ async function executeBITool(toolName, input) {
       // New critical health scores
       try {
         const newCritical = await db('customer_health_scores')
-          .where('churn_risk_level', 'critical')
-          .where('score_date', '>=', weekAgo)
+          .where('churn_risk', 'critical')
+          .where('scored_at', '>=', weekAgo)
           .innerJoin('customers', 'customer_health_scores.customer_id', 'customers.id')
           .select('customers.first_name', 'customers.last_name', 'customers.monthly_rate')
           .limit(5);

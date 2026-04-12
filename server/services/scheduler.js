@@ -329,8 +329,8 @@ function initScheduledJobs() {
       // Step 3: Generate retention outreach for at-risk customers
       const today = new Date().toISOString().split('T')[0];
       const atRisk = await db('customer_health_scores')
-        .where('score_date', today)
-        .whereIn('churn_risk_level', ['at_risk', 'critical'])
+        .where('scored_at', today)
+        .whereIn('churn_risk', ['at_risk', 'critical'])
         .select('customer_id');
 
       let outreachGenerated = 0;

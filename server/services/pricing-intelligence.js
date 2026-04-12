@@ -93,10 +93,10 @@ class PricingIntelligence {
     // Get health status for retention estimate
     const healthRow = await db('customer_health_scores')
       .where('customer_id', customerId)
-      .orderBy('score_date', 'desc')
+      .orderBy('scored_at', 'desc')
       .first();
 
-    const healthStatus = healthRow?.churn_risk_level || 'watch';
+    const healthStatus = healthRow?.churn_risk || 'watch';
     const retentionMonths = RETENTION_MONTHS[healthStatus] || 12;
 
     // Total revenue to date

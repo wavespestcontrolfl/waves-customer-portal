@@ -12,10 +12,10 @@ class RetentionEngine {
   async generateRetentionOutreach(customerId) {
     const health = await db('customer_health_scores')
       .where('customer_id', customerId)
-      .orderBy('score_date', 'desc')
+      .orderBy('scored_at', 'desc')
       .first();
 
-    if (!health || !['at_risk', 'critical'].includes(health.churn_risk_level)) return null;
+    if (!health || !['at_risk', 'critical'].includes(health.churn_risk)) return null;
 
     const customer = await db('customers').where('id', customerId).first();
     if (!customer) return null;
@@ -27,7 +27,7 @@ class RetentionEngine {
       .first();
     if (recent) return null;
 
-    const riskFactors = typeof health.risk_factors === 'string' ? JSON.parse(health.risk_factors) : (health.risk_factors || []);
+    const riskFactors = typeof health.churn_signals === 'string' ? JSON.parse(health.churn_signals) : (health.churn_signals || []);
 
     // Get context
     let lastServiceNote = '';
@@ -79,7 +79,7 @@ Return JSON: { "outreach_type": "sms/call", "strategy": "strategy_name", "messag
 
 Customer: ${customer.first_name} ${customer.last_name}
 Tier: ${customer.waveguard_tier} ($${customer.monthly_rate}/mo)
-Health: ${health.health_score}/100 (${health.churn_risk_level})
+Health: ${health.overall_score}/100 (${health.churn_risk})
 Churn probability: ${Math.round(health.churn_probability * 100)}%
 
 Risk factors:
@@ -108,10 +108,10 @@ ${recentSMS || 'None'}`
     }).returning('*');
 
     // Alert Adam for critical customers
-    if (health.churn_risk_level === 'critical' && TwilioService && process.env.ADAM_PHONE) {
+    if (health.churn_risk === 'critical' && TwilioService && process.env.ADAM_PHONE) {
       try {
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `🚨 CHURN ALERT: ${customer.first_name} ${customer.last_name} (${customer.waveguard_tier} $${customer.monthly_rate}/mo)\nHealth: ${health.health_score}/100\nRisk: ${riskFactors[0]?.value || 'Multiple signals'}\nAction: ${outreach.outreach_type.toUpperCase()} — "${(outreach.message || '').substring(0, 100)}..."`,
+          `🚨 CHURN ALERT: ${customer.first_name} ${customer.last_name} (${customer.waveguard_tier} $${customer.monthly_rate}/mo)\nHealth: ${health.overall_score}/100\nRisk: ${riskFactors[0]?.value || 'Multiple signals'}\nAction: ${outreach.outreach_type.toUpperCase()} — "${(outreach.message || '').substring(0, 100)}..."`,
           { messageType: 'internal_alert' }
         );
       } catch (err) {
@@ -143,13 +143,13 @@ ${recentSMS || 'None'}`
     // Save template outreach
     db('retention_outreach').insert({
       customer_id: customer.id,
-      outreach_type: health.churn_risk_level === 'critical' ? 'call' : 'sms',
+      outreach_type: health.churn_risk === 'critical' ? 'call' : 'sms',
       outreach_strategy: strategy,
       message_content: message,
       status: 'pending_approval',
     }).catch(err => logger.error(`Template outreach save failed: ${err.message}`));
 
-    return { outreach_type: health.churn_risk_level === 'critical' ? 'call' : 'sms', strategy, message };
+    return { outreach_type: health.churn_risk === 'critical' ? 'call' : 'sms', strategy, message };
   }
 
   /**

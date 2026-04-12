@@ -102,7 +102,7 @@ router.get('/dashboard', async (req, res) => {
   try {
     // Fleet health average
     const avgResult = await db('customer_health_scores')
-      .avg('health_score as avg')
+      .avg('overall_score as avg')
       .first().catch(() => null);
     const fleetHealthAvg = Math.round(parseFloat(avgResult?.avg || 50));
 
@@ -125,7 +125,7 @@ router.get('/dashboard', async (req, res) => {
 
     // Healthy count (score >= 65)
     const healthyResult = await db('customer_health_scores')
-      .where('health_score', '>=', 65)
+      .where('overall_score', '>=', 65)
       .count('* as count')
       .first().catch(() => ({ count: 0 }));
     const healthyCount = parseInt(healthyResult?.count || 0);
@@ -156,10 +156,10 @@ router.get('/dashboard', async (req, res) => {
     } catch {
       // Derive grades from health_score
       try {
-        const all = await db('customer_health_scores').select('health_score');
+        const all = await db('customer_health_scores').select('overall_score');
         const grades = { A: 0, B: 0, C: 0, D: 0, F: 0 };
         all.forEach(r => {
-          const s = r.health_score || 0;
+          const s = r.overall_score || 0;
           if (s >= 80) grades.A++; else if (s >= 65) grades.B++; else if (s >= 50) grades.C++; else if (s >= 35) grades.D++; else grades.F++;
         });
         gradeDistribution = Object.entries(grades).map(([g, c]) => ({ score_grade: g, count: c }));
@@ -181,8 +181,8 @@ router.get('/dashboard', async (req, res) => {
     try {
       atRiskCustomers = await db('customer_health_scores')
         .join('customers', 'customer_health_scores.customer_id', 'customers.id')
-        .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customer_health_scores.health_score')
-        .orderBy('customer_health_scores.health_score', 'asc')
+        .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customer_health_scores.overall_score')
+        .orderBy('customer_health_scores.overall_score', 'asc')
         .limit(10);
     } catch { /* non-critical */ }
 
@@ -246,7 +246,7 @@ router.get('/scores', async (req, res) => {
         'customers.email',
         'customers.phone',
         'customers.waveguard_tier',
-        'customer_health_scores.health_score',
+        'customer_health_scores.overall_score',
         'customer_health_scores.score_grade',
         'customer_health_scores.payment_score',
         'customer_health_scores.service_score',
@@ -276,7 +276,7 @@ router.get('/scores', async (req, res) => {
     const total = parseInt((await countQuery)?.count || 0);
 
     const allowedSorts = ['overall_score', 'score_grade', 'churn_risk', 'scored_at', 'first_name'];
-    const sortCol = allowedSorts.includes(sort) ? sort : 'health_score';
+    const sortCol = allowedSorts.includes(sort) ? sort : 'overall_score';
     const sortOrder = order === 'desc' ? 'desc' : 'asc';
 
     const scores = await query
@@ -303,7 +303,7 @@ router.get('/scores/:customerId', async (req, res) => {
       .where('customer_health_scores.customer_id', customerId)
       .select(
         'customers.*',
-        'customer_health_scores.health_score',
+        'customer_health_scores.overall_score',
         'customer_health_scores.score_grade',
         'customer_health_scores.payment_score',
         'customer_health_scores.service_score',

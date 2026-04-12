@@ -24,7 +24,7 @@ router.get('/', async (req, res, next) => {
       // rating column may not exist — use satisfaction_rating from treatment_outcomes or skip
       db.raw("(SELECT NULL) as last_rating"),
       db.raw("(SELECT COALESCE(SUM(total), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
-      db.raw("(SELECT COALESCE(health_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY created_at DESC LIMIT 1) as health_score"),
+      db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY created_at DESC LIMIT 1) as health_score"),
     );
 
     if (search) {

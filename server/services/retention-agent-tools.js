@@ -10,7 +10,7 @@ async function executeRetentionTool(toolName, input) {
 
     // ── Health & Signals ────────────────────────────────────────
 
-    case 'run_health_scores': {
+    case 'run_overall_scores': {
       const HealthScorer = require('./health-scorer');
       return HealthScorer.calculateAllHealthScores();
     }
@@ -27,20 +27,20 @@ async function executeRetentionTool(toolName, input) {
       // Get the most recent health score for each customer
       const scores = await db('customer_health_scores as h')
         .innerJoin(
-          db.raw(`(SELECT customer_id, MAX(score_date) as max_date FROM customer_health_scores GROUP BY customer_id) as latest`),
-          function () { this.on('h.customer_id', 'latest.customer_id').andOn('h.score_date', 'latest.max_date'); }
+          db.raw(`(SELECT customer_id, MAX(scored_at) as max_date FROM customer_health_scores GROUP BY customer_id) as latest`),
+          function () { this.on('h.customer_id', 'latest.customer_id').andOn('h.scored_at', 'latest.max_date'); }
         )
         .innerJoin('customers as c', 'h.customer_id', 'c.id')
-        .whereIn('h.churn_risk_level', levels)
+        .whereIn('h.churn_risk', levels)
         .where('c.active', true)
         .select(
           'c.id', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate',
           'c.phone', 'c.city', 'c.pipeline_stage',
-          'h.health_score', 'h.churn_risk_level', 'h.churn_probability',
-          'h.risk_factors', 'h.next_best_action', 'h.engagement_trend',
+          'h.overall_score', 'h.churn_risk', 'h.churn_probability',
+          'h.churn_signals', 'h.next_best_action', 'h.engagement_trend',
           'h.lifetime_value_estimate', 'h.upsell_opportunities'
         )
-        .orderByRaw("CASE WHEN h.churn_risk_level = 'critical' THEN 0 WHEN h.churn_risk_level = 'at_risk' THEN 1 ELSE 2 END")
+        .orderByRaw("CASE WHEN h.churn_risk = 'critical' THEN 0 WHEN h.churn_risk = 'at_risk' THEN 1 ELSE 2 END")
         .orderBy('h.lifetime_value_estimate', 'desc')
         .limit(limit);
 
@@ -52,10 +52,10 @@ async function executeRetentionTool(toolName, input) {
           tier: s.waveguard_tier,
           monthlyRate: parseFloat(s.monthly_rate || 0),
           city: s.city,
-          healthScore: s.health_score,
-          riskLevel: s.churn_risk_level,
+          healthScore: s.overall_score,
+          riskLevel: s.churn_risk,
           churnProbability: s.churn_probability,
-          riskFactors: typeof s.risk_factors === 'string' ? JSON.parse(s.risk_factors) : (s.risk_factors || []),
+          riskFactors: typeof s.churn_signals === 'string' ? JSON.parse(s.churn_signals) : (s.churn_signals || []),
           nextAction: s.next_best_action,
           trend: s.engagement_trend,
           ltv: parseFloat(s.lifetime_value_estimate || 0),
@@ -70,7 +70,7 @@ async function executeRetentionTool(toolName, input) {
 
       const [customer, health, signals, smsHistory, lastService, billing, activeSequences, recentOutreach, upsells] = await Promise.all([
         db('customers').where('id', customerId).first(),
-        db('customer_health_scores').where('customer_id', customerId).orderBy('score_date', 'desc').first(),
+        db('customer_health_scores').where('customer_id', customerId).orderBy('scored_at', 'desc').first(),
         db('customer_signals').where({ customer_id: customerId, resolved: false }).orderBy('detected_at', 'desc').limit(20),
         db('sms_log').where('customer_id', customerId).orderBy('created_at', 'desc').limit(10),
         db('service_records').where({ customer_id: customerId, status: 'completed' }).orderBy('service_date', 'desc').first(),
@@ -94,10 +94,10 @@ async function executeRetentionTool(toolName, input) {
           pipelineStage: customer.pipeline_stage,
         },
         health: health ? {
-          score: health.health_score,
-          riskLevel: health.churn_risk_level,
+          score: health.overall_score,
+          riskLevel: health.churn_risk,
           churnProbability: health.churn_probability,
-          riskFactors: typeof health.risk_factors === 'string' ? JSON.parse(health.risk_factors) : (health.risk_factors || []),
+          riskFactors: typeof health.churn_signals === 'string' ? JSON.parse(health.churn_signals) : (health.churn_signals || []),
           trend: health.engagement_trend,
           ltv: parseFloat(health.lifetime_value_estimate || 0),
           nextAction: health.next_best_action,

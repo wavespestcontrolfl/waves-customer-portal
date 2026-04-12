@@ -17,7 +17,7 @@ router.get('/', async (req, res, next) => {
     // Get latest health scores
     const healthScores = await db('customer_health_scores as h')
       .join('customers as c', 'h.customer_id', 'c.id')
-      .where('h.score_date', today)
+      .where('h.scored_at', today)
       .where('c.active', true)
       .select('h.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'c.phone', 'c.member_since');
 
@@ -27,7 +27,7 @@ router.get('/', async (req, res, next) => {
       scores = await db('customer_health_scores as h')
         .join('customers as c', 'h.customer_id', 'c.id')
         .where('c.active', true)
-        .whereRaw('h.score_date = (SELECT MAX(score_date) FROM customer_health_scores WHERE customer_id = h.customer_id)')
+        .whereRaw('h.scored_at = (SELECT MAX(scored_at) FROM customer_health_scores WHERE customer_id = h.customer_id)')
         .select('h.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate', 'c.phone', 'c.member_since');
     }
 
@@ -35,19 +35,19 @@ router.get('/', async (req, res, next) => {
     const dist = { healthy: 0, watch: 0, at_risk: 0, critical: 0 };
     let mrrAtRisk = 0;
     for (const s of scores) {
-      dist[s.churn_risk_level] = (dist[s.churn_risk_level] || 0) + 1;
-      if (['at_risk', 'critical'].includes(s.churn_risk_level)) {
+      dist[s.churn_risk] = (dist[s.churn_risk] || 0) + 1;
+      if (['at_risk', 'critical'].includes(s.churn_risk)) {
         mrrAtRisk += parseFloat(s.lifetime_value_estimate || 0) / 12;
       }
     }
 
     // At-risk and critical customers
     const atRisk = scores
-      .filter(s => ['at_risk', 'critical'].includes(s.churn_risk_level))
-      .sort((a, b) => (a.health_score || 100) - (b.health_score || 100))
+      .filter(s => ['at_risk', 'critical'].includes(s.churn_risk))
+      .sort((a, b) => (a.overall_score || 100) - (b.overall_score || 100))
       .map(s => ({
         ...s,
-        risk_factors: typeof s.risk_factors === 'string' ? JSON.parse(s.risk_factors) : s.risk_factors,
+        churn_signals: typeof s.churn_signals === 'string' ? JSON.parse(s.churn_signals) : s.churn_signals,
         upsell_opportunities: typeof s.upsell_opportunities === 'string' ? JSON.parse(s.upsell_opportunities) : s.upsell_opportunities,
       }));
 
@@ -87,7 +87,7 @@ router.get('/:id/health', async (req, res, next) => {
   try {
     const history = await db('customer_health_scores')
       .where('customer_id', req.params.id)
-      .orderBy('score_date', 'desc')
+      .orderBy('scored_at', 'desc')
       .limit(30);
 
     const signals = await db('customer_signals')
@@ -106,7 +106,7 @@ router.get('/:id/health', async (req, res, next) => {
 
     const latest = history[0];
     if (latest) {
-      if (typeof latest.risk_factors === 'string') latest.risk_factors = JSON.parse(latest.risk_factors);
+      if (typeof latest.churn_signals === 'string') latest.churn_signals = JSON.parse(latest.churn_signals);
       if (typeof latest.upsell_opportunities === 'string') latest.upsell_opportunities = JSON.parse(latest.upsell_opportunities);
     }
 

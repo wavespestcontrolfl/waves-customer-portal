@@ -94,14 +94,14 @@ class HealthScorer {
     const today = new Date().toISOString().split('T')[0];
     const existing = await db('customer_health_scores')
       .where('customer_id', customerId)
-      .where('score_date', today)
+      .where('scored_at', today)
       .first();
 
     const record = {
-      health_score: score,
+      overall_score: score,
       churn_probability: churnProbability,
-      churn_risk_level: riskLevel,
-      risk_factors: JSON.stringify(riskFactors),
+      churn_risk: riskLevel,
+      churn_signals: JSON.stringify(riskFactors),
       upsell_opportunities: JSON.stringify(upsellOpps),
       next_best_action: nextAction,
       engagement_trend: trend,
@@ -111,7 +111,7 @@ class HealthScorer {
     if (existing) {
       await db('customer_health_scores').where('id', existing.id).update({ ...record, updated_at: new Date() });
     } else {
-      await db('customer_health_scores').insert({ customer_id: customerId, score_date: today, ...record });
+      await db('customer_health_scores').insert({ customer_id: customerId, scored_at: today, ...record });
     }
 
     return { score, riskLevel, churnProbability, trend, riskFactors, upsellOpps, nextAction };
