@@ -232,7 +232,7 @@ const CallRecordingProcessor = {
             lead_source_detail: numberConfig?.domain || 'inbound call',
             pipeline_stage: 'new_lead',
             pipeline_stage_changed_at: new Date(),
-            location_id: loc.id,
+            nearest_location_id: loc.id,
           }).returning('*');
           customerId = newCust.id;
           logger.info(`[call-proc] Created customer: ${extracted.first_name} ${extracted.last_name} (${customerId})`);
