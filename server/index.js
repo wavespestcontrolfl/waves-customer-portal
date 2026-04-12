@@ -343,9 +343,9 @@ const server = app.listen(PORT, () => {
       logger.warn(`Voice Agent WebSocket setup skipped: ${err.message}`);
     }
   }
-  logger.info(`🌊 Waves Customer Portal API running on port ${PORT}`);
-  logger.info(`   Environment: ${config.nodeEnv}`);
-  logger.info(`   Client URL: ${config.clientUrl}`);
+  const mem = process.memoryUsage();
+  logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
+  logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
 
   // Run migrations in the background after the server is accepting requests
   const dbUrl = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL || process.env.POSTGRES_URL;
@@ -401,6 +401,12 @@ const server = app.listen(PORT, () => {
     if (config.nodeEnv !== 'test') {
       initScheduledJobs();
     }
+
+    // Log memory every 5 minutes to catch leaks / OOM before SIGTERM
+    setInterval(() => {
+      const m = process.memoryUsage();
+      logger.info(`[mem] RSS: ${Math.round(m.rss/1024/1024)}MB | Heap: ${Math.round(m.heapUsed/1024/1024)}/${Math.round(m.heapTotal/1024/1024)}MB`);
+    }, 5 * 60 * 1000);
   })();
 });
 
