@@ -1,8 +1,8 @@
 const cron = require('node-cron');
 const db = require('../models/db');
 const TwilioService = require('./twilio');
-const SquareService = require('./square');
 const logger = require('./logger');
+// Square removed — lazy-load if needed by any legacy cron
 
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
