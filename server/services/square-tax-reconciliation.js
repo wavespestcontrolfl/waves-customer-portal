@@ -13,7 +13,6 @@
  * - FL sales tax collected vs owed
  */
 
-const { Client, Environment } = require('square');
 const config = require('../config');
 const db = require('../models/db');
 const logger = require('./logger');
@@ -21,6 +20,7 @@ const logger = require('./logger');
 // Initialize Square client
 let squareClient, ordersApi, paymentsApi;
 try {
+  const { Client, Environment } = require('square');
   if (config.square?.accessToken) {
     squareClient = new Client({
       accessToken: config.square.accessToken,

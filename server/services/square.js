@@ -1,7 +1,6 @@
 // DEPRECATED — Square has been removed. Migrated to Stripe.
 // This file is kept for reference only. Safe to delete.
 
-const { Client, Environment } = require('square');
 const config = require('../config');
 const db = require('../models/db');
 const logger = require('./logger');
@@ -9,21 +8,26 @@ const { v4: uuidv4 } = require('uuid');
 
 // Initialize Square client — lazy to avoid crash if creds missing
 let squareClient, paymentsApi, customersApi, cardsApi, invoicesApi, bookingsApi, teamApi;
-if (config.square.accessToken) {
-  squareClient = new Client({
-    accessToken: config.square.accessToken,
-    environment: config.square.environment === 'production'
-      ? Environment.Production
-      : Environment.Sandbox,
-  });
-  paymentsApi = squareClient.paymentsApi;
-  customersApi = squareClient.customersApi;
-  cardsApi = squareClient.cardsApi;
-  invoicesApi = squareClient.invoicesApi;
-  bookingsApi = squareClient.bookingsApi;
-  teamApi = squareClient.teamApi;
-} else {
-  logger.warn('[square] SQUARE_ACCESS_TOKEN not set — payment features disabled');
+try {
+  const { Client, Environment } = require('square');
+  if (config.square.accessToken) {
+    squareClient = new Client({
+      accessToken: config.square.accessToken,
+      environment: config.square.environment === 'production'
+        ? Environment.Production
+        : Environment.Sandbox,
+    });
+    paymentsApi = squareClient.paymentsApi;
+    customersApi = squareClient.customersApi;
+    cardsApi = squareClient.cardsApi;
+    invoicesApi = squareClient.invoicesApi;
+    bookingsApi = squareClient.bookingsApi;
+    teamApi = squareClient.teamApi;
+  } else {
+    logger.warn('[square] SQUARE_ACCESS_TOKEN not set — payment features disabled');
+  }
+} catch {
+  logger.warn('[square] square SDK not installed — Square features disabled');
 }
 
 const SquareService = {

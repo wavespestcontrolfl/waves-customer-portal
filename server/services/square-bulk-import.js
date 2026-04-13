@@ -23,19 +23,23 @@ const config = require('../config');
 const logger = require('./logger');
 const SquareCustomerSync = require('./square-customer-sync');
 const SquareHistorySync = require('./square-history-sync');
-const { Client, Environment } = require('square');
 const crypto = require('crypto');
 
 let squareClient, bookingsApi, invoicesApi, paymentsApi, customersApi;
-if (config.square?.accessToken) {
-  squareClient = new Client({
-    accessToken: config.square.accessToken,
-    environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,
-  });
-  bookingsApi = squareClient.bookingsApi;
-  invoicesApi = squareClient.invoicesApi;
-  paymentsApi = squareClient.paymentsApi;
-  customersApi = squareClient.customersApi;
+try {
+  const { Client, Environment } = require('square');
+  if (config.square?.accessToken) {
+    squareClient = new Client({
+      accessToken: config.square.accessToken,
+      environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,
+    });
+    bookingsApi = squareClient.bookingsApi;
+    invoicesApi = squareClient.invoicesApi;
+    paymentsApi = squareClient.paymentsApi;
+    customersApi = squareClient.customersApi;
+  }
+} catch {
+  logger.warn('[square-bulk-import] square SDK not installed — import features disabled');
 }
 
 function cleanPhone(raw) {

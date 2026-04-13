@@ -1,7 +1,7 @@
 const cron = require('node-cron');
 const db = require('../models/db');
 const TwilioService = require('./twilio');
-const SquareService = require('./square');
+// SquareService removed — migrated to Stripe
 const logger = require('./logger');
 
 function initScheduledJobs() {

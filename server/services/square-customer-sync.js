@@ -13,15 +13,19 @@ const db = require('../models/db');
 const config = require('../config');
 const { resolveLocation } = require('../config/locations');
 const logger = require('./logger');
-const { Client, Environment } = require('square');
 
 let squareClient, customersApi;
-if (config.square?.accessToken) {
-  squareClient = new Client({
-    accessToken: config.square.accessToken,
-    environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,
-  });
-  customersApi = squareClient.customersApi;
+try {
+  const { Client, Environment } = require('square');
+  if (config.square?.accessToken) {
+    squareClient = new Client({
+      accessToken: config.square.accessToken,
+      environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,
+    });
+    customersApi = squareClient.customersApi;
+  }
+} catch {
+  logger.warn('[square-customer-sync] square SDK not installed — sync disabled');
 }
 
 function cleanPhone(raw) {
