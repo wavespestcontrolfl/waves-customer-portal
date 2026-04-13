@@ -13,10 +13,13 @@ const db = require('../models/db');
 const config = require('../config');
 const { resolveLocation } = require('../config/locations');
 const logger = require('./logger');
-const { Client, Environment } = require('square');
+let Client, Environment;
+try { ({ Client, Environment } = require('square')); } catch { Client = null; Environment = null; }
 
 let squareClient, customersApi;
-if (config.square?.accessToken) {
+if (!Client) {
+  // Square SDK not installed — customer sync will be unavailable
+} else if (config.square?.accessToken) {
   squareClient = new Client({
     accessToken: config.square.accessToken,
     environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,

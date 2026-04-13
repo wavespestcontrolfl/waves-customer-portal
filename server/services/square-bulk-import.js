@@ -23,11 +23,14 @@ const config = require('../config');
 const logger = require('./logger');
 const SquareCustomerSync = require('./square-customer-sync');
 const SquareHistorySync = require('./square-history-sync');
-const { Client, Environment } = require('square');
+let Client, Environment;
+try { ({ Client, Environment } = require('square')); } catch { Client = null; Environment = null; }
 const crypto = require('crypto');
 
 let squareClient, bookingsApi, invoicesApi, paymentsApi, customersApi;
-if (config.square?.accessToken) {
+if (!Client) {
+  logger.warn('[square-bulk-import] Square SDK not installed — bulk import features disabled');
+} else if (config.square?.accessToken) {
   squareClient = new Client({
     accessToken: config.square.accessToken,
     environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,

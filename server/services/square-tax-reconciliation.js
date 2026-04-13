@@ -13,25 +13,26 @@
  * - FL sales tax collected vs owed
  */
 
-const { Client, Environment } = require('square');
+let Client, Environment;
+try { ({ Client, Environment } = require('square')); } catch { Client = null; Environment = null; }
 const config = require('../config');
 const db = require('../models/db');
 const logger = require('./logger');
 
 // Initialize Square client
 let squareClient, ordersApi, paymentsApi;
-try {
-  if (config.square?.accessToken) {
-    squareClient = new Client({
-      accessToken: config.square.accessToken,
-      environment: config.square.environment === 'production'
-        ? Environment.Production
-        : Environment.Sandbox,
-    });
-    ordersApi = squareClient.ordersApi;
-    paymentsApi = squareClient.paymentsApi;
-  }
-} catch { /* square not available */ }
+if (!Client) {
+  logger.warn('[square-tax-reconciliation] Square SDK not installed — tax reconciliation features disabled');
+} else if (config.square?.accessToken) {
+  squareClient = new Client({
+    accessToken: config.square.accessToken,
+    environment: config.square.environment === 'production'
+      ? Environment.Production
+      : Environment.Sandbox,
+  });
+  ordersApi = squareClient.ordersApi;
+  paymentsApi = squareClient.paymentsApi;
+}
 
 // 2026 Federal income tax brackets (single / sole prop)
 const FEDERAL_BRACKETS = [

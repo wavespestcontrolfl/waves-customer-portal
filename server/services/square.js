@@ -10,7 +10,9 @@ const { v4: uuidv4 } = require('uuid');
 
 // Initialize Square client — lazy to avoid crash if creds missing
 let squareClient, paymentsApi, customersApi, cardsApi, invoicesApi, bookingsApi, teamApi;
-if (config.square.accessToken) {
+if (!Client) {
+  logger.warn('[square] Square SDK not installed — all Square features disabled');
+} else if (config.square.accessToken) {
   squareClient = new Client({
     accessToken: config.square.accessToken,
     environment: config.square.environment === 'production'
