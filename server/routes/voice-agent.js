@@ -20,10 +20,47 @@ const {
 const { analyzeSentiment } = require('../services/call-sentiment');
 
 // ── Missed call SMS — fires when call goes to voicemail ──
+// Rate limited: max 1 per customer per day
 async function sendMissedCallSMS(callerPhone, callerName, callSid) {
   try {
     const TwilioService = require('../services/twilio');
-    const firstName = callerName ? callerName.split(/\s+/)[0] : null;
+
+    // Rate limit: check if we already sent a missed call SMS to this number today
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const existing = await db('sms_log')
+        .where({ to_phone: callerPhone, message_type: 'missed_call_followup' })
+        .whereRaw("created_at::date = ?", [today])
+        .first();
+      if (existing) {
+        console.log(`[VoiceAgent] Missed call SMS already sent to ${callerPhone} today — skipping`);
+        return;
+      }
+    } catch { /* sms_log query failed — send anyway */ }
+
+    // Clean up caller name: skip business names (all caps, "WIRELESS CALLER", etc.)
+    let firstName = null;
+    if (callerName) {
+      const raw = callerName.trim();
+      const isBusinessName = raw === raw.toUpperCase() && raw.length > 2;
+      const isGeneric = /wireless caller|unavailable|unknown|private|toll free/i.test(raw);
+      if (!isBusinessName && !isGeneric) {
+        // Properly capitalize first name: "JOHN" → "John", "john" → "John"
+        const first = raw.split(/\s+/)[0];
+        firstName = first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+      }
+    }
+
+    // Also try to get name from customer DB
+    if (!firstName) {
+      try {
+        const customer = await db('customers').where({ phone: callerPhone }).first();
+        if (customer?.first_name) {
+          firstName = customer.first_name.charAt(0).toUpperCase() + customer.first_name.slice(1).toLowerCase();
+        }
+      } catch { /* no customer match */ }
+    }
+
     const greeting = firstName
       ? `Hey ${firstName}, this is Waves Pest Control.`
       : `Hey, this is Waves Pest Control.`;
@@ -31,7 +68,7 @@ async function sendMissedCallSMS(callerPhone, callerName, callSid) {
     await TwilioService.sendSMS(callerPhone, msg, {
       messageType: 'missed_call_followup',
     });
-    console.log(`[VoiceAgent] Missed call SMS sent to ${callerPhone}`);
+    console.log(`[VoiceAgent] Missed call SMS sent to ${callerPhone}${firstName ? ` (${firstName})` : ''}`);
   } catch (err) {
     console.error(`[VoiceAgent] Missed call SMS failed: ${err.message}`);
   }
