@@ -320,13 +320,43 @@ export default function WavesSEODashboard() {
     );
   }
 
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState('');
+
+  const runSync = async () => {
+    setSyncing(true); setSyncMsg('Syncing GSC data...');
+    try {
+      await adminFetch('/admin/seo/sync', { method: 'POST', body: JSON.stringify({ daysBack: 28 }) });
+      setSyncMsg('GSC synced. Running rank tracking...');
+      await adminFetch('/admin/seo/rankings/track', { method: 'POST', body: JSON.stringify({}) }).catch(() => {});
+      setSyncMsg('Generating SEO report...');
+      await adminFetch('/admin/seo/advisor/generate', { method: 'POST', body: JSON.stringify({}) }).catch(() => {});
+      setSyncMsg('Done! Refreshing...');
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (e) { setSyncMsg('Sync failed: ' + e.message); }
+    setSyncing(false);
+  };
+
   const noData = !aiData && !rankData;
   if (noData) {
     return (
       <Card style={{ padding: 60, textAlign: 'center' }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}>{'🔍'}</div>
         <div style={{ fontSize: 18, fontWeight: 600, color: WAVES_COLORS.textPrimary, marginBottom: 8 }}>No SEO Data Yet</div>
-        <div style={{ fontSize: 13, color: WAVES_COLORS.textMuted }}>Enable GATE_SEO_INTELLIGENCE and configure DataForSEO to start tracking rankings and AI visibility.</div>
+        <div style={{ fontSize: 13, color: WAVES_COLORS.textMuted, marginBottom: 20 }}>
+          Sync Google Search Console data and run the SEO analyzer to populate this dashboard.
+        </div>
+        <button onClick={runSync} disabled={syncing} style={{
+          padding: '12px 24px', borderRadius: 10, border: 'none', cursor: syncing ? 'default' : 'pointer',
+          background: WAVES_COLORS.accent || '#0ea5e9', color: '#fff', fontSize: 14, fontWeight: 700,
+          opacity: syncing ? 0.7 : 1,
+        }}>
+          {syncing ? syncMsg : 'Sync & Generate SEO Report'}
+        </button>
+        {syncMsg && !syncing && <div style={{ fontSize: 12, color: WAVES_COLORS.textMuted, marginTop: 10 }}>{syncMsg}</div>}
+        <div style={{ fontSize: 11, color: WAVES_COLORS.textMuted, marginTop: 16 }}>
+          Requires: GOOGLE_SERVICE_ACCOUNT_JSON + GSC_SITE_URL env vars on Railway
+        </div>
       </Card>
     );
   }

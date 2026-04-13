@@ -139,7 +139,24 @@ function AdvisorTab() {
   const [loading, setLoading] = useState(true);
   useEffect(() => { adminFetch('/admin/seo/advisor').then(d => { setReport(d.report); setLoading(false); }).catch(() => setLoading(false)); }, []);
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading SEO advisor...</div>;
-  if (!report) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No SEO reports yet. Click "Generate" or wait for weekly Monday 7 AM auto-run.</div></Card>;
+  const [generating, setGenerating] = useState(false);
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      await adminFetch('/admin/seo/sync', { method: 'POST', body: JSON.stringify({ daysBack: 28 }) }).catch(() => {});
+      const r = await adminFetch('/admin/seo/advisor/generate', { method: 'POST', body: JSON.stringify({}) });
+      if (r.report) setReport(r.report);
+    } catch { /* failed */ }
+    setGenerating(false);
+  };
+  if (!report) return (
+    <Card style={{ padding: 40, textAlign: 'center' }}>
+      <div style={{ color: D.muted, marginBottom: 16 }}>No SEO reports yet.</div>
+      <button onClick={generate} disabled={generating} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, opacity: generating ? 0.7 : 1 }}>
+        {generating ? 'Syncing & generating...' : 'Sync GSC & Generate Report'}
+      </button>
+    </Card>
+  );
   const data = report.report_data || {};
   const gradeColor = (g) => !g ? D.muted : g.startsWith('A') ? D.green : g.startsWith('B') ? D.teal : g.startsWith('C') ? D.amber : D.red;
   return (
