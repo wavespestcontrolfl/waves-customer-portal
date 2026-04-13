@@ -111,4 +111,51 @@ router.post('/preview', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Map messageType values to template_key values
+const MSG_TYPE_TO_TEMPLATE = {
+  confirmation: 'appointment_confirmation',
+  booking_confirmation: 'appointment_confirmation',
+  appointment_reminder: 'reminder_24h',
+  en_route: 'tech_en_route',
+  service_complete: 'service_complete',
+  missed_call_followup: 'missed_call',
+  invoice: 'invoice_sent',
+  late_payment: 'payment_failed',
+  payment_expiry: 'payment_failed',
+  review_request: 'review_request',
+  referral_nudge: 'referral_nudge',
+  referral_invite: 'referral_nudge',
+  retention: 'churn_save_step1',
+  retention_outreach: 'churn_save_step1',
+  lead_response: 'lead_auto_reply_biz',
+  auto_reply: 'lead_auto_reply_biz',
+  balance_reminder: 'invoice_sent',
+  reactivation: 'churn_save_step1',
+};
+
+// ── Template helper for services — check if a template is enabled before sending ──
+router.isTemplateActive = async function(messageType) {
+  try {
+    if (!(await db.schema.hasTable('sms_templates'))) return true;
+    const templateKey = MSG_TYPE_TO_TEMPLATE[messageType] || messageType;
+    const t = await db('sms_templates').where({ template_key: templateKey }).first();
+    if (!t) return true; // template not in DB = active by default
+    return t.is_active !== false;
+  } catch { return true; }
+};
+
+// Get template body by key (returns null if disabled)
+router.getTemplate = async function(templateKey, vars = {}) {
+  try {
+    if (!(await db.schema.hasTable('sms_templates'))) return null;
+    const t = await db('sms_templates').where({ template_key: templateKey }).first();
+    if (!t || t.is_active === false) return null;
+    let body = t.body;
+    for (const [key, val] of Object.entries(vars)) {
+      body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), val || '');
+    }
+    return body;
+  } catch { return null; }
+};
+
 module.exports = router;

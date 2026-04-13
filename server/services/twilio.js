@@ -78,6 +78,18 @@ const TwilioService = {
         return { success: true, sid: 'gate-blocked', gateBlocked: true };
       }
 
+      // Check if this message type has been disabled via SMS Templates admin
+      if (options.messageType && options.messageType !== 'internal_alert') {
+        try {
+          const templates = require('../routes/admin-sms-templates');
+          const active = await templates.isTemplateActive(options.messageType);
+          if (!active) {
+            logger.info(`[SMS DISABLED] Template "${options.messageType}" is off — skipping SMS to ${to}`);
+            return { success: true, sid: 'template-disabled', templateDisabled: true };
+          }
+        } catch { /* template check failed — send anyway */ }
+      }
+
       const TWILIO_NUMBERS = require('../config/twilio-numbers');
       const { resolveLocation } = require('../config/locations');
 

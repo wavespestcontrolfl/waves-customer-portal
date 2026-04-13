@@ -946,7 +946,16 @@ function SmsTemplatesTab() {
               {t.is_internal && <span style={{ fontSize: 10, marginLeft: 6, padding: '2px 6px', borderRadius: 4, background: '#64748b22', color: '#64748b' }}>Internal</span>}
             </div>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-              <button onClick={() => toggleActive(t)} style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, border: 'none', cursor: 'pointer', background: t.is_active ? D.green + '22' : D.red + '22', color: t.is_active ? D.green : D.red }}>{t.is_active ? 'Active' : 'Disabled'}</button>
+              <button onClick={() => toggleActive(t)} title={t.is_active ? 'Click to disable' : 'Click to enable'} style={{
+                position: 'relative', width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+                background: t.is_active ? D.green : '#475569', transition: 'background 0.2s', padding: 0,
+              }}>
+                <span style={{
+                  position: 'absolute', top: 2, left: t.is_active ? 22 : 2,
+                  width: 20, height: 20, borderRadius: '50%', background: '#fff',
+                  transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                }} />
+              </button>
               {editing === t.id ? (
                 <>
                   <button onClick={() => handleSave(t.id)} disabled={saving} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.green, color: D.white }}>{saving ? '...' : 'Save'}</button>
