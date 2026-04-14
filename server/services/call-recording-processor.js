@@ -138,7 +138,12 @@ Return ONLY valid JSON, no markdown.`,
   const text = response.content[0]?.text?.trim() || '{}';
   // Parse JSON, stripping any markdown code fences
   const cleaned = text.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    logger.error(`[call-proc] Invalid JSON from Claude: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
+    return { first_name: null, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
+  }
 }
 
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
@@ -432,7 +437,7 @@ const CallRecordingProcessor = {
             description: `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`,
             performed_by: 'AI Call Processor',
             metadata: JSON.stringify({ call_summary: extracted.call_summary, pain_points: extracted.pain_points, sentiment: extracted.sentiment }),
-          }).catch(() => {});
+          }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
         }
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
@@ -501,15 +506,22 @@ const CallRecordingProcessor = {
             }
 
             if (scheduledDate) {
-              const windowEnd = windowStart
-                ? `${String(Math.min(23, parseInt(windowStart) + 1)).padStart(2, '0')}:${windowStart.split(':')[1]}`
-                : null;
+              // Compute window_end (1 hour after start) and 12-hour display
+              let windowEnd = null, windowDisplay = '9:00 AM';
+              if (windowStart) {
+                const [hh, mm] = windowStart.split(':').map(Number);
+                const endH = hh >= 23 ? 23 : hh + 1;
+                windowEnd = `${String(endH).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+                const ampm = hh >= 12 ? 'PM' : 'AM';
+                const displayH = hh % 12 || 12;
+                windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
+              }
               const [svc] = await db('scheduled_services').insert({
                 customer_id: customerId,
                 scheduled_date: scheduledDate,
                 window_start: windowStart || '09:00',
                 window_end: windowEnd || '10:00',
-                window_display: windowStart ? `${windowStart.replace(/^0/, '')}` : '9:00 AM',
+                window_display: windowDisplay,
                 service_type: extracted.matched_service || extracted.requested_service || 'General Pest Control',
                 status: 'confirmed',
                 customer_confirmed: true,
@@ -565,7 +577,7 @@ const CallRecordingProcessor = {
         interaction_type: 'call',
         subject: `Inbound call — ${extracted.matched_service || extracted.requested_service || 'General inquiry'}`,
         body: extracted.call_summary || `Call from ${phone}. ${extracted.pain_points || ''}`,
-      }).catch(() => {});
+      }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
 
     // Step 7b: Generate lead synopsis (Sales Strategist analysis)
@@ -574,10 +586,10 @@ const CallRecordingProcessor = {
       try {
         synopsis = await generateLeadSynopsis(transcription);
         if (synopsis) {
-          await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(() => {});
+          await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
           // Also write to lead if one was created
           if (leadId) {
-            await db('leads').where({ id: leadId }).update({ lead_synopsis: synopsis }).catch(() => {});
+            await db('leads').where({ id: leadId }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
           }
           logger.info(`[call-proc] Lead synopsis generated: ${synopsis.length} chars`);
         }
@@ -663,7 +675,7 @@ const CallRecordingProcessor = {
 
     const synopsis = await generateLeadSynopsis(call.transcription);
     if (synopsis) {
-      await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(() => {});
+      await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
     return { success: true, synopsis };
   },
