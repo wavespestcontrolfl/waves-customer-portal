@@ -24,9 +24,6 @@ router.get('/:token', async (req, res, next) => {
     const productsApplied = data.products_applied || [];
     const photos = data.service_photos || [];
 
-    // Determine processor for this customer
-    const processor = await PaymentRouter.getProcessorName(data.customer_id);
-
     res.json({
       invoice: {
         id: data.id,
