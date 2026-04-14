@@ -56,7 +56,8 @@ async function callClaudeVision(base64Image, mimeType) {
       }],
     });
 
-    const text = response.content[0].text;
+    const text = response.content?.[0]?.text;
+    if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
     return JSON.parse(text.replace(/```json|```/g, '').trim());
   } catch (err) {
     logger.error(`Lawn assessment Claude vision failed: ${err.message}`);
@@ -173,12 +174,13 @@ function averageScores(claudeResult, geminiResult) {
 function mapToDisplayScores(composite) {
   if (!composite) return null;
 
+  const clamp = v => Math.max(0, Math.min(100, v));
   return {
-    turf_density: composite.turf_density,
-    weed_suppression: 100 - (composite.weed_coverage || 0),
-    color_health: Math.round((composite.color_health || 5) * 10),
-    fungus_control: FUNGUS_DISPLAY[composite.fungal_activity] || 50,
-    thatch_level: THATCH_DISPLAY[composite.thatch_visibility] || 60,
+    turf_density: clamp(composite.turf_density || 0),
+    weed_suppression: clamp(100 - (composite.weed_coverage || 0)),
+    color_health: clamp(Math.round((composite.color_health || 5) * 10)),
+    fungus_control: clamp(FUNGUS_DISPLAY[composite.fungal_activity] || 50),
+    thatch_level: clamp(THATCH_DISPLAY[composite.thatch_visibility] || 60),
     observations: composite.observations || '',
   };
 }

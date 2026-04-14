@@ -112,7 +112,7 @@ export default function LawnAssessmentPanel() {
   const loadHistory = async (customerId) => {
     try {
       const d = await adminFetch(`/admin/lawn-assessment/history/${customerId}`);
-      setHistory(d.assessments || []);
+      setHistory(d.history || d.assessments || []);
       setStep('history');
     } catch { setHistory([]); }
   };
@@ -234,7 +234,7 @@ export default function LawnAssessmentPanel() {
                 const val = result.displayScores?.[m.key] || 0;
                 const claude = result.claudeDisplay?.[m.key];
                 const gemini = result.geminiDisplay?.[m.key];
-                const flagged = (result.divergenceFlags || []).includes(m.key);
+                const flagged = (result.divergenceFlags || []).some(f => f.metric === m.key);
                 return (
                   <div key={m.key} style={{ padding: 14, background: D.input, borderRadius: 10, textAlign: 'center', border: flagged ? `2px solid ${D.amber}` : `1px solid ${D.border}` }}>
                     <div style={{ fontFamily: MONO, fontSize: 28, fontWeight: 800, color: scoreColor(val) }}>{val}%</div>

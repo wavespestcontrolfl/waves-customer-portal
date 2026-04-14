@@ -177,12 +177,24 @@ router.post('/assess', async (req, res, next) => {
       is_baseline: isBaseline,
     }).returning('*');
 
+    // Build per-model display scores for Claude vs Gemini comparison
+    let claudeDisplay = null, geminiDisplay = null;
+    if (validResults.length > 0) {
+      const firstClaude = validResults.find(r => r.claude);
+      const firstGemini = validResults.find(r => r.gemini);
+      if (firstClaude?.claude) claudeDisplay = lawnAssessment.mapToDisplayScores(firstClaude.claude);
+      if (firstGemini?.gemini) geminiDisplay = lawnAssessment.mapToDisplayScores(firstGemini.gemini);
+    }
+
     res.json({
       success: true,
       assessment,
       rawComposite: mergedComposite,
       displayScores,
       adjustedScores,
+      claudeDisplay,
+      geminiDisplay,
+      observations: adjustedScores.observations || displayScores.observations || '',
       season,
       isBaseline,
       divergenceFlags: allDivergences,
