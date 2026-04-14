@@ -351,9 +351,22 @@ const InvoiceService = {
       } catch { formattedDate = ''; }
     }
 
-    const body = `Hey ${customer.first_name}! ${techName} just wrapped up your ${serviceType}${formattedDate ? ` completed on ${formattedDate}` : ' today'}. ` +
-      `Tap to see what was applied, tech notes & before/after photos → ${payUrl}\n\n` +
-      `Your invoice ($${Number(invoice.total || 0).toFixed(2)}) is ready at the bottom whenever you're set.\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+    // Use DB template if available, fall back to inline
+    let body;
+    try {
+      const templates = require('../routes/admin-sms-templates');
+      body = await templates.getTemplate('invoice_sent', {
+        first_name: customer.first_name || '',
+        service_type: serviceType,
+        service_date: formattedDate || 'today',
+        pay_url: payUrl,
+      });
+    } catch { /* template lookup failed */ }
+
+    if (!body) {
+      body = `Hi ${customer.first_name}! Your invoice for ${serviceType} completed on ${formattedDate || 'today'} is ready: ${payUrl}\n\n` +
+        `Questions or requests? Reply to this message. Thank you for choosing Waves!`;
+    }
 
     try {
       const TwilioService = require('./twilio');
