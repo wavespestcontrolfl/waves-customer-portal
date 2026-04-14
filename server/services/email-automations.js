@@ -72,7 +72,7 @@ const AUTOMATIONS = {
     name: 'Bed Bug Treatment',
     description: 'For first-time customers who have booked a bed bug treatment',
     trigger: 'manual',
-    beehiivAutomationId: process.env.BEEHIIV_AUTO_BEDBUG || 'aut_53cfd473-982b-49fd-b03d-62a9d462909c',
+    beehiivAutomationId: process.env.BEEHIIV_AUTO_BEDBUG || 'aut_9e3657f3-82de-4d4f-84a5-ae757ac7e13b',
     tags: ['bed bug treatment', 'first-time'],
     smsTemplate: (c) =>
       `Hello ${c.first_name}! Let's get your home bed bug-free. We just emailed your Waves treatment guide—please review it to help us get the best results for your home!\n\n` +
@@ -83,11 +83,42 @@ const AUTOMATIONS = {
     name: 'Cockroach Control',
     description: 'For first-time customers who have booked a cockroach treatment',
     trigger: 'manual',
-    beehiivAutomationId: process.env.BEEHIIV_AUTO_ROACH || null, // Set BEEHIIV_AUTO_ROACH env var — no fallback to avoid using bed bug automation
+    beehiivAutomationId: process.env.BEEHIIV_AUTO_ROACH || null, // Set BEEHIIV_AUTO_ROACH env var
     tags: ['roach treatment', 'first-time'],
     smsTemplate: (c) =>
       `Hello ${c.first_name}! Let's get your home cockroach-free. We just emailed your Waves treatment guide—please review it to help us get the best results for your home!\n\n` +
       `If you have any questions or need assistance, simply reply to this message.`,
+    enabled: true,
+  },
+  new_lead: {
+    name: 'New Lead',
+    description: 'For new leads entering the pipeline — intro to Waves services',
+    trigger: 'manual',
+    beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c',
+    tags: ['new lead'],
+    smsTemplate: (c) =>
+      `Hi ${c.first_name}! Thanks for your interest in Waves Pest Control. We just sent you an email with more info about our services.\n\n` +
+      `Reply here anytime if you have questions!`,
+    enabled: true,
+  },
+  service_renewal: {
+    name: 'Service Renewal Reminder',
+    description: 'Reminder for customers whose service agreement is coming up for renewal',
+    trigger: 'manual',
+    beehiivAutomationId: process.env.BEEHIIV_AUTO_RENEWAL || 'aut_6e9b0067-89c9-4c11-acbe-f62eaa80b1aa',
+    tags: ['renewal reminder'],
+    smsTemplate: (c) =>
+      `Hi ${c.first_name}! Your Waves service is coming up for renewal. We just emailed you the details — take a look when you get a chance.\n\n` +
+      `Questions? Just reply here!`,
+    enabled: true,
+  },
+  pricing_update: {
+    name: 'Pricing Update',
+    description: 'Notify customers about service pricing changes',
+    trigger: 'manual',
+    beehiivAutomationId: process.env.BEEHIIV_AUTO_PRICING || 'aut_0d249df2-79fe-4e4d-a7ad-e35259e9d706',
+    tags: ['pricing update'],
+    smsTemplate: null,
     enabled: true,
   },
 };
