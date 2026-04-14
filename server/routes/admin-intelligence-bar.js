@@ -25,6 +25,7 @@ const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
 const { COMMS_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
+const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -44,6 +45,7 @@ const REVENUE_TOOL_NAMES = new Set(REVENUE_TOOLS.map(t => t.name));
 const TECH_TOOL_NAMES = new Set(TECH_TOOLS.map(t => t.name));
 const REVIEW_TOOL_NAMES = new Set(REVIEW_TOOLS.map(t => t.name));
 const COMMS_TOOL_NAMES = new Set(COMMS_TOOLS.map(t => t.name));
+const TAX_TOOL_NAMES = new Set(TAX_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -255,6 +257,40 @@ RESPONSE STYLE:
 - For calls, note whether there's a recording/transcript available
 - Flag any messages that mention cancellation, complaint, or urgency — these need immediate attention
 - Virginia is the primary user — be helpful, concise, and action-oriented`,
+
+  tax: `
+TAX & FINANCE CONTEXT:
+You are on the Tax Center page. The operator manages tax compliance, expenses, equipment depreciation, mileage, and P&L reporting for a Florida-based pest control & lawn care company.
+
+KEY FACTS:
+- Florida has NO state income tax
+- Business is a sole proprietorship / LLC — self-employment tax at 15.3% applies
+- Federal estimated rate ~22% bracket
+- IRS mileage rate: $0.70/mile (2026)
+- Equipment depreciated via straight-line or Section 179 where eligible
+- 4 quarterly filing deadlines per year
+
+TAX CAPABILITIES:
+- Full tax dashboard: YTD tax collected, expenses, deductions, equipment book value
+- Expense tracking by category, date, vendor, deductibility
+- Equipment depreciation register with fully-depreciated flagging
+- Filing calendar with overdue alerts
+- Quarterly estimated tax payment calculation
+- Profit & Loss statement for any period
+- AI Tax Advisor: run fresh analysis, view alerts, savings opportunities
+- Mileage summary with IRS deduction estimate (Bouncie GPS integration)
+- Accounts receivable aging
+
+REPLACES: The "AI Advisor" tab. Everything it did (run analysis, view reports, review alerts) is now handled conversationally through this bar.
+
+RESPONSE STYLE:
+- Always note that Florida has no state income tax when relevant
+- When showing expenses, include the deductible vs non-deductible split
+- For quarterly estimates, break down federal + self-employment separately
+- Flag any overdue filing deadlines as URGENT
+- For equipment, note Section 179 eligibility when discussing write-offs
+- P&L should show gross margin % and net margin % alongside dollar amounts
+- Remind the operator to consult their CPA for final tax decisions`,
 };
 
 function getToolsForContext(context) {
@@ -279,6 +315,9 @@ function getToolsForContext(context) {
   if (context === 'comms') {
     return [...TOOLS, ...COMMS_TOOLS];
   }
+  if (context === 'tax') {
+    return [...TOOLS, ...TAX_TOOLS];
+  }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
@@ -295,6 +334,9 @@ function executeToolByName(toolName, input, techContext) {
   }
   if (COMMS_TOOL_NAMES.has(toolName)) {
     return executeCommsTool(toolName, input);
+  }
+  if (TAX_TOOL_NAMES.has(toolName)) {
+    return executeTaxTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -617,6 +659,18 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'stats', label: 'SMS Stats', prompt: 'SMS volume breakdown this month by type', icon: '📊' },
       { id: 'csr', label: 'CSR Coach', prompt: "How's the CSR performance? Any follow-up tasks pending?", icon: '🎓' },
       { id: 'search', label: 'Search Messages', prompt: 'Search messages about...', icon: '🔍' },
+    ] });
+  } else if (context === 'tax') {
+    res.json({ actions: [
+      { id: 'overview', label: 'Tax Overview', prompt: "Give me the full tax picture — expenses, deductions, equipment, upcoming deadlines.", icon: '💰' },
+      { id: 'quarterly', label: 'Quarterly Estimate', prompt: "What's my estimated quarterly tax payment? Break down federal and self-employment.", icon: '📊' },
+      { id: 'expenses', label: 'Expenses YTD', prompt: 'Show me expenses by category this year. What percentage is deductible?', icon: '🧾' },
+      { id: 'equipment', label: 'Depreciation', prompt: 'Which equipment is fully depreciated? Any Section 179 candidates?', icon: '🔧' },
+      { id: 'pnl', label: 'P&L', prompt: "Month-to-date P&L with gross and net margins", icon: '📋' },
+      { id: 'deadlines', label: 'Deadlines', prompt: 'When are my next tax deadlines? Anything overdue?', icon: '📅' },
+      { id: 'advisor', label: 'Run Advisor', prompt: 'Run the AI tax advisor — check for savings opportunities and regulation changes.', icon: '🤖' },
+      { id: 'ar', label: 'A/R Aging', prompt: "Who owes us money? Show me the accounts receivable aging.", icon: '⚠️' },
+      { id: 'mileage', label: 'Mileage', prompt: 'Mileage deduction so far this year?', icon: '🚗' },
     ] });
   } else {
     res.json({ actions: baseActions });

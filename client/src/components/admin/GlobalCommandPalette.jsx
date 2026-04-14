@@ -36,7 +36,7 @@ const ROUTE_CONTEXT_MAP = {
   '/admin/inventory': 'procurement',
   '/admin/revenue': 'revenue',
   '/admin/invoices': 'revenue',
-  '/admin/tax': 'revenue',
+  '/admin/tax': 'tax',
   '/admin/reviews': 'reviews',
   '/admin/referrals': 'reviews',
   '/admin/communications': 'comms',
@@ -54,6 +54,7 @@ const CONTEXT_LABELS = {
   revenue: 'Revenue',
   reviews: 'Reviews & Reputation',
   comms: 'Communications',
+  tax: 'Tax Center',
 };
 
 const CONTEXT_COLORS = {
@@ -68,6 +69,7 @@ const CONTEXT_COLORS = {
   revenue: D.green,
   reviews: D.amber,
   comms: '#3b82f6',
+  tax: D.purple,
 };
 
 function detectContext(pathname) {
