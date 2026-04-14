@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import Customer360Profile from '../../components/admin/Customer360Profile';
+import IntelligenceBar from '../../components/admin/IntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
@@ -843,7 +844,6 @@ export default function CustomersPage() {
   const [syncingSquare, setSyncingSquare] = useState(false);
   const [squareSyncInfo, setSquareSyncInfo] = useState(null);
   const [filterCity, setFilterCity] = useState('all');
-  const [fixingTiers, setFixingTiers] = useState(false);
   const [filterHasBalance, setFilterHasBalance] = useState(false);
   const [selected360Id, setSelected360Id] = useState(null);
   const [page, setPage] = useState(1);
@@ -932,19 +932,6 @@ export default function CustomersPage() {
       setSortBy(key);
       setSortDir('asc');
     }
-  };
-
-  const handleFixTiers = async () => {
-    if (!confirm('Recalculate all customer tiers based on active service count?\n\n0 services = No Plan\n1 = Bronze\n2 = Silver\n3 = Gold\n4+ = Platinum')) return;
-    setFixingTiers(true);
-    try {
-      const result = await adminFetch('/admin/customers/fix-tiers', { method: 'POST', body: '{}' });
-      alert(`Tiers updated: ${result.updated || 0} customers recalculated`);
-      loadCustomers();
-    } catch (e) {
-      alert('Fix tiers failed: ' + e.message);
-    }
-    setFixingTiers(false);
   };
 
   const handleDeleteCustomer = async (customerId, customerName) => {
@@ -1100,21 +1087,12 @@ export default function CustomersPage() {
         </div>
       </div>
 
+      {/* Intelligence Bar */}
+      <IntelligenceBar onSelectCustomer={(id) => setSelected360Id(id)} />
+
       {/* ====================== DIRECTORY VIEW ====================== */}
       {view === 'directory' && (
         <>
-          {/* Square sync status + Fix tiers */}
-          <div style={{
-            display: 'flex', gap: 10, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center',
-            padding: '8px 14px', background: `${D.card}cc`, border: `1px solid ${D.border}`, borderRadius: 10,
-          }}>
-            <div style={{ flex: 1 }} />
-            <button onClick={handleFixTiers} disabled={fixingTiers} style={{
-              padding: '5px 12px', background: 'transparent', border: `1px solid ${D.amber}66`, borderRadius: 6,
-              color: D.amber, fontSize: 11, fontWeight: 600, cursor: 'pointer', opacity: fixingTiers ? 0.5 : 1,
-            }}>{fixingTiers ? 'Fixing...' : 'Fix Tiers'}</button>
-          </div>
-
           {/* Filter pills — City */}
           <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>City:</span>

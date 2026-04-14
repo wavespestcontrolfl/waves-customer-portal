@@ -76,6 +76,7 @@ const aiAssistantRoutes = require('./routes/ai-assistant');
 const twilioVoiceWebhookRoutes = require('./routes/twilio-voice-webhook');
 const adminReviewRequestRoutes = require('./routes/admin-review-requests');
 const reviewPublicRoutes = require('./routes/review-public');
+const adminIntelligenceBarRoutes = require('./routes/admin-intelligence-bar');
 
 const app = express();
 
@@ -161,6 +162,7 @@ app.use('/api/badges', badgeRoutes);
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/onboarding', onboardingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
+app.use('/api/admin/intelligence-bar', adminIntelligenceBarRoutes);
 app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/dashboard', adminDashboardRoutes);
