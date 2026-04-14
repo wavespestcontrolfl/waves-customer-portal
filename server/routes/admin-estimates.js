@@ -62,24 +62,25 @@ router.post('/:id/send', async (req, res, next) => {
           port: 587,
           secure: false,
           auth: {
-            user: process.env.GOOGLE_SMTP_USER || 'contact@wavespestcontrol.com',
+            user: 'contact@wavespestcontrol.com',
             pass: process.env.GOOGLE_SMTP_PASSWORD,
           },
         });
         await transporter.sendMail({
-          from: `"Waves Pest Control" <${process.env.GOOGLE_SMTP_USER || 'contact@wavespestcontrol.com'}>`,
+          from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
           to: estimate.customer_email,
           subject: 'Your Waves Pest Control Estimate is Ready',
           html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-              <h2 style="color: #0ea5e9;">Waves Pest Control</h2>
+              <h2 style="color: #0ea5e9;">Waves Pest Control, LLC</h2>
               <p>Hi ${firstName},</p>
               <p>Your customized service estimate is ready for review.</p>
               ${priceLine ? `<p style="font-size: 18px; font-weight: bold; color: #10b981;">${priceLine}</p>` : ''}
               <p><a href="${viewUrl}" style="display: inline-block; padding: 14px 28px; background: #0ea5e9; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">View Your Estimate</a></p>
               <p style="color: #666; font-size: 14px;">Questions? Call us at (941) 318-7612 or reply to this email.</p>
               <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
-              <p style="color: #999; font-size: 12px;">Waves Pest Control &amp; Lawn Care | Lakewood Ranch, FL</p>
+              <p style="color: #999; font-size: 12px;">Waves Pest Control, LLC | Lakewood Ranch, FL</p>
+              <p style="color: #999; font-size: 11px;">contact@wavespestcontrol.com</p>
             </div>
           `,
         });
