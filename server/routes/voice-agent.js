@@ -203,6 +203,15 @@ function voiceAgentRoutes(app, httpServer) {
       }
     }
 
+    // Check if caller is blocked (spam/wrong number)
+    try {
+      const blocked = await db('blocked_numbers').where({ phone: from }).first().catch(() => null);
+      if (blocked) {
+        console.log(`[VoiceAgent] Blocked number ${from} — rejecting call`);
+        return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject reason="rejected"/></Response>');
+      }
+    } catch { /* blocked_numbers table may not exist yet */ }
+
     // Match caller to customer — or create from CNAM lookup
     let customer = null;
     if (from) {

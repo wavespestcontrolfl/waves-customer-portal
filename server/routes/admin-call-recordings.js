@@ -102,4 +102,65 @@ router.get('/audio/:id', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// CALL DISPOSITION — Tag calls + block spam numbers
+// ═══════════════════════════════════════════════════════════════════
+
+// PUT /calls/:id/disposition — tag a call
+router.put('/calls/:id/disposition', async (req, res, next) => {
+  try {
+    const { disposition } = req.body;
+    const call = await db('call_log').where({ id: req.params.id }).first();
+    if (!call) {
+      // Try by twilio_call_sid
+      const bySid = await db('call_log').where({ twilio_call_sid: req.params.id }).first();
+      if (!bySid) return res.status(404).json({ error: 'Call not found' });
+      await db('call_log').where({ id: bySid.id }).update({ disposition, updated_at: new Date() });
+    } else {
+      await db('call_log').where({ id: req.params.id }).update({ disposition, updated_at: new Date() });
+    }
+
+    // If spam — add to blocked numbers
+    if (disposition === 'spam') {
+      const callRecord = call || await db('call_log').where({ twilio_call_sid: req.params.id }).first();
+      if (callRecord?.from_phone) {
+        await db.raw(`
+          CREATE TABLE IF NOT EXISTS blocked_numbers (
+            id serial PRIMARY KEY,
+            phone varchar(20) NOT NULL UNIQUE,
+            reason varchar(50) DEFAULT 'spam',
+            blocked_by varchar(100),
+            blocked_at timestamptz DEFAULT NOW()
+          )
+        `).catch(() => {});
+        await db('blocked_numbers').insert({
+          phone: callRecord.from_phone,
+          reason: 'spam',
+          blocked_by: 'admin',
+        }).onConflict('phone').ignore();
+        logger.info(`[calls] Blocked spam number: ${callRecord.from_phone}`);
+      }
+    }
+
+    res.json({ success: true, disposition });
+  } catch (err) { next(err); }
+});
+
+// GET /blocked — list blocked numbers
+router.get('/blocked', async (req, res, next) => {
+  try {
+    await db.raw('CREATE TABLE IF NOT EXISTS blocked_numbers (id serial PRIMARY KEY, phone varchar(20) NOT NULL UNIQUE, reason varchar(50), blocked_by varchar(100), blocked_at timestamptz DEFAULT NOW())').catch(() => {});
+    const numbers = await db('blocked_numbers').orderBy('blocked_at', 'desc');
+    res.json({ numbers });
+  } catch (err) { next(err); }
+});
+
+// DELETE /blocked/:phone — unblock a number
+router.delete('/blocked/:phone', async (req, res, next) => {
+  try {
+    await db('blocked_numbers').where({ phone: req.params.phone }).del();
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

@@ -388,7 +388,7 @@ function CallLogTab() {
     setDispositions(prev => ({ ...prev, [callId]: value }));
     setSavingDisp(callId);
     try {
-      await adminFetch(`/ai/admin/calls/${callId}/disposition`, {
+      await adminFetch(`/admin/call-recordings/calls/${callId}/disposition`, {
         method: 'PUT',
         body: JSON.stringify({ disposition: value }),
       });
