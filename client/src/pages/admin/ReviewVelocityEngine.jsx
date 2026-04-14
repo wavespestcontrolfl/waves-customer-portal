@@ -23,7 +23,7 @@ const C = {
   blu: '#3b82f6', bluG: 'rgba(59,130,246,0.12)',
   pur: '#8b5cf6', purG: 'rgba(139,92,246,0.12)',
   t1: '#e2e8f0', t2: '#94a3b8', t3: '#64748b',
-  mono: "'JetBrains Mono', monospace", sans: "'DM Sans', sans-serif",
+  sans: "'DM Sans', sans-serif",
 };
 
 // ── GBP Locations ──
@@ -232,7 +232,7 @@ const tagColors = {
 
 function Tag({ type, children }) {
   const tc = tagColors[type] || tagColors.acc;
-  return <span style={{ fontFamily: C.mono, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.8, padding: '2px 7px', borderRadius: 20, whiteSpace: 'nowrap', background: tc.bg, color: tc.color }}>{children}</span>;
+  return <span style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 20, whiteSpace: 'nowrap', background: tc.bg, color: tc.color }}>{children}</span>;
 }
 
 function Btn({ variant = 'ghost', onClick, disabled, children, style: extra }) {
@@ -248,7 +248,7 @@ function Btn({ variant = 'ghost', onClick, disabled, children, style: extra }) {
 }
 
 function SectionLabel({ children }) {
-  return <div style={{ fontFamily: C.mono, fontSize: 8, color: C.t3, textTransform: 'uppercase', letterSpacing: 2.5, marginBottom: 6 }}>{children}</div>;
+  return <div style={{ fontSize: 11, fontWeight: 600, color: C.t2, marginBottom: 6 }}>{children}</div>;
 }
 
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
@@ -403,19 +403,19 @@ export default function ReviewVelocityEngine() {
   return (
     <div style={{ fontFamily: C.sans, color: C.t1 }}>
       {/* Nav tabs */}
-      <div style={{ display: 'flex', gap: 2, background: C.surface, borderRadius: 8, padding: 3, border: `1px solid ${C.bdr}`, marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
+      <div style={{ display: 'flex', gap: 4, background: C.surface, borderRadius: 10, padding: 4, border: `1px solid ${C.bdr}`, marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {tabs.map(t => (
           <button key={t.key} onClick={() => setPage(t.key)} style={{
-            padding: '6px 14px', borderRadius: 6, fontFamily: C.mono, fontSize: 10, textTransform: 'uppercase',
-            letterSpacing: 1.2, color: page === t.key ? C.acc : C.t3, background: page === t.key ? C.accG : 'none',
-            border: 'none', cursor: 'pointer', transition: 'all .15s', whiteSpace: 'nowrap', fontWeight: page === t.key ? 600 : 400, flexShrink: 0, minHeight: 44,
+            padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 500,
+            color: page === t.key ? '#fff' : C.t2, background: page === t.key ? C.acc : 'transparent',
+            border: 'none', cursor: 'pointer', transition: 'all .15s', whiteSpace: 'nowrap', flexShrink: 0,
           }}>
             {t.label}
             {t.count !== undefined && (
               <span style={{
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 16, height: 16,
-                borderRadius: 8, fontSize: 8, fontWeight: 700, padding: '0 4px', marginLeft: 4,
-                background: page === t.key ? C.acc : C.bdr, color: page === t.key ? C.bg : C.t3,
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 18, height: 18,
+                borderRadius: 9, fontSize: 10, fontWeight: 700, padding: '0 5px', marginLeft: 6,
+                background: page === t.key ? 'rgba(255,255,255,0.2)' : C.bdr, color: page === t.key ? '#fff' : C.t3,
               }}>{t.count}</span>
             )}
           </button>
@@ -503,9 +503,9 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
           {kpis.map(k => (
             <div key={k.label} style={{ background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 18px', position: 'relative', overflow: 'hidden' }}>
               <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: k.accent }} />
-              <div style={{ fontFamily: C.mono, fontSize: 28, fontWeight: 800, marginBottom: 2 }}>{k.value}</div>
-              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.t3, textTransform: 'uppercase', letterSpacing: 2 }}>{k.label}</div>
-              <div style={{ fontSize: 11, color: C.t3, marginTop: 6 }}>{k.desc}</div>
+              <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 2 }}>{k.value}</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: C.t2, marginBottom: 4 }}>{k.label}</div>
+              <div style={{ fontSize: 11, color: C.t3 }}>{k.desc}</div>
             </div>
           ))}
         </div>
@@ -539,12 +539,12 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
                     { v: `${locSent > 0 ? Math.round(locReviewed / locSent * 100) : 0}%`, l: 'Conv Rate' },
                   ].map(s => (
                     <div key={s.l} style={{ textAlign: 'center', padding: 6, background: C.input, borderRadius: 8 }}>
-                      <div style={{ fontFamily: C.mono, fontSize: 14, fontWeight: 700, color: C.acc }}>{s.v}</div>
-                      <div style={{ fontFamily: C.mono, fontSize: 7, color: C.t3, textTransform: 'uppercase', letterSpacing: 1.5, marginTop: 1 }}>{s.l}</div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: C.acc }}>{s.v}</div>
+                      <div style={{ fontSize: 10, color: C.t3, marginTop: 1 }}>{s.l}</div>
                     </div>
                   ))}
                 </div>
-                <div style={{ fontFamily: C.mono, fontSize: 9, color: C.t3, marginTop: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <div style={{ fontSize: 10, color: C.t3, marginTop: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {loc.reviewUrl.substring(0, 50)}...
                 </div>
               </div>
@@ -565,9 +565,9 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
               <div key={svc} style={{ background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: 14 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{svc}</div>
                 <div style={{ display: 'flex', gap: 12 }}>
-                  <div><span style={{ fontFamily: C.mono, fontSize: 16, fontWeight: 700, color: C.acc }}>{sc.length}</span><div style={{ fontFamily: C.mono, fontSize: 7, color: C.t3, textTransform: 'uppercase', letterSpacing: 1 }}>Jobs</div></div>
-                  <div><span style={{ fontFamily: C.mono, fontSize: 16, fontWeight: 700, color: C.grn }}>{rev}</span><div style={{ fontFamily: C.mono, fontSize: 7, color: C.t3, textTransform: 'uppercase', letterSpacing: 1 }}>Reviews</div></div>
-                  <div><span style={{ fontFamily: C.mono, fontSize: 16, fontWeight: 700, color: C.org }}>{asked > 0 ? Math.round(rev / asked * 100) : 0}%</span><div style={{ fontFamily: C.mono, fontSize: 7, color: C.t3, textTransform: 'uppercase', letterSpacing: 1 }}>Conv</div></div>
+                  <div><span style={{ fontSize: 16, fontWeight: 700, color: C.acc }}>{sc.length}</span><div style={{ fontSize: 10, color: C.t3 }}>Jobs</div></div>
+                  <div><span style={{ fontSize: 16, fontWeight: 700, color: C.grn }}>{rev}</span><div style={{ fontSize: 10, color: C.t3 }}>Reviews</div></div>
+                  <div><span style={{ fontSize: 16, fontWeight: 700, color: C.org }}>{asked > 0 ? Math.round(rev / asked * 100) : 0}%</span><div style={{ fontSize: 10, color: C.t3 }}>Conv</div></div>
                 </div>
               </div>
             );
@@ -643,10 +643,10 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
           {filters.map(f => (
             <button key={f.key} onClick={() => setCurrentFilter(f.key)} style={{
-              padding: '5px 10px', fontFamily: C.mono, fontSize: 9, textTransform: 'uppercase', letterSpacing: 1,
+              padding: '6px 12px', fontSize: 12, fontWeight: 500,
               borderRadius: 20, border: `1px solid ${currentFilter === f.key ? C.bdrA : C.bdr}`,
-              background: currentFilter === f.key ? C.accG : 'none',
-              color: currentFilter === f.key ? C.acc : C.t3, cursor: 'pointer', transition: 'all .15s',
+              background: currentFilter === f.key ? C.acc : 'transparent',
+              color: currentFilter === f.key ? '#fff' : C.t2, cursor: 'pointer', transition: 'all .15s',
             }}>{f.label}</button>
           ))}
         </div>
@@ -655,7 +655,7 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
       {/* Batch bar */}
       {selectedIds.size > 0 && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '10px 16px', background: C.surface, border: `1px solid ${C.bdrA}`, borderRadius: 12, marginBottom: 12 }}>
-          <span style={{ fontFamily: C.mono, fontSize: 12, fontWeight: 700, color: C.acc }}>{selectedIds.size} selected</span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.acc }}>{selectedIds.size} selected</span>
           <div style={{ width: 1, height: 20, background: C.bdr }} />
           <Btn variant="primary" onClick={() => setBatchModal(true)}>📤 Batch Send</Btn>
           <Btn onClick={() => batchStage('sms_sent')}>Mark: SMS Sent</Btn>
@@ -696,7 +696,7 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
                   <td style={tdStyle}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <div style={{ height: 6, borderRadius: 3, minWidth: 4, width: `${c.score}%`, maxWidth: 80, background: scoreColor, transition: 'width .3s' }} />
-                      <span style={{ fontFamily: C.mono, fontSize: 11, fontWeight: 700, color: scoreColor }}>{c.score}</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: scoreColor }}>{c.score}</span>
                     </div>
                   </td>
                   <td style={tdStyle}>
@@ -705,14 +705,14 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
                   <td style={tdStyle}>
                     <select
                       value={c.stage} onChange={e => setStage(c.id, e.target.value)}
-                      style={{ fontFamily: C.mono, fontSize: 9, textTransform: 'uppercase', padding: '3px 8px', borderRadius: 12, border: `1px solid ${C.bdr}`, background: C.input, color: C.t2, cursor: 'pointer', outline: 'none' }}
+                      style={{ fontSize: 11, padding: '4px 10px', borderRadius: 8, border: `1px solid ${C.bdr}`, background: C.input, color: C.t2, cursor: 'pointer', outline: 'none' }}
                     >
                       {Object.entries(STAGES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                     </select>
                   </td>
                   <td style={tdStyle}>
                     <div style={{ fontSize: 11 }}>{c.lastSvc}</div>
-                    <div style={{ fontFamily: C.mono, fontSize: 9, color: C.t3 }}>{c.lastDate} · {c.daysAgo}d ago</div>
+                    <div style={{ fontSize: 10, color: C.t3 }}>{c.lastDate} · {c.daysAgo}d ago</div>
                   </td>
                   <td style={tdStyle}>
                     {c.seqStep > 0 ? <Tag type="blu">Step {c.seqStep}/3</Tag> : <span style={{ color: C.t3, fontSize: 10 }}>—</span>}
@@ -734,8 +734,8 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
   );
 }
 
-const thStyle = { fontFamily: "'JetBrains Mono', monospace", fontSize: 8, textTransform: 'uppercase', letterSpacing: 2, color: '#506270', textAlign: 'left', padding: '8px 10px', borderBottom: '1px solid rgba(56,189,176,0.08)' };
-const tdStyle = { padding: '10px', borderBottom: '1px solid rgba(56,189,176,0.08)', fontSize: 12, verticalAlign: 'middle' };
+const thStyle = { fontSize: 11, fontWeight: 600, color: C.t2, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${C.bdr}` };
+const tdStyle = { padding: '10px', borderBottom: `1px solid ${C.bdr}`, fontSize: 12, verticalAlign: 'middle' };
 
 // ══════════════════════════════════════════════════════════════
 // SEQUENCES
@@ -762,9 +762,9 @@ function SequencesPage({ customers }) {
                 {i < seq.steps.length - 1 && (
                   <div style={{ position: 'absolute', top: 16, left: 'calc(50% + 16px)', width: 'calc(100% - 32px)', height: 2, background: C.bdr }} />
                 )}
-                <div style={{ fontFamily: C.mono, fontSize: 8, textTransform: 'uppercase', letterSpacing: 1, color: C.t3, marginTop: 6, textAlign: 'center' }}>{step.label}</div>
-                <div style={{ fontFamily: C.mono, fontSize: 9, color: C.acc, marginTop: 2 }}>{step.day === 0 ? 'Immediate' : `Day ${step.day}`}</div>
-                <div style={{ fontFamily: C.mono, fontSize: 8, color: C.t3, marginTop: 2 }}>{step.template}</div>
+                <div style={{ fontSize: 11, fontWeight: 500, color: C.t2, marginTop: 6, textAlign: 'center' }}>{step.label}</div>
+                <div style={{ fontSize: 11, color: C.acc, marginTop: 2 }}>{step.day === 0 ? 'Immediate' : `Day ${step.day}`}</div>
+                <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>{step.template}</div>
               </div>
             ))}
           </div>
@@ -861,7 +861,7 @@ function SuppressionPage({ customers, supRules, setSupRules, updateCustomer, sho
               <tr key={c.id}>
                 <td style={{ ...tdStyle, fontWeight: 500 }}>{c.name}</td>
                 <td style={tdStyle}><Tag type="red">{c.suppressReason || 'Manual'}</Tag></td>
-                <td style={{ ...tdStyle, fontFamily: C.mono, fontSize: 10, color: C.t3 }}>—</td>
+                <td style={{ ...tdStyle, fontSize: 11, color: C.t3 }}>—</td>
                 <td style={tdStyle}><Btn onClick={() => unsuppress(c.id)} style={{ padding: '3px 8px', fontSize: 10 }}>Restore</Btn></td>
               </tr>
             )) : (
@@ -903,7 +903,7 @@ function ActivityList({ log, max }) {
             <div style={{ width: 28, height: 28, borderRadius: '50%', display: 'grid', placeItems: 'center', fontSize: 12, flexShrink: 0, background: ic.bg, color: ic.color }}>{ic.icon}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12, lineHeight: 1.5 }}>{l.msg}</div>
-              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.t3, marginTop: 2 }}>{l.time}</div>
+              <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>{l.time}</div>
             </div>
           </div>
         );
@@ -962,7 +962,7 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
         <div>
           <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4, margin: 0 }}>{c.name}</h2>
           <div style={{ fontSize: 11, color: C.t2 }}>{c.addr} · {c.lastSvc} · {c.daysAgo} days ago</div>
-          <div style={{ fontFamily: C.mono, fontSize: 11, color: C.acc, marginTop: 2 }}>{c.phoneF || 'No phone'}</div>
+          <div style={{ fontSize: 11, color: C.acc, marginTop: 2 }}>{c.phoneF || 'No phone'}</div>
         </div>
         <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.t3, fontSize: 18, cursor: 'pointer', padding: 4 }}>✕</button>
       </div>
@@ -971,7 +971,7 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
         {/* Score */}
         <DrawerSection title="Review Score Breakdown">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <div style={{ fontFamily: C.mono, fontSize: 32, fontWeight: 800, color: scoreColor }}>{c.score}</div>
+            <div style={{ fontSize: 32, fontWeight: 800, color: scoreColor }}>{c.score}</div>
             <div style={{ flex: 1, height: 8, background: C.input, borderRadius: 4, overflow: 'hidden' }}>
               <div style={{ width: `${c.score}%`, height: '100%', background: scoreColor, borderRadius: 4 }} />
             </div>
@@ -997,7 +997,7 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
         <DrawerSection title="GBP Assignment">
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 8, background: C.input, borderRadius: 8, border: `1px solid ${C.bdr}` }}>
             <Tag type="acc">{gbp?.name || c.gbpId}</Tag>
-            <span style={{ fontFamily: C.mono, fontSize: 9, color: C.t3, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.reviewUrl}</span>
+            <span style={{ fontSize: 10, color: C.t3, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.reviewUrl}</span>
           </div>
         </DrawerSection>
 
@@ -1007,10 +1007,10 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
             <div key={i} style={{ padding: '6px 0', borderBottom: `1px solid ${C.bdr}`, fontSize: 11 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ fontWeight: 600 }}>{j.svcType}</span>
-                <span style={{ fontFamily: C.mono, fontSize: 9, color: C.t3 }}>{j.date}</span>
+                <span style={{ fontSize: 10, color: C.t3 }}>{j.date}</span>
               </div>
               {j.notes && <div style={{ color: C.t3, marginTop: 2 }}>{j.notes}</div>}
-              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.t3, marginTop: 2 }}>{j.tech} · ${j.revenue}</div>
+              <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>{j.tech} · ${j.revenue}</div>
             </div>
           )) : <p style={{ color: C.t3, fontSize: 11 }}>No service records</p>}
         </DrawerSection>
@@ -1019,7 +1019,7 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
         <DrawerSection title="Recent SMS">
           {c.sms.length > 0 ? c.sms.slice(-5).map((m, i) => (
             <div key={i} style={{ background: C.input, border: `1px solid ${C.bdr}`, borderRadius: 8, padding: '8px 10px', marginBottom: 4, fontSize: 11, lineHeight: 1.5 }}>
-              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.t3, marginBottom: 2 }}>{m.date} {m.dir === 'out' ? '→ Sent' : '← Received'}</div>
+              <div style={{ fontSize: 10, color: C.t3, marginBottom: 2 }}>{m.date} {m.dir === 'out' ? '→ Sent' : '← Received'}</div>
               {m.text}
             </div>
           )) : <p style={{ color: C.t3, fontSize: 11 }}>No SMS history</p>}
@@ -1059,7 +1059,7 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
 function DrawerSection({ title, children }) {
   return (
     <div style={{ marginBottom: 16 }}>
-      <div style={{ fontFamily: C.mono, fontSize: 9, textTransform: 'uppercase', letterSpacing: 2, color: C.t3, marginBottom: 8, paddingBottom: 4, borderBottom: `1px solid ${C.bdr}` }}>{title}</div>
+      <div style={{ fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 8, paddingBottom: 4, borderBottom: `1px solid ${C.bdr}` }}>{title}</div>
       {children}
     </div>
   );

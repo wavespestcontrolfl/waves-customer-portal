@@ -1273,7 +1273,7 @@ export default function ReviewsPage() {
   return (
     <div>
       {/* ====================== TAB TOGGLE ====================== */}
-      <div style={{ display: 'flex', gap: 0, marginBottom: 24, borderBottom: `1px solid ${D.border}` }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {[
           { key: 'reviews', label: 'Reviews' },
           { key: 'gbp', label: 'GBP Management' },
@@ -1283,11 +1283,10 @@ export default function ReviewsPage() {
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
             style={{
-              padding: '12px 24px', background: 'transparent', border: 'none',
-              borderBottom: activeTab === tab.key ? `3px solid ${D.teal}` : '3px solid transparent',
+              padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
+              background: activeTab === tab.key ? D.teal : 'transparent',
               color: activeTab === tab.key ? D.white : D.muted,
-              fontSize: 15, fontFamily: 'DM Sans, sans-serif', fontWeight: 600,
-              cursor: 'pointer', transition: 'color 0.15s, border-color 0.15s',
+              transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
             }}
           >{tab.label}</button>
         ))}
