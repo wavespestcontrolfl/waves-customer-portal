@@ -214,6 +214,7 @@ app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
+app.use('/api/admin/knowledge-bridge', require('./routes/admin-knowledge-bridge'));
 app.use('/api/admin/equipment', require('./routes/admin-equipment'));
 app.use('/api/admin/wordpress', require('./routes/admin-wordpress-v2'));
 app.use('/api/admin/analytics', require('./routes/admin-analytics'));
