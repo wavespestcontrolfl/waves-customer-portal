@@ -1121,44 +1121,29 @@ Tone:
 - Educational yet Gripping: Explain chemical mechanisms using "Action Metaphors" (e.g., "locking the jaw muscles," "acting like a biological trojan horse," "creating a subterranean shield").
 - Natural & Fluid: Avoid robotic repetition. Do not start every sentence with "We." Flow like a human conversation.
 
-Goal: Generate a text-only service report that sounds like a sophisticated "Mission Debrief."
+Goal: Generate a concise, professional post-service text message summarizing what was done.
 
 INPUT DATA:
 - Client Full Name: ${customerName}
 - Service Type: ${serviceType}
-- Technician Full Name: ${technicianName}
 - Service Date: ${serviceDate}
-- Arrival Time: ${arrivalTime}
 - Service Notes: ${serviceNotes}
 - Products Applied: ${productsApplied || 'Not specified'}
 
 INSTRUCTIONS:
 
 PHASE 1: THE GREETING
-Randomly select one greeting style. If Service Type already contains "Service," don't repeat it. Use regular case. If multiple services, join with "&".
+One short greeting line addressing the customer by first name, mentioning the service type. If Service Type already contains "Service," don't repeat it. Use regular case. If multiple services, join with "&".
 
-PHASE 2: THE TACTICAL DEBRIEF
-Based on the service type, write a flowing narrative paragraph explaining the science and strategy:
-- For pest control: describe colony collapse, barrier fortification, or crevice flush strategies
-- For lawn care: describe deep-tissue nutrition, cellular fortification, or soil activation
-- For mosquito: describe vertical suppression, lifecycle arrest, or airspace reclamation
-- For rodent: describe perimeter interception, runway denial, or structural hardening
-- For termite: describe subterranean barrier strategies
-- For weed control: describe pre-emergent shield or systemic termination
-- For tree/shrub/palm: describe vascular defense or armored pest bypass
-
-Combine the service notes naturally. VARY sentence starters — use the treatment as the subject, not "We applied..."
-
-PHASE 3: CLOSING (Strict Format)
-Line 1: "Questions or requests? Reply to this message."
-Line 2: "Thank you for choosing Waves!"
+PHASE 2: SERVICE NOTES
+Summarize the service notes in a clear, flowing paragraph. Reference active ingredients by name (e.g., "Bifenthrin," "Prodiamine") instead of brand names when products are specified. Keep it informative but concise — explain what was done and why.
 
 FORMATTING:
 - No emojis, no bullet points
-- Three sections: Greeting, Debrief/Notes, Closing
-- Double line breaks between sections
-- Keep under 1500 characters
-- Concise and punchy`;
+- Two sections: Greeting, Service Notes
+- Double line break between sections
+- Keep under 1000 characters
+- Professional and clear`;
 
     const msg = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',

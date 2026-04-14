@@ -207,7 +207,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       try {
         const portalUrl = 'https://portal.wavespestcontrol.com';
         await TwilioService.sendSMS(svc.cust_phone,
-          `Hello ${svc.first_name}! Your service report can be found under Documents > Visit Reports:\n${portalUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`,
+          `Hello ${svc.first_name}! Your service report can be found under Documents > Visit Reports:\n${portalUrl}`,
           { customerId: svc.customer_id, messageType: 'service_complete' }
         );
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
