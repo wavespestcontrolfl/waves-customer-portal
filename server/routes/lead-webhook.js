@@ -57,6 +57,49 @@ router.post('/', async (req, res) => {
     // Determine lead source
     const leadSource = determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent);
 
+    // Look up matching lead_sources record for proper attribution
+    let leadSourceId = null;
+    try {
+      let sourceRecord = null;
+      // Match by domain first (most specific)
+      if (leadSource.source === 'domain_website' && leadSource.detail) {
+        sourceRecord = await db('lead_sources')
+          .where('domain', leadSource.detail)
+          .where('is_active', true)
+          .first();
+      }
+      // Match by source_type + channel
+      if (!sourceRecord && leadSource.source === 'google_business') {
+        sourceRecord = await db('lead_sources')
+          .where('source_type', 'website_organic')
+          .where('channel', 'google')
+          .where('is_active', true)
+          .first();
+      }
+      if (!sourceRecord && leadSource.source === 'waves_website') {
+        sourceRecord = await db('lead_sources')
+          .where('domain', 'like', '%wavespestcontrol%')
+          .where('is_active', true)
+          .first();
+      }
+      if (!sourceRecord && leadSource.source === 'nextdoor') {
+        sourceRecord = await db('lead_sources')
+          .where('source_type', 'marketplace')
+          .where('channel', 'social_organic')
+          .where('is_active', true)
+          .first();
+      }
+      if (!sourceRecord && leadSource.source === 'facebook') {
+        sourceRecord = await db('lead_sources')
+          .whereRaw("LOWER(name) LIKE '%facebook%'")
+          .where('is_active', true)
+          .first();
+      }
+      if (sourceRecord) leadSourceId = sourceRecord.id;
+    } catch (e) {
+      logger.warn(`[lead-webhook] Lead source lookup failed: ${e.message}`);
+    }
+
     // Check for existing customer
     const existing = await db('customers').where({ phone: phoneFormatted }).first();
 
@@ -131,14 +174,36 @@ router.post('/', async (req, res) => {
         // During business hours: initiate call to admin connecting to the lead
         try {
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
-          await twilioClient.calls.create({
+          logger.info(`[lead-webhook] Attempting outbound call to admin. Domain: ${domain}, Lead: ${firstName} ${phoneFormatted}`);
+          const call = await twilioClient.calls.create({
             to: WAVES_ADMIN_PHONE,
             from: '+19412972606',
             url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(phoneFormatted)}&callerIdNumber=${encodeURIComponent('+19412972606')}&leadName=${encodeURIComponent(firstName)}`,
+            statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
+            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
             record: true,
           });
           callConnected = true;
-          logger.info(`[lead-webhook] Business hours — calling admin to connect with ${firstName}`);
+          logger.info(`[lead-webhook] Business hours — calling admin to connect with ${firstName}. CallSid: ${call.sid}`);
+
+          // Log outbound call so it shows up in call log
+          try {
+            await db('call_log').insert({
+              customer_id: customer.id,
+              direction: 'outbound',
+              from_phone: '+19412972606',
+              to_phone: WAVES_ADMIN_PHONE,
+              twilio_call_sid: call.sid,
+              status: 'initiated',
+              metadata: JSON.stringify({
+                type: 'lead_callback',
+                leadName: `${firstName} ${lastName}`,
+                leadPhone: phoneFormatted,
+              }),
+            });
+          } catch (logErr) {
+            logger.warn(`[lead-webhook] Could not log outbound call: ${logErr.message}`);
+          }
         } catch (callErr) {
           logger.error(`[lead-webhook] Admin call failed, falling back to SMS: ${callErr.message}`);
           await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
@@ -213,7 +278,7 @@ router.post('/', async (req, res) => {
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
         address: address || '', city: leadSource.area || '',
-        lead_source_id: null,
+        lead_source_id: leadSourceId,
         lead_type: 'form_submission',
         service_interest: serviceInterestField || null,
         first_contact_at: new Date(),

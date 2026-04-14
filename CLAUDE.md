@@ -2,6 +2,18 @@
 
 This file provides context for Claude Code sessions working on the waves-customer-portal monorepo.
 
+## Rules
+
+1. **Only touch what you're asked to touch.** If the task is "add a tool to the Intelligence Bar," don't refactor the route file, don't update the UI theme, don't reorganize imports in unrelated files.
+2. **Don't add features that weren't requested.** No "while I'm here, I also improved..." — scope creep is the enemy.
+3. **Don't guess at business logic.** If you're unsure whether a service should be taxable, or what the WaveGuard tier thresholds are, ask — don't assume.
+4. **Preserve the existing style.** This project uses inline styles (not Tailwind classes), the `D` color palette object, `adminFetch` for API calls, and `JetBrains Mono` for numbers. Match what's already there.
+5. **Don't delete or rename existing files** without explicit instruction. Don't move files between directories.
+6. **Test your SQL.** Every Intelligence Bar tool runs Knex queries against PostgreSQL. If a table or column might not exist, wrap it in a try/catch — don't let one bad query crash the whole tool module.
+7. **Keep the Intelligence Bar pattern.** New tool modules follow the exact pattern documented below: export `TOOLS` array + `executeTool` function, wire 6 lines into the route file. Don't invent a new architecture.
+8. **Stripe is the payment processor. Square is fully phased out.** Do not reference Square in new code.
+9. **All automation is native.** Do not reference or suggest Zapier, Make, or any external automation tool.
+
 ## Project Overview
 
 Waves Pest Control & Lawn Care — a family-owned company serving SW Florida (Manatee, Sarasota, Charlotte counties). This is a custom AI-native operations platform: React/Vite frontend + Express/Node.js backend + PostgreSQL, deployed on Railway.
@@ -94,7 +106,7 @@ The Intelligence Bar is a natural language AI command center embedded across the
 ## Architecture
 
 ```
-   ⌘K (any admin page)  or  Embedded bar (12 pages)
+   ⌘K (any admin page)  or  Embedded bar (13 pages)
         │
    POST /api/admin/intelligence-bar/query
         │
@@ -127,9 +139,10 @@ The Intelligence Bar is a natural language AI command center embedded across the
 | `review-tools.js` | 9 | Review stats, AI reply drafting, outreach candidates, velocity |
 | `comms-tools.js` | 9 | Unanswered threads, conversation search, call log, AI SMS draft |
 | `tax-tools.js` | 10 | Tax dashboard, expenses, depreciation, P&L, quarterly estimates |
+| `leads-tools.js` | 9 | Pipeline overview, stale leads, funnel, source ROI, bulk status updates |
 | `tech-tools.js` | 8 | Read-only field tools — route, stop details, products, protocols, weather |
 
-**Total: 95 tools across 10 modules.**
+**Total: 104 tools across 11 modules.**
 
 ### Server — Route & Migration
 
@@ -145,7 +158,7 @@ The Intelligence Bar is a natural language AI command center embedded across the
 | `IntelligenceBar.jsx` | CustomersPage | teal |
 | `ScheduleIntelligenceBar.jsx` | SchedulePage | teal |
 | `DashboardIntelligenceBar.jsx` | DashboardPage | teal |
-| `SEOIntelligenceBar.jsx` | SEO, Blog, WordPress, Reviews, Comms, Tax | teal (context-driven) |
+| `SEOIntelligenceBar.jsx` | SEO, Blog, WordPress, Reviews, Comms, Tax, Leads | teal (context-driven) |
 | `ProcurementIntelligenceBar.jsx` | InventoryPage | purple |
 | `RevenueIntelligenceBar.jsx` | RevenuePage | green |
 | `GlobalCommandPalette.jsx` | AdminLayout (⌘K overlay, every page) | per-context |
@@ -160,13 +173,15 @@ The Intelligence Bar is a natural language AI command center embedded across the
 ✅ RevenuePage           ✅ InventoryPage        ✅ SEODashboardPage
 ✅ BlogPage              ✅ WordPressSitesPage    ✅ TechHomePage
 ✅ ReviewsPage           ✅ CommunicationsPage    ✅ TaxPage
+✅ LeadsPage
 ```
 
 ## Context → Tools Mapping
 
 | Context | Route(s) | Tools loaded | Model |
 |---------|----------|-------------|-------|
-| `customers` | /admin/customers, /admin/leads, /admin/health | base (14) | Opus |
+| `customers` | /admin/customers, /admin/health | base (14) | Opus |
+| `leads` | /admin/leads | base + leads (23) | Opus |
 | `schedule` | /admin/schedule | base + schedule (23) | Opus |
 | `dispatch` | /admin/dispatch | base + schedule (23) | Opus |
 | `dashboard` | /admin/dashboard, /admin | base + dashboard (24) | Opus |
