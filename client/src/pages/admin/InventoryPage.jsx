@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import ProcurementIntelligenceBar from '../../components/admin/ProcurementIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
@@ -33,7 +34,6 @@ export default function InventoryPage() {
     { key: 'approvals', label: 'Approvals', badge: stats?.approvals?.pending },
     { key: 'protocols', label: 'Protocols' },
     { key: 'margins', label: 'Service Margins' },
-    { key: 'ai_agent', label: 'AI Price Agent' },
     { key: 'scrape', label: 'Scrape Health' },
   ];
 
@@ -64,6 +64,8 @@ export default function InventoryPage() {
         </div>
       )}
 
+      <ProcurementIntelligenceBar stats={stats} onRefresh={loadStats} />
+
       <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
         {tabs.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
@@ -82,7 +84,6 @@ export default function InventoryPage() {
       {tab === 'approvals' && <ApprovalsTab showToast={showToast} onUpdate={loadStats} />}
       {tab === 'protocols' && <ProtocolsTab showToast={showToast} />}
       {tab === 'margins' && <MarginsTab showToast={showToast} />}
-      {tab === 'ai_agent' && <AIAgentTab showToast={showToast} onUpdate={loadStats} />}
       {tab === 'scrape' && <ScrapeTab showToast={showToast} />}
 
       <div style={{ position: 'fixed', bottom: 20, right: 20, background: D.card, border: `1px solid ${D.green}`, borderRadius: 8, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 32px rgba(0,0,0,.4)', zIndex: 300, fontSize: 12, transform: toast ? 'translateY(0)' : 'translateY(80px)', opacity: toast ? 1 : 0, transition: 'all .3s', pointerEvents: 'none' }}>
@@ -516,145 +517,6 @@ function AddProtocolRow({ products, newRow, setNewRow, unitOpts, onAdd, onCancel
         <input value={newRow.notes} onChange={e => setNewRow(r => ({ ...r, notes: e.target.value }))} placeholder="Usage notes..." style={{ ...sInput, width: 150 }} /></div>
       <button onClick={onAdd} style={sBtn(D.green, D.white)}>Add</button>
       <button onClick={onCancel} style={{ ...sBtn('transparent', D.muted), border: `1px solid ${D.border}` }}>Cancel</button>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════
-// AI PRICE AGENT TAB
-// ══════════════════════════════════════════════════════════════
-function AIAgentTab({ showToast, onUpdate }) {
-  const [products, setProducts] = useState([]);
-  const [vendors, setVendors] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedProduct, setSelectedProduct] = useState('');
-  const [selectedVendors, setSelectedVendors] = useState([]);
-  const [running, setRunning] = useState(false);
-  const [results, setResults] = useState(null);
-  const [runningBulk, setRunningBulk] = useState(false);
-  const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0, results: [] });
-
-  useEffect(() => {
-    Promise.all([adminFetch('/admin/inventory?limit=200'), adminFetch('/admin/inventory/vendors')]).then(([pData, vData]) => {
-      setProducts(pData.products || []); setVendors((vData.vendors || []).filter(v => v.active)); setLoading(false);
-    });
-  }, []);
-
-  const runLookup = async () => {
-    const product = products.find(p => p.id === selectedProduct);
-    if (!product) { showToast('Select a product'); return; }
-    setRunning(true); setResults(null);
-    try {
-      const data = await adminFetch('/admin/inventory/ai-price-lookup', { method: 'POST', body: JSON.stringify({ productId: product.id, productName: product.name, containerSize: product.containerSize || '', vendors: selectedVendors.length ? selectedVendors : undefined }) });
-      setResults(data);
-      showToast(`Found ${data.results?.length || 0} prices — sent to approvals`);
-      onUpdate();
-    } catch (e) { showToast(`Failed: ${e.message}`); }
-    setRunning(false);
-  };
-
-  const runBulkLookup = async () => {
-    const unpriced = products.filter(p => !p.bestPrice || p.bestPrice === 0);
-    if (!unpriced.length) { showToast('All products already priced'); return; }
-    setRunningBulk(true); setBulkProgress({ current: 0, total: unpriced.length, results: [] });
-    for (let i = 0; i < unpriced.length; i++) {
-      const p = unpriced[i];
-      setBulkProgress(prev => ({ ...prev, current: i + 1 }));
-      try {
-        const data = await adminFetch('/admin/inventory/ai-price-lookup', { method: 'POST', body: JSON.stringify({ productId: p.id, productName: p.name, containerSize: p.containerSize || '' }) });
-        setBulkProgress(prev => ({ ...prev, results: [...prev.results, { product: p.name, found: data.results?.length || 0, cheapest: data.cheapest }] }));
-      } catch { setBulkProgress(prev => ({ ...prev, results: [...prev.results, { product: p.name, found: 0, error: true }] })); }
-    }
-    setRunningBulk(false); onUpdate(); showToast('Bulk price lookup complete');
-  };
-
-  const toggleVendor = (id) => setSelectedVendors(prev => prev.includes(id) ? prev.filter(v => v !== id) : [...prev, id]);
-  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>;
-  const unpricedCount = products.filter(p => !p.bestPrice || p.bestPrice === 0).length;
-
-  return (
-    <div>
-      <div style={{ ...sCard, textAlign: 'center', border: `1px solid ${D.purple}33` }}>
-        <div style={{ fontSize: 18, marginBottom: 4 }}>🤖</div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>AI Price Research Agent</div>
-        <div style={{ fontSize: 12, color: D.muted }}>Uses Claude + web search to find real vendor prices across your 23 vendors, normalizes per-oz/per-lb, and routes results through your approval queue.</div>
-      </div>
-
-      <div style={{ ...sCard }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Single Product Lookup</div>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <div style={{ flex: 1, minWidth: 250 }}>
-            <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Product</label>
-            <select value={selectedProduct} onChange={e => setSelectedProduct(e.target.value)} style={{ ...sInput, width: '100%' }}>
-              <option value="">Select product...</option>
-              {products.map(p => <option key={p.id} value={p.id}>{p.name} {p.containerSize ? `(${p.containerSize})` : ''} {!p.bestPrice ? '⚠' : ''}</option>)}
-            </select>
-          </div>
-          <button onClick={runLookup} disabled={running || !selectedProduct} style={{ ...sBtn(running ? D.border : D.purple, D.white), opacity: running || !selectedProduct ? 0.5 : 1 }}>
-            {running ? '⏳ Searching vendors...' : '🔍 Find Cheapest Prices'}
-          </button>
-        </div>
-
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Filter Vendors (optional)</div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {vendors.map(v => (
-              <button key={v.id} onClick={() => toggleVendor(v.id)} style={{ padding: '4px 10px', borderRadius: 12, fontSize: 11, border: 'none', cursor: 'pointer', background: selectedVendors.includes(v.id) ? D.teal : D.input, color: selectedVendors.includes(v.id) ? D.white : D.muted }}>{v.name}</button>
-            ))}
-          </div>
-        </div>
-
-        {results && (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 8 }}>
-              Results for {results.product} — {results.results?.length || 0} prices found
-              {results.cheapest && <span style={{ color: D.green, marginLeft: 8 }}>Cheapest: {results.cheapest}</span>}
-            </div>
-            {results.summary && <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>{results.summary}</div>}
-            {results.results?.length > 0 ? (
-              <div style={{ display: 'grid', gap: 4 }}>
-                {results.results.map((r, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', background: D.input, borderRadius: 6, fontSize: 12 }}>
-                    <span style={{ color: D.white, fontWeight: 600, minWidth: 160 }}>{r.vendor}</span>
-                    <span style={{ fontFamily: "'JetBrains Mono', monospace", color: r.vendor === results.cheapest ? D.green : D.text, fontWeight: 700 }}>${r.price?.toFixed(2)}</span>
-                    {r.quantity && <span style={{ color: D.muted }}>{r.quantity}</span>}
-                    {r.pricePerOz && <span style={{ color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>${r.pricePerOz?.toFixed(4)}/oz</span>}
-                    {r.url && <a href={r.url} target="_blank" rel="noopener noreferrer" style={{ color: D.teal, fontSize: 11 }}>↗</a>}
-                    <span style={sBadge(`${D.amber}22`, D.amber)}>→ Approvals</span>
-                  </div>
-                ))}
-              </div>
-            ) : <div style={{ color: D.muted, fontSize: 12 }}>No prices found from search.</div>}
-            {results.raw && <details style={{ marginTop: 8 }}><summary style={{ fontSize: 11, color: D.muted, cursor: 'pointer' }}>Raw AI Response</summary><pre style={{ fontSize: 11, color: D.muted, background: D.input, padding: 12, borderRadius: 8, overflow: 'auto', maxHeight: 200, whiteSpace: 'pre-wrap' }}>{results.raw}</pre></details>}
-          </div>
-        )}
-      </div>
-
-      <div style={{ ...sCard }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div><div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>Bulk Price Check</div><div style={{ fontSize: 12, color: D.muted }}>AI agent searches all {unpricedCount} unpriced products sequentially</div></div>
-          <button onClick={runBulkLookup} disabled={runningBulk || !unpricedCount} style={{ ...sBtn(runningBulk ? D.border : D.amber, D.white), opacity: runningBulk || !unpricedCount ? 0.5 : 1 }}>
-            {runningBulk ? `⏳ ${bulkProgress.current}/${bulkProgress.total}` : `🔍 Price All Unpriced (${unpricedCount})`}
-          </button>
-        </div>
-        {runningBulk && (
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ height: 6, background: D.input, borderRadius: 3, overflow: 'hidden' }}><div style={{ height: '100%', background: D.purple, borderRadius: 3, transition: 'width 0.3s', width: `${(bulkProgress.current / bulkProgress.total) * 100}%` }} /></div>
-            <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Processing {bulkProgress.current} of {bulkProgress.total}...</div>
-          </div>
-        )}
-        {bulkProgress.results.length > 0 && (
-          <div style={{ display: 'grid', gap: 4, maxHeight: 300, overflow: 'auto' }}>
-            {bulkProgress.results.map((r, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: D.input, borderRadius: 6, fontSize: 12 }}>
-                <span style={{ color: r.error ? D.red : D.white, fontWeight: 500 }}>{r.product}</span>
-                <span style={{ color: r.error ? D.red : D.green, marginLeft: 'auto', fontFamily: "'JetBrains Mono', monospace" }}>{r.error ? 'Error' : `${r.found} prices`}</span>
-                {r.cheapest && <span style={{ color: D.muted, fontSize: 11 }}>→ {r.cheapest}</span>}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }

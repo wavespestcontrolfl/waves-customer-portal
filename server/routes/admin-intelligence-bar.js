@@ -20,6 +20,7 @@ const { TOOLS, executeTool } = require('../services/intelligence-bar/tools');
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
+const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intelligence-bar/procurement-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -34,6 +35,7 @@ const MAX_TOOL_ROUNDS = 8;
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
 const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
+const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -121,6 +123,35 @@ ANALYSIS STYLE:
 - Hub sites (wavespestcontrol.com, waveslawncare.com) should generally outperform spokes — flag if not
 - Blog posts should target 1,500+ words for SEO value — flag thin content
 - PageSpeed mobile ≥ 90 = good, 50-89 = needs work, <50 = poor`,
+
+  procurement: `
+PROCUREMENT & INVENTORY CONTEXT:
+You are on the Procurement Intelligence page. The operator manages a product catalog of ~154 pest control and lawn care products across 23 vendors.
+
+PRIMARY VENDORS: SiteOne Landscape Supply (primary distributor), LESCO, DoMyOwn, Solutions Pest & Lawn, Amazon Commercial, Univar Solutions.
+
+PRODUCT CATEGORIES: insecticide, herbicide, fungicide, fertilizer, IGR (insect growth regulator), bait, rodenticide, adjuvant/surfactant, equipment.
+
+PROCUREMENT CAPABILITIES:
+- Search and filter the product catalog by name, category, active ingredient, pricing status
+- Compare vendor pricing for any product (shows all vendors' prices + cheapest)
+- Run AI-powered web search price lookups (uses Claude + web search to find real vendor prices)
+- Manage the price approval queue (approve/reject AI-found prices)
+- Analyze margins by service type (labor + product cost vs revenue)
+- Track price trends over time
+- Find unpriced products and prioritize what to price next
+
+PRICING INTELLIGENCE:
+- The operator uses a $35/hr loaded labor rate
+- Products are normalized to price-per-oz or price-per-lb for comparison
+- AI price lookups search vendor websites in real time and route results through an approval queue
+- When comparing vendors, always normalize to the same container size
+- SiteOne and LESCO are the primary/preferred vendors — flag if a cheaper option exists elsewhere
+
+WHEN ASKED TO FIND PRICES:
+Use the run_price_lookup tool. This triggers a real web search via Claude + web_search tool. Results are automatically queued for approval. After the lookup, summarize what was found and offer to approve the best prices.
+
+REPLACES: The "AI Price Agent" tab. Everything it did (single lookup, bulk lookup, vendor filtering) is now handled conversationally through this bar.`,
 };
 
 function getToolsForContext(context) {
@@ -132,6 +163,9 @@ function getToolsForContext(context) {
   }
   if (context === 'seo' || context === 'blog' || context === 'wordpress') {
     return [...TOOLS, ...SEO_TOOLS];
+  }
+  if (context === 'procurement' || context === 'inventory') {
+    return [...TOOLS, ...PROCUREMENT_TOOLS];
   }
   return TOOLS;
 }
@@ -145,6 +179,9 @@ function executeToolByName(toolName, input) {
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input);
+  }
+  if (PROCUREMENT_TOOL_NAMES.has(toolName)) {
+    return executeProcurementTool(toolName, input);
   }
   return executeTool(toolName, input);
 }
@@ -393,6 +430,17 @@ router.get('/quick-actions', async (req, res) => {
     res.json({ actions: dashboardActions });
   } else if (context === 'seo' || context === 'blog' || context === 'wordpress') {
     res.json({ actions: seoActions });
+  } else if (context === 'procurement' || context === 'inventory') {
+    res.json({ actions: [
+      { id: 'unpriced', label: 'Unpriced Products', prompt: 'What products still need pricing? Prioritize by category.', icon: '❓' },
+      { id: 'compare', label: 'Compare Vendors', prompt: 'Compare SiteOne vs LESCO pricing on our top 10 most-used products', icon: '⚖️' },
+      { id: 'cheapest', label: 'Cheapest Sources', prompt: 'Where are we getting the best deals? Any products where a cheaper vendor exists?', icon: '💰' },
+      { id: 'approvals', label: 'Approval Queue', prompt: 'Any pending price approvals? Show me what needs review.', icon: '✅' },
+      { id: 'margins', label: 'Margin Analysis', prompt: 'What are our margins by service type?', icon: '📊' },
+      { id: 'herbicides', label: 'Herbicide Prices', prompt: 'Compare prices on all our pre-emergent herbicides', icon: '🌿' },
+      { id: 'price_check', label: 'Run Price Check', prompt: 'Run a price check on Demand CS across all vendors', icon: '🔍' },
+      { id: 'trends', label: 'Price Trends', prompt: 'Have any product prices gone up in the last 90 days?', icon: '📈' },
+    ] });
   } else {
     res.json({ actions: baseActions });
   }
