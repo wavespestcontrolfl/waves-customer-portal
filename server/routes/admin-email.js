@@ -335,6 +335,21 @@ router.delete('/vendors/:id', async (req, res) => {
 });
 
 // ============================================
+// AI Draft Reply (Session 3)
+// ============================================
+
+router.post('/message/:id/ai-draft', async (req, res) => {
+  try {
+    const { draftEmailReply } = require('../services/intelligence-bar/email-tools');
+    const result = await draftEmailReply(req.params.id, null, null, req.body.instructions);
+    res.json(result);
+  } catch (err) {
+    logger.error(`[email] AI draft error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
 // AI Classification & Auto-Actions (Session 2)
 // ============================================
 

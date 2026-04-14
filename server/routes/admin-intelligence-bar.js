@@ -27,6 +27,7 @@ const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-ba
 const { COMMS_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
+const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -48,6 +49,7 @@ const REVIEW_TOOL_NAMES = new Set(REVIEW_TOOLS.map(t => t.name));
 const COMMS_TOOL_NAMES = new Set(COMMS_TOOLS.map(t => t.name));
 const TAX_TOOL_NAMES = new Set(TAX_TOOLS.map(t => t.name));
 const LEADS_TOOL_NAMES = new Set(LEADS_TOOLS.map(t => t.name));
+const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -324,6 +326,30 @@ RESPONSE STYLE:
 - For bulk updates, ALWAYS run dry_run first to show the count, then ask for confirmation
 - When marking leads as lost, always ask for the lost_reason
 - Virginia is the primary user — be direct about what needs attention NOW`,
+
+  email: `
+EMAIL CONTEXT:
+You are on the Email page — the inbox for contact@wavespestcontrol.com synced via Gmail API.
+
+EMAIL CAPABILITIES:
+- Inbox summary with category breakdown and auto-action report
+- Search emails by sender, subject, body, category, date
+- View full email threads
+- Draft AI-powered replies in Waves brand voice (with customer/vendor context)
+- Send email replies
+- Reply via SMS instead of email (for customers who respond faster to texts)
+- View vendor invoices detected in email with expense linkage
+- Email volume and classification statistics
+- View and manage blocked sender list
+- Block new spam domains
+
+RESPONSE STYLE:
+- Urgent items first: complaints, then unread customer requests, then everything else
+- When showing inbox summary, lead with "needs attention" count
+- For vendor emails from SiteOne, note that Mark Mroczkowski is the primary rep
+- When drafting replies, always show the draft and wait for approval
+- If a customer emailed about scheduling, suggest replying via SMS since it's faster
+- Keep email drafts concise — 2-3 paragraphs max, professional but warm`,
 };
 
 function getToolsForContext(context) {
@@ -354,6 +380,9 @@ function getToolsForContext(context) {
   if (context === 'leads') {
     return [...TOOLS, ...LEADS_TOOLS];
   }
+  if (context === 'email') {
+    return [...TOOLS, ...EMAIL_TOOLS];
+  }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
@@ -376,6 +405,9 @@ function executeToolByName(toolName, input, techContext) {
   }
   if (LEADS_TOOL_NAMES.has(toolName)) {
     return executeLeadsTool(toolName, input);
+  }
+  if (EMAIL_TOOL_NAMES.has(toolName)) {
+    return executeEmailTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -721,6 +753,15 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'response', label: 'Response Times', prompt: 'How fast are we responding? Does speed correlate with conversion?', icon: '⏱️' },
       { id: 'new_leads', label: 'New Leads', prompt: 'Show me all new leads this week', icon: '🆕' },
       { id: 'cleanup', label: 'Pipeline Cleanup', prompt: 'How many unresponsive leads older than 30 days should we move to lost?', icon: '🧹' },
+    ] });
+  } else if (context === 'email') {
+    res.json({ actions: [
+      { id: 'summary', label: 'Inbox Summary', prompt: 'What came in today? Give me the full picture.', icon: '📬' },
+      { id: 'unread', label: 'Unread', prompt: 'Show me all unread emails that need attention', icon: '🔴' },
+      { id: 'invoices', label: 'Vendor Invoices', prompt: 'Any vendor invoices to review? Show amounts and status.', icon: '🧾' },
+      { id: 'leads', label: 'Email Leads', prompt: 'How many leads came in via email this month? Show me the recent ones.', icon: '📈' },
+      { id: 'blocked', label: 'Blocked Senders', prompt: 'How many spam senders are blocked? Show the top domains.', icon: '🚫' },
+      { id: 'stats', label: 'Email Stats', prompt: 'Email volume and classification breakdown this month', icon: '📊' },
     ] });
   } else {
     res.json({ actions: baseActions });

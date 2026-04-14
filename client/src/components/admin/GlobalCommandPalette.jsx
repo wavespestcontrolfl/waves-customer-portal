@@ -40,6 +40,7 @@ const ROUTE_CONTEXT_MAP = {
   '/admin/reviews': 'reviews',
   '/admin/referrals': 'reviews',
   '/admin/communications': 'comms',
+  '/admin/email': 'email',
 };
 
 const CONTEXT_LABELS = {
@@ -56,6 +57,7 @@ const CONTEXT_LABELS = {
   comms: 'Communications',
   tax: 'Tax Center',
   leads: 'Leads Pipeline',
+  email: 'Email',
 };
 
 const CONTEXT_COLORS = {
@@ -72,6 +74,7 @@ const CONTEXT_COLORS = {
   comms: '#3b82f6',
   tax: D.purple,
   leads: D.amber,
+  email: D.green,
 };
 
 function detectContext(pathname) {

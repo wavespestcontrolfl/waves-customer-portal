@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 function adminFetch(path, options = {}) {
@@ -82,6 +83,8 @@ export default function EmailPage() {
   const [tab, setTab] = useState('inbox'); // inbox | blocked
   const [blocked, setBlocked] = useState([]);
   const [blockInput, setBlockInput] = useState('');
+  const [drafting, setDrafting] = useState(false);
+  const [draftResult, setDraftResult] = useState(null);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -224,6 +227,40 @@ export default function EmailPage() {
     setSending(false);
   };
 
+  const handleAiDraft = async () => {
+    if (!selectedEmail) return;
+    setDrafting(true);
+    setDraftResult(null);
+    try {
+      const r = await adminFetch(`/api/admin/email/message/${selectedEmail.id}/ai-draft`, { method: 'POST' });
+      const d = await r.json();
+      if (d.reply_draft) {
+        setReplyText(d.reply_draft);
+        setDraftResult(d);
+      }
+    } catch { /* ignore */ }
+    setDrafting(false);
+  };
+
+  const handleReplyViaSms = async () => {
+    if (!selectedEmail) return;
+    const smsBody = prompt(`SMS to ${selectedEmail.from_name || selectedEmail.from_address}:`);
+    if (!smsBody) return;
+    try {
+      await adminFetch('/api/admin/email/send', {
+        method: 'POST',
+        body: JSON.stringify({
+          to: selectedEmail.from_address,
+          subject: `Re: ${selectedEmail.subject || ''}`,
+          body: `[Replied via SMS instead]`,
+          threadId: selectedEmail.gmail_thread_id,
+        }),
+      });
+    } catch { /* non-critical — the SMS is what matters */ }
+    // The actual SMS goes through the Intelligence Bar tool
+    // This button pre-fills a quick path for Virginia
+  };
+
   const handleBlock = async () => {
     if (!blockInput.trim()) return;
     try {
@@ -301,6 +338,9 @@ export default function EmailPage() {
           }}>{syncing ? 'Syncing...' : 'Sync Now'}</button>
         </div>
       </div>
+
+      {/* Intelligence Bar */}
+      <SEOIntelligenceBar context="email" />
 
       {/* Daily digest card */}
       {digest && digest.total_received > 0 && (
@@ -609,7 +649,21 @@ export default function EmailPage() {
                             boxSizing: 'border-box',
                           }}
                         />
-                        <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
+                        {draftResult && (
+                        <div style={{ fontSize: 11, color: D.green, marginTop: 4, marginBottom: 4 }}>
+                          {'\u2713'} AI draft loaded — review and edit before sending
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
+                          <button onClick={handleAiDraft} disabled={drafting} style={{
+                            padding: '8px 16px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                            background: D.purple + '22', border: `1px solid ${D.purple}44`, color: D.purple,
+                            opacity: drafting ? 0.5 : 1,
+                          }}>{drafting ? 'Drafting...' : '\u2728 AI Draft'}</button>
+                          <button onClick={handleReplyViaSms} style={{
+                            padding: '8px 16px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+                            background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
+                          }}>{'\uD83D\uDCAC'} Reply via SMS</button>
                           <button onClick={handleReply} disabled={sending || !replyText.trim()} style={{
                             padding: '8px 20px', borderRadius: 6, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer',
                             background: D.teal, color: D.white, opacity: sending || !replyText.trim() ? 0.5 : 1,

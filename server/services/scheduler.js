@@ -187,6 +187,49 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:30 AM — Morning email digest notification
+  // =========================================================================
+  cron.schedule('30 7 * * *', async () => {
+    try {
+      const yesterday = new Date(Date.now() - 24 * 3600000);
+      yesterday.setHours(0, 0, 0, 0);
+
+      const emails = await db('emails').where('received_at', '>=', yesterday);
+      const unread = await db('emails')
+        .where({ is_read: false, is_archived: false })
+        .count('* as c').first();
+
+      const leads = emails.filter(e => e.auto_action && e.auto_action.includes('lead_created')).length;
+      const invoices = emails.filter(e => e.classification === 'vendor_invoice').length;
+      const spam = emails.filter(e => e.classification === 'spam').length;
+      const invoiceAmounts = emails
+        .filter(e => e.classification === 'vendor_invoice' && e.extracted_data)
+        .reduce((sum, e) => {
+          const data = typeof e.extracted_data === 'string' ? JSON.parse(e.extracted_data) : e.extracted_data;
+          return sum + (parseFloat(data.invoice_amount) || 0);
+        }, 0);
+
+      const parts = [`${parseInt(unread?.c || 0)} unread`];
+      if (leads > 0) parts.push(`${leads} leads created`);
+      if (invoices > 0) parts.push(`${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`);
+      if (spam > 0) parts.push(`${spam} spam blocked`);
+
+      await db('notifications').insert({
+        type: 'email_digest',
+        title: 'Morning Email Digest',
+        message: `${emails.length} emails overnight. ${parts.join(', ')}. Check /admin/email for details.`,
+        severity: parseInt(unread?.c || 0) > 10 ? 'high' : 'low',
+        link: '/admin/email',
+        created_at: new Date(),
+      }).catch(() => {});
+
+      logger.info(`[email-digest] Morning digest: ${emails.length} emails, ${leads} leads, ${spam} spam`);
+    } catch (err) {
+      logger.error(`[email-digest] Cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 HOURS — Estimate follow-up SMS (unviewed, viewed-not-accepted, expiring)
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {
