@@ -208,9 +208,10 @@ exports.up = async function(knex) {
 
   // ── 4. ACH failure log table ──
   if (!(await knex.schema.hasTable('ach_failure_log'))) {
+    // Create without the FK first so the table always lands cleanly
     await knex.schema.createTable('ach_failure_log', t => {
       t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
-      t.uuid('customer_id').references('id').inTable('customers');
+      t.uuid('customer_id'); // FK added below after orphan cleanup
       t.string('stripe_payment_intent_id', 255);
       t.string('failure_reason', 255);
       t.timestamp('failure_date').defaultTo(knex.fn.now());
@@ -219,6 +220,30 @@ exports.up = async function(knex) {
       t.string('resolution', 50); // retry_success, card_fallback, customer_updated
       t.index('customer_id');
     });
+  }
+
+  // Delete orphaned rows where customer_id has no matching customer, then add
+  // the FK constraint if it does not already exist.  We check the information
+  // schema so the step is idempotent across repeated migration runs.
+  if (await knex.schema.hasTable('ach_failure_log') && await knex.schema.hasTable('customers')) {
+    await knex.raw(`
+      DELETE FROM ach_failure_log
+      WHERE customer_id IS NOT NULL
+        AND customer_id NOT IN (SELECT id FROM customers)
+    `);
+
+    const fkExists = await knex.raw(`
+      SELECT 1 FROM information_schema.table_constraints
+      WHERE table_name = 'ach_failure_log'
+        AND constraint_name = 'ach_failure_log_customer_id_foreign'
+        AND constraint_type = 'FOREIGN KEY'
+    `);
+
+    if (fkExists.rows.length === 0) {
+      await knex.schema.alterTable('ach_failure_log', t => {
+        t.foreign('customer_id').references('id').inTable('customers');
+      });
+    }
   }
 
   // ── 5. Add ACH status columns to customers ──
