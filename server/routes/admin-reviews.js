@@ -39,10 +39,12 @@ router.get('/', async (req, res, next) => {
   try {
     const { location, rating, responded, search, page = 1, limit = 30 } = req.query;
 
-    // Exclude stats rows from actual reviews
+    // Exclude stats rows and dismissed reviews from actual reviews
+    const showDismissed = req.query.dismissed === 'true';
     let query = db('google_reviews')
       .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
       .where('google_reviews.reviewer_name', '!=', '_stats')
+      .modify(qb => { if (!showDismissed) qb.where(function() { this.where('google_reviews.dismissed', false).orWhereNull('google_reviews.dismissed'); }); })
       .select(
         'google_reviews.*',
         'customers.first_name as cust_first', 'customers.last_name as cust_last',
@@ -135,13 +137,42 @@ router.post('/:id/reply', async (req, res, next) => {
     const review = await db('google_reviews').where({ id: req.params.id }).first();
     if (!review) return res.status(404).json({ error: 'Review not found' });
 
-    // Try to post to Google
-    if (gbp.configured && review.google_review_id) {
-      try {
-        await gbp.replyToReview(review.google_review_id, replyText, review.location_id);
-      } catch (e) {
-        logger.error(`Google reply failed: ${e.message}`);
-        // Still save locally even if Google API fails
+    // Try to post reply to Google
+    let googlePosted = false;
+    if (gbp.configured) {
+      let resourceName = review.gbp_review_name;
+
+      // If no GBP resource name stored, try to resolve it now
+      if (!resourceName && review.location_id) {
+        try {
+          const { WAVES_LOCATIONS } = require('../config/locations');
+          const loc = WAVES_LOCATIONS.find(l => l.id === review.location_id);
+          if (loc?.googleLocationResourceName) {
+            const gbpReviews = await gbp.getReviews(loc.googleLocationResourceName, review.location_id, 100);
+            const match = gbpReviews.find(g => {
+              const gName = (g.reviewer?.displayName || '').toLowerCase();
+              const rName = (review.reviewer_name || '').toLowerCase();
+              return gName === rName;
+            });
+            if (match?.name) {
+              resourceName = match.name;
+              await db('google_reviews').where({ id: req.params.id }).update({ gbp_review_name: resourceName });
+            }
+          }
+        } catch (lookupErr) {
+          logger.warn(`GBP resource name lookup failed: ${lookupErr.message}`);
+        }
+      }
+
+      if (resourceName) {
+        try {
+          await gbp.replyToReview(resourceName, replyText, review.location_id);
+          googlePosted = true;
+        } catch (e) {
+          logger.error(`Google reply failed: ${e.message}`);
+        }
+      } else {
+        logger.warn(`No GBP resource name for review ${req.params.id} — reply saved locally only`);
       }
     }
 
@@ -154,7 +185,25 @@ router.post('/:id/reply', async (req, res, next) => {
       description: `Replied to ${review.star_rating}-star review from ${review.reviewer_name} on ${review.location_id}`,
     });
 
+    res.json({ success: true, googlePosted });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/reviews/:id/dismiss — dismiss a review from dashboard
+router.post('/:id/dismiss', async (req, res, next) => {
+  try {
+    await db('google_reviews').where({ id: req.params.id }).update({ dismissed: true });
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/reviews/dismiss-batch — dismiss multiple reviews
+router.post('/dismiss-batch', async (req, res, next) => {
+  try {
+    const { ids } = req.body;
+    if (!ids?.length) return res.status(400).json({ error: 'No IDs provided' });
+    await db('google_reviews').whereIn('id', ids).update({ dismissed: true });
+    res.json({ success: true, dismissed: ids.length });
   } catch (err) { next(err); }
 });
 

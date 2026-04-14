@@ -332,7 +332,63 @@ class GoogleBusinessService {
       }
     }
 
+    // After Places API sync, try to resolve GBP resource names for reviews missing them
+    await this._resolveGbpResourceNames();
+
     return { synced: totalSynced, new: totalNew, errors };
+  }
+
+  /**
+   * Fetch reviews from GBP API and match to stored reviews to populate gbp_review_name.
+   * This enables reply posting. Only processes reviews without a gbp_review_name already set.
+   */
+  async _resolveGbpResourceNames() {
+    try {
+      const unresolved = await db('google_reviews')
+        .whereNull('gbp_review_name')
+        .where('reviewer_name', '!=', '_stats')
+        .select('id', 'reviewer_name', 'review_created_at', 'location_id');
+      if (unresolved.length === 0) return;
+
+      // Group by location
+      const byLocation = {};
+      for (const r of unresolved) {
+        if (!byLocation[r.location_id]) byLocation[r.location_id] = [];
+        byLocation[r.location_id].push(r);
+      }
+
+      for (const [locId, reviews] of Object.entries(byLocation)) {
+        const loc = WAVES_LOCATIONS.find(l => l.id === locId);
+        if (!loc?.googleLocationResourceName) continue;
+        if (!this._getClient(locId)) continue;
+
+        try {
+          const gbpReviews = await this.getReviews(loc.googleLocationResourceName, locId, 100);
+          for (const gbpRev of gbpReviews) {
+            // Match by reviewer display name + approximate timestamp
+            const gbpName = gbpRev.reviewer?.displayName || '';
+            const gbpTime = gbpRev.createTime ? new Date(gbpRev.createTime).getTime() : 0;
+
+            const match = reviews.find(r => {
+              if (!r.reviewer_name || !r.review_created_at) return false;
+              const localTime = new Date(r.review_created_at).getTime();
+              const nameMatch = r.reviewer_name.toLowerCase() === gbpName.toLowerCase();
+              const timeClose = Math.abs(localTime - gbpTime) < 86400000; // within 24h
+              return nameMatch && timeClose;
+            });
+
+            if (match && gbpRev.name) {
+              await db('google_reviews').where({ id: match.id }).update({ gbp_review_name: gbpRev.name });
+              logger.info(`[gbp] Resolved GBP resource name for ${gbpName}: ${gbpRev.name}`);
+            }
+          }
+        } catch (err) {
+          logger.warn(`[gbp] GBP resource name resolution failed for ${loc.name}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      logger.warn(`[gbp] Resource name resolution skipped: ${err.message}`);
+    }
   }
 
   // =========================================================================

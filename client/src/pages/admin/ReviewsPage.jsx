@@ -107,7 +107,7 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
 }
 
 // --- Review Card ---
-function ReviewCard({ review, onReplySubmit }) {
+function ReviewCard({ review, onReplySubmit, onDismiss }) {
   const [editing, setEditing] = useState(false);
   const [replyText, setReplyText] = useState(review.reply || '');
   const [submitting, setSubmitting] = useState(false);
@@ -261,6 +261,16 @@ function ReviewCard({ review, onReplySubmit }) {
           </div>
         ) : null}
       </div>
+
+      {/* Dismiss */}
+      {onDismiss && (
+        <div style={{ textAlign: 'right', marginTop: 8 }}>
+          <button onClick={() => onDismiss(review.id)} style={{
+            padding: '4px 10px', background: 'transparent', border: 'none', color: D.muted,
+            fontSize: 11, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer', opacity: 0.6,
+          }}>Dismiss</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1196,6 +1206,14 @@ export default function ReviewsPage() {
     }));
   };
 
+  const handleDismiss = async (reviewId) => {
+    await adminFetch(`/admin/reviews/${reviewId}/dismiss`, { method: 'POST' });
+    setData(prev => ({
+      ...prev,
+      reviews: prev.reviews.filter(r => r.id !== reviewId),
+    }));
+  };
+
   const handleRequestReview = (loc) => {
     if (loc.reviewUrl) {
       navigator.clipboard.writeText(loc.reviewUrl).then(() => {
@@ -1409,7 +1427,7 @@ export default function ReviewsPage() {
                 </div>
               ) : (
                 filtered.map(r => (
-                  <ReviewCard key={r.id} review={r} onReplySubmit={handleReply} />
+                  <ReviewCard key={r.id} review={r} onReplySubmit={handleReply} onDismiss={handleDismiss} />
                 ))
               )}
             </>

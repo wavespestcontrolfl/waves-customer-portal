@@ -22,13 +22,10 @@ const TYPE_ICONS = { pest_control: '🐛', exterminator: '🔫', lawn_care: '�
 const CONTENT_COLORS = { built: D.green, partial: D.amber, clone_needs_rebuild: D.red, needs_content: D.amber, unknown: D.muted };
 const CONTENT_LABELS = { built: 'Built', partial: 'Partial', clone_needs_rebuild: 'Needs Rebuild', needs_content: 'Needs Content', unknown: 'Unknown' };
 
-const ZAPIER_URL = 'https://hooks.zapier.com/hooks/catch/18868815/24az9vq/';
-const PORTAL_URL = 'https://waves-customer-portal-production.up.railway.app/api/webhooks/lead';
 
 const TABS = [
   { id: 'fleet', label: 'Fleet Overview' },
   { id: 'sites', label: 'All Sites' },
-  { id: 'webhooks', label: 'Webhooks' },
   { id: 'specs', label: 'Specs & Protocols' },
 ];
 
@@ -41,7 +38,6 @@ export default function WordPressSitesPage() {
   const [creds, setCreds] = useState({ wp_username: '', wp_app_password: '' });
   const [testing, setTesting] = useState(null);
   const [scanning, setScanning] = useState(null);
-  const [swapping, setSwapping] = useState(false);
   const [toast, setToast] = useState('');
   const [migrationPending, setMigrationPending] = useState(false);
 
@@ -79,15 +75,6 @@ export default function WordPressSitesPage() {
     setTesting(null);
   };
 
-  const scanForms = async (siteId) => {
-    setScanning(siteId);
-    try {
-      await adminFetch(`/admin/wordpress/sites/${siteId}/scan`, { method: 'POST' });
-      showToast('Form scan started...');
-      setTimeout(() => { loadSites(); setScanning(null); }, 15000);
-    } catch (e) { showToast(`Scan failed: ${e.message}`); setScanning(null); }
-  };
-
   const quickScan = async (siteId) => {
     setScanning(siteId);
     try {
@@ -104,27 +91,6 @@ export default function WordPressSitesPage() {
       await adminFetch('/admin/wordpress/quick-scan-all', { method: 'POST' });
       setTimeout(loadSites, 25000);
     } catch (e) { showToast(`Failed: ${e.message}`); }
-  };
-
-  const swapSite = async (siteId) => {
-    try {
-      const r = await adminFetch(`/admin/wordpress/sites/${siteId}/swap`, { method: 'POST', body: JSON.stringify({ old_url: ZAPIER_URL, new_url: PORTAL_URL }) });
-      showToast(`Swapped: ${r.formsUpdated || 0} forms updated`);
-      loadSites();
-    } catch (e) { showToast(`Swap failed: ${e.message}`); }
-  };
-
-  const swapAll = async () => {
-    if (!confirm(`Swap ALL Zapier webhooks to the portal URL across ${connected} connected sites?`)) return;
-    setSwapping(true);
-    try {
-      const r = await adminFetch('/admin/wordpress/swap-all', { method: 'POST', body: JSON.stringify({ old_url: ZAPIER_URL, new_url: PORTAL_URL }) });
-      const results = r.results || r.sites || [];
-      const total = results.reduce((s, r) => s + (r.formsUpdated || 0), 0);
-      showToast(`Done! ${total} forms updated`);
-      loadSites();
-    } catch (e) { showToast(`Swap failed: ${e.message}`); }
-    setSwapping(false);
   };
 
   const connected = sites.filter(s => s.wp_username || s.has_credentials).length;
@@ -349,65 +315,6 @@ export default function WordPressSitesPage() {
               {site.last_error && <div style={{ fontSize: 10, color: D.red, marginTop: 6, lineHeight: 1.3 }}>{String(site.last_error).substring(0, 120)}</div>}
             </div>
           ))}
-        </div>
-      )}
-
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {/* WEBHOOKS TAB                                                      */}
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {tab === 'webhooks' && (
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <div style={{ fontSize: 14, color: D.muted }}>Manage Elementor form webhook URLs across the network</div>
-            <button onClick={swapAll} disabled={swapping || connected === 0} style={{ ...sBtn(D.green, D.white), opacity: swapping || connected === 0 ? 0.5 : 1 }}>
-              {swapping ? 'Swapping...' : `🔄 Swap All to Portal (${connected} sites)`}
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
-            {[
-              { label: 'On Portal', value: sites.filter(s => s.webhook_status === 'portal').length, color: D.green },
-              { label: 'On Zapier', value: sites.filter(s => s.webhook_status === 'zapier' || s.webhook_status === 'mixed').length, color: D.amber },
-              { label: 'Not Scanned', value: sites.filter(s => !s.webhook_status || s.webhook_status === 'unknown').length, color: D.muted },
-            ].map(s => (
-              <div key={s.label} style={{ ...sCard, flex: '1 1 120px', minWidth: 120, marginBottom: 0, textAlign: 'center', padding: 12 }}>
-                <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
-                <div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase', letterSpacing: 1 }}>{s.label}</div>
-              </div>
-            ))}
-          </div>
-
-          {sites.filter(s => s.wp_username || s.has_credentials).map(site => (
-            <div key={site.id} style={{ ...sCard, display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, padding: 14 }}>
-              <div>
-                <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{site.domain}</span>
-                <span style={{ ...sBadge(`${(site.webhook_status === 'portal' ? D.green : site.webhook_status === 'zapier' ? D.amber : D.muted)}22`, site.webhook_status === 'portal' ? D.green : site.webhook_status === 'zapier' ? D.amber : D.muted), marginLeft: 8 }}>
-                  {site.webhook_status || 'unknown'}
-                </span>
-                {site.forms_count > 0 && <span style={{ fontSize: 11, color: D.muted, marginLeft: 8 }}>{site.forms_count} forms</span>}
-              </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => scanForms(site.id)} disabled={scanning === site.id} style={{ ...sBtn('transparent', D.teal), border: `1px solid ${D.teal}33`, padding: '4px 10px', fontSize: 11 }}>
-                  {scanning === site.id ? '...' : 'Scan Forms'}
-                </button>
-                {(site.webhook_status === 'zapier' || site.webhook_status === 'mixed') && (
-                  <button onClick={() => swapSite(site.id)} style={{ ...sBtn(D.green, D.white), padding: '4px 10px', fontSize: 11 }}>Swap to Portal</button>
-                )}
-              </div>
-            </div>
-          ))}
-
-          <div style={{ ...sCard, marginTop: 16 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 8 }}>Webhook URLs</div>
-            <div style={{ fontSize: 12, marginBottom: 6 }}>
-              <span style={{ color: D.amber }}>Old (Zapier):</span>
-              <code style={{ fontFamily: MONO, fontSize: 11, color: D.muted, marginLeft: 8, background: D.input, padding: '2px 6px', borderRadius: 4 }}>{ZAPIER_URL}</code>
-            </div>
-            <div style={{ fontSize: 12 }}>
-              <span style={{ color: D.green }}>New (Portal):</span>
-              <code style={{ fontFamily: MONO, fontSize: 11, color: D.green, marginLeft: 8, background: D.input, padding: '2px 6px', borderRadius: 4 }}>{PORTAL_URL}</code>
-            </div>
-          </div>
         </div>
       )}
 
