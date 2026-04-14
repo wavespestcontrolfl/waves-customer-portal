@@ -85,6 +85,57 @@ const SERVICE_DETAILS = {
       { title: 'Service Reporting & Follow-Up', text: "Every injection visit is documented with a digital service report that includes the palms treated, products and dosages applied, health assessment findings for each tree, and photos when relevant. Reports include follow-up recommendations — whether that's scheduling the next treatment window, monitoring a palm showing early symptoms, or flagging a tree that may need removal before it becomes a hazard. Our goal is to give you a clear, ongoing picture of your palm health, not just a one-time treatment.", tags: ['Digital Reports', 'Photo Documentation', 'Treatment Calendar'] },
     ],
   },
+  mosquito: {
+    header: 'Professional Mosquito Control, Defined.',
+    subheader: 'WaveGuard Mosquito — Monthly Barrier Treatments',
+    intro: "Take back your yard with a professional mosquito control program built for Southwest Florida's year-round mosquito pressure. Our barrier treatment program targets mosquitoes where they live, breed, and rest — reducing populations on your property and creating a protective perimeter so you can enjoy your outdoor spaces without the bites.",
+    sections: [
+      { title: 'Property Assessment & Breeding Site Survey', text: "Every mosquito program begins with a thorough inspection of your property to identify standing water sources, breeding sites, and harborage areas where adult mosquitoes rest during the day. We check gutters, plant saucers, bird baths, drainage features, low spots in the landscape, dense vegetation, and any other areas holding stagnant water. Findings guide both our treatment plan and your action items to reduce mosquito-friendly conditions between visits.", tags: ['Breeding Sites', 'Harborage Areas', 'Action Items'] },
+      { title: 'Barrier Treatment Applications', text: "Our core mosquito treatment is a perimeter barrier spray applied to all vegetation, fence lines, under eaves, around patios and lanais, and in shaded resting areas where adult mosquitoes harbor during the day. The residual formulation adheres to leaf surfaces and structures, killing mosquitoes on contact for weeks after application. Treatments are applied monthly during peak season and adjusted based on seasonal pressure and rainfall patterns.", tags: ['Perimeter Spray', 'Residual Control', 'Monthly Visits'] },
+      { title: 'Larvicide Applications', text: "Killing adult mosquitoes is only half the solution. We apply targeted larvicide treatments to standing water features, drainage areas, and any water-holding sites that cannot be eliminated — such as storm drains, decorative ponds, bromeliads, and low areas that collect rainwater. Larvicides prevent mosquito larvae from developing into biting adults, breaking the breeding cycle at the source and reducing the next generation of mosquitoes on your property.", tags: ['Breeding Cycle', 'Standing Water', 'Prevention'] },
+      { title: 'Targeted Species Control', text: "Southwest Florida is home to over 30 mosquito species, but the ones that make outdoor living miserable are primarily Aedes aegypti (yellow fever mosquito), Aedes albopictus (Asian tiger mosquito), and various Culex species. Aedes mosquitoes are aggressive daytime biters that breed in tiny amounts of water — bottle caps, plant trays, and clogged gutters. Our treatment strategy targets these container-breeding species specifically, with product selection and application timing matched to their behavior patterns.", tags: ['Aedes Aegypti', 'Asian Tiger', 'Culex Species'] },
+      { title: 'Event & Special Occasion Treatments', text: "Planning an outdoor event — a wedding, birthday party, graduation, or holiday gathering? We offer one-time or pre-event mosquito treatments timed 24–48 hours before your event to knock down mosquito populations and create a comfortable outdoor environment for your guests. Event treatments can be added to your regular program or booked as a standalone service.", tags: ['Pre-Event', '24–48 Hour Timing', 'Standalone Available'] },
+      { title: 'Seasonal Program Design', text: "Mosquito pressure in Southwest Florida peaks from April through October but never fully disappears. Our program runs monthly during peak season with reduced frequency during cooler months when mosquito activity drops. Treatment timing and product rotation are adjusted throughout the year based on temperature, rainfall, and observed activity levels — ensuring you get the right level of protection when you need it most.", tags: ['April–October Peak', 'Year-Round Option', 'Adaptive Scheduling'] },
+      { title: 'Integrated Pest Management Approach', text: "Effective mosquito control requires more than just spraying. Our program integrates chemical barrier treatments with habitat modification guidance, larviciding, and cultural recommendations to create a multi-layered defense. Each service report includes specific recommendations for reducing mosquito breeding and resting sites on your property — from adjusting irrigation schedules to removing hidden water-holding containers.", tags: ['Multi-Layered', 'Habitat Modification', 'Cultural Controls'] },
+      { title: 'Service Reporting & Recommendations', text: "Each visit is documented with a digital service report that includes areas treated, products applied, breeding sites identified, and specific recommendations for reducing mosquito pressure between visits. Reports track conditions over time so we can measure the effectiveness of the program and make data-driven adjustments to maximize results.", tags: ['Digital Reports', 'Condition Tracking', 'Data-Driven'] },
+    ],
+  },
+  termite: {
+    header: 'Termite Bait Station Protection, Defined.',
+    subheader: 'WaveGuard Termite — Monitoring & Baiting System',
+    intro: "Stop termites before they reach your home. Our professional bait station system creates a continuous detection and elimination perimeter around your property — intercepting subterranean termite colonies underground before they can cause structural damage, backed by ongoing monitoring and warranty protection.",
+    sections: [
+      { title: 'Initial Termite Inspection', text: "Every bait station program begins with a comprehensive termite inspection of your home and property. We examine the full structure — interior and exterior — for signs of active termite activity, previous damage, conducive conditions, and entry points. This includes foundation walls, slab joints, expansion joints, plumbing penetrations, wood-to-soil contact areas, crawl spaces, attic framing, door frames, window sills, and landscape features. The inspection determines station placement strategy and identifies any conditions that need to be corrected to reduce termite risk.", tags: ['Full Structure Inspection', 'Conducive Conditions', 'Activity Assessment'] },
+      { title: 'Professional Station Installation', text: "Bait stations are installed in the ground around the full perimeter of your home, spaced approximately every 10–15 feet — closer at high-risk areas such as bath traps, expansion joints, A/C units, and areas with known moisture. Each station is flush-mounted at ground level for a clean, unobtrusive appearance. Station placement follows a strategic layout designed to maximize the probability of interception by foraging termite workers before they reach the structure. The number of stations is determined by the size of your home and the specific conditions identified during the initial inspection.", tags: ['Full Perimeter', '10–15 ft Spacing', 'Flush Mount'] },
+      { title: 'How the Bait System Works', text: "Subterranean termites forage continuously through the soil searching for cellulose food sources. When foraging workers encounter a bait station, they feed on the bait matrix and carry it back to the colony, sharing it with nestmates through their natural social feeding behavior. The active ingredient — an insect growth regulator — disrupts the molting process, preventing termites from developing and ultimately collapsing the colony from within. This transfer effect is what makes baiting so effective: a small number of foraging workers can deliver a lethal dose to an entire colony over time.", tags: ['Colony Elimination', 'Transfer Effect', 'Growth Regulator'] },
+      { title: 'Quarterly Monitoring & Inspection', text: "Every station is inspected on a quarterly schedule by a licensed technician. During each monitoring visit, we open every station, check for termite activity, assess bait consumption levels, replace bait cartridges as needed, and document findings for each station in your service report. We also re-inspect the exterior of the structure for new signs of activity, mud tubes, or changes in conducive conditions. This ongoing monitoring ensures that if termites arrive on the property, they are detected and intercepted quickly — before they reach the home.", tags: ['Every Station Checked', 'Bait Replacement', 'Quarterly Visits'] },
+      { title: 'RFID-Enabled Station Tracking', text: "Each bait station is equipped with built-in RFID identification, allowing us to digitally track and document every station on your property — its location, installation date, inspection history, bait condition, and activity status. This technology ensures that no station is missed during monitoring visits and provides a verifiable, time-stamped service record for every inspection. RFID tracking also supports faster, more efficient monitoring and gives you complete transparency into the status of your termite protection system.", tags: ['Digital Tracking', 'Station-Level Data', 'Verified Inspections'] },
+      { title: 'Active Colony Response Protocol', text: "When termite activity is detected in one or more stations, we escalate immediately. Active stations receive increased bait load, and additional stations may be installed in the area of activity to maximize interception. If activity is found near or within the structure, targeted supplemental treatments — liquid spot treatments, foam applications, or direct wood treatments — can be deployed to address the immediate threat while the bait system works to eliminate the colony. You are notified at the first sign of activity so there are no surprises, and follow-up inspections are scheduled until activity is confirmed eliminated.", tags: ['Immediate Escalation', 'Supplemental Treatment', 'Confirmed Elimination'] },
+      { title: 'Termite Damage Repair Warranty', text: "Our premium termite bait station plan includes a damage repair warranty covering up to $500,000 per occurrence for new termite damage to structural components or personal belongings that occurs while your system is actively monitored. The warranty includes unlimited retreatments at no additional cost if live termite activity is found at any time during your coverage period. Warranty plans are available in 1-, 5-, or 10-year terms, and coverage is transferable to a new homeowner for a nominal transfer fee — adding measurable value to your property at resale.", tags: ['$500K Repair Coverage', 'Unlimited Retreatments', 'Transferable'] },
+      { title: 'Subterranean & Formosan Termite Coverage', text: "Southwest Florida is home to both Eastern subterranean termites and the more aggressive Formosan subterranean termite — a species capable of building massive colonies and causing severe structural damage in a short period. Formosan termites can also establish secondary aerial colonies above ground level, making them particularly difficult to detect and control. Our premier warranty tier covers both subterranean and Formosan species, as well as drywood termites, powderpost beetles, and old house borers — providing the most comprehensive wood-destroying organism protection available.", tags: ['Subterranean', 'Formosan', 'Drywood', 'WDO Coverage'] },
+      { title: 'Conducive Conditions & Exclusion Guidance', text: "Termite protection is more than just bait in the ground. At every inspection, we evaluate and document conditions around your home that increase termite risk — wood-to-soil contact, excessive mulch against the foundation, moisture issues from irrigation or drainage, plumbing leaks, improper grading, and stored cellulose materials near the structure. Each service report includes specific, actionable recommendations to correct these conditions and reduce your home's overall vulnerability.", tags: ['Moisture Management', 'Wood-to-Soil Contact', 'Actionable Recs'] },
+      { title: 'WDO Inspections for Real Estate', text: "Buying or selling a home in Florida requires a Wood-Destroying Organism inspection. We provide official WDO inspections (Florida Form 13645) for real estate transactions, documenting the presence or absence of subterranean termites, drywood termites, wood-decay fungi, and wood-boring beetles. For homes already on our bait station program, the existing station data and monitoring history provide valuable documentation of ongoing termite protection — which can be a strong selling point during a real estate transaction.", tags: ['FL Form 13645', 'Real Estate Compliance', 'Existing Station History'] },
+      { title: 'Simple Monthly Billing & Long-Term Protection', text: "After initial installation, your bait station program is billed as a simple monthly fee that covers all quarterly monitoring visits, station maintenance, bait replacement, and warranty coverage. There are no surprise charges for routine service, and no per-visit fees. The system works continuously — stations are in the ground 24/7, intercepting termites whether you're home or not.", tags: ['Flat Monthly Fee', 'No Surprise Charges', '24/7 Protection'] },
+    ],
+  },
+  rodent: {
+    header: 'Professional Rodent Control, Defined.',
+    subheader: 'WaveGuard Rodent — Exclusion, Trapping & Bait Station Monitoring',
+    intro: "Eliminate rodent activity and keep it from coming back. Our rodent control program follows a three-phase approach — assessment and trapping, structural exclusion, and ongoing bait station monitoring — to deliver permanent results, not temporary fixes.",
+    sections: [
+      { title: 'Comprehensive Rodent Inspection', text: "Every rodent program begins with a thorough inspection of your home's interior and exterior to identify the species involved, the scope of activity, and every entry point being used. We inspect rooflines, soffit junctions, A/C line penetrations, plumbing roof vents, garage door margins, dryer vents, gable vents, weep holes, pipe and wire penetrations, and any gap larger than a quarter-inch — which is all a mouse needs to enter. We also assess harborage areas, food sources, droppings distribution, rub marks, and gnaw damage to build a complete picture of the infestation before recommending a treatment plan.", tags: ['Full Structure Audit', 'Entry Point Mapping', 'Species Identification'] },
+      { title: 'Interior Trapping Program', text: "When rodents are active inside the home, we deploy professional snap traps in strategic locations based on activity patterns identified during inspection — along runways, near droppings concentrations, in attic spaces, behind appliances, inside wall voids, and in garages or utility areas. Traps are checked and reset on a regular schedule until interior activity is confirmed eliminated. We use mechanical traps rather than interior rodenticide to avoid the risk of rodents dying in inaccessible areas within the structure and causing odor issues.", tags: ['Strategic Placement', 'Attic & Wall Voids', 'No Interior Poison'], oneTime: true },
+      { title: 'Structural Exclusion — Sealing Entry Points', text: "Exclusion is the most important step in permanent rodent control. After trapping reduces the active population, we seal every identified entry point using materials rodents cannot chew through — copper mesh packed into gaps before sealing with pest-block expanding foam, galvanized hardware cloth secured over larger openings like gable vents and soffit gaps, and sheet metal or steel plates for high-traffic entry zones. Every A/C line penetration, plumbing stack, roof-wall junction, garage door gap, and utility entry is addressed. Exclusion work is documented with photos so you can see exactly what was done and where.", tags: ['Copper Mesh', 'Hardware Cloth', 'Photo Documentation'], oneTime: true },
+      { title: 'Exterior Tamper-Resistant Bait Stations', text: "Tamper-resistant bait stations are installed at strategic locations around the exterior perimeter of your home — near identified entry points, along foundation walls, beside garages, near A/C units, and in other areas where rodent activity has been observed or is likely. Each station is locked, weighted, and designed to prevent access by children, pets, and non-target wildlife while allowing rodents to enter and feed. Bait stations intercept rodents in the landscape before they attempt to enter the structure, serving as a continuous first line of defense around your home.", tags: ['Tamper-Resistant', 'Pet & Child Safe', 'Perimeter Defense'] },
+      { title: 'Monthly Bait Station Monitoring', text: "Every exterior bait station is inspected monthly by a licensed technician. During each monitoring visit, we open every station, check bait consumption levels, replace or replenish bait as needed, look for signs of new rodent activity, and inspect the exterior of the structure for any evidence of re-entry attempts or new gaps. This ongoing monitoring catches changes in rodent pressure early — before a new population can establish — and ensures your exclusion work and bait stations remain intact and effective over time.", tags: ['Every Station Checked', 'Bait Replenishment', 'Re-Entry Detection'] },
+      { title: 'Exclusion Integrity Checks', text: "Rodents are persistent. They will test sealed entry points, gnaw at exclusion materials, and exploit new gaps that develop from settling, weathering, or maintenance work on the home. At every monitoring visit, we re-inspect all sealed entry points and exclusion work to verify it remains intact. If any material has been compromised, we repair or reinforce it immediately. This ongoing exclusion maintenance is what separates a permanent solution from a temporary one — and it's included in the monthly monitoring program.", tags: ['Seal Verification', 'Damage Repair', 'Included in Monitoring'] },
+      { title: 'Harborage & Habitat Reduction', text: "Rodent control doesn't stop at the structure. We evaluate and provide recommendations for landscape and property conditions that attract and harbor rodents — vegetation growing within three feet of the foundation, dense ground cover against walls, overgrown hedges that provide runway cover, fruit trees dropping unpicked fruit, woodpiles and debris stored against the home, bird feeders creating food sources, and pet food left outdoors. Each service report includes specific, actionable steps to reduce the property's attractiveness to rodents between visits.", tags: ['Vegetation Clearance', 'Food Source Removal', 'Property Recs'] },
+      { title: 'Roof Rat & Norway Rat Strategies', text: "Southwest Florida deals primarily with roof rats — agile climbers that access structures from above through rooflines, soffits, palm trees touching the roof, and overhead utility lines. Norway rats, while less common locally, favor ground-level entry through foundation gaps and burrows. Our treatment strategy is adapted to the species identified during inspection. Roof rats require overhead exclusion work and attic-focused trapping, while Norway rats demand ground-level station placement and burrow treatment. Correct species identification drives every decision in the program.", tags: ['Roof Rat Focus', 'Species-Specific', 'Overhead Exclusion'] },
+      { title: 'Sanitation & Contamination Guidance', text: "Rodent infestations leave behind droppings, urine, nesting material, and contamination that can pose health risks even after the animals are removed. We provide detailed guidance on safe cleanup procedures for attic insulation, storage areas, garages, and any interior spaces where rodent activity was present. For significant contamination in attic spaces, we can recommend professional insulation removal and replacement services.", tags: ['Cleanup Guidance', 'Attic Contamination', 'Health & Safety'], oneTime: true },
+      { title: 'The Three-Phase Approach', text: "Our rodent program is structured in three clear phases, each designed to build on the last. Phase 1 — Assessment & Trapping: Inspection, species identification, interior trap deployment, and initial population reduction. Phase 2 — Exclusion: Sealing every entry point with rodent-proof materials, removing harborage, and installing exterior bait stations. Phase 3 — Ongoing Monitoring: Monthly bait station inspection, exclusion integrity checks, and re-entry surveillance to ensure permanent results. Most active infestations are resolved within Phases 1 and 2. Phase 3 keeps them from coming back.", tags: ['Phase 1: Trap', 'Phase 2: Seal', 'Phase 3: Monitor'] },
+      { title: 'Service Reporting & Documentation', text: "Every visit — from the initial inspection through ongoing monitoring — is documented with a detailed digital service report. Reports include findings at each bait station, trap results, photos of exclusion work, new activity observations, and any recommendations for property improvements. This documentation creates a complete, trackable history of your rodent control program — showing what was done, what was found, and how the situation is improving over time.", tags: ['Digital Reports', 'Photo Documentation', 'Treatment Calendar'] },
+    ],
+  },
 };
 
 const PERKS = [
@@ -180,6 +231,7 @@ const ALL_SERVICES = [
   { key: 'mosquito', label: 'Mosquito Control', emoji: '🦟' },
   { key: 'treeShrub', label: 'Tree & Shrub Care', emoji: '🌳' },
   { key: 'termite', label: 'Termite Protection', emoji: '🏠' },
+  { key: 'rodent', label: 'Rodent Control', emoji: '🐀' },
 ];
 
 // =========================================================================
@@ -196,6 +248,7 @@ const VALUE_MAP = {
   'mosquito':   { label: 'Seasonal mosquito barrier program', value: 350 },
   'treeShrub':  { label: '6 tree & shrub care applications', value: 390 },
   'termite':    { label: 'Termite bait station monitoring', value: 600 },
+  'rodent':     { label: 'Rodent exclusion, trapping & monitoring', value: 450 },
 };
 const ALWAYS_INCLUDED = [
   { label: 'Unlimited pest callbacks between visits', value: 200, suffix: '+' },
@@ -226,6 +279,8 @@ function buildValueStack(services, tier) {
       items.push(VALUE_MAP['treeShrub']);
     } else if (n.includes('termite')) {
       items.push(VALUE_MAP['termite']);
+    } else if (n.includes('rodent')) {
+      items.push(VALUE_MAP['rodent']);
     }
   });
   // Core service deliverables based on included services
@@ -451,6 +506,7 @@ export default function EstimateViewPage() {
   const hasMosquito = svcNames.some(n => n.includes('mosquito'));
   const hasTS = svcNames.some(n => n.includes('tree') || n.includes('shrub'));
   const hasTermite = svcNames.some(n => n.includes('termite'));
+  const hasRodent = svcNames.some(n => n.includes('rodent'));
 
   const includedKeys = [];
   if (hasLawn) includedKeys.push('lawn');
@@ -458,6 +514,7 @@ export default function EstimateViewPage() {
   if (hasMosquito) includedKeys.push('mosquito');
   if (hasTS) includedKeys.push('treeShrub');
   if (hasTermite) includedKeys.push('termite');
+  if (hasRodent) includedKeys.push('rodent');
 
   const missingServices = ALL_SERVICES.filter(svc => {
     if (includedKeys.includes(svc.key)) return false;
@@ -784,11 +841,21 @@ export default function EstimateViewPage() {
 
           {hasMosquito && (
             <ServiceDropdown title="🦟 Mosquito Control" defaultOpen={firstOpenService === 'mosquito'}>
-              <DetailSection
-                title="Mosquito Control"
-                sub="Bite-free yards start here."
-                text="Our mosquito control program targets breeding sites through larviciding, precision fogging, and habitat reduction — delivering lasting population suppression. Barrier treatments are applied to all foliage, fence lines, and standing water areas around your property perimeter."
-              />
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.mosquito.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.mosquito.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.mosquito.intro}</div>
+              {SERVICE_DETAILS.mosquito.sections.map((s, i) => (
+                <div key={i} style={{ marginBottom: 14 }}>
+                  <DetailSection title={s.title} text={s.text} />
+                  {s.tags && (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                      {s.tags.map((tag, ti) => (
+                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
             </ServiceDropdown>
           )}
 
@@ -833,12 +900,45 @@ export default function EstimateViewPage() {
           )}
 
           {hasTermite && (
-            <ServiceDropdown title="🏠 Termite Protection" defaultOpen={firstOpenService === 'termite'}>
-              <DetailSection
-                title="Termite Protection"
-                sub="Stop termites before they cause damage."
-                text="Our termite control targets colonies at the source through advanced baiting and barrier technologies, ensuring durable structural defense. We use Trelona ATBS and Sentricon systems — the most effective bait station platforms available — with quarterly monitoring included."
-              />
+            <ServiceDropdown title="🏠 Termite Bait Station Protection" defaultOpen={firstOpenService === 'termite'}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.termite.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.termite.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.termite.intro}</div>
+              {SERVICE_DETAILS.termite.sections.map((s, i) => (
+                <div key={i} style={{ marginBottom: 14 }}>
+                  <DetailSection title={s.title} text={s.text} />
+                  {s.tags && (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                      {s.tags.map((tag, ti) => (
+                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </ServiceDropdown>
+          )}
+
+          {hasRodent && (
+            <ServiceDropdown title="🐀 Rodent Control">
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.rodent.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.rodent.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.rodent.intro}</div>
+              {SERVICE_DETAILS.rodent.sections.map((s, i) => (
+                <div key={i} style={{ marginBottom: 14 }}>
+                  {s.oneTime && (
+                    <div style={{ fontSize: 9, fontWeight: 700, color: B.wavesBlue, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 2 }}>One-Time Service</div>
+                  )}
+                  <DetailSection title={s.title} text={s.text} />
+                  {s.tags && (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                      {s.tags.map((tag, ti) => (
+                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
             </ServiceDropdown>
           )}
         </div>
