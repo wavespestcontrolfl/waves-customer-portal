@@ -284,6 +284,18 @@ export default function PayPage() {
       });
   }, [data, token]);
 
+  // Timeout if payment form doesn't load
+  useEffect(() => {
+    if (paymentState !== 'setup') return;
+    const timeout = setTimeout(() => {
+      if (paymentState === 'setup') {
+        setPaymentState('error');
+        setPaymentError('Payment form failed to load. Please refresh the page or call (941) 318-7612.');
+      }
+    }, 15000);
+    return () => clearTimeout(timeout);
+  }, [paymentState]);
+
   // Handle successful Stripe payment — confirm on backend + update UI
   const handlePaymentSuccess = async (paymentIntent) => {
     try {
@@ -348,8 +360,7 @@ export default function PayPage() {
             <path d="M0 30 C360 0 720 60 1080 30 C1260 15 1380 0 1440 10 L1440 60 L0 60 Z" fill={W.offWhite} />
           </svg>
         </div>
-        <div style={{ fontSize: isMobile ? 24 : 28, fontFamily: "'Montserrat', sans-serif", fontWeight: 800, color: W.white, letterSpacing: -0.5 }}>WAVES</div>
-        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
+        <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: isMobile ? 40 : 48, maxWidth: '80%', objectFit: 'contain' }} />
       </div>
 
       <div style={{ maxWidth: 560, margin: '0 auto', padding: isMobile ? '0 12px 40px' : '0 16px 60px' }}>
@@ -446,8 +457,11 @@ export default function PayPage() {
               <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Invoice</div>
               <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>{invoice.invoiceNumber}</div>
             </div>
-            {invoice.dueDate && !isPaid && (
+            {invoice.dueDate && !isPaid && !isNaN(new Date(invoice.dueDate).getTime()) && (
               <div style={{ fontSize: 12, color: W.textCaption }}>Due {new Date(invoice.dueDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+            )}
+            {!invoice.dueDate && !isPaid && (
+              <div style={{ fontSize: 12, color: W.textCaption }}>Due upon receipt</div>
             )}
           </div>
 
@@ -561,7 +575,7 @@ export default function PayPage() {
         {/* ── Footer ── */}
         <div style={{ textAlign: 'center', padding: '20px 0', color: W.textCaption, fontSize: 12 }}>
           <div style={{ marginBottom: 8 }}>Questions? Reply to the text or call <a href="tel:+19413187612" style={{ color: W.blue, textDecoration: 'none' }}>(941) 318-7612</a></div>
-          <div>Waves Pest Control — Southwest Florida</div>
+          <div>Waves Pest Control</div>
           <div style={{ marginTop: 4 }}>wavespestcontrol.com</div>
         </div>
       </div>
