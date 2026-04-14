@@ -282,7 +282,7 @@ const AppointmentReminders = {
             const firstName = customer.first_name || 'there';
             const time = formatTime(apptTime);
 
-            const body = `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. If you have any questions or need assistance, simply reply to this message.`;
+            const body = `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`;
 
             await safeSend(r.customer_id, customer.phone, body);
 
