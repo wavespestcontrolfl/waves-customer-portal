@@ -924,7 +924,8 @@ export default function CustomersPage() {
   const handleDeleteCustomer = async (customerId, customerName) => {
     if (!confirm(`Delete ${customerName}? This cannot be undone.`)) return;
     try {
-      await fetch(`${API_BASE}/admin/customers/${customerId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` } });
+      const r = await fetch(`${API_BASE}/admin/customers/${customerId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` } });
+      if (!r.ok) { const err = await r.json().catch(() => ({})); throw new Error(err.error || `HTTP ${r.status}`); }
       loadCustomers();
     } catch (e) { alert('Delete failed: ' + e.message); }
   };

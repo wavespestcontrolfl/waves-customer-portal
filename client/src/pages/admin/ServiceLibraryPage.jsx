@@ -44,7 +44,7 @@ const EMPTY_SVC = {
   scheduling_buffer_minutes: 0, requires_follow_up: false, follow_up_interval_days: '',
   frequency: '', visits_per_year: '',
   pricing_type: 'variable', base_price: '', price_range_min: '', price_range_max: '', pricing_model_key: '',
-  is_taxable: true, tax_service_key: '', requires_license: false, license_category: '',
+  is_taxable: false, tax_service_key: '', requires_license: false, license_category: '',
   min_tech_skill_level: 1, customer_visible: true, booking_enabled: true,
   sort_order: 100, icon: '', color: '#0ea5e9', is_active: true,
 };
@@ -175,7 +175,7 @@ function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
     <div style={{ ...sCard, opacity: svc.is_active ? 1 : 0.5, cursor: 'pointer', transition: 'border-color 0.2s', borderColor: expanded ? D.teal : D.border }} onClick={onToggle}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <span style={{ fontSize: 22 }}>{svc.icon || '>'}</span>
+          <span style={{ fontSize: 14, color: D.muted }}>{'>'}</span>
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{svc.name}</div>
             <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
@@ -265,7 +265,7 @@ function PackageCard({ pkg, allServices, onUpdate }) {
           <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', marginBottom: 4 }}>Included Services</div>
           {pkg.items.map(item => (
             <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.text, padding: '2px 0' }}>
-              <span>{item.icon || '>'} {item.service_name || item.short_name}</span>
+              <span>{item.service_name || item.short_name}</span>
               {item.included_visits && <span style={{ color: D.muted }}>{item.included_visits}x/yr</span>}
             </div>
           ))}

@@ -474,17 +474,21 @@ router.delete('/:id', async (req, res, next) => {
     const customer = await db('customers').where({ id: req.params.id }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    // Delete related records (cascade should handle most, but be explicit)
-    await db('estimates').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('scheduled_services').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('payments').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('service_records').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('property_preferences').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('notification_prefs').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('customer_interactions').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('customer_tags').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('activity_log').where({ customer_id: req.params.id }).del().catch(() => {});
-    await db('sms_log').where({ customer_id: req.params.id }).del().catch(() => {});
+    // Delete related records — explicit cascade for all tables with customer_id FK
+    const cascadeTables = [
+      'customer_health_scores', 'customer_health_history', 'customer_health_alerts',
+      'customer_save_sequences', 'customer_discounts', 'customer_subscriptions',
+      'sms_scheduling_sessions', 'referrals', 'referral_promoters',
+      'estimates', 'scheduled_services', 'payments', 'invoices',
+      'service_records', 'service_requests', 'service_tracking',
+      'property_preferences', 'notification_prefs', 'appointment_reminders',
+      'customer_interactions', 'customer_tags', 'activity_log',
+      'sms_log', 'call_log', 'reschedule_log',
+      'leads', 'lead_activities',
+    ];
+    for (const table of cascadeTables) {
+      await db(table).where({ customer_id: req.params.id }).del().catch(() => {});
+    }
     await db('notifications').where({ recipient_id: req.params.id }).del().catch(() => {});
 
     await db('customers').where({ id: req.params.id }).del();
