@@ -24,10 +24,8 @@ const AUTOMATIONS = {
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_RECURRING || 'aut_3f539f94-024a-466f-9d50-4454173627dd',
     tags: ['new customer', 'recurring'],
     smsTemplate: (c) =>
-      `Hello ${c.first_name}! Welcome to a safer, pest-free home with Waves Pest Control 🌊\n\n` +
-      `We just sent you a welcome email with everything you need to know about your service. ` +
-      `Check your inbox!\n\n` +
-      `Questions? Reply here or call (941) 318-7612.`,
+      `Hello ${c.first_name}! Welcome to a safer, pest-free home with Waves! Check your inbox, we just emailed you our welcome guide.\n\n` +
+      `If you have any questions or need assistance, simply reply to this message.`,
     enabled: true,
   },
   cold_lead: {
@@ -46,10 +44,8 @@ const AUTOMATIONS = {
     beehiivAutomationId: process.env.BEEHIIV_AUTO_LAWN || 'aut_0c794b25-1a87-46aa-9ef3-6c508348d288',
     tags: ['lawn', 'recurring'],
     smsTemplate: (c) =>
-      `Hello ${c.first_name}! Welcome to a better lawn with Waves! 🌊\n\n` +
-      `We just emailed you a breakdown of what to expect with your lawn care program. ` +
-      `Check your inbox for the full details!\n\n` +
-      `Questions? Reply here or call (941) 318-7612.`,
+      `Hello ${c.first_name}! Welcome to a better lawn with Waves! We just emailed your our lawn care welcome guide + expert tips for the best results for your lawn!\n\n` +
+      `If you have any questions or need assistance, simply reply to this message.`,
     enabled: true,
   },
   new_appointment: {
@@ -59,9 +55,8 @@ const AUTOMATIONS = {
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_APPT || 'aut_d34a894e-a5bc-43fc-af47-7efba42881e7',
     tags: ['new appointment', 'first-time'],
     smsTemplate: (c) =>
-      `Hello ${c.first_name}! We just emailed you a breakdown of what to expect from Waves Pest Control 🌊\n\n` +
-      `Check your inbox for the details. We're looking forward to helping you!\n\n` +
-      `Questions? Reply here or call (941) 318-7612.`,
+      `Hello ${c.first_name}! We just emailed you a breakdown of what to expect with your upcoming service with Waves!\n\n` +
+      `If you have any questions or need assistance, simply reply to this message.`,
     enabled: true,
   },
   review_thank_you: {
@@ -80,10 +75,8 @@ const AUTOMATIONS = {
     beehiivAutomationId: process.env.BEEHIIV_AUTO_BEDBUG || 'aut_53cfd473-982b-49fd-b03d-62a9d462909c',
     tags: ['bed bug treatment', 'first-time'],
     smsTemplate: (c) =>
-      `Hello ${c.first_name}! Let's get your home bed bug-free 🌊\n\n` +
-      `We just emailed you everything you need to know about your treatment plan. ` +
-      `Check your inbox!\n\n` +
-      `Questions? Reply here or call (941) 318-7612.`,
+      `Hello ${c.first_name}! Let's get your home bed bug-free. We just emailed your Waves treatment guide—please review it to help us get the best results for your home!\n\n` +
+      `If you have any questions or need assistance, simply reply to this message.`,
     enabled: true,
   },
   cockroach: {
@@ -93,9 +86,8 @@ const AUTOMATIONS = {
     beehiivAutomationId: process.env.BEEHIIV_AUTO_ROACH || 'aut_53cfd473-982b-49fd-b03d-62a9d462909c',
     tags: ['roach treatment', 'first-time'],
     smsTemplate: (c) =>
-      `Hello ${c.first_name}! Let's get your home roach-free 🌊\n\n` +
-      `We just emailed you your treatment plan details. Check your inbox!\n\n` +
-      `Questions? Reply here or call (941) 318-7612.`,
+      `Hello ${c.first_name}! Let's get your home cockroach-free. We just emailed your Waves treatment guide—please review it to help us get the best results for your home!\n\n` +
+      `If you have any questions or need assistance, simply reply to this message.`,
     enabled: true,
   },
 };
