@@ -120,7 +120,13 @@ function DashboardTab({ showToast }) {
       {/* Live Tech Status Cards */}
       <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Live Status</div>
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12, marginBottom: 24 }}>
-        {allTechs.map(tech => {
+        {allTechs.filter(tech => {
+          // Only show techs with activity — hide inactive techs with 0 hours/jobs
+          const active = activeShifts.find(s => s.technician_id === tech.id);
+          const summary = todaySummaries.find(s => s.technician_id === tech.id);
+          const hasWeekActivity = weekDailies.some(d => d.technician_id === tech.id);
+          return active || summary || hasWeekActivity;
+        }).map(tech => {
           const active = activeShifts.find(s => s.technician_id === tech.id);
           const summary = todaySummaries.find(s => s.technician_id === tech.id);
           const shiftDur = active ? ((Date.now() - new Date(active.clock_in).getTime()) / 60000) : 0;
