@@ -61,11 +61,12 @@ function Field({ label, children, half }) {
 function ServiceForm({ svc, onSave, onCancel }) {
   const [form, setForm] = useState({ ...EMPTY_SVC, ...svc });
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
   const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
   const submit = async () => {
-    setSaving(true);
-    try { await onSave(form); } finally { setSaving(false); }
+    setSaving(true); setError('');
+    try { await onSave(form); } catch (e) { setError(e.message || 'Save failed'); } finally { setSaving(false); }
   };
 
   const inp = (key, type = 'text') => (
@@ -150,6 +151,7 @@ function ServiceForm({ svc, onSave, onCancel }) {
         <textarea style={{ ...sInput, minHeight: 40, resize: 'vertical' }} value={form.internal_notes || ''} onChange={e => set('internal_notes', e.target.value)} />
       </Field>
 
+      {error && <div style={{ color: D.red, fontSize: 12, marginTop: 8, padding: '6px 10px', background: D.red + '15', borderRadius: 6 }}>{error}</div>}
       <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
         <button style={sBtn(D.teal, D.white)} onClick={submit} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
         <button style={sBtn('transparent', D.muted)} onClick={onCancel}>Cancel</button>

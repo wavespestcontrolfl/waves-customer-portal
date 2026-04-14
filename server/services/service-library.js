@@ -106,9 +106,18 @@ async function updateService(id, data) {
     'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
     'is_active', 'is_archived',
   ];
+  // Numeric columns — empty strings must become null or PostgreSQL rejects them
+  const numericKeys = new Set([
+    'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
+    'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
+    'base_price', 'price_range_min', 'price_range_max',
+    'min_tech_skill_level', 'typical_materials_cost', 'sort_order',
+  ]);
   const update = { updated_at: new Date() };
   for (const key of allowed) {
-    if (data[key] !== undefined) update[key] = data[key];
+    if (data[key] !== undefined) {
+      update[key] = numericKeys.has(key) && data[key] === '' ? null : data[key];
+    }
   }
   const [row] = await db('services').where({ id }).update(update).returning('*');
   return row;
