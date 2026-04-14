@@ -600,6 +600,7 @@ function CustomerMap({ customers, onSelect }) {
   const mapInstance = useRef(null);
   const markersRef = useRef([]);
   const [mapReady, setMapReady] = useState(false);
+  const [mapError, setMapError] = useState(null);
   const [filterTier, setFilterTier] = useState('all');
   const [filterStage, setFilterStage] = useState('all');
   const [stats, setStats] = useState({ total: 0, mapped: 0, unmapped: 0 });
@@ -607,18 +608,30 @@ function CustomerMap({ customers, onSelect }) {
 
   // Load Google Maps script
   useEffect(() => {
-    if (window.google?.maps) { setMapReady(true); return; }
-    if (!MAPS_KEY) return;
-    if (document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')) { setMapReady(true); return; }
-    const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${MAPS_KEY}&libraries=places,marker&loading=async`;
-    script.async = true;
-    script.onload = () => setMapReady(true);
-    document.head.appendChild(script);
+    try {
+      if (window.google?.maps) { setMapReady(true); return; }
+      if (!MAPS_KEY) return;
+      const existingScript = document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]');
+      if (existingScript) {
+        // Script exists — wait for it to load
+        if (window.google?.maps) { setMapReady(true); return; }
+        existingScript.addEventListener('load', () => setMapReady(true));
+        existingScript.addEventListener('error', () => setMapError('Google Maps failed to load'));
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${MAPS_KEY}&libraries=places`;
+      script.async = true;
+      script.defer = true;
+      script.onload = () => setMapReady(true);
+      script.onerror = () => setMapError('Google Maps script failed to load. Check API key.');
+      document.head.appendChild(script);
+    } catch (e) { setMapError(e.message); }
   }, []);
 
   // Filter customers
   const filtered = useMemo(() => {
+    if (!customers || !Array.isArray(customers)) return [];
     return customers.filter(c => {
       if (filterTier !== 'all' && (c.tier || null) !== (filterTier === 'none' ? null : filterTier)) return false;
       if (filterStage !== 'all' && c.pipelineStage !== filterStage) return false;
@@ -629,6 +642,7 @@ function CustomerMap({ customers, onSelect }) {
   // Build map + markers
   useEffect(() => {
     if (!mapReady || !mapRef.current || !window.google?.maps) return;
+    try {
 
     // Init map centered on Bradenton/LWR area
     if (!mapInstance.current) {
@@ -725,6 +739,7 @@ function CustomerMap({ customers, onSelect }) {
         }
       }, 1500);
     }
+    } catch (e) { console.error('[CustomerMap] Error:', e); setMapError(e.message); }
   }, [mapReady, filtered]);
 
   if (!MAPS_KEY) {
@@ -733,6 +748,25 @@ function CustomerMap({ customers, onSelect }) {
         <div style={{ fontSize: 32, marginBottom: 12 }}>🗺️</div>
         <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 4 }}>Google Maps API Key Required</div>
         <div style={{ fontSize: 13, color: D.muted }}>Set VITE_GOOGLE_MAPS_API_KEY in your environment to enable the customer map.</div>
+      </div>
+    );
+  }
+
+  if (mapError) {
+    return (
+      <div style={{ background: D.card, borderRadius: 12, padding: 40, textAlign: 'center', border: `1px solid ${D.border}` }}>
+        <div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.red, marginBottom: 4 }}>Map Error</div>
+        <div style={{ fontSize: 13, color: D.muted }}>{mapError}</div>
+        <div style={{ fontSize: 11, color: D.muted, marginTop: 8 }}>Ensure Maps JavaScript API is enabled in Google Cloud Console.</div>
+      </div>
+    );
+  }
+
+  if (!mapReady) {
+    return (
+      <div style={{ background: D.card, borderRadius: 12, padding: 40, textAlign: 'center', border: `1px solid ${D.border}` }}>
+        <div style={{ fontSize: 13, color: D.muted }}>Loading map...</div>
       </div>
     );
   }
