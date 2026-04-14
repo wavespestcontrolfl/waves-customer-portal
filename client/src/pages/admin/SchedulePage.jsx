@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 
-const RoutePanel = lazy(() => import('../../components/dispatch/RoutePanel'));
 const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPanel'));
 const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanel'));
 const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanel'));
 const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanel'));
 import { ViewModeSelector, WeekView, MonthView } from '../../components/schedule/CalendarViews';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
+import ScheduleIntelligenceBar from '../../components/admin/ScheduleIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -2074,7 +2074,6 @@ export default function SchedulePage() {
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newAppt, setNewAppt] = useState({ customerId: '', customerSearch: '', customerResults: [], serviceType: 'Pest Control', windowStart: '09:00', windowEnd: '11:00', notes: '' });
   const [savingAppt, setSavingAppt] = useState(false);
-  const [optimizing, setOptimizing] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
 
@@ -2156,20 +2155,6 @@ export default function SchedulePage() {
   const handlePanelClose = useCallback((wasCompleted) => {
     setCompletingService(null);
   }, []);
-
-  const handleOptimize = async () => {
-    setOptimizing(true);
-    try {
-      await adminFetch('/admin/schedule/optimize', {
-        method: 'POST',
-        body: JSON.stringify({ date }),
-      });
-      fetchSchedule(date);
-    } catch (e) {
-      alert('Optimize failed: ' + e.message);
-    }
-    setOptimizing(false);
-  };
 
   const [syncingCal, setSyncingCal] = useState(false);
   const handleSyncCalendar = async () => {
@@ -2253,7 +2238,6 @@ export default function SchedulePage() {
   const SCHEDULE_TABS = [
     { id: 'board', label: 'Board' },
     { id: 'protocols', label: 'Protocols' },
-    { id: 'routes', label: 'AI Routes' },
     { id: 'match', label: 'Tech Match' },
     { id: 'csr', label: 'CSR Booking' },
     { id: 'revenue', label: 'Job Scores' },
@@ -2319,12 +2303,6 @@ export default function SchedulePage() {
                   <strong style={{ color: D.green }}>${estRevenue.toLocaleString()}</strong> revenue
                 </span>
               </div>
-              <button onClick={handleOptimize} disabled={optimizing} style={{
-                ...btnBase, background: D.teal, color: D.white, fontSize: 13, height: 38,
-                opacity: optimizing ? 0.6 : 1,
-              }}>
-                {optimizing ? 'Optimizing...' : 'Optimize Routes'}
-              </button>
               <button onClick={() => setShowNewAppt(!showNewAppt)} style={{
                 ...btnBase, background: D.green, color: D.white, fontSize: 13, height: 38,
               }}>+ New Appointment</button>
@@ -2365,11 +2343,19 @@ export default function SchedulePage() {
         ))}
       </div>}
 
+      {/* Intelligence Bar — schedule context */}
+      {viewMode === 'day' && (
+        <ScheduleIntelligenceBar
+          date={date}
+          scheduleData={data}
+          onRefresh={() => fetchSchedule(date)}
+        />
+      )}
+
       {/* ── Protocol Reference ── */}
       {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTab />}
 
       {/* ── AI Dispatch Panels ── */}
-      {viewMode === 'day' && activeTab === 'routes' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><RoutePanel date={date} /></Suspense>}
       {viewMode === 'day' && activeTab === 'match' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><TechMatchPanel /></Suspense>}
       {viewMode === 'day' && activeTab === 'csr' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><CSRPanel /></Suspense>}
       {viewMode === 'day' && activeTab === 'revenue' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><RevenuePanel date={date} /></Suspense>}

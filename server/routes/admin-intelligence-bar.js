@@ -17,6 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { TOOLS, executeTool } = require('../services/intelligence-bar/tools');
+const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -26,6 +27,60 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || 'claude-opus-4-6';
 const MAX_TOOL_ROUNDS = 8;
+
+// Schedule tool names for routing execution
+const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
+
+// Context-specific system prompt extensions
+const CONTEXT_PROMPTS = {
+  schedule: `
+SCHEDULE CONTEXT:
+You are currently on the Schedule & Dispatch page. The operator is managing today's or a specific day's schedule.
+You have FULL CONTROL over route optimization, tech assignments, and appointment management.
+
+SCHEDULE-SPECIFIC CAPABILITIES:
+- Optimize all routes or a single tech's route (calls Google Routes API)
+- Assign unassigned stops to technicians
+- Move stops between days ("move the Lakewood stops to Thursday")
+- Swap entire routes between techs
+- Find schedule gaps and open capacity
+- Get a full day briefing with zone density analysis
+- Cancel far-out appointments and reschedule sooner
+- Analyze zone consolidation opportunities
+
+ROUTE OPTIMIZATION:
+When the operator says "optimize routes" or "optimize", run optimize_all_routes for the current date.
+When they say "optimize Adam's route", run optimize_tech_route.
+After optimization, report miles saved and the new stop order.
+
+ZONE INTELLIGENCE:
+- Parrish / Palmetto = north zone
+- Lakewood Ranch / Bradenton = central zone  
+- Sarasota = south-central
+- Venice / North Port = south zone
+- Consolidating stops by zone reduces drive time — always look for this opportunity
+- Each tech can handle ~8-10 stops/day (25 min avg service + 12 min avg drive)`,
+
+  dispatch: `
+DISPATCH CONTEXT:
+You are on the Dispatch page — real-time field operations view.
+The operator is tracking technician progress, managing live routes, and handling day-of changes.
+Prioritize speed and actionability in your responses.`,
+};
+
+function getToolsForContext(context) {
+  if (context === 'schedule' || context === 'dispatch') {
+    return [...TOOLS, ...SCHEDULE_TOOLS];
+  }
+  return TOOLS;
+}
+
+function executeToolByName(toolName, input) {
+  if (SCHEDULE_TOOL_NAMES.has(toolName)) {
+    return executeScheduleTool(toolName, input);
+  }
+  return executeTool(toolName, input);
+}
 
 const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
 
@@ -72,7 +127,7 @@ The current date is ${new Date().toISOString().split('T')[0]}.`;
 
 router.post('/query', async (req, res, next) => {
   try {
-    const { prompt, conversationHistory = [] } = req.body;
+    const { prompt, conversationHistory = [], context, pageData } = req.body;
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -87,9 +142,22 @@ router.post('/query', async (req, res, next) => {
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+    // Build context-aware system prompt
+    let systemPrompt = SYSTEM_PROMPT;
+    if (context && CONTEXT_PROMPTS[context]) {
+      systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
+    }
+    // Inject live page data (current date, schedule stats, etc.)
+    if (pageData) {
+      systemPrompt += `\n\nCURRENT PAGE STATE:\n${JSON.stringify(pageData, null, 2)}`;
+    }
+
+    // Select tools based on context
+    const tools = getToolsForContext(context);
+
     // Build messages array (support multi-turn conversation)
     const messages = [
-      ...conversationHistory.slice(-10), // Keep last 10 messages for context
+      ...conversationHistory.slice(-10),
       { role: 'user', content: prompt },
     ];
 
@@ -98,13 +166,13 @@ router.post('/query', async (req, res, next) => {
     const toolCalls = [];
     const toolResults = [];
 
-    // Tool-use loop — Claude may call multiple tools before responding
+    // Tool-use loop
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await anthropic.messages.create({
         model: MODEL,
         max_tokens: 4096,
-        system: SYSTEM_PROMPT,
-        tools: TOOLS,
+        system: systemPrompt,
+        tools,
         messages: currentMessages,
       });
 
@@ -112,17 +180,16 @@ router.post('/query', async (req, res, next) => {
       const textBlocks = response.content.filter(c => c.type === 'text');
 
       if (toolUses.length === 0) {
-        // No more tool calls — this is the final response
         finalResponse = textBlocks.map(t => t.text).join('\n');
         break;
       }
 
-      // Execute all tool calls in this round
+      // Execute all tool calls using context-aware router
       const results = [];
       for (const toolUse of toolUses) {
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, toolUse.input);
 
-        const result = await executeTool(toolUse.name, toolUse.input);
+        const result = await executeToolByName(toolUse.name, toolUse.input);
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
@@ -133,7 +200,6 @@ router.post('/query', async (req, res, next) => {
         toolResults.push({ name: toolUse.name, result });
       }
 
-      // Add assistant response + tool results to message chain
       currentMessages = [
         ...currentMessages,
         { role: 'assistant', content: response.content },
@@ -187,7 +253,7 @@ router.post('/execute', async (req, res, next) => {
       return res.status(400).json({ error: 'Action is required' });
     }
 
-    const result = await executeTool(action, params);
+    const result = await executeToolByName(action, params);
 
     logger.info(`[intelligence-bar] Executed action: ${action}`, params);
 
@@ -206,20 +272,37 @@ router.post('/execute', async (req, res, next) => {
 // ─── QUICK ACTIONS (pre-built prompts for common tasks) ─────────
 
 router.get('/quick-actions', async (req, res) => {
-  res.json({
-    actions: [
-      { id: 'missing_city', label: 'Missing Cities', prompt: 'Show me customers with no city on their profile', icon: '📍' },
-      { id: 'pest_overdue', label: 'Pest Overdue', prompt: 'Which quarterly pest control customers are overdue for service?', icon: '🐛' },
-      { id: 'lawn_overdue', label: 'Lawn Overdue', prompt: 'Which monthly lawn care customers are overdue?', icon: '🌿' },
-      { id: 'at_risk', label: 'At Risk', prompt: 'Show me customers with health scores below 40', icon: '⚠️' },
-      { id: 'no_email', label: 'Missing Emails', prompt: 'Customers with no email address', icon: '📧' },
-      { id: 'high_balance', label: 'Outstanding Balances', prompt: 'Who has an outstanding balance over $100?', icon: '💰' },
-      { id: 'duplicates', label: 'Duplicates', prompt: 'Find duplicate customers by phone number', icon: '👥' },
-      { id: 'schedule_gaps', label: 'Schedule Gaps', prompt: `What does this week's schedule look like? Any gaps?`, icon: '📅' },
-      { id: 'tech_performance', label: 'Tech Performance', prompt: 'Compare technician performance this month', icon: '📊' },
-      { id: 'win_back', label: 'Win Back', prompt: 'Show churned customers from the last 6 months who were Gold or Platinum tier', icon: '🔄' },
-    ],
-  });
+  const { context } = req.query;
+
+  const baseActions = [
+    { id: 'missing_city', label: 'Missing Cities', prompt: 'Show me customers with no city on their profile', icon: '📍' },
+    { id: 'pest_overdue', label: 'Pest Overdue', prompt: 'Which quarterly pest control customers are overdue for service?', icon: '🐛' },
+    { id: 'lawn_overdue', label: 'Lawn Overdue', prompt: 'Which monthly lawn care customers are overdue?', icon: '🌿' },
+    { id: 'at_risk', label: 'At Risk', prompt: 'Show me customers with health scores below 40', icon: '⚠️' },
+    { id: 'no_email', label: 'Missing Emails', prompt: 'Customers with no email address', icon: '📧' },
+    { id: 'high_balance', label: 'Outstanding Balances', prompt: 'Who has an outstanding balance over $100?', icon: '💰' },
+    { id: 'duplicates', label: 'Duplicates', prompt: 'Find duplicate customers by phone number', icon: '👥' },
+    { id: 'schedule_gaps', label: 'Schedule Gaps', prompt: `What does this week's schedule look like? Any gaps?`, icon: '📅' },
+    { id: 'tech_performance', label: 'Tech Performance', prompt: 'Compare technician performance this month', icon: '📊' },
+    { id: 'win_back', label: 'Win Back', prompt: 'Show churned customers from the last 6 months who were Gold or Platinum tier', icon: '🔄' },
+  ];
+
+  const scheduleActions = [
+    { id: 'day_briefing', label: 'Day Briefing', prompt: 'Give me a full briefing for today', icon: '📋' },
+    { id: 'optimize', label: 'Optimize Routes', prompt: 'Optimize all routes for today', icon: '🗺️' },
+    { id: 'unassigned', label: 'Unassigned Stops', prompt: 'Show me unassigned stops and suggest tech assignments', icon: '❓' },
+    { id: 'zone_density', label: 'Zone Density', prompt: 'Analyze zone density for today — any consolidation opportunities?', icon: '📍' },
+    { id: 'gaps_this_week', label: 'Gaps This Week', prompt: 'Where do we have open capacity this week?', icon: '📅' },
+    { id: 'far_out', label: 'Far-Out Appointments', prompt: 'Find appointments scheduled more than 30 days out that we could move sooner', icon: '⏩' },
+    { id: 'overdue_no_appt', label: 'Overdue + No Appt', prompt: 'Which overdue customers have no upcoming appointment at all?', icon: '🚨' },
+    { id: 'pest_overdue_sched', label: 'Pest Overdue', prompt: 'Quarterly pest customers overdue — schedule them into open slots this week', icon: '🐛' },
+  ];
+
+  if (context === 'schedule' || context === 'dispatch') {
+    res.json({ actions: scheduleActions });
+  } else {
+    res.json({ actions: baseActions });
+  }
 });
 
 
