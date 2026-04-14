@@ -24,6 +24,7 @@ const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intel
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
+const { COMMS_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -42,6 +43,7 @@ const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
 const REVENUE_TOOL_NAMES = new Set(REVENUE_TOOLS.map(t => t.name));
 const TECH_TOOL_NAMES = new Set(TECH_TOOLS.map(t => t.name));
 const REVIEW_TOOL_NAMES = new Set(REVIEW_TOOLS.map(t => t.name));
+const COMMS_TOOL_NAMES = new Set(COMMS_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -224,6 +226,35 @@ REPUTATION MANAGEMENT STYLE:
 - Don't over-ask — check if the customer was already sent a request in the last 30 days
 - Target: 4.8+ average rating, 90%+ response rate, 10+ new reviews per month
 - When drafting replies, ALWAYS show the draft and ask for approval before posting`,
+
+  comms: `
+COMMUNICATIONS CONTEXT:
+You are on the Communications page — the SMS inbox, call log, and customer messaging hub. This is Virginia's daily driver.
+
+PHONE NUMBERS (Waves operates multiple lines):
+- (941) 318-7612 — Waves Pest Control Lakewood Ranch (primary)
+- (941) 297-2606 — Waves Pest Control Sarasota
+- (941) 297-5749 — wavespestcontrol.com main line
+- Plus tracking numbers for ads/marketing
+
+COMMUNICATIONS CAPABILITIES:
+- Find unanswered threads (customers waiting for a reply) — THIS IS THE #1 PRIORITY
+- View full conversation threads with any customer
+- Search messages by content, customer, type, or date
+- SMS volume stats by type (manual, auto-reply, reminder, review request, estimate)
+- Call log with recordings, transcripts, sentiment
+- Send SMS (with confirmation before sending)
+- AI-draft SMS replies based on the customer's last message
+- CSR coaching: call scores, follow-up tasks, lost lead analysis
+- Today's activity summary
+
+RESPONSE STYLE:
+- Unanswered messages are URGENT — always surface these first when asked about inbox status
+- Show the customer's message and how long they've been waiting
+- When drafting replies, keep them under 160 chars (1 SMS segment) unless the customer wrote a long message
+- For calls, note whether there's a recording/transcript available
+- Flag any messages that mention cancellation, complaint, or urgency — these need immediate attention
+- Virginia is the primary user — be helpful, concise, and action-oriented`,
 };
 
 function getToolsForContext(context) {
@@ -245,6 +276,9 @@ function getToolsForContext(context) {
   if (context === 'reviews') {
     return [...TOOLS, ...REVIEW_TOOLS];
   }
+  if (context === 'comms') {
+    return [...TOOLS, ...COMMS_TOOLS];
+  }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
@@ -258,6 +292,9 @@ function executeToolByName(toolName, input, techContext) {
   }
   if (REVIEW_TOOL_NAMES.has(toolName)) {
     return executeReviewTool(toolName, input);
+  }
+  if (COMMS_TOOL_NAMES.has(toolName)) {
+    return executeCommsTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -571,6 +608,15 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'velocity', label: 'Velocity Pipeline', prompt: "What's our review request conversion rate?", icon: '🔄' },
       { id: 'negative', label: 'Negative Reviews', prompt: 'Show me all 1-2 star reviews. Any patterns?', icon: '⚠️' },
       { id: 'by_location', label: 'By Location', prompt: 'Compare review counts and ratings across all 4 locations', icon: '📍' },
+    ] });
+  } else if (context === 'comms') {
+    res.json({ actions: [
+      { id: 'unanswered', label: 'Unanswered', prompt: 'Any unanswered messages? Who is waiting for a reply?', icon: '🔴' },
+      { id: 'today', label: "Today's Activity", prompt: "What happened today? Messages, calls, anything missed?", icon: '📋' },
+      { id: 'calls', label: 'Recent Calls', prompt: "What calls came in today? Any with recordings?", icon: '📞' },
+      { id: 'stats', label: 'SMS Stats', prompt: 'SMS volume breakdown this month by type', icon: '📊' },
+      { id: 'csr', label: 'CSR Coach', prompt: "How's the CSR performance? Any follow-up tasks pending?", icon: '🎓' },
+      { id: 'search', label: 'Search Messages', prompt: 'Search messages about...', icon: '🔍' },
     ] });
   } else {
     res.json({ actions: baseActions });
