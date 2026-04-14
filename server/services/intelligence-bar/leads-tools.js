@@ -445,7 +445,7 @@ async function getResponseTimes(days) {
       conversion_rate: b.count > 0 ? Math.round(b.won / b.count * 100) : 0,
     })),
     avg_minutes: leads.length > 0 ? Math.round(leads.reduce((s, l) => s + l.response_time_minutes, 0) / leads.length) : null,
-    median_minutes: leads.length > 0 ? leads.sort((a, b) => a.response_time_minutes - b.response_time_minutes)[Math.floor(leads.length / 2)].response_time_minutes : null,
+    median_minutes: leads.length > 0 ? [...leads].sort((a, b) => a.response_time_minutes - b.response_time_minutes)[Math.floor(leads.length / 2)].response_time_minutes : null,
   };
 }
 

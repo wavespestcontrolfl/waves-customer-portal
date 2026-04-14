@@ -252,7 +252,7 @@ async function computeSatisfactionScore(customerId) {
           const avg = ratings.reduce((sum, r) => sum + parseFloat(r.rating), 0) / ratings.length;
           details.avgRating = Math.round(avg * 10) / 10;
           details.reviewCount = ratings.length;
-          score = Math.round((avg / 5) * 80) + 10;
+          score = Math.round((avg / 5) * 100);
         }
       } catch { /* rating column may not exist */ }
     }

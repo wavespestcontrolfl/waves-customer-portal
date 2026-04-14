@@ -383,6 +383,7 @@ router.put('/:id/stage', async (req, res, next) => {
   try {
     const { stage, notes } = req.body;
     const customer = await db('customers').where({ id: req.params.id }).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const oldStage = customer.pipeline_stage;
     await db('customers').where({ id: req.params.id }).update({ pipeline_stage: stage, pipeline_stage_changed_at: new Date() });
     if (stage === 'churned' && req.body.churnReason) {

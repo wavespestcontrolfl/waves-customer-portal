@@ -354,28 +354,36 @@ function CustomerIntelligenceTab() {
 
   const handleScan = async () => {
     setScanning(true);
-    await adminFetch('/admin/customers/intelligence/scan', { method: 'POST', body: '{}' });
-    const d = await adminFetch('/admin/customers/intelligence');
-    setData(d);
+    try {
+      await adminFetch('/admin/customers/intelligence/scan', { method: 'POST', body: '{}' });
+      const d = await adminFetch('/admin/customers/intelligence');
+      setData(d);
+    } catch (e) { console.error('Scan failed:', e); }
     setScanning(false);
   };
 
   const handleApprove = async (outreachId) => {
-    await adminFetch(`/admin/customers/intelligence/retention/${outreachId}/approve`, { method: 'PUT', body: JSON.stringify({ approvedBy: 'admin' }) });
-    const d = await adminFetch('/admin/customers/intelligence');
-    setData(d);
+    try {
+      await adminFetch(`/admin/customers/intelligence/retention/${outreachId}/approve`, { method: 'PUT', body: JSON.stringify({ approvedBy: 'admin' }) });
+      const d = await adminFetch('/admin/customers/intelligence');
+      setData(d);
+    } catch (e) { console.error('Approve failed:', e); }
   };
 
   const handleSkip = async (outreachId) => {
-    await adminFetch(`/admin/customers/intelligence/retention/${outreachId}/skip`, { method: 'PUT', body: JSON.stringify({}) });
-    const d = await adminFetch('/admin/customers/intelligence');
-    setData(d);
+    try {
+      await adminFetch(`/admin/customers/intelligence/retention/${outreachId}/skip`, { method: 'PUT', body: JSON.stringify({}) });
+      const d = await adminFetch('/admin/customers/intelligence');
+      setData(d);
+    } catch (e) { console.error('Skip failed:', e); }
   };
 
   const handleUpsellStatus = async (upsellId, status) => {
-    await adminFetch(`/admin/customers/intelligence/upsells/${upsellId}`, { method: 'PUT', body: JSON.stringify({ status }) });
-    const d = await adminFetch('/admin/customers/intelligence');
-    setData(d);
+    try {
+      await adminFetch(`/admin/customers/intelligence/upsells/${upsellId}`, { method: 'PUT', body: JSON.stringify({ status }) });
+      const d = await adminFetch('/admin/customers/intelligence');
+      setData(d);
+    } catch (e) { console.error('Upsell update failed:', e); }
   };
 
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading customer intelligence...</div>;
