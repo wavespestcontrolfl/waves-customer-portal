@@ -359,50 +359,80 @@ const CallRecordingProcessor = {
     });
 
     // Step 4b: Create lead in leads table for pipeline tracking
-    let leadResult = null;
+    // Note: we create the lead DIRECTLY here instead of going through lead-attribution,
+    // because Step 3 already created the customer — attribution would find the customer
+    // and skip lead creation (race condition).
+    let leadId = null;
     if (customerId && extracted.first_name && !extracted.is_spam) {
       try {
-        const leadAttribution = require('./lead-attribution');
-        if (leadAttribution.attributeInboundContact) {
-          leadResult = await leadAttribution.attributeInboundContact({
-            from: phone,
-            to: call.to_phone,
-            type: 'call',
-            callSid: call.twilio_call_sid,
-            callDuration: call.duration_seconds,
-            recordingUrl: call.recording_url,
+        // Check if lead already exists for this phone
+        const existingLead = phone ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first() : null;
+
+        if (existingLead) {
+          leadId = existingLead.id;
+          logger.info(`[call-proc] Found existing lead ${leadId} for ${phone}`);
+        } else {
+          // Resolve lead source from the Twilio number
+          let leadSourceId = null;
+          try {
+            const normalizedTo = (call.to_phone || '').replace(/\D/g, '');
+            const ls = await db('lead_sources').where('is_active', true).andWhere(function() {
+              this.where('twilio_phone_number', call.to_phone)
+                .orWhere('twilio_phone_number', `+${normalizedTo}`)
+                .orWhere('twilio_phone_number', `+1${normalizedTo}`);
+            }).first();
+            if (ls) leadSourceId = ls.id;
+          } catch { /* non-critical */ }
+
+          const [newLead] = await db('leads').insert({
+            lead_source_id: leadSourceId,
+            customer_id: customerId,
+            phone,
+            first_name: capitalizeName(extracted.first_name),
+            last_name: capitalizeName(extracted.last_name || ''),
+            email: extracted.email || null,
+            lead_type: 'inbound_call',
+            first_contact_at: new Date(),
+            first_contact_channel: 'call',
+            twilio_call_sid: call.twilio_call_sid,
+            call_duration_seconds: call.duration_seconds,
+            call_recording_url: call.recording_url,
+            status: 'new',
+          }).returning('*');
+          leadId = newLead.id;
+          logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name} ${extracted.last_name}`);
+        }
+
+        // Enrich lead with AI-extracted data
+        if (leadId) {
+          const leadUpdates = {};
+          if (extracted.first_name) leadUpdates.first_name = capitalizeName(extracted.first_name);
+          if (extracted.last_name) leadUpdates.last_name = capitalizeName(extracted.last_name);
+          if (extracted.email) leadUpdates.email = extracted.email;
+          if (extracted.address_line1) leadUpdates.address = extracted.address_line1;
+          if (extracted.city) leadUpdates.city = extracted.city;
+          if (extracted.zip) leadUpdates.zip = extracted.zip;
+          if (extracted.matched_service) leadUpdates.service_interest = extracted.matched_service;
+          if (extracted.lead_quality) leadUpdates.urgency = extracted.lead_quality === 'hot' ? 'urgent' : 'normal';
+          leadUpdates.transcript_summary = extracted.call_summary;
+          leadUpdates.extracted_data = JSON.stringify({
+            pain_points: extracted.pain_points,
+            preferred_date_time: extracted.preferred_date_time,
+            sentiment: extracted.sentiment,
           });
-          // Enrich lead with extracted data
-          if (leadResult?.type === 'new_lead' && leadResult.lead?.id) {
-            const leadUpdates = {};
-            if (extracted.first_name) leadUpdates.first_name = extracted.first_name;
-            if (extracted.last_name) leadUpdates.last_name = extracted.last_name;
-            if (extracted.email) leadUpdates.email = extracted.email;
-            if (extracted.address_line1) leadUpdates.address = extracted.address_line1;
-            if (extracted.city) leadUpdates.city = extracted.city;
-            if (extracted.zip) leadUpdates.zip = extracted.zip;
-            if (extracted.matched_service) leadUpdates.service_interest = extracted.matched_service;
-            if (extracted.lead_quality) leadUpdates.urgency = extracted.lead_quality === 'hot' ? 'urgent' : 'normal';
-            leadUpdates.transcript_summary = extracted.call_summary;
-            leadUpdates.extracted_data = JSON.stringify({
-              pain_points: extracted.pain_points,
-              preferred_date_time: extracted.preferred_date_time,
-              sentiment: extracted.sentiment,
-            });
-            leadUpdates.is_qualified = extracted.lead_quality !== 'spam';
-            if (Object.keys(leadUpdates).length) {
-              await db('leads').where({ id: leadResult.lead.id }).update(leadUpdates);
-            }
-            // Log AI triage activity
-            await db('lead_activities').insert({
-              lead_id: leadResult.lead.id,
-              activity_type: 'ai_triage',
-              description: `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`,
-              performed_by: 'AI Call Processor',
-              metadata: JSON.stringify({ call_summary: extracted.call_summary, pain_points: extracted.pain_points, sentiment: extracted.sentiment }),
-            }).catch(() => {});
-          }
-          logger.info(`[call-proc] Lead created/updated: ${leadResult.type} (${leadResult.lead?.id || 'existing'})`);
+          leadUpdates.is_qualified = extracted.lead_quality !== 'spam';
+          leadUpdates.customer_id = customerId;
+          leadUpdates.updated_at = new Date();
+          await db('leads').where({ id: leadId }).update(leadUpdates);
+
+          // Log AI triage activity
+          await db('lead_activities').insert({
+            lead_id: leadId,
+            activity_type: 'ai_triage',
+            description: `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`,
+            performed_by: 'AI Call Processor',
+            metadata: JSON.stringify({ call_summary: extracted.call_summary, pain_points: extracted.pain_points, sentiment: extracted.sentiment }),
+          }).catch(() => {});
         }
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
@@ -546,8 +576,8 @@ const CallRecordingProcessor = {
         if (synopsis) {
           await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(() => {});
           // Also write to lead if one was created
-          if (leadResult?.lead?.id) {
-            await db('leads').where({ id: leadResult.lead.id }).update({ lead_synopsis: synopsis }).catch(() => {});
+          if (leadId) {
+            await db('leads').where({ id: leadId }).update({ lead_synopsis: synopsis }).catch(() => {});
           }
           logger.info(`[call-proc] Lead synopsis generated: ${synopsis.length} chars`);
         }
@@ -587,6 +617,7 @@ const CallRecordingProcessor = {
       success: true,
       callSid,
       customerId,
+      leadId,
       extracted,
       appointmentResult,
       beehiivResult,
