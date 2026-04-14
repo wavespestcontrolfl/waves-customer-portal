@@ -46,7 +46,7 @@ const sBadge = (bg) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, bac
 const EMPTY_SVC = {
   name: '', service_key: '', short_name: '', description: '', internal_notes: '',
   category: 'pest_control', subcategory: '', billing_type: 'recurring', is_waveguard: false,
-  default_duration_minutes: 60, min_duration_minutes: '', max_duration_minutes: '',
+  default_duration_minutes: 60,
   scheduling_buffer_minutes: 0, requires_follow_up: false, follow_up_interval_days: '',
   frequency: '', visits_per_year: '',
   pricing_type: 'variable', base_price: '', price_range_min: '', price_range_max: '', pricing_model_key: '',
@@ -110,8 +110,6 @@ function ServiceForm({ svc, onSave, onCancel }) {
         </Field>
         <Field label="Visits/Year" half>{inp('visits_per_year', 'number')}</Field>
         <Field label="Duration (min)" half>{inp('default_duration_minutes', 'number')}</Field>
-        <Field label="Min Duration" half>{inp('min_duration_minutes', 'number')}</Field>
-        <Field label="Max Duration" half>{inp('max_duration_minutes', 'number')}</Field>
       </div>
 
       <div style={{ fontSize: 13, fontWeight: 600, color: D.teal, marginTop: 14, marginBottom: 8 }}>Pricing</div>
