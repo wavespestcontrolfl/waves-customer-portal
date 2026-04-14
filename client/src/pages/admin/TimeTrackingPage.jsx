@@ -60,6 +60,7 @@ export default function TimeTrackingPage() {
           { key: 'entries', label: 'Entries' },
           { key: 'analytics', label: 'Analytics' },
           { key: 'team', label: 'Team' },
+          { key: 'documents', label: 'Documents' },
         ].map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
@@ -74,6 +75,7 @@ export default function TimeTrackingPage() {
       {tab === 'entries' && <EntriesTab showToast={showToast} />}
       {tab === 'analytics' && <AnalyticsTab />}
       {tab === 'team' && <TeamTab showToast={showToast} />}
+      {tab === 'documents' && <DocumentsTab showToast={showToast} />}
 
       <div style={{ position: 'fixed', bottom: 20, right: 20, background: D.card, border: `1px solid ${D.green}`, borderRadius: 8, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 32px rgba(0,0,0,.4)', zIndex: 300, fontSize: 12, transform: toast ? 'translateY(0)' : 'translateY(80px)', opacity: toast ? 1 : 0, transition: 'all .3s', pointerEvents: 'none' }}>
         <span style={{ color: D.green }}>OK</span><span style={{ color: D.text }}>{toast}</span>
@@ -1020,6 +1022,233 @@ function TeamTab({ showToast }) {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// =============================================================================
+// DOCUMENTS TAB — internal company documents (admin only)
+// =============================================================================
+const DOC_CATEGORIES = [
+  { value: 'all', label: 'All Documents' },
+  { value: 'sop', label: 'SOPs' },
+  { value: 'onboarding', label: 'New Hire Onboarding' },
+  { value: 'offer_letter', label: 'Offer Letters' },
+  { value: 'policy', label: 'Policies' },
+  { value: 'training', label: 'Training' },
+  { value: 'safety', label: 'Safety' },
+  { value: 'general', label: 'General' },
+];
+
+const DOC_CAT_COLORS = { sop: D.teal, onboarding: D.green, offer_letter: D.purple, policy: D.amber, training: '#3b82f6', safety: D.red, general: D.muted };
+
+const FILE_ICONS = { pdf: '\uD83D\uDCC4', docx: '\uD83D\uDDD2\uFE0F', doc: '\uD83D\uDDD2\uFE0F', xlsx: '\uD83D\uDCCA', xls: '\uD83D\uDCCA', png: '\uD83D\uDDBC\uFE0F', jpg: '\uD83D\uDDBC\uFE0F', jpeg: '\uD83D\uDDBC\uFE0F', txt: '\uD83D\uDCC3', csv: '\uD83D\uDCCA' };
+
+function DocumentsTab({ showToast }) {
+  const [docs, setDocs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [catFilter, setCatFilter] = useState('all');
+  const [showUpload, setShowUpload] = useState(false);
+  const [uploadForm, setUploadForm] = useState({ title: '', category: 'general', description: '' });
+  const [file, setFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({ title: '', category: '', description: '' });
+
+  const load = useCallback(async () => {
+    try {
+      const res = await adminFetch(`/admin/timetracking/documents?category=${catFilter}`);
+      setDocs(res.documents || []);
+    } catch { setDocs([]); }
+    setLoading(false);
+  }, [catFilter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleUpload = async () => {
+    if (!file) { showToast('Select a file'); return; }
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('title', uploadForm.title || file.name);
+      fd.append('category', uploadForm.category);
+      fd.append('description', uploadForm.description);
+
+      const token = localStorage.getItem('waves_admin_token');
+      const r = await fetch(`${API_BASE}/admin/timetracking/documents/upload`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      if (!r.ok) throw new Error(`Upload failed: HTTP ${r.status}`);
+      showToast('Document uploaded');
+      setShowUpload(false);
+      setUploadForm({ title: '', category: 'general', description: '' });
+      setFile(null);
+      load();
+    } catch (e) { showToast('Upload failed: ' + e.message); }
+    setUploading(false);
+  };
+
+  const handleDownload = async (doc) => {
+    try {
+      const res = await adminFetch(`/admin/timetracking/documents/${doc.id}/download`);
+      window.open(res.url, '_blank');
+    } catch (e) { showToast('Download failed: ' + e.message); }
+  };
+
+  const handleDelete = async (doc) => {
+    if (!confirm(`Archive "${doc.title}"? It can be restored later.`)) return;
+    try {
+      await adminFetch(`/admin/timetracking/documents/${doc.id}`, { method: 'DELETE' });
+      showToast('Document archived');
+      load();
+    } catch (e) { showToast('Failed: ' + e.message); }
+  };
+
+  const handleEditSave = async () => {
+    try {
+      await adminFetch(`/admin/timetracking/documents/${editingId}`, { method: 'PUT', body: JSON.stringify(editForm) });
+      showToast('Document updated');
+      setEditingId(null);
+      load();
+    } catch (e) { showToast('Failed: ' + e.message); }
+  };
+
+  const fmtSize = (bytes) => {
+    if (!bytes) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  };
+
+  const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading documents...</div>;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Company Documents</div>
+        <button onClick={() => setShowUpload(true)} style={sBtn(D.teal, D.white)}>+ Upload Document</button>
+      </div>
+
+      {/* Category filter pills */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+        {DOC_CATEGORIES.map(c => (
+          <button key={c.value} onClick={() => setCatFilter(c.value)} style={{
+            padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            border: `1px solid ${catFilter === c.value ? D.teal : D.border}`,
+            background: catFilter === c.value ? D.teal : 'transparent',
+            color: catFilter === c.value ? D.white : D.muted,
+          }}>{c.label}</button>
+        ))}
+      </div>
+
+      {/* Upload form */}
+      {showUpload && (
+        <div style={{ ...sCard, borderColor: D.teal + '44' }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Upload Document</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Title</div>
+              <input value={uploadForm.title} onChange={e => setUploadForm(f => ({ ...f, title: e.target.value }))} placeholder="Document title" style={sInput} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Category</div>
+              <select value={uploadForm.category} onChange={e => setUploadForm(f => ({ ...f, category: e.target.value }))} style={sInput}>
+                {DOC_CATEGORIES.filter(c => c.value !== 'all').map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Description (optional)</div>
+            <input value={uploadForm.description} onChange={e => setUploadForm(f => ({ ...f, description: e.target.value }))} placeholder="Brief description..." style={sInput} />
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>File</div>
+            <input type="file" onChange={e => {
+              const f = e.target.files[0];
+              if (f) { setFile(f); if (!uploadForm.title) setUploadForm(prev => ({ ...prev, title: f.name.replace(/\.[^.]+$/, '') })); }
+            }} style={{ fontSize: 13, color: D.text }} accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg" />
+            {file && <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{file.name} ({fmtSize(file.size)})</div>}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={handleUpload} disabled={uploading || !file} style={{ ...sBtn(D.green, D.white), opacity: uploading || !file ? 0.5 : 1 }}>
+              {uploading ? 'Uploading...' : 'Upload'}
+            </button>
+            <button onClick={() => { setShowUpload(false); setFile(null); }} style={sBtn('transparent', D.muted)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Documents grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
+        {docs.map(doc => {
+          const catColor = DOC_CAT_COLORS[doc.category] || D.muted;
+          const icon = FILE_ICONS[doc.file_type] || '\uD83D\uDCC1';
+          const isEditing = editingId === doc.id;
+
+          if (isEditing) {
+            return (
+              <div key={doc.id} style={{ ...sCard, borderColor: D.teal + '44' }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 10 }}>Edit Document</div>
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}>Title</div>
+                  <input value={editForm.title} onChange={e => setEditForm(f => ({ ...f, title: e.target.value }))} style={sInput} />
+                </div>
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}>Category</div>
+                  <select value={editForm.category} onChange={e => setEditForm(f => ({ ...f, category: e.target.value }))} style={sInput}>
+                    {DOC_CATEGORIES.filter(c => c.value !== 'all').map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                  </select>
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}>Description</div>
+                  <input value={editForm.description} onChange={e => setEditForm(f => ({ ...f, description: e.target.value }))} style={sInput} />
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={handleEditSave} style={sBtn(D.green, D.white)}>Save</button>
+                  <button onClick={() => setEditingId(null)} style={sBtn('transparent', D.muted)}>Cancel</button>
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <div key={doc.id} style={sCard}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <div style={{ fontSize: 28, flexShrink: 0, lineHeight: 1 }}>{icon}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.title}</div>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
+                    <span style={sBadge(catColor + '22', catColor)}>{(DOC_CATEGORIES.find(c => c.value === doc.category) || {}).label || doc.category}</span>
+                    <span style={{ fontSize: 11, color: D.muted }}>{doc.file_type?.toUpperCase()}</span>
+                    <span style={{ fontSize: 11, color: D.muted }}>{fmtSize(doc.file_size)}</span>
+                  </div>
+                  {doc.description && <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>{doc.description}</div>}
+                  <div style={{ fontSize: 11, color: D.muted }}>Uploaded {fmtDate(doc.created_at)}</div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 10, borderTop: `1px solid ${D.border}`, paddingTop: 10 }}>
+                <button onClick={() => handleDownload(doc)} style={{ padding: '5px 12px', background: D.teal + '22', border: 'none', borderRadius: 6, color: D.teal, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Download</button>
+                <button onClick={() => { setEditingId(doc.id); setEditForm({ title: doc.title, category: doc.category, description: doc.description || '' }); }} style={{ padding: '5px 12px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.muted, fontSize: 12, cursor: 'pointer' }}>Edit</button>
+                <button onClick={() => handleDelete(doc)} style={{ padding: '5px 12px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.red, fontSize: 12, cursor: 'pointer' }}>Archive</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {docs.length === 0 && !showUpload && (
+        <div style={{ ...sCard, textAlign: 'center', padding: 40 }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>{'\uD83D\uDCC1'}</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 6 }}>No documents yet</div>
+          <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>Upload SOPs, onboarding packets, offer letters, and other internal documents.</div>
+          <button onClick={() => setShowUpload(true)} style={sBtn(D.teal, D.white)}>+ Upload First Document</button>
+        </div>
+      )}
     </div>
   );
 }

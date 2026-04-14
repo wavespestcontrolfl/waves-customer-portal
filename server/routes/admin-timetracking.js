@@ -500,4 +500,120 @@ router.delete('/technicians/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =============================================================================
+// COMPANY DOCUMENTS — admin-only internal docs (SOPs, onboarding, offer letters)
+// =============================================================================
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const config = require('../config');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } }); // 25 MB max
+
+const s3 = new S3Client({
+  region: config.s3.region,
+  credentials: { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey },
+});
+const DOC_PREFIX = 'company-documents/';
+
+async function ensureDocTable() {
+  if (!(await db.schema.hasTable('company_documents'))) {
+    await db.schema.createTable('company_documents', t => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.string('title', 200).notNullable();
+      t.string('category', 50).notNullable().defaultTo('general');
+      t.text('description');
+      t.string('file_name', 255).notNullable();
+      t.string('file_type', 50);
+      t.integer('file_size');
+      t.string('s3_key', 500).notNullable();
+      t.uuid('uploaded_by');
+      t.boolean('is_archived').defaultTo(false);
+      t.timestamps(true, true);
+    });
+  }
+}
+
+// GET /documents — list all (admin only)
+router.get('/documents', async (req, res, next) => {
+  try {
+    await ensureDocTable();
+    const { category } = req.query;
+    let query = db('company_documents').where('is_archived', false).orderBy('created_at', 'desc');
+    if (category && category !== 'all') query = query.where('category', category);
+    const docs = await query;
+    res.json({ documents: docs });
+  } catch (err) { next(err); }
+});
+
+// POST /documents/upload — upload a file
+router.post('/documents/upload', upload.single('file'), async (req, res, next) => {
+  try {
+    await ensureDocTable();
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+
+    const { title, category, description } = req.body;
+    const ext = req.file.originalname.split('.').pop().toLowerCase();
+    const key = `${DOC_PREFIX}${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+
+    await s3.send(new PutObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype,
+    }));
+
+    const [doc] = await db('company_documents').insert({
+      title: title || req.file.originalname,
+      category: category || 'general',
+      description: description || null,
+      file_name: req.file.originalname,
+      file_type: ext,
+      file_size: req.file.size,
+      s3_key: key,
+      uploaded_by: req.technicianId || null,
+    }).returning('*');
+
+    logger.info(`[docs] Uploaded: ${doc.title} (${ext}, ${(req.file.size / 1024).toFixed(0)} KB)`);
+    res.status(201).json(doc);
+  } catch (err) { next(err); }
+});
+
+// GET /documents/:id/download — get presigned download URL
+router.get('/documents/:id/download', async (req, res, next) => {
+  try {
+    const doc = await db('company_documents').where({ id: req.params.id }).first();
+    if (!doc) return res.status(404).json({ error: 'Document not found' });
+
+    const url = await getSignedUrl(s3, new GetObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: doc.s3_key,
+    }), { expiresIn: 3600 });
+
+    res.json({ url, fileName: doc.file_name });
+  } catch (err) { next(err); }
+});
+
+// PUT /documents/:id — update metadata
+router.put('/documents/:id', async (req, res, next) => {
+  try {
+    const { title, category, description } = req.body;
+    const updates = { updated_at: new Date() };
+    if (title !== undefined) updates.title = title;
+    if (category !== undefined) updates.category = category;
+    if (description !== undefined) updates.description = description;
+    await db('company_documents').where({ id: req.params.id }).update(updates);
+    const doc = await db('company_documents').where({ id: req.params.id }).first();
+    res.json(doc);
+  } catch (err) { next(err); }
+});
+
+// DELETE /documents/:id — archive (soft delete)
+router.delete('/documents/:id', async (req, res, next) => {
+  try {
+    await db('company_documents').where({ id: req.params.id }).update({ is_archived: true, updated_at: new Date() });
+    logger.info(`[docs] Archived document: ${req.params.id}`);
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
