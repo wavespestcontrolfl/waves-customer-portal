@@ -94,10 +94,11 @@ router.post('/voice', async (req, res) => {
     logger.info(`Inbound call: ${From} → ${To} (${CallSid}) customer=${customer?.first_name || 'unknown'}`);
 
     // Build TwiML response — answer with recording enabled
+    // timeout=15 ensures Twilio hangs up the dial BEFORE the carrier voicemail can answer (~20-25s)
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="alice">Thank you for calling Waves Pest Control. Please hold while we connect you.</Say>
-  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="20" action="/api/webhooks/twilio/call-complete">
+  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="15" action="/api/webhooks/twilio/call-complete">
     <Number>${numberConfig?.forwardTo || '+19413187612'}</Number>
   </Dial>
 </Response>`;
@@ -133,11 +134,12 @@ router.post('/call-complete', async (req, res) => {
 
     logger.info(`Call complete: ${CallSid} status=${status} duration=${duration}s`);
 
-    // If no answer, go to voicemail
+    // If no answer, play Waves custom voicemail greeting + record
     if (['no-answer', 'busy', 'failed'].includes(status)) {
+      const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
       const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="alice">Sorry, no one is available right now. Please leave a message after the beep and we'll call you back shortly.</Say>
+  <Play>${voicemailAudio}</Play>
   <Record maxLength="120" transcribe="true" transcribeCallback="/api/webhooks/twilio/transcription" playBeep="true" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" />
   <Say voice="alice">Thank you. We'll get back to you soon. Goodbye.</Say>
 </Response>`;
