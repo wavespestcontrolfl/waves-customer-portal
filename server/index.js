@@ -202,6 +202,13 @@ app.use('/api/webhooks/twilio', twilioVoiceWebhookRoutes);
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
+// Standalone technicians list — used by CreateAppointmentModal and other components
+app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, async (req, res, next) => {
+  try {
+    const techs = await require('./models/db')('technicians').select('id', 'name', 'role', 'phone', 'active').where({ active: true }).orderBy('name');
+    res.json({ technicians: techs });
+  } catch (err) { next(err); }
+});
 app.use('/api/admin/drafts', require('./routes/admin-drafts'));
 app.use('/api/admin/gbp', require('./routes/admin-gbp'));
 app.use('/api/admin/email-automations', require('./routes/admin-email-automations'));
