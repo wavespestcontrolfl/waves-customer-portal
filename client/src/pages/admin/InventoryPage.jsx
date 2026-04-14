@@ -109,17 +109,22 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newProduct, setNewProduct] = useState({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz' });
   const [deleting, setDeleting] = useState(null);
+  const [page, setPage] = useState(1);
+  const [totalProducts, setTotalProducts] = useState(0);
+  const PER_PAGE = 50;
 
   const load = useCallback(async () => {
+    const needsPricingParam = filter === 'needs_price' ? '&needsPricing=true' : filter === 'priced' ? '&needsPricing=false' : '';
     const [pData, vData] = await Promise.all([
-      adminFetch(`/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=100`),
+      adminFetch(`/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}`),
       adminFetch('/admin/inventory/vendors'),
     ]);
     setProducts(pData.products || []);
     setCategories(pData.categories || []);
+    setTotalProducts(pData.total || 0);
     setVendors(vData.vendors || []);
     setLoading(false);
-  }, [search, catFilter]);
+  }, [search, catFilter, page, filter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -149,13 +154,13 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
     <div>
       <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
         {[{ key: 'all', label: 'All Products' }, { key: 'priced', label: 'Priced' }, { key: 'needs_price', label: 'Needs Price' }].map(f => (
-          <button key={f.key} onClick={() => onFilterChange?.(f.key)} style={{ padding: '6px 14px', borderRadius: 20, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: filter === f.key ? D.teal : D.card, color: filter === f.key ? D.white : D.muted }}>{f.label}</button>
+          <button key={f.key} onClick={() => { onFilterChange?.(f.key); setPage(1); }} style={{ padding: '6px 14px', borderRadius: 20, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: filter === f.key ? D.teal : D.card, color: filter === f.key ? D.white : D.muted }}>{f.label}</button>
         ))}
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search products..." style={{ ...sInput, flex: 1, minWidth: 200 }} />
-        <select value={catFilter} onChange={e => setCatFilter(e.target.value)} style={{ ...sInput, cursor: 'pointer', minWidth: 150 }}>
+        <input value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} placeholder="Search products..." style={{ ...sInput, flex: 1, minWidth: 200 }} />
+        <select value={catFilter} onChange={e => { setCatFilter(e.target.value); setPage(1); }} style={{ ...sInput, cursor: 'pointer', minWidth: 150 }}>
           <option value="">All Categories</option>
           {categories.map(c => <option key={c.name} value={c.name}>{c.name} ({c.count})</option>)}
         </select>
@@ -192,11 +197,7 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
           {['Product', 'Category', 'Active Ingredient', 'MOA', 'Size', 'Best Price', 'Vendor', 'Status', ''].map(h => <th key={h} style={thS}>{h}</th>)}
         </tr></thead>
         <tbody>
-          {products.filter(p => {
-            if (filter === 'priced') return p.bestPrice && p.bestPrice > 0;
-            if (filter === 'needs_price') return !p.bestPrice || p.bestPrice === 0;
-            return true;
-          }).map(p => {
+          {products.map(p => {
             const isEditing = editing === p.id;
             const isExpanded = expanded === p.id && !isEditing;
             return [
@@ -243,6 +244,18 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
       </table>
       </div>
       {products.length === 0 && <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No products found</div>}
+      {totalProducts > PER_PAGE && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0' }}>
+          <div style={{ fontSize: 12, color: D.muted }}>
+            Showing {(page - 1) * PER_PAGE + 1}–{Math.min(page * PER_PAGE, totalProducts)} of {totalProducts} products
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button disabled={page <= 1} onClick={() => setPage(p => p - 1)} style={{ ...sBtn(page <= 1 ? D.card : D.teal, page <= 1 ? D.muted : D.white), opacity: page <= 1 ? 0.5 : 1 }}>← Prev</button>
+            <span style={{ fontSize: 13, color: D.text, padding: '8px 12px', fontFamily: "'JetBrains Mono', monospace" }}>{page} / {Math.ceil(totalProducts / PER_PAGE)}</span>
+            <button disabled={page >= Math.ceil(totalProducts / PER_PAGE)} onClick={() => setPage(p => p + 1)} style={{ ...sBtn(page >= Math.ceil(totalProducts / PER_PAGE) ? D.card : D.teal, page >= Math.ceil(totalProducts / PER_PAGE) ? D.muted : D.white), opacity: page >= Math.ceil(totalProducts / PER_PAGE) ? 0.5 : 1 }}>Next →</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

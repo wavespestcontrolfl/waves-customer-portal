@@ -52,10 +52,12 @@ router.get('/', async (req, res, next) => {
     });
     if (category) query = query.where('category', category);
     if (needsPricing === 'true') query = query.where('needs_pricing', true);
+    if (needsPricing === 'false') query = query.where(function () { this.where('needs_pricing', false).orWhere('best_price', '>', 0); });
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
+    const countQuery = query.clone().clearOrder().clearSelect().count('* as count');
     const products = await query.limit(parseInt(limit)).offset(offset);
-    const [{ count: totalCount }] = await db('products_catalog').count('* as count');
+    const [{ count: totalCount }] = await countQuery;
 
     // Vendor pricing for these products
     const productIds = products.map(p => p.id);
