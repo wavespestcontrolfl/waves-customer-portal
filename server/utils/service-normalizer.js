@@ -150,13 +150,17 @@ function serviceColor(category) {
  * Strip it out and return only the meaningful content.
  */
 const SQUARE_BOILERPLATE_PATTERNS = [
-  /\*{3}\s*Please make changes.*?calendar.*?\*{3}/gis,
-  /\*{3}.*?Square\s*Appointments.*?\*{3}/gis,
+  /\*{3}\s*Please make changes.*?(?:\*{3}|$)/gis,
+  /Please make changes to this appointment in the Square Appointments calendar[\s\S]*?next sync\./gi,
+  /\*{3}.*?Square\s*Appointments.*?(?:\*{3}|$)/gis,
+  /Any changes made here will be overwritten.*$/gim,
+  /https?:\/\/app\.squareup\.com\S*/g,
+  /https?:\/\/squareup\.com\S*/g,
   /Booked via Square Online/gi,
   /Booked online/gi,
   /Created by Square/gi,
   /This appointment was booked/gi,
-  /New customer\s*[-–—]\s*first visit/gi,   // Square's default for new bookings
+  /New customer\s*[-–—]\s*first visit/gi,
   /New customer\s*[-–—]\s*first time/gi,
   /First[-\s]time customer/gi,
 ];
@@ -167,8 +171,12 @@ function cleanSquareNotes(notes) {
   for (const pattern of SQUARE_BOILERPLATE_PATTERNS) {
     cleaned = cleaned.replace(pattern, '');
   }
-  // Clean up residual whitespace and pipe separators
-  cleaned = cleaned.replace(/\|\s*$/g, '').replace(/^\s*\|/g, '').replace(/\s{2,}/g, ' ').trim();
+  // Clean up residual whitespace, pipe separators, orphaned contact info lines
+  cleaned = cleaned
+    .replace(/\|\s*$/g, '').replace(/^\s*\|/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
   return cleaned;
 }
 

@@ -918,6 +918,9 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
   const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const [manualDate, setManualDate] = useState('');
+  const [manualTime, setManualTime] = useState('08:00');
 
   useEffect(() => {
     adminFetch(`/admin/dispatch/${service.id}/reschedule-options`)
@@ -938,6 +941,28 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
     setSending(false);
   };
 
+  const handleManualReschedule = async () => {
+    if (!manualDate) return;
+    setSending(true);
+    const [h, m] = manualTime.split(':');
+    const endH = String(Math.min(23, parseInt(h) + 2)).padStart(2, '0');
+    const window = { start: manualTime, end: `${endH}:${m}`, display: `${formatTimeDisplay(manualTime)} - ${formatTimeDisplay(`${endH}:${m}`)}` };
+    try {
+      await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
+        method: 'POST',
+        body: JSON.stringify({ newDate: manualDate, newWindow: window, reasonCode: reason, reasonText: notes, notifyCustomer: true }),
+      });
+      onRescheduled?.();
+      onClose();
+    } catch (e) { console.error(e); }
+    setSending(false);
+  };
+
+  function formatTimeDisplay(t) {
+    const [h, min] = t.split(':').map(Number);
+    return `${h % 12 || 12}:${String(min).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+  }
+
   const REASONS = [
     { value: 'weather_rain', label: 'Weather — Rain' },
     { value: 'weather_wind', label: 'Weather — Wind' },
@@ -948,6 +973,8 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
     { value: 'route_overload', label: 'Route Overload' },
   ];
 
+  const inputSt = { width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.input, color: D.white, fontSize: 14, outline: 'none', boxSizing: 'border-box' };
+
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div onClick={e => e.stopPropagation()} style={{ background: D.card, borderRadius: 16, padding: 24, maxWidth: 480, width: '100%', border: `1px solid ${D.border}`, maxHeight: '80vh', overflowY: 'auto' }}>
@@ -956,21 +983,17 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
 
         <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, marginBottom: 6 }}>Reason</div>
-          <select value={reason} onChange={e => setReason(e.target.value)} style={{
-            width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`,
-            background: D.input, color: D.white, fontSize: 14, outline: 'none',
-          }}>
+          <select value={reason} onChange={e => setReason(e.target.value)} style={inputSt}>
             {REASONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
           </select>
         </div>
 
         <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, marginBottom: 6 }}>Notes (optional)</div>
-          <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Additional context..."
-            style={{ width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.input, color: D.white, fontSize: 14, outline: 'none', boxSizing: 'border-box' }} />
+          <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Additional context..." style={inputSt} />
         </div>
 
-        <div style={{ fontSize: 13, fontWeight: 700, color: D.teal, marginBottom: 10 }}>Available Dates</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: D.teal, marginBottom: 10 }}>Suggested Dates (on route)</div>
         {loading ? (
           <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>Finding best dates...</div>
         ) : (
@@ -986,17 +1009,46 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
               >
                 <div>
                   <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{opt.displayDate}</div>
-                  <div style={{ fontSize: 12, color: D.muted }}>{opt.suggestedWindow?.display} · {opt.currentLoad} other services · {opt.sameAreaServices} same area</div>
+                  <div style={{ fontSize: 12, color: D.muted }}>{opt.suggestedWindow?.display} · {opt.currentLoad} jobs · {opt.sameAreaServices} same area</div>
                 </div>
                 <button onClick={() => handleReschedule(opt)} disabled={sending} style={{
                   padding: '8px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
                   background: D.teal, color: D.white, fontSize: 12, fontWeight: 600,
                   opacity: sending ? 0.6 : 1,
-                }}>Reschedule</button>
+                }}>Select</button>
               </div>
             ))}
           </div>
         )}
+
+        {/* Manual date/time picker */}
+        <div style={{ marginTop: 16, borderTop: `1px solid ${D.border}`, paddingTop: 14 }}>
+          <button onClick={() => setShowManual(!showManual)} style={{
+            background: 'transparent', border: 'none', color: D.teal, fontSize: 13, fontWeight: 600,
+            cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            {showManual ? '\u25BC' : '\u25B6'} Pick Custom Date & Time
+          </button>
+          {showManual && (
+            <div style={{ marginTop: 12, display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Date</div>
+                <input type="date" value={manualDate} onChange={e => setManualDate(e.target.value)} style={inputSt} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Start Time</div>
+                <input type="time" value={manualTime} onChange={e => setManualTime(e.target.value)} style={inputSt} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                <button onClick={handleManualReschedule} disabled={sending || !manualDate} style={{
+                  padding: '10px 16px', borderRadius: 10, border: 'none', cursor: 'pointer',
+                  background: manualDate ? D.teal : D.border, color: D.white, fontSize: 13, fontWeight: 600,
+                  opacity: sending ? 0.6 : 1, whiteSpace: 'nowrap',
+                }}>Reschedule</button>
+              </div>
+            </div>
+          )}
+        </div>
 
         <button onClick={onClose} style={{
           width: '100%', marginTop: 14, padding: '10px 14px', borderRadius: 10,
@@ -1983,7 +2035,7 @@ function ProtocolReferenceTab() {
                           <td style={tdSt}>
                             <TierDots tiers={v.tiers} tier4x={v.tier_4x} tier6x={v.tier_6x} />
                           </td>
-                          <td style={{ ...tdSt, fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap' }}>{v.notes || '\u2014'}</td>
+                          <td style={{ ...tdSt, fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap' }}>{stripSquareBoilerplate(v.notes) || '\u2014'}</td>
                         </tr>
                       );
                     })}

@@ -19,7 +19,6 @@ class SmartRebooker {
     for (let d = 1; d <= 10; d++) {
       const candidateDate = new Date(today);
       candidateDate.setDate(today.getDate() + d);
-      if (candidateDate.getDay() === 0) continue; // Skip Sunday
 
       const dateStr = candidateDate.toISOString().split('T')[0];
 
