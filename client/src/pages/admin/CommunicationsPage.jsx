@@ -1293,6 +1293,7 @@ export default function CommunicationsPage() {
   const [smsView, setSmsView] = useState('threads'); // 'threads' | 'log' | 'conversation'
   const [activeThread, setActiveThread] = useState(null);
   const [threadFilter, setThreadFilter] = useState('all'); // 'all' | 'unanswered'
+  const [viewedThreads, setViewedThreads] = useState(new Set()); // tracks threads user has opened
 
   const loadData = useCallback(() => {
     Promise.all([
@@ -1735,23 +1736,25 @@ export default function CommunicationsPage() {
             ) : (
               filteredThreads.map((t, i) => {
                 const preview = t.lastMessage ? (t.lastMessage.length > 60 ? t.lastMessage.slice(0, 60) + '...' : t.lastMessage) : '';
+                const threadKey = t.contactPhone?.replace(/\D/g, '').slice(-10);
+                const showDot = t.unanswered && !viewedThreads.has(threadKey);
                 return (
                   <div
                     key={i}
-                    onClick={() => { setActiveThread(t); setSmsView('conversation'); setToNumber(t.contactPhone); if (t.ourNumber) setFromNumber(t.ourNumber); }}
+                    onClick={() => { setActiveThread(t); setSmsView('conversation'); setToNumber(t.contactPhone); if (t.ourNumber) setFromNumber(t.ourNumber); setViewedThreads(prev => new Set(prev).add(threadKey)); }}
                     style={{
                       padding: '12px 14px', borderBottom: `1px solid ${D.border}`, cursor: 'pointer',
                       display: 'flex', alignItems: 'center', gap: 12,
-                      background: t.unanswered ? D.red + '08' : 'transparent',
-                      borderLeft: t.unanswered ? `3px solid ${D.red}` : '3px solid transparent',
+                      background: showDot ? D.red + '08' : 'transparent',
+                      borderLeft: showDot ? `3px solid ${D.red}` : '3px solid transparent',
                       transition: 'background 0.15s',
                     }}
                     onMouseEnter={e => e.currentTarget.style.background = D.bg}
-                    onMouseLeave={e => e.currentTarget.style.background = t.unanswered ? D.red + '08' : 'transparent'}
+                    onMouseLeave={e => e.currentTarget.style.background = showDot ? D.red + '08' : 'transparent'}
                   >
                     {/* Unread dot */}
                     <div style={{ width: 10, flexShrink: 0 }}>
-                      {t.unanswered && (
+                      {showDot && (
                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: D.red, display: 'block' }} />
                       )}
                     </div>
