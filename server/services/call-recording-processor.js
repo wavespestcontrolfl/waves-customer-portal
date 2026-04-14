@@ -441,8 +441,62 @@ const CallRecordingProcessor = {
           }
 
           await TwilioService.sendSMS(customer.phone, smsBody);
-          appointmentResult = { smsSent: true, service: extracted.matched_service, dateTime: extracted.preferred_date_time };
           logger.info(`[call-proc] Appointment SMS sent to ${customer.phone}`);
+
+          // Create the scheduled_services record so it appears on the schedule
+          try {
+            const parsedDate = new Date(extracted.preferred_date_time);
+            let scheduledDate, windowStart;
+            if (!isNaN(parsedDate.getTime())) {
+              scheduledDate = parsedDate.toISOString().split('T')[0];
+              const hrs = String(parsedDate.getHours()).padStart(2, '0');
+              const mins = String(parsedDate.getMinutes()).padStart(2, '0');
+              windowStart = `${hrs}:${mins}`;
+            } else {
+              // Fallback: try to extract date and time from the string
+              const dateMatch = extracted.preferred_date_time.match(/(\w+ \d{1,2}(?:,?\s*\d{4})?)/);
+              const timeMatch = extracted.preferred_date_time.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
+              if (dateMatch) {
+                const d = new Date(dateMatch[1]);
+                if (!isNaN(d.getTime())) scheduledDate = d.toISOString().split('T')[0];
+              }
+              if (timeMatch) {
+                const t = timeMatch[1].toLowerCase();
+                let [h, m] = t.replace(/\s*(am|pm)/, '').split(':').map(Number);
+                if (isNaN(m)) m = 0;
+                if (t.includes('pm') && h < 12) h += 12;
+                if (t.includes('am') && h === 12) h = 0;
+                windowStart = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+              }
+            }
+
+            if (scheduledDate) {
+              const windowEnd = windowStart
+                ? `${String(Math.min(23, parseInt(windowStart) + 1)).padStart(2, '0')}:${windowStart.split(':')[1]}`
+                : null;
+              const [svc] = await db('scheduled_services').insert({
+                customer_id: customerId,
+                scheduled_date: scheduledDate,
+                window_start: windowStart || '09:00',
+                window_end: windowEnd || '10:00',
+                window_display: windowStart ? `${windowStart.replace(/^0/, '')}` : '9:00 AM',
+                service_type: extracted.matched_service || extracted.requested_service || 'General Pest Control',
+                status: 'confirmed',
+                customer_confirmed: true,
+                confirmed_at: new Date(),
+                notes: `Booked via phone call. ${extracted.call_summary || ''}`.trim(),
+                booking_source: 'phone_call',
+              }).returning('*');
+              logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
+              appointmentResult = { smsSent: true, scheduledServiceId: svc.id, service: serviceType, dateTime: extracted.preferred_date_time };
+            } else {
+              logger.warn(`[call-proc] Could not parse date from: ${extracted.preferred_date_time}`);
+              appointmentResult = { smsSent: true, service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false };
+            }
+          } catch (schedErr) {
+            logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}`);
+            appointmentResult = { smsSent: true, service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message };
+          }
         }
       } catch (err) {
         logger.error(`[call-proc] Appointment SMS failed: ${err.message}`);
