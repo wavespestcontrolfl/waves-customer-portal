@@ -20,25 +20,34 @@ const SERVICE_DETAILS = {
       { title: 'Soil Conditioning & pH Balancing', text: "Soil chemistry is annually tested to monitor CEC, pH, and nutrient levels. Based on results, pH is adjusted with lime, sulfur, or other amendments, and micronutrients like iron, manganese, and zinc are applied to maintain optimal root-zone conditions." },
       { title: 'Disease Prevention (Fungicides)', text: "Preventive fungicide applications are integrated into the management program based on disease forecasting models, environmental data (temperature, humidity, leaf wetness), and turf species susceptibility. These treatments protect against major turf pathogens such as Rhizoctonia, Pythium, and Dollar Spot, prioritizing proactive suppression rather than reactive control." },
       { title: 'Lawn Insect & Turf Pest Control', text: "Pest control applications are timed to pest life cycles and environmental cues, targeting chinch bugs, sod webworms, mole crickets, armyworms, and fire ants. An IPM approach blends biological, chemical, and cultural controls, with product rotation to prevent resistance." },
-      { title: 'Core/Liquid Aeration', text: "Performed once annually — typically in spring or fall — using mechanical coring or liquid aeration technologies to relieve soil compaction, enhance oxygen exchange, and stimulate microbial activity. This improves root penetration, nutrient mobility, and water infiltration." },
+      { title: 'Core/Liquid Aeration & Dethatching', text: "Performed once annually — typically in spring or fall — using mechanical coring, liquid aeration technologies, or dethatching equipment to relieve soil compaction, remove thatch buildup, enhance oxygen exchange, and stimulate microbial activity. This improves root penetration, nutrient mobility, and water infiltration." },
+      { title: 'Lawn Nutrition & Disease Control', text: "We deliver the right nutrients at the right time and treat fungal threats like brown patch and dollar spot before they spread. Preventive and curative applications are timed to seasonal disease pressure and turf health data." },
       { title: 'Weed-Free Landscape Bed Perimeter', text: "Selective spot applications of contact or systemic herbicides along turf and hardscape interfaces to maintain a clean, defined perimeter. Treatments are calibrated for ornamental safety." },
       { title: 'Iron / Greening Touch-Up', text: "Applied during nitrogen blackout or restriction periods, this chelated iron and micronutrient blend supports chlorophyll production, color uniformity, and turf vigor without promoting excessive top growth." },
       { title: 'Irrigation Maintenance & Watering Optimization', text: "Regular inspection and calibration of sprinkler systems to ensure even coverage and proper pressure. Seasonal adjustments align with ET rates, rainfall, and turf-specific needs." },
     ],
     extras: [
-      { title: 'Lawn Restoration & Aeration', text: "We relieve soil compaction, boost root growth, fill in thin areas, and remove thatch that traps pests and disease — essential for restoring stressed lawns in our coastal climate." },
-      { title: 'Lawn Nutrition & Disease Control', text: "We deliver the right nutrients at the right time and treat fungal threats like brown patch and dollar spot before they spread." },
       { title: 'Shrub & Ornamental Plant Care', text: "We use proactive monitoring and treatment to control pests and diseases, keeping your shrubs healthy, strong, and well-shaped year-round." },
+      { title: 'Palm Tree Care & Injections', text: "Targeted trunk injections and root-zone treatments to protect palms from lethal diseases like lethal bronzing and Ganoderma, while delivering essential nutrients for canopy health and vigor." },
+      { title: 'Overseeding', text: "Strategic overseeding to fill in thin or bare areas, improve turf density, and establish a thicker, more resilient lawn. Seed selection is matched to your grass type and site conditions." },
     ],
   },
   pest: {
     header: 'Full-Service Pest Control, Defined.',
+    subheader: 'WaveGuard Pest Control — 2–12 Treatments Per Year',
+    intro: "Protect your home with a customizable pest control program built for consistent, year-round results. Our full-service pest protection plans combine interior and exterior treatments, advanced repellent and non-repellent formulas, and surfactant-enhanced applications to deliver broad, effective coverage against 75+ common pests.",
     sections: [
-      { title: 'Pest Control', sub: 'Targeted protection for your home.', text: "Our expert pest control treatments target ants, roaches, and other invaders — scientifically formulated, seasonally timed, and engineered for household safety." },
-      { title: 'Bed Bug Control', sub: 'Fast, effective relief from bed bugs.', text: "We combine professional-grade chemistry with expert inspection and monitoring to achieve total bed bug removal, start to finish." },
-      { title: 'Mosquito Control', sub: 'Bite-free yards start here.', text: "Our mosquito control program targets breeding sites through larviciding, precision fogging, and habitat reduction — delivering lasting population suppression." },
-      { title: 'Termite Protection', sub: 'Stop termites before they cause damage.', text: "Our termite control targets colonies at the source through advanced baiting and barrier technologies, ensuring durable structural defense." },
-      { title: 'Rodent Control & Removal', sub: 'Remove rodents for good.', text: "Using integrated trapping, baiting, and exclusion methods, we eliminate rodent activity and establish long-term prevention against re-infestation." },
+      { title: 'Comprehensive Property Inspection', text: "Every service begins with a careful inspection of your home and surrounding property. We identify pest activity, entry points, nesting areas, moisture issues, and other conditions that may be contributing to infestations. This allows us to tailor each treatment to your home's specific needs." },
+      { title: 'Interior & Exterior Coverage Included', text: "Our pest control program includes treatment of both the interior and exterior of your home for complete protection. Exterior applications help establish a strong protective barrier around the structure, while interior treatments target active pest areas and problem zones where pests live and travel." },
+      { title: 'Targets 75+ Common Household Pests', text: "Our treatments are designed to control a wide range of pests, including ants, roaches, spiders, silverfish, earwigs, crickets, centipedes, wasps, pill bugs, and many other crawling and flying insects. Whether you need preventive service or help with active pest issues, our program is built to deliver dependable results." },
+      { title: 'Repellent & Non-Repellent Formulas', text: "We use a strategic combination of repellent and non-repellent products based on the pest problem, treatment area, and desired outcome. Repellent formulas help keep pests away from treated zones, while non-repellent solutions work more subtly, allowing pests to contact treated areas without detection for more effective control in certain situations." },
+      { title: 'Surfactant-Enhanced Applications', text: "Selected applications include added surfactants to improve product spread, adhesion, and penetration on treated surfaces. This added performance helps treatments work more efficiently in challenging areas and supports more thorough coverage where pests hide and travel." },
+      { title: 'Flexible Treatment Scheduling', text: "Programs are available from 2 to 12 treatments per year, depending on the level of pest activity, the type of pests being targeted, and the protection level you want for your home. From preventive care to higher-frequency service plans, each schedule is designed around your property's specific conditions." },
+      { title: 'Seasonal Pest Protection', text: "Pest pressures change throughout the year, and so does our approach. We adjust service timing and treatment strategy based on seasonal activity patterns to help prevent infestations before they start and maintain stronger control throughout the year." },
+      { title: 'Barrier Defense Around the Home', text: "Exterior treatments focus on high-risk areas such as foundation lines, doorways, windows, eaves, utility penetrations, and other common pest entry points. These applications help create a durable barrier that reduces pest access and strengthens your home's first line of defense." },
+      { title: 'Targeted Interior Treatments', text: "When interior pest activity is present, treatments are applied with precision in key areas such as baseboards, cracks and crevices, garages, utility areas, and other active zones. This focused approach helps maximize results while avoiding unnecessary product use." },
+      { title: 'Service Reporting & Recommendations', text: "Each visit concludes with a detailed digital service report documenting findings, products applied, target pests observed, and any structural or sanitation conditions contributing to pest pressure. Reports also include actionable recommendations for moisture management, vegetation trimming, screening repairs, and other exclusion improvements — turning every visit into a consultative service experience, not just an application." },
+      { title: 'Long-Term Prevention & Peace of Mind', text: "Our goal is not just to treat pests, but to help prevent them from coming back. By combining effective products, customized scheduling, detailed reporting, and practical prevention strategies, we provide a smarter, more complete approach to protecting your home." },
     ],
   },
   treeShrub: {
@@ -199,12 +208,6 @@ function buildValueStack(services, tier) {
   });
   // Core service deliverables based on included services
   const svcNames = services.map(s => s.name.toLowerCase());
-  if (svcNames.some(n => n.includes('pest'))) {
-    items.push({ label: '4 quarterly interior + exterior pest treatments', value: 0, included: true });
-  }
-  if (svcNames.some(n => n.includes('lawn'))) {
-    items.push({ label: '6-12 professional lawn applications per year', value: 0, included: true });
-  }
   if (svcNames.some(n => n.includes('mosquito'))) {
     items.push({ label: 'Monthly mosquito barrier treatments (peak season)', value: 0, included: true });
   }
@@ -577,19 +580,9 @@ export default function EstimateViewPage() {
 
               <div style={{ height: 2, background: `linear-gradient(90deg, ${B.green}, ${B.wavesBlue})`, borderRadius: 1, marginTop: 16, marginBottom: 14 }} />
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                <span style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Total value:</span>
-                <span style={{ fontSize: 22, fontWeight: 800, color: B.green, fontFamily: FONTS.ui }}>${totalValue.toLocaleString()}+</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                <span style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Your rate:</span>
-                <span style={{ fontSize: 16, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>
-                  ${annualRate.toLocaleString()}/year ({fmt(monthlyTotal)}/mo)
-                </span>
-              </div>
               {savings > 0 && (
                 <div style={{
-                  background: `${B.green}15`, borderRadius: 10, padding: '10px 14px', marginTop: 6,
+                  background: `${B.green}15`, borderRadius: 10, padding: '10px 14px',
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 }}>
                   <span style={{ fontSize: 15, fontWeight: 800, color: B.green, fontFamily: FONTS.heading }}>You save:</span>
@@ -612,7 +605,7 @@ export default function EstimateViewPage() {
           </div>
           <div style={{ fontSize: 14, color: B.navy, lineHeight: 1.7, fontFamily: FONTS.body }}>
             <span role="img" aria-label="shield" style={{ fontSize: 20, marginRight: 6 }}>🛡️</span>
-            If pests return between treatments, we come back free — within 24 hours.
+            If pests return between treatments, we come back free — within 24 hours. If your lawn isn't showing measurable progress, we come back between treatments at no extra charge.
           </div>
           <div style={{ fontSize: 14, color: B.navy, lineHeight: 1.7, fontFamily: FONTS.body, marginTop: 8 }}>
             If you're not satisfied after 90 days, we'll refund every penny. No questions, no hassle, no fine print.
@@ -622,37 +615,6 @@ export default function EstimateViewPage() {
           </div>
         </div>
 
-        {/* ============================================================= */}
-        {/* 2. SERVICE LINE ITEMS                                          */}
-        {/* ============================================================= */}
-        <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>Your Services</div>
-          {services.map((s, i) => (
-            <div key={i} style={{
-              display: 'flex', justifyContent: 'space-between', padding: '10px 0',
-              borderBottom: i < services.length - 1 ? `1px solid ${SAND_DARK}` : 'none',
-            }}>
-              <span style={{ fontSize: 15, fontWeight: 600, color: B.navy }}>{s.name}</span>
-              <span style={{ fontSize: 15, fontWeight: 800, color: B.green, fontFamily: FONTS.ui }}>{fmt(s.mo)}/mo</span>
-            </div>
-          ))}
-          {recurring.discount > 0 && (
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', padding: '10px 0',
-              borderTop: `1px solid ${SAND_DARK}`, marginTop: 6,
-            }}>
-              <span style={{ fontSize: 14, color: B.green, fontWeight: 600 }}>WaveGuard {e.tier} discount</span>
-              <span style={{ fontSize: 14, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>-{fmt(recurring.savings / 12)}/mo</span>
-            </div>
-          )}
-          <div style={{
-            display: 'flex', justifyContent: 'space-between', padding: '12px 0 0',
-            borderTop: `2px solid ${SAND_DARK}`, marginTop: 6,
-          }}>
-            <span style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Monthly Total</span>
-            <span style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui }}>{fmt(monthlyTotal)}/mo</span>
-          </div>
-        </div>
 
         {/* Accept CTA — below Monthly Total */}
         {e.status !== 'accepted' && (
@@ -775,24 +737,6 @@ export default function EstimateViewPage() {
         {/* ============================================================= */}
         <div style={{ marginTop: 32 }}>
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6 }}>What's Included</div>
-          <div style={{ background: '#fff', borderRadius: 14, padding: '14px 16px', marginBottom: 14, border: `1px solid ${SAND_DARK}` }}>
-            {services.map((s, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: i < services.length - 1 ? `1px solid ${SAND_DARK}` : 'none' }}>
-                <span style={{ fontSize: 18 }}>{s.name.toLowerCase().includes('lawn') ? '🌿' : s.name.toLowerCase().includes('pest') ? '🐛' : s.name.toLowerCase().includes('mosquito') ? '🦟' : s.name.toLowerCase().includes('tree') || s.name.toLowerCase().includes('shrub') ? '🌳' : s.name.toLowerCase().includes('termite') ? '🏠' : s.name.toLowerCase().includes('rodent') ? '🐀' : '✅'}</span>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{s.name}</div>
-                </div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>{fmt(s.mo)}/mo</div>
-              </div>
-            ))}
-            {otItems.length > 0 && otItems.map((item, i) => (
-              <div key={`ot-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderTop: `1px solid ${SAND_DARK}` }}>
-                <span style={{ fontSize: 18 }}>🔧</span>
-                <div style={{ flex: 1 }}><div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{item.name}</div><div style={{ fontSize: 11, color: B.grayMid }}>One-time</div></div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${Math.round(item.price)}</div>
-              </div>
-            ))}
-          </div>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.grayMid, marginBottom: 10, fontFamily: FONTS.heading }}>Service Details</div>
 
           {hasLawn && (
@@ -809,8 +753,10 @@ export default function EstimateViewPage() {
 
           {hasPest && (
             <ServiceDropdown title="🐛 Pest Control" defaultOpen={firstOpenService === 'pest'}>
-              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>{SERVICE_DETAILS.pest.header}</div>
-              {SERVICE_DETAILS.pest.sections.map((s, i) => <DetailSection key={i} title={s.title} sub={s.sub} text={s.text} />)}
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.pest.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pest.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pest.intro}</div>
+              {SERVICE_DETAILS.pest.sections.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
             </ServiceDropdown>
           )}
 
