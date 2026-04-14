@@ -1,6 +1,6 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
+import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-const RevenuePage = lazy(() => import('./RevenuePage'));
+import DashboardIntelligenceBar from '../../components/admin/DashboardIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
@@ -59,8 +59,6 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [weekBookings, setWeekBookings] = useState([]);
   const [bookingsLoading, setBookingsLoading] = useState(true);
-  const [activeKPI, setActiveKPI] = useState(null);
-
   useEffect(() => {
     adminFetch('/admin/dashboard').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
     adminFetch('/admin/dashboard/square-bookings?days=7').then(d => { setWeekBookings(d.bookings || []); setBookingsLoading(false); }).catch(() => setBookingsLoading(false));
@@ -92,13 +90,15 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* KPI Cards — clickable */}
+      {/* Intelligence Bar */}
+      <DashboardIntelligenceBar kpiData={data} />
+
+      {/* KPI Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)', gap: 14, marginBottom: 20 }}>
         {KPI_CARDS.map((kpi, i) => (
-          <div key={i} onClick={() => setActiveKPI(activeKPI === kpi.id ? null : kpi.id)} style={{
-            background: D.card, borderRadius: 10, padding: isMobile ? 14 : 20, cursor: 'pointer',
-            border: activeKPI === kpi.id ? `2px solid ${D.teal}` : `1px solid ${D.border}`,
-            transition: 'all 0.15s',
+          <div key={i} style={{
+            background: D.card, borderRadius: 10, padding: isMobile ? 14 : 20,
+            border: `1px solid ${D.border}`,
           }}>
             <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, color: D.muted, marginBottom: 8 }}>
               {kpi.icon} {kpi.label}
@@ -117,77 +117,6 @@ export default function DashboardPage() {
           </div>
         ))}
       </div>
-
-      {/* Detail Panel — shows content for clicked KPI */}
-      {activeKPI === 'revenue' && (
-        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Revenue Breakdown</div>
-            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
-          </div>
-          <Suspense fallback={<div style={{ color: D.muted, padding: 20, textAlign: 'center' }}>Loading...</div>}><RevenuePage /></Suspense>
-        </div>
-      )}
-
-      {activeKPI === 'customers' && (
-        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Customer Summary</div>
-            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
-          </div>
-          {data.revenueChart?.byTier?.length > 0 ? data.revenueChart.byTier.map((t, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
-              <span style={{ fontSize: 14, color: D.text }}>{t.tier || 'No Plan'} <span style={{ color: D.muted }}>({t.count})</span></span>
-              <span style={{ fontSize: 14, fontWeight: 700, color: D.green, fontFamily: "'JetBrains Mono', monospace" }}>{fmt(t.revenue)}/mo</span>
-            </div>
-          )) : <div style={{ color: D.muted, padding: 20, textAlign: 'center' }}>No tier data available</div>}
-          <a href="/admin/customers" style={{ display: 'block', marginTop: 12, fontSize: 13, color: D.teal, textDecoration: 'none' }}>View all customers →</a>
-        </div>
-      )}
-
-      {activeKPI === 'estimates' && (
-        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Pending Estimates</div>
-            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
-          </div>
-          <div style={{ fontSize: 13, color: D.muted, marginBottom: 12 }}>{k.estimatesPending} estimates awaiting customer response</div>
-          <a href="/admin/estimates" style={{ display: 'inline-block', padding: '10px 20px', borderRadius: 8, background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>View Estimates →</a>
-        </div>
-      )}
-
-      {activeKPI === 'services' && data.todaysSchedule && (
-        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Today's Services</div>
-            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
-          </div>
-          {data.todaysSchedule.map(s => (
-            <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${D.border}` }}>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{s.customerName}</div>
-                <div style={{ fontSize: 11, color: D.muted }}>{s.serviceType} · {fmtTimeShort(s.windowStart)}</div>
-              </div>
-              <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 8, background: `${STATUS_COLORS[s.status] || D.muted}20`, color: STATUS_COLORS[s.status] || D.muted }}>{s.status}</span>
-            </div>
-          ))}
-          <a href="/admin/schedule" style={{ display: 'block', marginTop: 12, fontSize: 13, color: D.teal, textDecoration: 'none' }}>View full schedule →</a>
-        </div>
-      )}
-
-      {activeKPI === 'reviews' && (
-        <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.teal}`, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Review Performance</div>
-            <button onClick={() => setActiveKPI(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>✕</button>
-          </div>
-          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
-            <div><div style={{ fontSize: 11, color: D.muted }}>Rating</div><div style={{ fontSize: 24, fontWeight: 700, color: D.amber }}>{k.googleReviewRating} ★</div></div>
-            <div><div style={{ fontSize: 11, color: D.muted }}>Total Reviews</div><div style={{ fontSize: 24, fontWeight: 700, color: D.white }}>{k.googleReviewCount}</div></div>
-          </div>
-          <a href="/admin/reviews" style={{ display: 'block', marginTop: 12, fontSize: 13, color: D.teal, textDecoration: 'none' }}>Manage reviews →</a>
-        </div>
-      )}
 
       {/* Revenue Chart */}
       <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}`, marginBottom: 20 }}>

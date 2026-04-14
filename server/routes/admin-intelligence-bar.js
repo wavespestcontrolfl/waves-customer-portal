@@ -18,6 +18,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { TOOLS, executeTool } = require('../services/intelligence-bar/tools');
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
+const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -30,6 +31,7 @@ const MAX_TOOL_ROUNDS = 8;
 
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
+const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -66,11 +68,38 @@ DISPATCH CONTEXT:
 You are on the Dispatch page — real-time field operations view.
 The operator is tracking technician progress, managing live routes, and handling day-of changes.
 Prioritize speed and actionability in your responses.`,
+
+  dashboard: `
+DASHBOARD CONTEXT:
+You are on the Dashboard — the business command center. The operator wants to understand how the business is performing.
+
+DASHBOARD CAPABILITIES:
+- KPI snapshot: revenue MTD, MRR, active customers, pending estimates, services this week, outstanding balances, customer health
+- Period-over-period comparison: compare any two periods (this week vs last, this month vs last, any month vs any month)
+- MRR trend: monthly recurring revenue over time with growth rates and tier breakdown
+- Revenue breakdown: by service type, tier, city/zone, customer, or month
+- Estimate funnel: sent → viewed → accepted pipeline with conversion rates
+- Churn analysis: who left, when, what tier, revenue impact
+- Service mix: which services are most common, revenue per type
+- Customer acquisition: where new customers come from, which lead sources convert best
+- Outstanding balances: aging breakdown, top debtors
+- Morning briefing: everything you need to know today in one shot
+
+ANALYSIS STYLE:
+- Lead with the headline number, then drill into the "why"
+- Always compare to a benchmark (last month, last week, target)
+- Flag anything that's significantly better or worse than expected
+- Be opinionated: "This is strong" or "This needs attention" — the operator wants your read, not just data
+- When showing revenue, always include both the dollar amount and the trend direction
+- Round to whole dollars for readability ($1,234 not $1,234.56)`,
 };
 
 function getToolsForContext(context) {
   if (context === 'schedule' || context === 'dispatch') {
     return [...TOOLS, ...SCHEDULE_TOOLS];
+  }
+  if (context === 'dashboard') {
+    return [...TOOLS, ...DASHBOARD_TOOLS];
   }
   return TOOLS;
 }
@@ -78,6 +107,9 @@ function getToolsForContext(context) {
 function executeToolByName(toolName, input) {
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
+  }
+  if (DASHBOARD_TOOL_NAMES.has(toolName)) {
+    return executeDashboardTool(toolName, input);
   }
   return executeTool(toolName, input);
 }
@@ -298,8 +330,21 @@ router.get('/quick-actions', async (req, res) => {
     { id: 'pest_overdue_sched', label: 'Pest Overdue', prompt: 'Quarterly pest customers overdue — schedule them into open slots this week', icon: '🐛' },
   ];
 
+  const dashboardActions = [
+    { id: 'briefing', label: 'Morning Briefing', prompt: 'Give me a morning briefing — what do I need to know today?', icon: '☀️' },
+    { id: 'this_vs_last', label: 'This vs Last Week', prompt: 'How did we do this week compared to last week?', icon: '📊' },
+    { id: 'mrr', label: 'MRR Trend', prompt: "What's our MRR trend over the last 6 months?", icon: '📈' },
+    { id: 'close_rate', label: 'Close Rate', prompt: "What's our estimate close rate this month?", icon: '🎯' },
+    { id: 'revenue_by_service', label: 'Revenue by Service', prompt: 'Break down revenue by service type this month', icon: '💰' },
+    { id: 'churn', label: 'Churn Check', prompt: 'Any churn this month? Who did we lose and what was the revenue impact?', icon: '🔻' },
+    { id: 'lead_sources', label: 'Lead Sources', prompt: 'Where are new customers coming from? Which source converts best?', icon: '🧲' },
+    { id: 'balances', label: 'Outstanding Balances', prompt: "What's outstanding? Show me the aging breakdown and top debtors", icon: '🧾' },
+  ];
+
   if (context === 'schedule' || context === 'dispatch') {
     res.json({ actions: scheduleActions });
+  } else if (context === 'dashboard') {
+    res.json({ actions: dashboardActions });
   } else {
     res.json({ actions: baseActions });
   }
