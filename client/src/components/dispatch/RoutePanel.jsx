@@ -5,7 +5,7 @@ const authHeader = () => ({ Authorization: `Bearer ${localStorage.getItem('waves
 
 const SCORE_COLOR = (s) => s >= 80 ? '#0e8c6a' : s >= 65 ? '#ba7517' : '#a32d2d';
 const BADGE = { critical: 'bg-green-100 text-green-800', high: 'bg-blue-100 text-blue-700', standard: 'bg-amber-100 text-amber-700', low: 'bg-red-100 text-red-700' };
-const TIER_BADGE = { platinum: 'bg-purple-100 text-purple-700', gold: 'bg-yellow-100 text-yellow-700', silver: 'bg-gray-100 text-gray-600', bronze: 'bg-orange-100 text-orange-700' };
+const TIER_BADGE = { platinum: 'bg-purple-100 text-purple-700', gold: 'bg-yellow-100 text-yellow-700', silver: 'bg-gray-100 text-gray-600', bronze: 'bg-orange-100 text-orange-700', 'one-time': 'bg-blue-100 text-blue-700' };
 
 const SERVICE_ZONES = [
   { value: 'all', label: 'All Zones' },

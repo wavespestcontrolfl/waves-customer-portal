@@ -46,7 +46,7 @@ const STAGES = [
 const STAGE_MAP = {};
 STAGES.forEach(s => { STAGE_MAP[s.key] = s; });
 
-const TIER_COLORS = { Gold: D.amber, Silver: '#94a3b8', Bronze: '#cd7f32', Platinum: '#a855f7' };
+const TIER_COLORS = { Platinum: '#a855f7', Gold: D.amber, Silver: '#94a3b8', Bronze: '#cd7f32', 'One-Time': '#0ea5e9' };
 
 const LEAD_SOURCES = ['referral', 'google', 'facebook', 'nextdoor', 'website', 'door_knock', 'yelp', 'other'];
 
@@ -65,7 +65,7 @@ function StageBadge({ stage }) {
 }
 
 function TierBadge({ tier }) {
-  if (!tier) return null;
+  if (!tier) return <span style={{ padding: '2px 8px', borderRadius: 9999, fontSize: 10, fontWeight: 700, border: `1px solid ${D.muted}`, color: D.muted, letterSpacing: 0.5, textTransform: 'uppercase' }}>No Plan</span>;
   const color = TIER_COLORS[tier] || D.muted;
   return (
     <span style={{
@@ -592,7 +592,7 @@ function CustomerTimeline({ customerId }) {
 // CUSTOMER MAP — Interactive Google Maps with customer pins
 // ═══════════════════════════════════════════════════════════════════
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
-const TIER_PIN_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32' };
+const TIER_PIN_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0ea5e9' };
 const STAGE_PIN_COLORS = { active_customer: '#10b981', won: '#10b981', new_lead: '#0ea5e9', contacted: '#0ea5e9', estimate_sent: '#f59e0b', at_risk: '#ef4444', churned: '#ef4444' };
 
 function CustomerMap({ customers, onSelect }) {
@@ -781,6 +781,7 @@ function CustomerMap({ customers, onSelect }) {
           <option value="Gold">Gold</option>
           <option value="Silver">Silver</option>
           <option value="Bronze">Bronze</option>
+          <option value="One-Time">One-Time</option>
           <option value="none">No Plan</option>
         </select>
         <select value={filterStage} onChange={e => setFilterStage(e.target.value)} style={{ padding: '6px 10px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12 }}>
@@ -1140,10 +1141,11 @@ export default function CustomersPage() {
             <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>Tier:</span>
             {[
               { value: 'all', label: 'All' },
-              { value: 'Bronze', label: 'Bronze' },
-              { value: 'Silver', label: 'Silver' },
-              { value: 'Gold', label: 'Gold' },
               { value: 'Platinum', label: 'Platinum' },
+              { value: 'Gold', label: 'Gold' },
+              { value: 'Silver', label: 'Silver' },
+              { value: 'Bronze', label: 'Bronze' },
+              { value: 'One-Time', label: 'One-Time' },
               { value: 'none', label: 'No Plan' },
             ].map(t => (
               <button key={t.value} onClick={() => setFilterTier(t.value)} style={{
@@ -1323,7 +1325,7 @@ export default function CustomersPage() {
                       <div>
                         <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Tier</label>
                         <select value={editForm.tier || ''} onChange={e => setEditForm(p => ({ ...p, tier: e.target.value || null }))} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
-                          <option value="">No Plan</option><option value="Bronze">Bronze (0%)</option><option value="Silver">Silver (10%)</option><option value="Gold">Gold (15%)</option><option value="Platinum">Platinum (20%)</option>
+                          <option value="">No Plan</option><option value="Platinum">Platinum (20%)</option><option value="Gold">Gold (15%)</option><option value="Silver">Silver (10%)</option><option value="Bronze">Bronze (0%)</option><option value="One-Time">One-Time</option>
                         </select>
                       </div>
                       <div>

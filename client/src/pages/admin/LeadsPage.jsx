@@ -876,7 +876,7 @@ export default function LeadsPage() {
       <Input label="Monthly Value ($)" value={formData.monthly_value} onChange={v=>setFormData(f=>({...f,monthly_value:v}))} type="number" />
       <Input label="Initial Service Value ($)" value={formData.initial_service_value} onChange={v=>setFormData(f=>({...f,initial_service_value:v}))} type="number" />
       <Input label="WaveGuard Tier" value={formData.waveguard_tier} onChange={v=>setFormData(f=>({...f,waveguard_tier:v}))}
-        options={['bronze','silver','gold','platinum']} />
+        options={['Platinum','Gold','Silver','Bronze','One-Time']} />
       <Btn onClick={submitForm} disabled={loading} color={C.green}>{loading?'Converting...':'Convert'}</Btn>
     </Modal>;
 

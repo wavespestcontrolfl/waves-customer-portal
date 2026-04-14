@@ -60,10 +60,11 @@ function getTier(count) {
 }
 
 const TIER_COLORS = {
-  Bronze: '#CD7F32',
-  Silver: '#90CAF9',
-  Gold: '#FDD835',
   Platinum: '#E5E4E2',
+  Gold: '#FDD835',
+  Silver: '#90CAF9',
+  Bronze: '#CD7F32',
+  'One-Time': '#0ea5e9',
 };
 
 export default function TechEstimatorPage() {

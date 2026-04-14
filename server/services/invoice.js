@@ -39,7 +39,7 @@ async function nextInvoiceNumber() {
 
 // WaveGuard tier discount percentages — now loaded from discount engine DB
 // Fallback map only used if discount-engine import fails
-const TIER_DISCOUNTS_FALLBACK = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+const TIER_DISCOUNTS_FALLBACK = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE

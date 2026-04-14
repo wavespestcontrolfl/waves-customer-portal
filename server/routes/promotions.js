@@ -41,14 +41,15 @@ const SERVICES = {
 };
 
 const TIERS = {
-  none: { discount: 0, label: 'No Bundle', minServices: 0 },
+  none: { discount: 0, label: 'No Plan', minServices: 0 },
+  'One-Time': { discount: 0, label: 'One-Time', minServices: 0 },
   Bronze: { discount: 0, label: 'Bronze', minServices: 1 },
   Silver: { discount: 0.10, label: 'Silver', minServices: 2 },
   Gold: { discount: 0.15, label: 'Gold', minServices: 3 },
   Platinum: { discount: 0.20, label: 'Platinum', minServices: 4 },
 };
 
-const TIER_ORDER = ['none', 'Bronze', 'Silver', 'Gold', 'Platinum'];
+const TIER_ORDER = ['none', 'One-Time', 'Bronze', 'Silver', 'Gold', 'Platinum'];
 
 function getTierForServiceCount(count) {
   if (count >= 4) return 'Platinum';

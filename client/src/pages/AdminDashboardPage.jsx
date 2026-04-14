@@ -15,7 +15,7 @@ function adminFetch(path, opts = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const TIER_COLORS = { Bronze: '#CD7F32', Silver: '#C0C0C0', Gold: '#FDD835', Platinum: '#E5E4E2' };
+const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#C0C0C0', Bronze: '#CD7F32', 'One-Time': '#0ea5e9' };
 
 function StatCard({ label, value, color, sub }) {
   return (
@@ -111,8 +111,9 @@ function CustomersView() {
           <select value={tierFilter} onChange={e => setTierFilter(e.target.value)}
             style={{ padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.bg, color: D.white, fontSize: 13, fontFamily: FONTS.body, flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
             <option value="">All Tiers</option>
-            <option value="Bronze">Bronze</option><option value="Silver">Silver</option>
-            <option value="Gold">Gold</option><option value="Platinum">Platinum</option>
+            <option value="Platinum">Platinum</option><option value="Gold">Gold</option>
+            <option value="Silver">Silver</option><option value="Bronze">Bronze</option>
+            <option value="One-Time">One-Time</option>
           </select>
         </div>
 

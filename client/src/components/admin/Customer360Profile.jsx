@@ -32,7 +32,7 @@ function fmtDate(d) {
 
 function fmtCurrency(v) { return '$' + parseFloat(v || 0).toFixed(2); }
 
-const TIER_COLORS = { Gold: D.amber, Silver: '#94a3b8', Bronze: '#cd7f32', Platinum: '#a855f7' };
+const TIER_COLORS = { Platinum: '#a855f7', Gold: D.amber, Silver: '#94a3b8', Bronze: '#cd7f32', 'One-Time': '#0ea5e9' };
 const STAGE_LABELS = { new_lead: 'New Lead', contacted: 'Contacted', estimate_sent: 'Est. Sent', estimate_viewed: 'Est. Viewed', follow_up: 'Follow Up', won: 'Won', active_customer: 'Active', at_risk: 'At Risk', churned: 'Churned', lost: 'Lost', dormant: 'Dormant' };
 
 // --- Health Score Circle ---
@@ -85,7 +85,7 @@ function RadarChart({ data }) {
 
 // --- Badge helpers ---
 function TierBadge({ tier }) {
-  if (!tier) return null;
+  if (!tier) return <span style={{ padding: '2px 8px', borderRadius: 9999, fontSize: 10, fontWeight: 700, border: `1px solid ${D.muted}`, color: D.muted, letterSpacing: 0.5, textTransform: 'uppercase' }}>No Plan</span>;
   const color = TIER_COLORS[tier] || D.muted;
   return <span style={{ padding: '2px 8px', borderRadius: 9999, fontSize: 10, fontWeight: 700, border: `1px solid ${color}`, color, letterSpacing: 0.5, textTransform: 'uppercase' }}>{tier}</span>;
 }

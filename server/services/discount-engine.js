@@ -22,7 +22,7 @@ async function getTierDiscountsFromDB() {
     return map;
   } catch (err) {
     logger.warn(`[discount-engine] DB lookup failed, using fallback: ${err.message}`);
-    return { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+    return { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
   }
 }
 

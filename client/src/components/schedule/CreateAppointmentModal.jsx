@@ -19,7 +19,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const TIER_COLORS = { Bronze: '#CD7F32', Silver: '#90CAF9', Gold: '#FDD835', Platinum: '#E5E4E2' };
+const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0ea5e9' };
 
 // All services default 1hr / $0 unless noted. WaveGuard Membership = 0hr.
 const S = (name, dur = 60, pMin = 0, pMax = 0) => ({ name, duration: dur, priceMin: pMin, priceMax: pMax });

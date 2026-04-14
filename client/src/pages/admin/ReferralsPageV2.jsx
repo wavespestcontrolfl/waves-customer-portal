@@ -485,10 +485,11 @@ export default function ReferralsPageV2() {
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>WaveGuard Tier</div>
                 <select value={convertModal.tier} onChange={e => setConvertModal(m => ({ ...m, tier: e.target.value }))} style={{ ...inputSt, appearance: 'auto' }}>
                   <option value="">Select tier...</option>
-                  <option value="bronze">Bronze</option>
-                  <option value="silver">Silver</option>
-                  <option value="gold">Gold</option>
-                  <option value="platinum">Platinum</option>
+                  <option value="Platinum">Platinum</option>
+                  <option value="Gold">Gold</option>
+                  <option value="Silver">Silver</option>
+                  <option value="Bronze">Bronze</option>
+                  <option value="One-Time">One-Time</option>
                 </select>
               </div>
               <div>

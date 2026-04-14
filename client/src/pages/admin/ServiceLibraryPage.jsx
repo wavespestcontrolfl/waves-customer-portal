@@ -30,7 +30,7 @@ const BILLING_TYPES = [
 
 const catColors = { pest_control: '#0ea5e9', lawn_care: '#10b981', mosquito: '#6366f1', termite: '#dc2626', rodent: '#78716c', tree_shrub: '#059669', inspection: '#f59e0b', specialty: '#8b5cf6', other: '#64748b' };
 const billingColors = { recurring: '#0ea5e9', one_time: '#f59e0b', free: '#64748b' };
-const tierColors = { Bronze: '#cd7f32', Silver: '#94a3b8', Gold: '#f59e0b', Platinum: '#a78bfa' };
+const tierColors = { Platinum: '#a78bfa', Gold: '#f59e0b', Silver: '#94a3b8', Bronze: '#cd7f32', 'One-Time': '#0ea5e9' };
 
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16 };
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box', width: '100%' };

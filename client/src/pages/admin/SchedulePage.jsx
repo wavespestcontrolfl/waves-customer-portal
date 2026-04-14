@@ -27,10 +27,11 @@ const STATUS_CONFIG = {
 };
 
 const TIER_COLORS = {
-  Bronze:   { bg: '#CD7F32', text: '#fff' },
-  Silver:   { bg: '#90CAF9', text: '#0f1923' },
-  Gold:     { bg: '#FDD835', text: '#0f1923' },
   Platinum: { bg: '#E5E4E2', text: '#0f1923' },
+  Gold:     { bg: '#FDD835', text: '#0f1923' },
+  Silver:   { bg: '#90CAF9', text: '#0f1923' },
+  Bronze:   { bg: '#CD7F32', text: '#fff' },
+  'One-Time': { bg: '#0ea5e9', text: '#fff' },
 };
 
 const CHIP_ACTIONS = [
@@ -181,7 +182,7 @@ function StatusBadge({ status }) {
 /* ── Tier Badge ───────────────────────────────────────── */
 
 function TierBadge({ tier }) {
-  if (!tier) return null;
+  if (!tier) return <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 700, background: '#334155', color: '#94a3b8', marginLeft: 8, verticalAlign: 'middle' }}>NO PLAN</span>;
   const c = TIER_COLORS[tier] || TIER_COLORS.Bronze;
   return (
     <span style={{

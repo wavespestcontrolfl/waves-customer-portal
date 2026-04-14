@@ -171,7 +171,7 @@ export default function DiscountsPage() {
             </div>
             <label style={{ color: D.muted, fontSize: 11 }}>Requires WaveGuard Tier
               <select style={sInput} value={form.requires_waveguard_tier} onChange={e => upd('requires_waveguard_tier', e.target.value)}>
-                <option value="">Any / None</option><option>Bronze</option><option>Silver</option><option>Gold</option><option>Platinum</option>
+                <option value="">Any / None</option><option>Platinum</option><option>Gold</option><option>Silver</option><option>Bronze</option><option>One-Time</option>
               </select>
             </label>
             <label style={{ color: D.muted, fontSize: 11 }}>Min Subtotal ($)<input type="number" style={sInput} value={form.min_subtotal} onChange={e => upd('min_subtotal', e.target.value)} /></label>
