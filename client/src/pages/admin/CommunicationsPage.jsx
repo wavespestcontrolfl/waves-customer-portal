@@ -1487,7 +1487,7 @@ export default function CommunicationsPage() {
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Calls' }, { key: 'templates', label: 'SMS Templates' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
-          <button key={t.key} onClick={() => setCommsTab(t.key)} style={{
+          <button key={t.key} onClick={() => { setCommsTab(t.key); if (t.key === 'sms') { setSmsView('threads'); setActiveThread(null); } }} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
             color: commsTab === t.key ? D.white : D.muted,
@@ -1591,6 +1591,19 @@ export default function CommunicationsPage() {
               ))}
             </div>
           )}
+
+          {/* Recent message from customer */}
+          {activeThread && (() => {
+            const lastInbound = activeThread.messages.find(m => m.direction === 'inbound');
+            if (!lastInbound) return null;
+            return (
+              <div style={{ marginBottom: 12, padding: '10px 12px', background: D.bg, borderRadius: 8, border: `1px solid ${D.border}` }}>
+                <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Last message from customer</div>
+                <div style={{ fontSize: 13, color: D.text, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{lastInbound.body}</div>
+                <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>{formatTimestamp(lastInbound.createdAt)}</div>
+              </div>
+            );
+          })()}
 
           <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>Message</label>
           <textarea
@@ -1725,7 +1738,7 @@ export default function CommunicationsPage() {
                 return (
                   <div
                     key={i}
-                    onClick={() => { setActiveThread(t); setSmsView('conversation'); }}
+                    onClick={() => { setActiveThread(t); setSmsView('conversation'); setToNumber(t.contactPhone); if (t.ourNumber) setFromNumber(t.ourNumber); }}
                     style={{
                       padding: '12px 14px', borderBottom: `1px solid ${D.border}`, cursor: 'pointer',
                       display: 'flex', alignItems: 'center', gap: 12,
