@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import Customer360Profile from '../../components/admin/Customer360Profile';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -588,6 +588,220 @@ function CustomerTimeline({ customerId }) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// CUSTOMER MAP — Interactive Google Maps with customer pins
+// ═══════════════════════════════════════════════════════════════════
+const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+const TIER_PIN_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32' };
+const STAGE_PIN_COLORS = { active_customer: '#10b981', won: '#10b981', new_lead: '#0ea5e9', contacted: '#0ea5e9', estimate_sent: '#f59e0b', at_risk: '#ef4444', churned: '#ef4444' };
+
+function CustomerMap({ customers, onSelect }) {
+  const mapRef = useRef(null);
+  const mapInstance = useRef(null);
+  const markersRef = useRef([]);
+  const [mapReady, setMapReady] = useState(false);
+  const [filterTier, setFilterTier] = useState('all');
+  const [filterStage, setFilterStage] = useState('all');
+  const [stats, setStats] = useState({ total: 0, mapped: 0, unmapped: 0 });
+  const [selectedPin, setSelectedPin] = useState(null);
+
+  // Load Google Maps script
+  useEffect(() => {
+    if (window.google?.maps) { setMapReady(true); return; }
+    if (!MAPS_KEY) return;
+    if (document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')) { setMapReady(true); return; }
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${MAPS_KEY}&libraries=places,marker&loading=async`;
+    script.async = true;
+    script.onload = () => setMapReady(true);
+    document.head.appendChild(script);
+  }, []);
+
+  // Filter customers
+  const filtered = useMemo(() => {
+    return customers.filter(c => {
+      if (filterTier !== 'all' && (c.tier || null) !== (filterTier === 'none' ? null : filterTier)) return false;
+      if (filterStage !== 'all' && c.pipelineStage !== filterStage) return false;
+      return true;
+    });
+  }, [customers, filterTier, filterStage]);
+
+  // Build map + markers
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || !window.google?.maps) return;
+
+    // Init map centered on Bradenton/LWR area
+    if (!mapInstance.current) {
+      mapInstance.current = new window.google.maps.Map(mapRef.current, {
+        center: { lat: 27.45, lng: -82.45 },
+        zoom: 10,
+        mapTypeId: 'roadmap',
+        styles: [
+          { elementType: 'geometry', stylers: [{ color: '#1a2332' }] },
+          { elementType: 'labels.text.stroke', stylers: [{ color: '#1a2332' }] },
+          { elementType: 'labels.text.fill', stylers: [{ color: '#8ec3e8' }] },
+          { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#2c3e50' }] },
+          { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0e1926' }] },
+          { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+        ],
+      });
+    }
+
+    // Clear old markers
+    markersRef.current.forEach(m => m.setMap(null));
+    markersRef.current = [];
+
+    // Geocode + place markers
+    const geocoder = new window.google.maps.Geocoder();
+    let mapped = 0, unmapped = 0;
+    const bounds = new window.google.maps.LatLngBounds();
+    const infoWindow = new window.google.maps.InfoWindow();
+
+    const mappable = filtered.filter(c => c.address || c.city);
+
+    mappable.forEach((c, idx) => {
+      const address = [c.address, c.city, c.state, c.zip].filter(Boolean).join(', ');
+      if (!address || address.replace(/,\s*/g, '').length < 5) { unmapped++; return; }
+
+      // Use lat/lng if available, otherwise geocode
+      if (c.lat && c.lng) {
+        placeMarker(c, { lat: parseFloat(c.lat), lng: parseFloat(c.lng) });
+        mapped++;
+        bounds.extend({ lat: parseFloat(c.lat), lng: parseFloat(c.lng) });
+      } else if (idx < 200) { // limit geocoding to 200 to avoid quota
+        geocoder.geocode({ address: address + ', FL' }, (results, status) => {
+          if (status === 'OK' && results[0]) {
+            const pos = results[0].geometry.location;
+            placeMarker(c, pos);
+            bounds.extend(pos);
+            if (mapped + unmapped >= Math.min(mappable.length, 200)) {
+              mapInstance.current.fitBounds(bounds, 50);
+            }
+          }
+        });
+        mapped++;
+      } else { unmapped++; }
+    });
+
+    function placeMarker(c, position) {
+      const color = TIER_PIN_COLORS[c.tier] || STAGE_PIN_COLORS[c.pipelineStage] || '#0ea5e9';
+      const marker = new window.google.maps.Marker({
+        position, map: mapInstance.current,
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 8, fillColor: color, fillOpacity: 0.9,
+          strokeColor: '#fff', strokeWeight: 2,
+        },
+        title: `${c.firstName} ${c.lastName}`,
+      });
+
+      marker.addListener('click', () => {
+        setSelectedPin(c);
+        infoWindow.setContent(`
+          <div style="font-family:DM Sans,sans-serif;min-width:200px;color:#1e293b">
+            <div style="font-weight:700;font-size:14px;margin-bottom:4px">${c.firstName} ${c.lastName}</div>
+            <div style="font-size:12px;color:#64748b">${c.address || ''} ${c.city || ''}</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px">${c.phone || ''}</div>
+            ${c.tier ? `<div style="font-size:11px;margin-top:4px;color:${color};font-weight:600">WaveGuard ${c.tier}</div>` : ''}
+            <div style="font-size:11px;color:#94a3b8;margin-top:2px">${c.pipelineStage ? c.pipelineStage.replace(/_/g, ' ') : 'No stage'}</div>
+          </div>
+        `);
+        infoWindow.open(mapInstance.current, marker);
+      });
+
+      markersRef.current.push(marker);
+    }
+
+    unmapped += filtered.length - mappable.length;
+    setStats({ total: filtered.length, mapped, unmapped });
+
+    if (mapped > 0) {
+      setTimeout(() => {
+        if (bounds.getNorthEast().equals(bounds.getSouthWest())) {
+          mapInstance.current.setCenter(bounds.getCenter());
+          mapInstance.current.setZoom(14);
+        } else {
+          mapInstance.current.fitBounds(bounds, 50);
+        }
+      }, 1500);
+    }
+  }, [mapReady, filtered]);
+
+  if (!MAPS_KEY) {
+    return (
+      <div style={{ background: D.card, borderRadius: 12, padding: 40, textAlign: 'center', border: `1px solid ${D.border}` }}>
+        <div style={{ fontSize: 32, marginBottom: 12 }}>🗺️</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 4 }}>Google Maps API Key Required</div>
+        <div style={{ fontSize: 13, color: D.muted }}>Set VITE_GOOGLE_MAPS_API_KEY in your environment to enable the customer map.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {/* Filter bar */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        <select value={filterTier} onChange={e => setFilterTier(e.target.value)} style={{ padding: '6px 10px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12 }}>
+          <option value="all">All Tiers</option>
+          <option value="Platinum">Platinum</option>
+          <option value="Gold">Gold</option>
+          <option value="Silver">Silver</option>
+          <option value="Bronze">Bronze</option>
+          <option value="none">No Plan</option>
+        </select>
+        <select value={filterStage} onChange={e => setFilterStage(e.target.value)} style={{ padding: '6px 10px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12 }}>
+          <option value="all">All Stages</option>
+          <option value="active_customer">Active</option>
+          <option value="new_lead">New Lead</option>
+          <option value="estimate_sent">Estimate Sent</option>
+          <option value="at_risk">At Risk</option>
+          <option value="churned">Churned</option>
+        </select>
+        <div style={{ fontSize: 12, color: D.muted }}>
+          {stats.mapped} mapped · {stats.unmapped} no address
+        </div>
+
+        {/* Legend */}
+        <div style={{ display: 'flex', gap: 10, marginLeft: 'auto', fontSize: 11, color: D.muted }}>
+          {Object.entries(TIER_PIN_COLORS).map(([tier, color]) => (
+            <span key={tier} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ width: 10, height: 10, borderRadius: '50%', background: color, border: '1px solid #fff3' }} />
+              {tier}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Map container */}
+      <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', border: `1px solid ${D.border}` }}>
+        <div ref={mapRef} style={{ width: '100%', height: 600 }} />
+
+        {/* Selected customer card */}
+        {selectedPin && (
+          <div style={{
+            position: 'absolute', bottom: 16, left: 16, right: 16, maxWidth: 360,
+            background: D.card, borderRadius: 12, padding: 16,
+            border: `1px solid ${D.border}`, boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: D.white }}>{selectedPin.firstName} {selectedPin.lastName}</div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{selectedPin.address} {selectedPin.city}</div>
+                <div style={{ fontSize: 12, color: D.muted }}>{selectedPin.phone}</div>
+                {selectedPin.tier && <div style={{ fontSize: 11, color: TIER_PIN_COLORS[selectedPin.tier] || D.teal, fontWeight: 600, marginTop: 4 }}>WaveGuard {selectedPin.tier}</div>}
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button onClick={() => onSelect(selectedPin)} style={{ padding: '6px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>View</button>
+                <button onClick={() => setSelectedPin(null)} style={{ padding: '6px 8px', background: 'transparent', color: D.muted, border: `1px solid ${D.border}`, borderRadius: 6, fontSize: 14, cursor: 'pointer' }}>✕</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function CustomersPage() {
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
@@ -828,6 +1042,7 @@ export default function CustomersPage() {
           }}>
             {[
               { key: 'directory', label: '\ud83d\udccb Directory' },
+              { key: 'map', label: '\ud83d\uddfa Map' },
               { key: 'pipeline', label: '\ud83d\udd00 Pipeline' },
               { key: 'intelligence', label: '\ud83e\udd16 AI Advisor' },
             ].map(v => (
@@ -1110,6 +1325,9 @@ export default function CustomersPage() {
           )}
         </>
       )}
+
+      {/* ====================== MAP VIEW ====================== */}
+      {view === 'map' && <CustomerMap customers={customers} onSelect={(c) => { setSelectedCustomer(c); setShowProfile(true); }} />}
 
       {/* ====================== PIPELINE VIEW ====================== */}
       {view === 'pipeline' && (
