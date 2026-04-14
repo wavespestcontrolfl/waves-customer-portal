@@ -711,16 +711,7 @@ function CustomerMap({ customers, onSelect }) {
 
       marker.addListener('click', () => {
         setSelectedPin(c);
-        infoWindow.setContent(`
-          <div style="font-family:DM Sans,sans-serif;min-width:200px;color:#1e293b">
-            <div style="font-weight:700;font-size:14px;margin-bottom:4px">${c.firstName} ${c.lastName}</div>
-            <div style="font-size:12px;color:#64748b">${c.address || ''} ${c.city || ''}</div>
-            <div style="font-size:12px;color:#64748b;margin-top:2px">${c.phone || ''}</div>
-            ${c.tier ? `<div style="font-size:11px;margin-top:4px;color:${color};font-weight:600">WaveGuard ${c.tier}</div>` : ''}
-            <div style="font-size:11px;color:#94a3b8;margin-top:2px">${c.pipelineStage ? c.pipelineStage.replace(/_/g, ' ') : 'No stage'}</div>
-          </div>
-        `);
-        infoWindow.open(mapInstance.current, marker);
+        infoWindow.close();
       });
 
       markersRef.current.push(marker);
@@ -775,7 +766,7 @@ function CustomerMap({ customers, onSelect }) {
     <div>
       {/* Filter bar */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <select value={filterTier} onChange={e => setFilterTier(e.target.value)} style={{ padding: '6px 10px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12 }}>
+        <select value={filterTier} onChange={e => setFilterTier(e.target.value)} style={{ padding: '6px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12 }}>
           <option value="all">All Tiers</option>
           <option value="Platinum">Platinum</option>
           <option value="Gold">Gold</option>
@@ -784,7 +775,7 @@ function CustomerMap({ customers, onSelect }) {
           <option value="One-Time">One-Time</option>
           <option value="none">No Plan</option>
         </select>
-        <select value={filterStage} onChange={e => setFilterStage(e.target.value)} style={{ padding: '6px 10px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12 }}>
+        <select value={filterStage} onChange={e => setFilterStage(e.target.value)} style={{ padding: '6px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12 }}>
           <option value="all">All Stages</option>
           <option value="active_customer">Active</option>
           <option value="new_lead">New Lead</option>
@@ -1364,7 +1355,7 @@ export default function CustomersPage() {
       )}
 
       {/* ====================== MAP VIEW ====================== */}
-      {view === 'map' && <CustomerMap customers={customers} onSelect={(c) => { setSelectedCustomer(c); setShowProfile(true); }} />}
+      {view === 'map' && <CustomerMap customers={customers} onSelect={(c) => setSelected360Id(c.id)} />}
 
       {/* ====================== PIPELINE VIEW ====================== */}
       {view === 'pipeline' && (
