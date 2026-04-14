@@ -123,20 +123,36 @@ class BalanceReminder {
         .where('created_at', '>', new Date(Date.now() - 7 * 86400000)).first();
       if (sentRecently) continue;
 
-      const amt = balance.totalBalance.toFixed(2);
       const link = balance.oldestInvoiceUrl;
+
+      // Get oldest unpaid invoice for title and service date
+      const oldestInvoice = await db('invoices')
+        .where({ customer_id: customer.id })
+        .whereIn('status', ['sent', 'overdue', 'unpaid'])
+        .orderBy('created_at', 'asc')
+        .first();
+      const invoiceTitle = oldestInvoice?.title || oldestInvoice?.service_type || 'your service';
+      let completedOn = '';
+      if (oldestInvoice?.service_date) {
+        try {
+          completedOn = new Date(oldestInvoice.service_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+        } catch { completedOn = ''; }
+      }
+      const dateClause = completedOn ? ` completed on ${completedOn}` : '';
+
       let message;
 
       if (balance.daysOverdue >= 7 && balance.daysOverdue < 14 && count === 0) {
-        message = `Hi ${customer.first_name}! Friendly reminder from Waves — you have a balance of $${amt} that's a few days past due. Tap to pay: ${link}\n\nAlready paid? Disregard! — Waves`;
+        message = `Hello ${customer.first_name}! This is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 7 days overdue.\n\nPlease make your payment here: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
       } else if (balance.daysOverdue >= 14 && balance.daysOverdue < 30 && count <= 1) {
-        message = `${customer.first_name}, your Waves balance of $${amt} is ${balance.daysOverdue} days past due. Please take care of it: ${link}\n\nIssue? Just reply. — Waves`;
-      } else if (balance.daysOverdue >= 30 && balance.daysOverdue < 45 && count <= 2) {
-        message = `${customer.first_name}, your balance of $${amt} is 30+ days past due. To keep your WaveGuard ${customer.waveguard_tier} active: ${link}\n\nNeed a payment plan? Reply. — Adam, Waves`;
-      } else if (balance.daysOverdue >= 45 && balance.daysOverdue < 60 && count <= 3) {
-        message = `${customer.first_name}, your Waves account is significantly past due ($${amt}, ${balance.daysOverdue} days). Service may pause after 60 days. Pay now: ${link}\n\nReply or call to discuss. — Adam`;
-      } else if (balance.daysOverdue >= 60 && count <= 4) {
-        message = `${customer.first_name}, final notice — $${amt} outstanding. Service paused due to balance. Pay to reactivate: ${link}\n\nCall (941) 318-7612. — Adam`;
+        message = `Hello ${customer.first_name}, this is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 14 days overdue.\n\nPlease make your payment as soon as possible at: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+      } else if (balance.daysOverdue >= 30 && balance.daysOverdue < 60 && count <= 2) {
+        message = `Hello ${customer.first_name}, this is a final reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 30 days overdue.\n\nPlease make your payment immediately at: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+      } else if (balance.daysOverdue >= 60 && balance.daysOverdue < 90 && count <= 3) {
+        message = `Hello ${customer.first_name}, this is an urgent notice from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 60 days overdue.\n\nPlease make payment or contact us immediately to avoid further action: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        await db('customers').where({ id: customer.id }).update({ pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date() });
+      } else if (balance.daysOverdue >= 90 && count <= 4) {
+        message = `Hello ${customer.first_name}, your invoice from Waves for ${invoiceTitle}${dateClause} is now 90 days overdue.\n\nFinal notice: This account will be sent to collections if payment is not received today. Please pay now: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
         await db('customers').where({ id: customer.id }).update({ pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date() });
       } else continue;
 

@@ -109,16 +109,23 @@ const LatePaymentService = {
       const customerPhone = customer?.phone || phone;
       if (!customerPhone) { skipped++; continue; }
 
-      // Send SMS
+      // Send SMS — tiered by days overdue
       try {
-        const body = `Hello ${firstName || customer?.first_name || 'there'}! This is a reminder from Waves. ` +
-          `Your invoice for ${invoiceTitle}` +
-          (formattedDate ? ` completed on ${formattedDate}` : '') +
-          ` is now ${daysSince} days overdue.\n\n` +
-          (totalAmount > 0 ? `Amount due: $${totalAmount.toFixed(2)}\n` : '') +
-          (publicUrl ? `\nPay here: ${publicUrl}\n` : '') +
-          `\nPlease reach out if you have questions — reply here or call (941) 318-7612.\n\n` +
-          `— Waves Pest Control 🌊`;
+        const name = firstName || customer?.first_name || 'there';
+        const dateClause = formattedDate ? ` completed on ${formattedDate}` : '';
+        let body;
+
+        if (daysSince < 14) {
+          body = `Hello ${name}! This is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 7 days overdue.\n\nPlease make your payment here: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        } else if (daysSince < 30) {
+          body = `Hello ${name}, this is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 14 days overdue.\n\nPlease make your payment as soon as possible at: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        } else if (daysSince < 60) {
+          body = `Hello ${name}, this is a final reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 30 days overdue.\n\nPlease make your payment immediately at: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        } else if (daysSince < 90) {
+          body = `Hello ${name}, this is an urgent notice from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 60 days overdue.\n\nPlease make payment or contact us immediately to avoid further action: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        } else {
+          body = `Hello ${name}, your invoice from Waves for ${invoiceTitle}${dateClause} is now 90 days overdue.\n\nFinal notice: This account will be sent to collections if payment is not received today. Please pay now: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        }
 
         await TwilioService.sendSMS(customerPhone, body);
         notified++;
