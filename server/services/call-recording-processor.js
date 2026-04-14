@@ -366,6 +366,31 @@ const CallRecordingProcessor = {
       }).catch(() => {});
     }
 
+    // Step 8: CSR Coach scoring — auto-score every transcribed call
+    let csrScoreResult = null;
+    if (transcript && transcript.length > 50) {
+      try {
+        const CSRCoach = require('./csr/csr-coach');
+        const scoreResult = await CSRCoach.scoreCall({
+          csrName: 'Adam',
+          customerId: customerId || null,
+          callDirection: 'inbound',
+          callSource: call.to_phone || 'unknown',
+          transcript,
+          metadata: {
+            callSid,
+            duration: call.duration_seconds,
+            service: extracted.matched_service || extracted.requested_service,
+            sentiment: extracted.sentiment,
+          },
+        });
+        csrScoreResult = { score: scoreResult?.score?.total_score, outcome: scoreResult?.score?.call_outcome };
+        logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
+      } catch (err) {
+        logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);
+      }
+    }
+
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
 
     return {
