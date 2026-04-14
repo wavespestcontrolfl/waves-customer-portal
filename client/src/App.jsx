@@ -160,7 +160,7 @@ export default function App() {
             <Route path="leads" element={<Navigate to="/admin/estimates" replace />} />
             <Route path="fleet" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading fleet...</div>}><EquipmentMaintenancePage /></Suspense>} />
             <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
-            <Route path="discounts" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading discounts...</div>}><DiscountsPage /></Suspense>} />
+            <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
             <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
             <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />

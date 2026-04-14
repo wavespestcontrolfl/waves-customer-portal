@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { DiscountsSection } from './DiscountsTabs';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
@@ -295,7 +297,8 @@ export default function ServiceLibraryPage() {
   const [expandedId, setExpandedId] = useState(null);
   const [showNew, setShowNew] = useState(false);
   const [toast, setToast] = useState('');
-  const [tab, setTab] = useState('catalog');
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState(searchParams.get('tab') || 'catalog');
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
@@ -347,6 +350,7 @@ export default function ServiceLibraryPage() {
   const tabs = [
     { key: 'catalog', label: 'Service Catalog' },
     { key: 'packages', label: 'WaveGuard Packages' },
+    { key: 'discounts', label: 'Discounts' },
   ];
 
   return (
@@ -441,6 +445,9 @@ export default function ServiceLibraryPage() {
           )}
         </>
       )}
+
+      {/* === DISCOUNTS TAB === */}
+      {tab === 'discounts' && <DiscountsSection />}
     </div>
   );
 }
