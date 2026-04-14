@@ -744,7 +744,7 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'weather', label: 'Spray Check', prompt: 'Can I spray right now? Check wind and rain.', icon: '🌤️' },
       { id: 'remaining', label: 'How Many Left?', prompt: 'How many stops do I have left today?', icon: '📊' },
       { id: 'protocol', label: 'Pest Protocol', prompt: 'What products and rates for quarterly pest control?', icon: '📖' },
-      { id: 'lawn_protocol', label: 'Lawn Protocol', prompt: 'Lawn care protocol for St. Augustine Track A', icon: '🌿' },
+      { id: 'lawn_protocol', label: 'Lawn Protocol', prompt: 'Lawn care protocol for St. Augustine', icon: '🌿' },
     ] });
   } else if (context === 'reviews') {
     res.json({ actions: [

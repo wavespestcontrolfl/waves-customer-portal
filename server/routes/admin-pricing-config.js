@@ -24,7 +24,7 @@ async function ensureTable() {
       { config_key: 'pest_property_type', name: 'Pest Property Type', category: 'pest', sort_order: 4, data: JSON.stringify({ single_family:0,townhome_end:-8,townhome_interior:-15,duplex:-10,condo_ground:-20,condo_upper:-25 }) },
       { config_key: 'waveguard_tiers', name: 'WaveGuard Bundle Discounts', category: 'waveguard', sort_order: 10, data: JSON.stringify({ bronze:{min_services:1,discount:0},silver:{min_services:2,discount:0.10},gold:{min_services:3,discount:0.15},platinum:{min_services:4,discount:0.20} }) },
       { config_key: 'waveguard_membership', name: 'WaveGuard Membership Fee', category: 'waveguard', sort_order: 11, data: JSON.stringify({ fee:99, waived_with_prepay:true }) },
-      { config_key: 'lawn_track_a', name: 'Track A — St. Augustine Full Sun', category: 'lawn', sort_order: 20, data: JSON.stringify([[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]]) },
+      { config_key: 'lawn_st_augustine', name: 'St. Augustine', category: 'lawn', sort_order: 20, data: JSON.stringify([[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]]) },
     ];
     for (const c of configs) { await db('pricing_config').insert(c).onConflict('config_key').ignore(); }
   }

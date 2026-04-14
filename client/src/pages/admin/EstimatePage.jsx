@@ -217,7 +217,7 @@ function EstimateToolView() {
     nearWater: 'NO', urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
     bedArea: '', palmCount: '', treeCount: '',
     roachModifier: 'NONE', pestFreq: '4', plugArea: '', plugSpacing: '12',
-    grassType: 'A',
+    grassType: 'st_augustine',
     otLawnType: 'FERT',
     exclSimple: '0', exclModerate: '0', exclAdvanced: '0', exclWaive: 'NO',
     bedbugRooms: '1', bedbugMethod: 'BOTH',
@@ -537,7 +537,7 @@ function EstimateToolView() {
         if (form.svcExclusion) selectedServices.push('EXCLUSION');
 
         const options = {
-          grassType: form.grassType || 'A',
+          grassType: form.grassType || 'st_augustine',
           pestFreq: parseInt(form.pestFreq) || 4,
           roachModifier: form.roachModifier || 'NONE',
           urgency: form.urgency || 'ROUTINE',
@@ -885,11 +885,10 @@ function EstimateToolView() {
               <div style={sSubOpts}>
                 <Field label="Grass Type / Track">
                   <Select k="grassType" options={[
-                    { value: 'A', label: 'Track A: St. Augustine — Full Sun' },
-                    { value: 'B', label: 'Track B: St. Augustine — Shade' },
-                    { value: 'C1', label: 'Track C: Bermuda' },
-                    { value: 'C2', label: 'Track C: Zoysia' },
-                    { value: 'D', label: 'Track D: Bahia' },
+                    { value: 'st_augustine', label: 'St. Augustine' },
+                    { value: 'bermuda', label: 'Bermuda' },
+                    { value: 'zoysia', label: 'Zoysia' },
+                    { value: 'bahia', label: 'Bahia' },
                   ]} />
                 </Field>
               </div>

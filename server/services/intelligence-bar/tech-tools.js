@@ -63,7 +63,7 @@ Use for: "what's the label rate for Demand CS?", "mixing ratio for Bifen IT", "w
   {
     name: 'get_protocol',
     description: `Get the treatment protocol for a service type. Shows which products to use, application rates, order of operations, and seasonal adjustments.
-Use for: "what's the protocol for quarterly pest?", "lawn care protocol for St. Augustine Track A?", "mosquito barrier treatment steps"`,
+Use for: "what's the protocol for quarterly pest?", "lawn care protocol for St. Augustine?", "mosquito barrier treatment steps"`,
     input_schema: {
       type: 'object',
       properties: {

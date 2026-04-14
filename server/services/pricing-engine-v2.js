@@ -26,7 +26,7 @@ const ADMIN_ANNUAL = 51;  // annual admin overhead per service
 // ─────────────────────────────────────────────
 async function calculateEstimate(profile, selectedServices, options = {}) {
   const {
-    grassType = 'A',
+    grassType: _grassType = 'st_augustine',
     pestFreq = 4,
     roachModifier = 'NONE',
     urgency = 'ROUTINE',
@@ -71,6 +71,10 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
 
   const p = profile; // shorthand
   const mods = p.modifiers || {};
+
+  // Backward compat: map old track letters to new keys
+  const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
+  const grassType = TRACK_MAP[_grassType] || _grassType || 'st_augustine';
 
   // Zone-based drive time adjustment
   const zoneMultipliers = { A: 1.0, B: 1.05, C: 1.10, UNKNOWN: 1.05 };
@@ -457,14 +461,13 @@ function interpolate(v, breakpoints) {
 function calcLawn(turfSf, grassType, p) {
   // Pricing lookup from Lawn_Pricing_v4_TimeScaled.xlsx
   const LAWN_PRICES = {
-    A: { name: 'St. Aug Sun', pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
-    B: { name: 'St. Aug Shade', pts: [[0,35,45,55,65],[3500,35,45,55,65],[4000,35,45,55,70],[5000,35,45,56,80],[6000,35,45,63,91],[7000,36,48,70,101],[8000,39,52,76,111],[10000,45,60,89,131],[12000,51,68,102,152],[15000,59,81,122,183],[20000,74,101,155,234]] },
-    C1: { name: 'Bermuda', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
-    C2: { name: 'Zoysia', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
-    D: { name: 'Bahia', pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] }
+    st_augustine: { name: 'St. Augustine', pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
+    bermuda: { name: 'Bermuda', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
+    zoysia: { name: 'Zoysia', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
+    bahia: { name: 'Bahia', pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] }
   };
 
-  const lp = LAWN_PRICES[grassType] || LAWN_PRICES.A;
+  const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
 
   function lawnLookup(sf, freqIdx) {
     const pts = lp.pts;
@@ -675,9 +678,10 @@ function calcTreeShrub(bedArea, p) {
     return pts[pts.length - 1][fi + 1];
   }
 
-  // Palm injection add-on
+  // Palm injection add-on — combo pricing ($55/palm default for estimates)
   const injectionPalms = Math.max(1, Math.round(palmCount * 0.40));
-  const injPerVisit = Math.max(75, injectionPalms * 35);
+  const palmPerApp = 55;
+  const injPerVisit = Math.max(75, injectionPalms * palmPerApp);
   const injAnn = injPerVisit * 2;
   const injMo = Math.round(injAnn / 12 * 100) / 100;
 
@@ -787,8 +791,8 @@ function calcTermiteBait(footprint, p, mods) {
   // ── NEW: Foundation adjustment ──
   const foundAdj = mods.termiteFoundationAdj || 0;
 
-  const advanceInstall = Math.round((stations * 14 + stations * 5.25 + stations * 0.75) * 1.45 * conMult) + foundAdj;
-  const trelonaInstall = Math.round((stations * 24 + stations * 5.25 + stations * 0.75) * 1.45 * conMult) + foundAdj;
+  const advanceInstall = Math.round((stations * 14 + stations * 5.25 + stations * 0.75) * 1.75 * conMult) + foundAdj;
+  const trelonaInstall = Math.round((stations * 24 + stations * 5.25 + stations * 0.75) * 1.75 * conMult) + foundAdj;
 
   return {
     service: 'Termite Bait Stations',

@@ -125,7 +125,9 @@ export function calculateEstimate(inputs) {
   const plugSpacing = Number(_plugSpacing) || 12;
   const bedbugRooms = Number(_bedbugRooms) || 1;
   const fmPts = Number(_foamPoints) || 5;
-  const grassType = _grassType || 'A';
+  // Backward compat: map old track letters to new keys
+  const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
+  const grassType = TRACK_MAP[_grassType] || _grassType || 'st_augustine';
 
   const LABOR = 35, DRIVE = 20;
   const footprint = homeSqFt > 0 ? Math.round(homeSqFt / stories) : 0;
@@ -283,13 +285,12 @@ export function calculateEstimate(inputs) {
 
     // ── Track-based pricing lookup (from Lawn_Pricing_v4_TimeScaled) ──
     const LAWN_PRICES = {
-      A:  { name: 'St. Aug Sun',   pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
-      B:  { name: 'St. Aug Shade', pts: [[0,35,45,55,65],[3500,35,45,55,65],[4000,35,45,55,70],[5000,35,45,56,80],[6000,35,45,63,91],[7000,36,48,70,101],[8000,39,52,76,111],[10000,45,60,89,131],[12000,51,68,102,152],[15000,59,81,122,183],[20000,74,101,155,234]] },
-      C1: { name: 'Bermuda',       pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
-      C2: { name: 'Zoysia',        pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
-      D:  { name: 'Bahia',         pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] },
+      st_augustine: { name: 'St. Augustine', pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
+      bermuda:      { name: 'Bermuda',       pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
+      zoysia:       { name: 'Zoysia',        pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
+      bahia:        { name: 'Bahia',         pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] },
     };
-    const lp = LAWN_PRICES[grassType] || LAWN_PRICES.A;
+    const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
 
     function lawnLookup(sf, freqIdx) {
       const pts = lp.pts;
@@ -376,8 +377,8 @@ export function calculateEstimate(inputs) {
     const accessMin = accessDifficulty === 'DIFFICULT' ? 15 : accessDifficulty === 'MODERATE' ? 8 : 0;
     const osm = Math.max(25, 20 + Math.round(eb / 500) + Math.round(et * 1.5) + accessMin);
     const lpv = LABOR * ((osm + 10) / 60);
-    // v1.5: material rates benchmarked from SiteOne invoices avg Q1-Q4 2025
-    const mps = { 6: 220.60 / 3500, 9: 364.10 / 3500, 12: 413.60 / 3500 };
+    // v1.6: material rates updated from SiteOne pricing audit (2× higher than original)
+    const mps = { 6: 0.110, 9: 0.190, 12: 0.220 };
     const tst = [
       { n: 'Standard', v: 6, f: 50 },
       { n: 'Enhanced', v: 9, f: 65 },
@@ -413,8 +414,10 @@ export function calculateEstimate(inputs) {
       palmEstimated = true;
       fieldVerify.push('injectable palm count');
     }
-    const inja = ip * 35 * 3, injMo = Math.round(inja / 12 * 100) / 100;
-    R.injection = { palms: ip, ann: inja, mo: injMo, estimated: palmEstimated };
+    // v1.6: palm injection default is combo ($55/palm) for estimates, 3 apps/year
+    const palmPerApp = 55;
+    const inja = ip * palmPerApp * 3, injMo = Math.round(inja / 12 * 100) / 100;
+    R.injection = { palms: ip, ann: inja, mo: injMo, estimated: palmEstimated, pricePerPalm: palmPerApp };
     wgServices.push({ name: 'Palm Injection', mo: injMo });
   }
 
@@ -473,8 +476,8 @@ export function calculateEstimate(inputs) {
     let pm = (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
     const perim = Math.round(4 * Math.sqrt(footprint) * pm);
     const sta = Math.max(8, Math.ceil(perim / 10));
-    const ai = Math.round((sta * 14 + sta * 5.25 + sta * 0.75) * 1.45);
-    const ti = Math.round((sta * 24 + sta * 5.25 + sta * 0.75) * 1.45);
+    const ai = Math.round((sta * 14 + sta * 5.25 + sta * 0.75) * 1.75);
+    const ti = Math.round((sta * 24 + sta * 5.25 + sta * 0.75) * 1.75);
     R.tmBait = { ai, ti, bmo: 35, pmo: 65, perim, sta };
     wgServices.push({ name: 'Termite Bait (Basic)', mo: 35 });
   }

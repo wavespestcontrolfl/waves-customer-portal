@@ -120,8 +120,11 @@ router.get('/programs', async (req, res, next) => {
       return res.json({ program: protocols.tree_shrub });
     }
 
-    if (track && protocols.lawn[track]) {
-      return res.json({ track: protocols.lawn[track] });
+    // Backward compat: map old track letters to new keys
+    const TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
+    const resolvedTrack = TRACK_MAP[track] || track;
+    if (resolvedTrack && protocols.lawn[resolvedTrack]) {
+      return res.json({ track: protocols.lawn[resolvedTrack] });
     }
 
     // Return summary of all tracks
@@ -147,7 +150,9 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
       return res.json({ visit, notes: protocols.tree_shrub.notes });
     }
 
-    const trackData = protocols.lawn[track];
+    const VISIT_TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
+    const resolvedVisitTrack = VISIT_TRACK_MAP[track] || track;
+    const trackData = protocols.lawn[resolvedVisitTrack];
     if (!trackData) return res.status(404).json({ error: 'Track not found' });
 
     const visit = trackData.visits.find(v => v.visit === parseInt(num));
