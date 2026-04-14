@@ -234,6 +234,8 @@ function voiceAgentRoutes(app, httpServer) {
                     first_name: firstName,
                     last_name: lastName,
                     phone: from,
+                    address_line1: '',
+                    city: '', state: 'FL', zip: '',
                     lead_source: leadSource.source || 'cnam_lookup',
                     lead_source_detail: numberConfig?.domain || 'inbound call',
                     pipeline_stage: 'new_lead',

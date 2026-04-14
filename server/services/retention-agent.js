@@ -101,7 +101,7 @@ const RetentionAgent = {
 
     notify('starting', 'Creating retention session...');
 
-    const session = await apiCall('POST', '/sessions', { agent_id: RETENTION_AGENT_ID });
+    const session = await apiCall('POST', '/sessions', { agent: RETENTION_AGENT_ID });
     const sessionId = session.id;
     logger.info(`[retention-agent] Session ${sessionId}`);
 

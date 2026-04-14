@@ -35,7 +35,7 @@ class SeasonalReactivation {
         this.where('last_contact_date', '<', db.raw("NOW() - INTERVAL '30 days'"))
           .orWhereNull('last_contact_date');
       })
-      .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', 'address');
+      .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', 'address_line1 as address');
 
     let sent = 0;
 

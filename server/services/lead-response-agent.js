@@ -127,7 +127,7 @@ const LeadResponseAgent = {
 
     try {
       const session = await apiCall('POST', '/sessions', {
-        agent_id: LEAD_AGENT_ID,
+        agent: LEAD_AGENT_ID,
       });
 
       const sessionId = session.id;

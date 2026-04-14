@@ -67,7 +67,7 @@ const BIAgent = {
 
     notify('starting', 'Creating BI session...');
 
-    const session = await apiCall('POST', '/sessions', { agent_id: BI_AGENT_ID });
+    const session = await apiCall('POST', '/sessions', { agent: BI_AGENT_ID });
     const sessionId = session.id;
     logger.info(`[bi-agent] Session ${sessionId}`);
 

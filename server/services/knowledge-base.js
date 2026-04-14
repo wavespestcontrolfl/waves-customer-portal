@@ -29,6 +29,7 @@ const KnowledgeBaseService = {
   async create({ title, content, category, tags, source, confidence, metadata, status }) {
     const slug = await uniqueSlug(title);
     const [entry] = await db('knowledge_base').insert({
+      path: `kb/${category || 'general'}/${slug}.md`,
       slug,
       title,
       content: content || '',

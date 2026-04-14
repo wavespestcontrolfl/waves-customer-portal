@@ -159,7 +159,7 @@ class ManagedAssistant {
           : '';
 
         const session = await apiCall('POST', '/sessions', {
-          agent_id: MANAGED_AGENT_ID,
+          agent: MANAGED_AGENT_ID,
         });
 
         sessionId = session.id;

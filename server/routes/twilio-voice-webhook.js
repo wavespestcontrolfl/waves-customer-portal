@@ -43,6 +43,7 @@ router.post('/voice', async (req, res) => {
                 first_name: firstName,
                 last_name: lastName,
                 phone: From,
+                address_line1: '', city: '', state: 'FL', zip: '',
                 lead_source: 'twilio_lookup',
                 pipeline_stage: 'new_lead',
                 pipeline_stage_changed_at: new Date(),
