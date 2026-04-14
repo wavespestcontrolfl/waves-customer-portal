@@ -94,7 +94,15 @@ function ConfigCard({ config, onUpdate }) {
 
   // Render nested objects (like WaveGuard tiers)
   const renderValue = (key, val) => {
-    if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+    if (Array.isArray(val)) {
+      return (
+        <div key={key} style={{ marginBottom: 8, paddingLeft: 12, borderLeft: `2px solid ${D.border}` }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: D.teal, marginBottom: 4, textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</div>
+          {renderArray(val)}
+        </div>
+      );
+    }
+    if (typeof val === 'object' && val !== null) {
       return (
         <div key={key} style={{ marginBottom: 8, paddingLeft: 12, borderLeft: `2px solid ${D.border}` }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: D.teal, marginBottom: 4, textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</div>
