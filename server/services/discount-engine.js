@@ -4,6 +4,8 @@ const logger = require('./logger');
 // Cache tier discounts for 5 minutes to avoid repeated DB hits
 let tierCache = null;
 let tierCacheTime = 0;
+let serviceRulesCache = null;
+let serviceRulesCacheTime = 0;
 const TIER_CACHE_TTL = 5 * 60 * 1000;
 
 async function getTierDiscountsFromDB() {
@@ -23,6 +25,21 @@ async function getTierDiscountsFromDB() {
   } catch (err) {
     logger.warn(`[discount-engine] DB lookup failed, using fallback: ${err.message}`);
     return { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+  }
+}
+
+async function getServiceDiscountRules() {
+  const now = Date.now();
+  if (serviceRulesCache && now - serviceRulesCacheTime < TIER_CACHE_TTL) return serviceRulesCache;
+  try {
+    const rows = await db('service_discount_rules').select('*');
+    const map = {};
+    for (const r of rows) map[r.service_key] = r;
+    serviceRulesCache = map;
+    serviceRulesCacheTime = now;
+    return map;
+  } catch {
+    return {}; // table may not exist yet
   }
 }
 
@@ -231,8 +248,82 @@ const DiscountEngine = {
     }
   },
 
+  /**
+   * Apply WaveGuard tier discount with service-specific caps.
+   * Returns the effective discount rate (0.00–0.20).
+   */
+  async applyTierDiscount(tier, serviceKey) {
+    const baseDiscount = await this.getDiscountForTier(tier);
+    if (!serviceKey || baseDiscount === 0) return baseDiscount;
+
+    const rules = await getServiceDiscountRules();
+    const rule = rules[serviceKey];
+    if (!rule) return baseDiscount;
+
+    // Service excluded from percentage discounts entirely
+    if (rule.exclude_from_pct_discount) return 0;
+
+    // Service has a max discount cap (e.g. Enhanced/Premium lawn capped at Gold 15%)
+    if (rule.max_discount_pct !== null && rule.max_discount_pct !== undefined) {
+      return Math.min(baseDiscount, parseFloat(rule.max_discount_pct));
+    }
+
+    return baseDiscount;
+  },
+
+  /**
+   * Get flat credit for a service if applicable.
+   * Returns { credit, applies } or { credit: 0, applies: false }.
+   */
+  async getFlatCredit(serviceKey, customerTier) {
+    const rules = await getServiceDiscountRules();
+    const rule = rules[serviceKey];
+    if (!rule || !rule.flat_credit) return { credit: 0, applies: false };
+
+    const tierOrder = ['bronze', 'silver', 'gold', 'platinum'];
+    const minIdx = tierOrder.indexOf((rule.flat_credit_min_tier || '').toLowerCase());
+    const custIdx = tierOrder.indexOf((customerTier || '').toLowerCase());
+    if (minIdx < 0 || custIdx < minIdx) return { credit: 0, applies: false };
+
+    return { credit: parseFloat(rule.flat_credit), applies: true };
+  },
+
+  /**
+   * Enforce composite discount cap (25% max from all sources).
+   * Takes basePrice and finalPrice, returns adjusted finalPrice.
+   */
+  async enforceCompositeCap(basePrice, finalPrice) {
+    if (basePrice <= 0) return finalPrice;
+    let cap = 0.25;
+    try {
+      const row = await db('pricing_config').where({ config_key: 'WG_COMPOSITE_CAP' }).first();
+      if (row) cap = parseFloat(row.config_value);
+    } catch { /* use default */ }
+    const effectiveDiscount = 1 - (finalPrice / basePrice);
+    if (effectiveDiscount > cap) return Math.round(basePrice * (1 - cap) * 100) / 100;
+    return finalPrice;
+  },
+
+  /**
+   * Get qualifying services for WaveGuard tier determination.
+   * Returns list of service keys that count toward tier.
+   */
+  async getQualifyingServices() {
+    const rules = await getServiceDiscountRules();
+    return Object.entries(rules)
+      .filter(([, r]) => r.tier_qualifier)
+      .map(([key]) => key);
+  },
+
+  /**
+   * Get service discount rules (for admin UI).
+   */
+  async getServiceRules() {
+    return getServiceDiscountRules();
+  },
+
   /** Bust the tier cache (called after admin edits tier discounts). */
-  clearCache() { tierCache = null; tierCacheTime = 0; },
+  clearCache() { tierCache = null; tierCacheTime = 0; serviceRulesCache = null; serviceRulesCacheTime = 0; },
 };
 
 module.exports = DiscountEngine;
