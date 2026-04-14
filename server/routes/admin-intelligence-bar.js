@@ -21,6 +21,7 @@ const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligenc
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
 const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intelligence-bar/procurement-tools');
+const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -36,6 +37,7 @@ const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
 const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
+const REVENUE_TOOL_NAMES = new Set(REVENUE_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -152,6 +154,27 @@ WHEN ASKED TO FIND PRICES:
 Use the run_price_lookup tool. This triggers a real web search via Claude + web_search tool. Results are automatically queued for approval. After the lookup, summarize what was found and offer to approve the best prices.
 
 REPLACES: The "AI Price Agent" tab. Everything it did (single lookup, bulk lookup, vendor filtering) is now handled conversationally through this bar.`,
+
+  revenue: `
+REVENUE CONTEXT:
+You are on the Revenue page. The operator is analyzing financial performance.
+
+REVENUE CAPABILITIES:
+- Full revenue overview with gross margin, RPMH (revenue per man-hour), MRR, ARR
+- Service line P&L: revenue, cost, margin %, RPMH for each service type
+- Period comparison: March vs April, this month vs last, Q1 vs Q2, any two months
+- Technician revenue performance with RPMH rankings
+- Ad attribution / marketing ROI by lead source with ROAS and CAC
+- Top customers by revenue
+- All comparisons include delta and percent change
+
+ANALYSIS STYLE:
+- Always include the vs-previous-period change when showing topline numbers
+- Flag service lines below 55% gross margin target
+- RPMH (revenue per man-hour) is a key efficiency metric — $120+/hr = good, <$100 = needs attention
+- Use the $35/hr loaded labor rate as the cost baseline
+- When comparing periods, highlight the biggest mover (positive or negative)
+- Be direct about what's working and what isn't`,
 };
 
 function getToolsForContext(context) {
@@ -166,6 +189,9 @@ function getToolsForContext(context) {
   }
   if (context === 'procurement' || context === 'inventory') {
     return [...TOOLS, ...PROCUREMENT_TOOLS];
+  }
+  if (context === 'revenue') {
+    return [...TOOLS, ...REVENUE_TOOLS];
   }
   return TOOLS;
 }
@@ -182,6 +208,9 @@ function executeToolByName(toolName, input) {
   }
   if (PROCUREMENT_TOOL_NAMES.has(toolName)) {
     return executeProcurementTool(toolName, input);
+  }
+  if (REVENUE_TOOL_NAMES.has(toolName)) {
+    return executeRevenueTool(toolName, input);
   }
   return executeTool(toolName, input);
 }
@@ -440,6 +469,17 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'herbicides', label: 'Herbicide Prices', prompt: 'Compare prices on all our pre-emergent herbicides', icon: '🌿' },
       { id: 'price_check', label: 'Run Price Check', prompt: 'Run a price check on Demand CS across all vendors', icon: '🔍' },
       { id: 'trends', label: 'Price Trends', prompt: 'Have any product prices gone up in the last 90 days?', icon: '📈' },
+    ] });
+  } else if (context === 'revenue') {
+    res.json({ actions: [
+      { id: 'overview', label: 'Revenue Overview', prompt: "How's revenue this month? Show me the full picture with margins.", icon: '💰' },
+      { id: 'compare', label: 'This vs Last Month', prompt: 'Compare this month vs last month — revenue, margin, RPMH, everything', icon: '📊' },
+      { id: 'service_lines', label: 'Service Line P&L', prompt: 'Break down P&L by service line. Which has the best margin?', icon: '📋' },
+      { id: 'tech_perf', label: 'Tech RPMH', prompt: 'Rank technicians by revenue per man-hour', icon: '👷' },
+      { id: 'top_customers', label: 'Top 10 Customers', prompt: 'Who are our top 10 customers by revenue this month?', icon: '🏆' },
+      { id: 'ad_roi', label: 'Ad ROI', prompt: "What's our ad attribution? ROAS and CAC by channel?", icon: '📣' },
+      { id: 'quarter', label: 'Quarter View', prompt: "How's revenue this quarter compared to last quarter?", icon: '📈' },
+      { id: 'low_margin', label: 'Low Margin Alert', prompt: 'Which service lines are below our 55% margin target?', icon: '⚠️' },
     ] });
   } else {
     res.json({ actions: baseActions });
