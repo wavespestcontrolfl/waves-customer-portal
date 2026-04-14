@@ -55,6 +55,7 @@ export function calculateEstimate(inputs) {
     hasPool,
     hasPoolCage,
     hasLargeDriveway,
+    indoor,
     shrubDensity,
     treeDensity,
     landscapeComplexity,
@@ -185,12 +186,14 @@ export function calculateEstimate(inputs) {
   // Shrubs
   if (shrubDensity === 'HEAVY') addMod('pest', 'Heavy shrubs: +$10/visit', 10, 'up');
   else if (shrubDensity === 'MODERATE') addMod('pest', 'MODERATE shrubs: +$5/visit', 5, 'up');
-  else addMod('pest', 'Light shrubs: $0/visit', 0, 'info');
+  else if (shrubDensity === 'LIGHT') addMod('pest', 'Light shrubs: -$5/visit', -5, 'down');
+  else addMod('pest', 'No shrubs: $0/visit', 0, 'info');
 
   // Trees
   if (treeDensity === 'HEAVY') addMod('pest', 'Heavy trees: +$10/visit', 10, 'up');
   else if (treeDensity === 'MODERATE') addMod('pest', 'MODERATE trees: +$5/visit', 5, 'up');
-  else addMod('pest', 'Light trees: $0/visit', 0, 'info');
+  else if (treeDensity === 'LIGHT') addMod('pest', 'Light trees: -$5/visit', -5, 'down');
+  else addMod('pest', 'No trees: $0/visit', 0, 'info');
 
   // Complexity
   if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$5/visit', 5, 'up');
@@ -204,6 +207,10 @@ export function calculateEstimate(inputs) {
   // Driveway
   if (hasLargeDriveway) addMod('pest', 'Large driveway: +$5/visit', 5, 'up');
   else addMod('pest', 'Standard driveway: $0/visit', 0, 'info');
+
+  // Indoor treatment
+  if (indoor) addMod('pest', 'Indoor treatment: +$10/visit', 10, 'up');
+  else addMod('pest', 'Exterior only: $0/visit', 0, 'info');
 
   // Urgency
   if (urgency === 'SOON') addMod('one-time', `Urgency (Soon): +25%`, 25, 'up');
@@ -329,15 +336,18 @@ export function calculateEstimate(inputs) {
       { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 },
       { at: 4000, adj: 20 }, { at: 5500, adj: 28 },
     ]);
-    if (shrubDensity === 'MODERATE') adj += 5;
+    if (shrubDensity === 'LIGHT') adj -= 5;
+    else if (shrubDensity === 'MODERATE') adj += 5;
     else if (shrubDensity === 'HEAVY') adj += 10;
     if (hasPoolCage) adj += 10;
     else if (hasPool) adj += 5;
-    if (treeDensity === 'MODERATE') adj += 5;
+    if (treeDensity === 'LIGHT') adj -= 5;
+    else if (treeDensity === 'MODERATE') adj += 5;
     else if (treeDensity === 'HEAVY') adj += 10;
     if (landscapeComplexity === 'COMPLEX') adj += 5;
     if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 5;
     if (hasLargeDriveway) adj += 5;
+    if (indoor) adj += 10;
     adj += propTypeAdj; // Property type adjustment
     let pp = Math.max(92, 121 + adj), rOG = 0;
     // Split roach modifier: German 25% (labor-intensive: gel bait, IGR, monitoring), Regular 10%
@@ -528,10 +538,11 @@ export function calculateEstimate(inputs) {
       if (treeDensity === 'LIGHT') adj -= 3;
       else if (treeDensity === 'HEAVY') adj += 15;
       if (landscapeComplexity === 'COMPLEX') adj += 8;
+      if (indoor) adj += 10;
       bpp = Math.max(92, 121 + adj);
     }
     const fp = otP(Math.max(150, Math.round(bpp * 1.30)));
-    otItems.push({ name: 'OT Pest', price: fp, detail: 'Interior + exterior' });
+    otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
   }
 
   /* ── One-Time Lawn ───────────────────────────────────────── */

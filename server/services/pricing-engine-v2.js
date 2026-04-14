@@ -530,7 +530,8 @@ function calcPestBase(footprint, p, mods) {
 
   // Shrub density
   let shrAdj = 0;
-  if (p.shrubDensity === 'MODERATE') shrAdj = 5;
+  if (p.shrubDensity === 'LIGHT') shrAdj = -5;
+  else if (p.shrubDensity === 'MODERATE') shrAdj = 5;
   else if (p.shrubDensity === 'HEAVY') shrAdj = 10;
   adj += shrAdj;
   adjItems.push({ name: `Shrubs (${p.shrubDensity})`, value: shrAdj });
@@ -545,7 +546,8 @@ function calcPestBase(footprint, p, mods) {
 
   // Tree density
   let treeAdj = 0;
-  if (p.treeDensity === 'MODERATE') treeAdj = 5;
+  if (p.treeDensity === 'LIGHT') treeAdj = -5;
+  else if (p.treeDensity === 'MODERATE') treeAdj = 5;
   else if (p.treeDensity === 'HEAVY') treeAdj = 10;
   adj += treeAdj;
   adjItems.push({ name: `Trees (${p.treeDensity})`, value: treeAdj });
@@ -568,6 +570,12 @@ function calcPestBase(footprint, p, mods) {
   if (p.hasLargeDriveway) {
     adj += 5;
     adjItems.push({ name: 'Large driveway', value: 5 });
+  }
+
+  // Indoor treatment
+  if (p.indoor) {
+    adj += 10;
+    adjItems.push({ name: 'Indoor treatment', value: 10 });
   }
 
   // ── Property type adjustment ──
