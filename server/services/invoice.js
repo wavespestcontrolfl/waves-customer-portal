@@ -342,7 +342,16 @@ const InvoiceService = {
     const techName = invoice.tech_name || 'Our team';
     const serviceType = invoice.service_type || invoice.title || 'your service';
 
-    const body = `Hey ${customer.first_name}! ${techName} just wrapped up your ${serviceType} today. ` +
+    let formattedDate = '';
+    if (invoice.service_date) {
+      try {
+        formattedDate = new Date(invoice.service_date + 'T12:00:00').toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+        });
+      } catch { formattedDate = ''; }
+    }
+
+    const body = `Hey ${customer.first_name}! ${techName} just wrapped up your ${serviceType}${formattedDate ? ` completed on ${formattedDate}` : ' today'}. ` +
       `Tap to see what was applied, tech notes & before/after photos → ${payUrl}\n\n` +
       `Your invoice ($${Number(invoice.total || 0).toFixed(2)}) is ready at the bottom whenever you're set.\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
 
