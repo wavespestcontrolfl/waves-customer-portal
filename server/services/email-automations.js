@@ -83,7 +83,7 @@ const AUTOMATIONS = {
     name: 'Cockroach Control',
     description: 'For first-time customers who have booked a cockroach treatment',
     trigger: 'manual',
-    beehiivAutomationId: process.env.BEEHIIV_AUTO_ROACH || null, // Set BEEHIIV_AUTO_ROACH env var
+    beehiivAutomationId: process.env.BEEHIIV_AUTO_ROACH || 'aut_53cfd473-982b-49fd-b03d-62a9d462909c',
     tags: ['roach treatment', 'first-time'],
     smsTemplate: (c) =>
       `Hello ${c.first_name}! Let's get your home cockroach-free. We just emailed your Waves treatment guide—please review it to help us get the best results for your home!\n\n` +
