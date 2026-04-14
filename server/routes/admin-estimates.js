@@ -32,65 +32,89 @@ router.post('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/estimates/:id/send — send via SMS and email
+// POST /api/admin/estimates/:id/send — send via SMS and/or email (immediate or scheduled)
 router.post('/:id/send', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
 
-    const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
-    const firstName = estimate.customer_name?.split(' ')[0] || 'there';
     const sendMethod = req.body?.sendMethod || 'both';
-    const monthlyTotal = parseFloat(estimate.monthly_total || 0);
-    const annualTotal = parseFloat(estimate.annual_total || 0);
-    const priceLine = monthlyTotal > 0 ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr` : '';
+    const scheduledAt = req.body?.scheduledAt || null;
 
-    // Send SMS
-    if ((sendMethod === 'sms' || sendMethod === 'both') && estimate.customer_phone) {
-      try {
-        const smsBody = `Hi ${firstName}! Your Waves Pest Control estimate is ready.${priceLine ? `\n\n${priceLine}` : ''}\n\n${viewUrl}\n\nQuestions? Reply to this text or call (941) 318-7612.`;
-        await TwilioService.sendSMS(estimate.customer_phone, smsBody);
-      } catch (e) { logger.error(`Estimate SMS failed: ${e.message}`); }
+    // If scheduled for the future, store and return
+    if (scheduledAt) {
+      const scheduledTime = new Date(scheduledAt);
+      if (scheduledTime > new Date()) {
+        await db('estimates').where({ id: estimate.id }).update({
+          status: 'scheduled',
+          scheduled_at: scheduledTime,
+          send_method: sendMethod,
+        });
+        return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
+      }
     }
 
-    // Send Email via Google Workspace SMTP
-    if ((sendMethod === 'email' || sendMethod === 'both') && estimate.customer_email && process.env.GOOGLE_SMTP_PASSWORD) {
-      try {
-        const nodemailer = require('nodemailer');
-        const transporter = nodemailer.createTransport({
-          host: 'smtp.gmail.com',
-          port: 587,
-          secure: false,
-          auth: {
-            user: 'contact@wavespestcontrol.com',
-            pass: process.env.GOOGLE_SMTP_PASSWORD,
-          },
-        });
-        await transporter.sendMail({
-          from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
-          to: estimate.customer_email,
-          subject: 'Your Waves Pest Control Estimate is Ready',
-          html: `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-              <h2 style="color: #0ea5e9;">Waves Pest Control, LLC</h2>
-              <p>Hi ${firstName},</p>
-              <p>Your customized service estimate is ready for review.</p>
-              ${priceLine ? `<p style="font-size: 18px; font-weight: bold; color: #10b981;">${priceLine}</p>` : ''}
-              <p><a href="${viewUrl}" style="display: inline-block; padding: 14px 28px; background: #0ea5e9; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">View Your Estimate</a></p>
-              <p style="color: #666; font-size: 14px;">Questions? Call us at (941) 318-7612 or reply to this email.</p>
-              <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
-              <p style="color: #999; font-size: 12px;">Waves Pest Control, LLC | Lakewood Ranch, FL</p>
-              <p style="color: #999; font-size: 11px;">contact@wavespestcontrol.com</p>
-            </div>
-          `,
-        });
-      } catch (e) { logger.error(`Estimate email failed: ${e.message}`); }
-    }
-
-    await db('estimates').where({ id: estimate.id }).update({ status: 'sent', sent_at: db.fn.now() });
+    // Send immediately
+    await sendEstimateNow(estimate, sendMethod);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
+
+// Shared send logic — used by both immediate send and scheduled cron
+async function sendEstimateNow(estimate, sendMethod) {
+  const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+  const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+  const monthlyTotal = parseFloat(estimate.monthly_total || 0);
+  const annualTotal = parseFloat(estimate.annual_total || 0);
+  const priceLine = monthlyTotal > 0 ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr` : '';
+
+  // Send SMS
+  if ((sendMethod === 'sms' || sendMethod === 'both') && estimate.customer_phone) {
+    try {
+      const smsBody = `Hi ${firstName}! Your Waves Pest Control estimate is ready.${priceLine ? `\n\n${priceLine}` : ''}\n\n${viewUrl}\n\nQuestions? Reply to this text or call (941) 318-7612.`;
+      await TwilioService.sendSMS(estimate.customer_phone, smsBody);
+    } catch (e) { logger.error(`Estimate SMS failed: ${e.message}`); }
+  }
+
+  // Send Email via Google Workspace SMTP
+  if ((sendMethod === 'email' || sendMethod === 'both') && estimate.customer_email && process.env.GOOGLE_SMTP_PASSWORD) {
+    try {
+      const nodemailer = require('nodemailer');
+      const transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false,
+        auth: {
+          user: 'contact@wavespestcontrol.com',
+          pass: process.env.GOOGLE_SMTP_PASSWORD,
+        },
+      });
+      await transporter.sendMail({
+        from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
+        to: estimate.customer_email,
+        subject: 'Your Waves Pest Control Estimate is Ready',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #0ea5e9;">Waves Pest Control, LLC</h2>
+            <p>Hi ${firstName},</p>
+            <p>Your customized service estimate is ready for review.</p>
+            ${priceLine ? `<p style="font-size: 18px; font-weight: bold; color: #10b981;">${priceLine}</p>` : ''}
+            <p><a href="${viewUrl}" style="display: inline-block; padding: 14px 28px; background: #0ea5e9; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">View Your Estimate</a></p>
+            <p style="color: #666; font-size: 14px;">Questions? Call us at (941) 318-7612 or reply to this email.</p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
+            <p style="color: #999; font-size: 12px;">Waves Pest Control, LLC | Lakewood Ranch, FL</p>
+            <p style="color: #999; font-size: 11px;">contact@wavespestcontrol.com</p>
+          </div>
+        `,
+      });
+    } catch (e) { logger.error(`Estimate email failed: ${e.message}`); }
+  }
+
+  await db('estimates').where({ id: estimate.id }).update({ status: 'sent', sent_at: db.fn.now(), scheduled_at: null, send_method: null });
+}
+
+// Export for cron usage
+router.sendEstimateNow = sendEstimateNow;
 
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {

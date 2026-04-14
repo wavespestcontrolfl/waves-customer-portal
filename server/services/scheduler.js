@@ -145,6 +145,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MINUTES — Send scheduled estimates whose time has arrived
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const scheduled = await db('estimates')
+        .where({ status: 'scheduled' })
+        .where('scheduled_at', '<=', new Date())
+        .whereNotNull('scheduled_at');
+
+      if (scheduled.length === 0) return;
+
+      const { sendEstimateNow } = require('../routes/admin-estimates');
+      for (const est of scheduled) {
+        try {
+          await sendEstimateNow(est, est.send_method || 'both');
+          logger.info(`Scheduled estimate ${est.id} sent to ${est.customer_name}`);
+        } catch (e) {
+          logger.error(`Scheduled estimate ${est.id} failed: ${e.message}`);
+        }
+      }
+      logger.info(`Scheduled estimates: ${scheduled.length} sent`);
+    } catch (err) {
+      logger.error(`Scheduled estimate cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 HOURS — Estimate follow-up SMS (unviewed, viewed-not-accepted, expiring)
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {

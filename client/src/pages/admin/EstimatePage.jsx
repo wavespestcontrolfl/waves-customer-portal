@@ -691,20 +691,26 @@ function EstimateToolView() {
   }
 
   /* ── send estimate ────────────────────────────────────────── */
-  async function doSend(id) {
+  async function doSend(id, method) {
     const useId = id || savedId;
     if (!useId) { alert('Save the estimate first.'); return; }
+    const sendMethod = method || 'both';
+    const scheduled = form.scheduleSend && form.scheduledAt ? form.scheduledAt : null;
     setSending(true);
     try {
-      const method = form.sendMethod || 'both';
-      const scheduled = form.scheduleSend && form.scheduledAt ? form.scheduledAt : null;
       const r = await fetch(`/api/admin/estimates/${useId}/send`, {
         method: 'POST', headers: authHeaders,
-        body: JSON.stringify({ sendMethod: method, scheduledAt: scheduled }),
+        body: JSON.stringify({ sendMethod, scheduledAt: scheduled }),
       });
       if (!r.ok) throw new Error('Send failed: ' + r.status);
-      const label = method === 'sms' ? 'SMS' : method === 'email' ? 'email' : 'SMS & email';
-      alert(`Estimate sent via ${label}!`);
+      const d = await r.json();
+      const label = sendMethod === 'sms' ? 'SMS' : sendMethod === 'email' ? 'email' : 'SMS & email';
+      if (d.scheduled) {
+        const when = new Date(d.scheduledAt).toLocaleString();
+        alert(`Estimate scheduled via ${label} for ${when}`);
+      } else {
+        alert(`Estimate sent via ${label}!`);
+      }
     } catch (e) { alert(e.message); }
     setSending(false);
   }
@@ -1084,25 +1090,22 @@ function EstimateToolView() {
                     if (!form.customerPhone) { alert('Enter a phone number.'); return; }
                     if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
-                    set('sendMethod', 'sms');
                     const id = await doSave();
-                    if (id) await doSend(id);
+                    if (id) await doSend(id, 'sms');
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule SMS' : 'SMS Only'}</button>
                   <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerEmail) { alert('Enter an email.'); return; }
                     if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
-                    set('sendMethod', 'email');
                     const id = await doSave();
-                    if (id) await doSend(id);
+                    if (id) await doSend(id, 'email');
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule Email' : 'Email Only'}</button>
                   <button style={{ ...sBtn(C.teal, 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerPhone && !form.customerEmail) { alert('Enter phone or email.'); return; }
                     if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
-                    set('sendMethod', 'both');
                     const id = await doSave();
-                    if (id) await doSend(id);
+                    if (id) await doSend(id, 'both');
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule Both' : 'Both'}</button>
                 </div>
                 <button style={{ ...sBtn('transparent', C.gray), fontSize: 13, padding: '10px 16px', border: `1px solid ${C.border}` }} onClick={() => setShowSendForm(false)}>Cancel</button>
@@ -1111,7 +1114,7 @@ function EstimateToolView() {
           )}
 
           {savedId && (
-            <div style={{ fontSize: 12, color: C.green, marginBottom: 12 }}>Saved — ID #{savedId}. Estimate sent via SMS{form.customerEmail ? ' and email' : ''}.</div>
+            <div style={{ fontSize: 12, color: C.green, marginBottom: 12 }}>Saved — ID #{savedId}.</div>
           )}
         </div>
 
