@@ -1,4 +1,5 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', orange: '#f97316', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
@@ -812,6 +813,9 @@ export default function BlogPage() {
           color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: generatingIdeas ? 0.5 : 1,
         }}>{generatingIdeas ? 'Generating...' : '💡 Generate New Ideas'}</button>
       </div>
+
+      {/* Intelligence Bar */}
+      <SEOIntelligenceBar context="blog" />
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>

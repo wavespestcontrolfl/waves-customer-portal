@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
@@ -142,6 +143,9 @@ export default function WordPressSitesPage() {
           🔍 Scan All Sites
         </button>
       </div>
+
+      {/* Intelligence Bar */}
+      <SEOIntelligenceBar context="wordpress" />
 
       {migrationPending && (
         <div style={{ ...sCard, borderColor: D.amber, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>

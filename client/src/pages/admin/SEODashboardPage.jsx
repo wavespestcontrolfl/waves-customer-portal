@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -378,6 +379,9 @@ export default function WavesSEODashboard() {
           wavespestcontrol.com — Live data from DataForSEO + Google Search Console
         </div>
       </div>
+
+      {/* Intelligence Bar */}
+      <SEOIntelligenceBar context="seo" />
 
       {/* Tab Switcher */}
       <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: 4, width: isMobile ? "100%" : "fit-content" }}>
