@@ -103,16 +103,17 @@ router.post(
         .update({ processed: true, processed_at: new Date().toISOString() });
 
     } catch (err) {
-      logger.error(`[stripe-webhook] Handler error for ${event.type}: ${err.message}`);
+      logger.error(`[stripe-webhook] Handler error for ${event.type}: ${err.message}`, { stack: err.stack });
 
-      // Record error but still return 200 (Stripe will retry on non-200)
+      // Record error and return 500 so Stripe retries (handlers are idempotent)
       await db('stripe_webhook_events')
         .where({ id: event.id })
         .update({ error: err.message })
-        .catch(() => {});
+        .catch(dbErr => logger.error(`[stripe-webhook] Failed to record error: ${dbErr.message}`));
+
+      return res.status(500).json({ error: 'Handler failed, Stripe will retry' });
     }
 
-    // Always return 200 to prevent Stripe retries (we handle errors internally)
     return res.status(200).json({ received: true });
   }
 );

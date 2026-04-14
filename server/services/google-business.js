@@ -176,7 +176,11 @@ class GoogleBusinessService {
   // REVIEW SYNC — uses Google Places API (no GBP API access needed)
   // =========================================================================
   async syncAllReviews() {
-    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
+    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY;
+    if (!GOOGLE_KEY) {
+      logger.error('[google-business] GOOGLE_MAPS_API_KEY not set — skipping review sync');
+      return { synced: 0, error: 'GOOGLE_MAPS_API_KEY not configured' };
+    }
     let totalSynced = 0, totalNew = 0;
     const errors = [];
 

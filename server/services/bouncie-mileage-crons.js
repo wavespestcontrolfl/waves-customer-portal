@@ -122,9 +122,11 @@ function initBouncieMileageCrons() {
 
       for (const trip of unmatchedTrips) {
         try {
-          const tripDate = typeof trip.trip_date === 'string'
-            ? trip.trip_date
-            : trip.trip_date.toISOString().split('T')[0];
+          const tripDate = !trip.trip_date
+            ? new Date().toISOString().split('T')[0]
+            : typeof trip.trip_date === 'string'
+              ? trip.trip_date
+              : trip.trip_date.toISOString().split('T')[0];
 
           const jobMatch = await mileageService.matchTripToJob(
             parseFloat(trip.end_lat),

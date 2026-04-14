@@ -139,7 +139,7 @@ function initTimeTrackingCrons() {
             .update({
               status: 'completed',
               clock_out: now,
-              duration_minutes: db.raw("EXTRACT(EPOCH FROM (? - clock_in)) / 60", [now]),
+              duration_minutes: db.raw("CASE WHEN clock_in IS NOT NULL THEN EXTRACT(EPOCH FROM (? - clock_in)) / 60 ELSE 0 END", [now]),
               notes: db.raw("COALESCE(notes, '') || ' [auto-closed 11PM]'"),
               updated_at: now,
             });

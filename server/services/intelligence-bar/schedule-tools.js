@@ -351,11 +351,13 @@ async function swapTechAssignments(date, techAName, techBName) {
   const aServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }).whereNotIn('status', ['cancelled', 'completed']);
   const bServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }).whereNotIn('status', ['cancelled', 'completed']);
 
-  // Use a temp ID to avoid conflicts
-  const tempId = '00000000-0000-0000-0000-000000000000';
-  await db('scheduled_services').whereIn('id', aServices.map(s => s.id)).update({ technician_id: tempId });
-  await db('scheduled_services').whereIn('id', bServices.map(s => s.id)).update({ technician_id: techA.id });
-  await db('scheduled_services').where({ technician_id: tempId }).update({ technician_id: techB.id });
+  // Swap assignments atomically
+  await db.transaction(async trx => {
+    const tempId = '00000000-0000-0000-0000-000000000000';
+    await trx('scheduled_services').whereIn('id', aServices.map(s => s.id)).update({ technician_id: tempId });
+    await trx('scheduled_services').whereIn('id', bServices.map(s => s.id)).update({ technician_id: techA.id });
+    await trx('scheduled_services').whereIn('id', aServices.map(s => s.id)).update({ technician_id: techB.id });
+  });
 
   return {
     success: true,

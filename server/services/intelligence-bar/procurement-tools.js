@@ -419,7 +419,11 @@ Search vendor websites for exact prices. Return JSON only:
             source_url: result.url || null, status: 'pending',
           });
           approvalsCreated++;
-        } catch { /* duplicate or constraint */ }
+        } catch (insertErr) {
+          if (!insertErr.message?.includes('duplicate') && !insertErr.message?.includes('unique')) {
+            logger.warn(`[intelligence-bar:procurement] Price approval insert failed: ${insertErr.message}`);
+          }
+        }
       }
     }
 

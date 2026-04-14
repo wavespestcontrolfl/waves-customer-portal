@@ -71,9 +71,10 @@ const BillingCron = {
         // Extract receipt URL and include in confirmation SMS
         let receiptUrl = null;
         try {
-          const meta = paymentResult.metadata ? JSON.parse(paymentResult.metadata) : {};
+          const raw = paymentResult.metadata;
+          const meta = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
           receiptUrl = meta.stripe_receipt_url || null;
-        } catch (e) { /* ignore parse error */ }
+        } catch (e) { logger.warn(`[billing-cron] metadata parse error: ${e.message}`); }
 
         try {
           const receiptLine = receiptUrl ? ` View your receipt: ${receiptUrl}` : '';
@@ -185,7 +186,7 @@ const BillingCron = {
             retry_count: payment.retry_count + 1,
             next_retry_at: null,
             metadata: JSON.stringify({
-              ...(payment.metadata ? JSON.parse(payment.metadata) : {}),
+              ...(payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {}),
               retried_at: now,
               retry_payment_id: newPayment?.id || null,
             }),
@@ -196,7 +197,8 @@ const BillingCron = {
         // Send success SMS with receipt
         let retryReceiptUrl = null;
         try {
-          const meta = newPayment?.metadata ? JSON.parse(newPayment.metadata) : {};
+          const rawMeta = newPayment?.metadata;
+          const meta = rawMeta ? (typeof rawMeta === 'string' ? JSON.parse(rawMeta) : rawMeta) : {};
           retryReceiptUrl = meta.stripe_receipt_url || null;
         } catch (e) { /* ignore */ }
         try {

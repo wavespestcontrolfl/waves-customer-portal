@@ -71,7 +71,7 @@ class AvailabilityEngine {
       // Build occupied slots from scheduled_services
       const occupied = scheduledInZone.map(s => ({
         start: this.timeToMin(s.window_start || '09:00'),
-        end: this.timeToMin(s.window_end || s.window_start ? this.addMinutes(s.window_start, 60) : '10:00'),
+        end: this.timeToMin(s.window_end || (s.window_start ? this.addMinutes(s.window_start, 60) : '10:00')),
       }));
 
       // Add existing self-bookings

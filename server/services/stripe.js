@@ -184,13 +184,14 @@ const StripeService = {
         record.ach_status = pm.us_bank_account.status || 'verified';
       }
 
-      const [saved] = await db('payment_methods').insert(record).returning('*');
-
-      // Set all other PMs for this customer as non-default
-      await db('payment_methods')
-        .where({ customer_id: customerId })
-        .whereNot({ id: saved.id })
-        .update({ is_default: false });
+      const saved = await db.transaction(async trx => {
+        const [inserted] = await trx('payment_methods').insert(record).returning('*');
+        await trx('payment_methods')
+          .where({ customer_id: customerId })
+          .whereNot({ id: inserted.id })
+          .update({ is_default: false });
+        return inserted;
+      });
 
       logger.info(`[stripe] Payment method saved for ${customerId}: ${pm.type} ****${record.last_four}`);
       return saved;
@@ -285,8 +286,10 @@ const StripeService = {
     const stripeCustomerId = await this.ensureStripeCustomer(customerId);
     const amountCents = Math.round(amountDollars * 100);
 
+    // Step 1: Charge via Stripe
+    let paymentIntent;
     try {
-      const paymentIntent = await stripe.paymentIntents.create({
+      paymentIntent = await stripe.paymentIntents.create({
         amount: amountCents,
         currency: 'usd',
         customer: stripeCustomerId,
@@ -299,9 +302,26 @@ const StripeService = {
           ...metadata,
         },
       });
+    } catch (err) {
+      // Stripe charge failed — record the failure
+      logger.error(`[stripe] Charge failed for ${customerId}: ${err.message}`);
+      const [failedRecord] = await db('payments').insert({
+        customer_id: customerId,
+        payment_method_id: card.id,
+        processor: 'stripe',
+        payment_date: new Date().toISOString().split('T')[0],
+        amount: amountDollars,
+        status: 'failed',
+        description: `${description} — FAILED`,
+        failure_reason: err.message,
+        metadata: JSON.stringify({ error: err.message, code: err.code }),
+      }).returning('*');
+      throw Object.assign(new Error('Payment processing failed'), { paymentRecord: failedRecord });
+    }
 
-      const status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
-
+    // Step 2: Stripe charge succeeded — record in DB
+    const status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
+    try {
       const [paymentRecord] = await db('payments').insert({
         customer_id: customerId,
         payment_method_id: card.id,
@@ -319,23 +339,19 @@ const StripeService = {
 
       logger.info(`[stripe] Charge processed: $${amountDollars} for ${customerId}, PI: ${paymentIntent.id}`);
       return paymentRecord;
-    } catch (err) {
-      logger.error(`[stripe] Charge failed for ${customerId}: ${err.message}`);
-
-      // Record failed payment
-      const [failedRecord] = await db('payments').insert({
+    } catch (dbErr) {
+      // CRITICAL: Stripe charged the customer but DB insert failed
+      logger.error(`[stripe] CRITICAL: Charge succeeded (PI: ${paymentIntent.id}) but DB insert failed: ${dbErr.message}`);
+      return {
         customer_id: customerId,
         payment_method_id: card.id,
         processor: 'stripe',
-        payment_date: new Date().toISOString().split('T')[0],
+        stripe_payment_intent_id: paymentIntent.id,
         amount: amountDollars,
-        status: 'failed',
-        description: `${description} — FAILED`,
-        failure_reason: err.message,
-        metadata: JSON.stringify({ error: err.message, code: err.code }),
-      }).returning('*');
-
-      throw Object.assign(new Error('Payment processing failed'), { paymentRecord: failedRecord });
+        status,
+        description,
+        _db_error: dbErr.message,
+      };
     }
   },
 
@@ -555,36 +571,39 @@ const StripeService = {
         }
       }
 
-      // Update invoice
-      await db('invoices')
-        .where({ id: invoiceId })
-        .update({
-          status: 'paid',
-          paid_at: new Date().toISOString(),
+      // Update invoice + record payment atomically
+      const paymentRecord = await db.transaction(async trx => {
+        await trx('invoices')
+          .where({ id: invoiceId })
+          .update({
+            status: 'paid',
+            paid_at: new Date().toISOString(),
+            processor: 'stripe',
+            stripe_payment_intent_id: paymentIntentId,
+            stripe_charge_id: typeof charge === 'string' ? charge : null,
+            payment_method: 'card',
+            card_brand: cardBrand,
+            card_last_four: cardLastFour,
+            receipt_url: receiptUrl,
+          });
+
+        const [record] = await trx('payments').insert({
+          customer_id: invoice.customer_id,
           processor: 'stripe',
           stripe_payment_intent_id: paymentIntentId,
           stripe_charge_id: typeof charge === 'string' ? charge : null,
-          payment_method: 'card',
-          card_brand: cardBrand,
-          card_last_four: cardLastFour,
-          receipt_url: receiptUrl,
-        });
+          payment_date: new Date().toISOString().split('T')[0],
+          amount: parseFloat(invoice.total),
+          status: 'paid',
+          description: `Invoice ${invoice.invoice_number}`,
+          metadata: JSON.stringify({
+            invoice_id: invoiceId,
+            stripe_receipt_url: receiptUrl,
+          }),
+        }).returning('*');
 
-      // Record payment
-      const [paymentRecord] = await db('payments').insert({
-        customer_id: invoice.customer_id,
-        processor: 'stripe',
-        stripe_payment_intent_id: paymentIntentId,
-        stripe_charge_id: typeof charge === 'string' ? charge : null,
-        payment_date: new Date().toISOString().split('T')[0],
-        amount: parseFloat(invoice.total),
-        status: 'paid',
-        description: `Invoice ${invoice.invoice_number}`,
-        metadata: JSON.stringify({
-          invoice_id: invoiceId,
-          stripe_receipt_url: receiptUrl,
-        }),
-      }).returning('*');
+        return record;
+      });
 
       logger.info(`[stripe] Invoice ${invoice.invoice_number} paid via Stripe PI: ${paymentIntentId}`);
       return paymentRecord;
