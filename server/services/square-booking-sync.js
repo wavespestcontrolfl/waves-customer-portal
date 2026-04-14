@@ -136,8 +136,11 @@ const SquareBookingSync = {
           continue;
         }
 
-        // Resolve service name
-        const serviceName = SERVICE_NAME_MAP[booking.serviceName] || booking.serviceName || 'Service';
+        // Resolve service name — clean up Square variation names that are just price/duration
+        let serviceName = SERVICE_NAME_MAP[booking.serviceName] || booking.serviceName || 'Service';
+        if (/^\s*[-–—]?\s*\d+\s*(hour|hr|min)/i.test(serviceName) || /^\$\d/.test(serviceName.trim())) {
+          serviceName = 'General Pest Control';
+        }
 
         // Parse time
         const start = new Date(booking.startAt);
