@@ -190,24 +190,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     await db('service_status_log').insert({ scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId });
 
-    // Auto-generate invoice from completed service
+    // Auto-generate invoice + send SMS (combined service report + invoice)
+    let invoiceCreated = false;
     try {
       const InvoiceService = require('../services/invoice');
-      await InvoiceService.createFromService(record.id, {
+      const invoice = await InvoiceService.createFromService(record.id, {
         amount: svc.cust_monthly_rate || 0,
         description: svc.service_type,
         taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
       });
+      invoiceCreated = true;
+
+      // Send invoice SMS (includes service type, date, and pay link)
+      if (sendCompletionSms && svc.cust_phone) {
+        try {
+          await InvoiceService.sendViaSMS(invoice.id);
+        } catch (smsErr) {
+          logger.error(`[dispatch] Invoice SMS failed (non-blocking): ${smsErr.message}`);
+        }
+      }
     } catch (invErr) {
       logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
     }
 
-    // Completion SMS — link to Visit Reports in portal
-    if (svc.cust_phone) {
+    // Fallback completion SMS if invoice wasn't created but SMS was requested
+    if (!invoiceCreated && sendCompletionSms && svc.cust_phone) {
       try {
         const portalUrl = 'https://portal.wavespestcontrol.com';
         await TwilioService.sendSMS(svc.cust_phone,
-          `Hello ${svc.first_name}! Your service report can be found under Documents > Visit Reports:\n${portalUrl}`,
+          `Hello ${svc.first_name}! Your service report is ready. View it in your portal:\n${portalUrl}`,
           { customerId: svc.customer_id, messageType: 'service_complete' }
         );
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
