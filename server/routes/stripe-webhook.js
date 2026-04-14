@@ -87,6 +87,12 @@ router.post(
           await handleSetupIntentSucceeded(event.data.object);
           break;
 
+        case 'payout.paid':
+        case 'payout.failed':
+        case 'payout.created':
+          await handlePayoutEvent(event.data.object, event.type);
+          break;
+
         default:
           logger.info(`[stripe-webhook] Unhandled event type: ${event.type}`);
       }
@@ -235,6 +241,46 @@ async function handlePaymentMethodDetached(paymentMethod) {
 async function handleSetupIntentSucceeded(setupIntent) {
   const customerId = setupIntent.metadata?.waves_customer_id || 'unknown';
   logger.info(`[stripe-webhook] SetupIntent succeeded for customer ${customerId}: ${setupIntent.id}`);
+}
+
+/**
+ * payout.paid / payout.failed / payout.created — Sync payout and create notification
+ */
+async function handlePayoutEvent(payout, eventType) {
+  logger.info(`[stripe-webhook] Payout event: ${eventType} ${payout.id} $${payout.amount / 100}`);
+
+  try {
+    const StripeBanking = require('../services/stripe-banking');
+    await StripeBanking.syncPayouts(5);
+  } catch (err) {
+    logger.error(`[stripe-webhook] Payout sync failed: ${err.message}`);
+  }
+
+  try {
+    if (eventType === 'payout.paid') {
+      await db('notifications').insert({
+        recipient_type: 'admin',
+        category: 'payout',
+        title: `Payout deposited: $${(payout.amount / 100).toFixed(2)}`,
+        body: `Stripe payout of $${(payout.amount / 100).toFixed(2)} has been deposited to your Capital One account.`,
+        icon: '\uD83C\uDFE6',
+        link: '/admin/banking',
+      });
+    }
+
+    if (eventType === 'payout.failed') {
+      await db('notifications').insert({
+        recipient_type: 'admin',
+        category: 'payout',
+        title: `Payout FAILED: $${(payout.amount / 100).toFixed(2)}`,
+        body: `Payout failed: ${payout.failure_message || 'Unknown reason'}. Check your bank details.`,
+        icon: '\u26A0\uFE0F',
+        link: '/admin/banking',
+      });
+    }
+  } catch (err) {
+    logger.error(`[stripe-webhook] Payout notification failed: ${err.message}`);
+  }
 }
 
 module.exports = router;

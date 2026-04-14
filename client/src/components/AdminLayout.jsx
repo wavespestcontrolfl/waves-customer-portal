@@ -40,6 +40,7 @@ const NAV_SECTIONS = [
   ]},
   { section: 'Finance', items: [
     { path: '/admin/invoices', icon: '🧾', label: 'Invoices' },
+    { path: '/admin/banking', icon: '🏦', label: 'Banking' },
     { path: '/admin/tax', icon: '💰', label: 'Tax Center' },
   ]},
   { section: 'System', items: [

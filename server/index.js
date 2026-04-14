@@ -236,6 +236,7 @@ app.use('/api/admin/services', require('./routes/admin-services'));
 // Square import disabled — migration complete
 // app.use('/api/admin/square-import', require('./routes/admin-square-import'));
 app.use('/api/admin/discounts', require('./routes/admin-discounts'));
+app.use('/api/admin/banking', require('./routes/admin-banking'));
 app.use('/api/admin/dashboard-ops', require('./routes/admin-dashboard-ops'));
 app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
@@ -404,6 +405,19 @@ const server = app.listen(PORT, () => {
     if (config.nodeEnv !== 'test') {
       initScheduledJobs();
     }
+
+    // Sync Stripe payouts every 15 minutes
+    setInterval(async () => {
+      try {
+        const StripeBanking = require('./services/stripe-banking');
+        const result = await StripeBanking.syncPayouts(20);
+        if (result.synced > 0) {
+          logger.info(`[stripe-banking] Synced ${result.synced} new payouts`);
+        }
+      } catch (err) {
+        logger.error(`[stripe-banking] Sync failed: ${err.message}`);
+      }
+    }, 15 * 60 * 1000);
 
     // Log memory every 5 minutes to catch leaks / OOM before SIGTERM
     setInterval(() => {

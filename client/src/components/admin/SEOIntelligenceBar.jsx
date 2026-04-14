@@ -68,13 +68,52 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
     adminFetch(`/admin/intelligence-bar/quick-actions?context=${context}`)
       .then(d => setQuickActions(d.actions || []))
       .catch(() => {
-        setQuickActions([
-          { id: 'health', label: 'Fleet Health', prompt: 'Check all 15 sites for issues', icon: '🏥' },
-          { id: 'traffic', label: 'Top Sites', prompt: 'Rank sites by traffic', icon: '📊' },
-          { id: 'drops', label: 'Drops', prompt: 'Any ranking drops this week?', icon: '📉' },
-          { id: 'pipeline', label: 'Pipeline', prompt: "What's in the content pipeline?", icon: '📝' },
-          { id: 'queries', label: 'Top Queries', prompt: 'Top 20 non-branded keywords', icon: '🔍' },
-        ]);
+        const fallbacks = {
+          seo: [
+            { id: 'health', label: 'Fleet Health', prompt: 'Check all 15 sites for issues', icon: '🏥' },
+            { id: 'traffic', label: 'Top Sites', prompt: 'Rank sites by traffic', icon: '📊' },
+            { id: 'drops', label: 'Drops', prompt: 'Any ranking drops this week?', icon: '📉' },
+            { id: 'queries', label: 'Top Queries', prompt: 'Top 20 non-branded keywords', icon: '🔍' },
+          ],
+          blog: [
+            { id: 'pipeline', label: 'Pipeline', prompt: "What's in the content pipeline?", icon: '📝' },
+            { id: 'perf', label: 'Top Posts', prompt: 'Which blog posts perform best?', icon: '📰' },
+          ],
+          wordpress: [
+            { id: 'health', label: 'Fleet Health', prompt: 'Check all 15 sites for issues', icon: '🏥' },
+            { id: 'speed', label: 'PageSpeed', prompt: 'PageSpeed scores across the fleet', icon: '⚡' },
+          ],
+          reviews: [
+            { id: 'stats', label: 'Review Stats', prompt: 'How are our Google reviews?', icon: '⭐' },
+            { id: 'unresponded', label: 'Needs Reply', prompt: 'Any reviews needing a reply?', icon: '💬' },
+            { id: 'trends', label: 'Trends', prompt: 'Review trend over 6 months', icon: '📈' },
+          ],
+          comms: [
+            { id: 'unanswered', label: 'Unanswered', prompt: 'Any unanswered messages?', icon: '🔴' },
+            { id: 'today', label: "Today's Activity", prompt: "What happened today?", icon: '📋' },
+            { id: 'calls', label: 'Calls', prompt: 'Recent calls today', icon: '📞' },
+          ],
+          tax: [
+            { id: 'overview', label: 'Tax Overview', prompt: 'Give me the full tax picture', icon: '💰' },
+            { id: 'quarterly', label: 'Quarterly Est.', prompt: 'Estimated quarterly tax payment', icon: '📊' },
+            { id: 'expenses', label: 'Expenses', prompt: 'Expenses by category this year', icon: '🧾' },
+          ],
+          leads: [
+            { id: 'overview', label: 'Pipeline', prompt: 'How does the pipeline look?', icon: '📊' },
+            { id: 'stale', label: 'Stale Leads', prompt: 'Leads not contacted in 48 hours', icon: '🔴' },
+            { id: 'funnel', label: 'Funnel', prompt: 'Show me the funnel', icon: '🔄' },
+          ],
+          banking: [
+            { id: 'balance', label: 'Balance', prompt: "What's my Stripe balance?", icon: '💳' },
+            { id: 'payouts', label: 'Payouts', prompt: 'Recent payouts to the bank', icon: '🏦' },
+            { id: 'cash_flow', label: 'Cash Flow', prompt: 'Cash flow this month', icon: '📊' },
+          ],
+          email: [
+            { id: 'summary', label: 'Inbox', prompt: 'Inbox summary', icon: '📬' },
+            { id: 'unread', label: 'Unread', prompt: 'Unread emails', icon: '🔴' },
+          ],
+        };
+        setQuickActions(fallbacks[context] || fallbacks.seo);
       });
   }, [context]);
 
@@ -94,7 +133,7 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
         body: JSON.stringify({
           prompt: q,
           conversationHistory,
-          context: context === 'blog' || context === 'wordpress' ? context : 'seo',
+          context: context,
           pageData: buildPageData(),
         }),
       });
@@ -117,6 +156,12 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
     seo: 'Which sites dropped in rankings? Compare pest vs lawn traffic...',
     blog: 'Top performing posts? How many need generation? Content calendar...',
     wordpress: 'Fleet health check? PageSpeed scores? Which sites need attention?',
+    reviews: 'Any reviews need replies? Draft responses, check trends...',
+    comms: 'Any unanswered messages? Search conversations, draft replies...',
+    tax: 'Tax overview, quarterly estimate, expense breakdown, P&L...',
+    leads: 'Stale leads? Pipeline overview? Source ROI comparison...',
+    banking: 'Stripe balance, recent payouts, cash flow analysis...',
+    email: 'Inbox summary, search emails, vendor invoices...',
   };
 
   return (

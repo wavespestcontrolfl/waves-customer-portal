@@ -28,6 +28,7 @@ const { COMMS_TOOLS, executeCommsTool } = require('../services/intelligence-bar/
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
+const { BANKING_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -50,6 +51,7 @@ const COMMS_TOOL_NAMES = new Set(COMMS_TOOLS.map(t => t.name));
 const TAX_TOOL_NAMES = new Set(TAX_TOOLS.map(t => t.name));
 const LEADS_TOOL_NAMES = new Set(LEADS_TOOLS.map(t => t.name));
 const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
+const BANKING_TOOL_NAMES = new Set(BANKING_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -350,6 +352,33 @@ RESPONSE STYLE:
 - When drafting replies, always show the draft and wait for approval
 - If a customer emailed about scheduling, suggest replying via SMS since it's faster
 - Keep email drafts concise — 2-3 paragraphs max, professional but warm`,
+
+  banking: `
+BANKING & CASH FLOW CONTEXT:
+You are on the Banking page. The operator manages the Stripe → Capital One cash pipeline.
+
+BANKING CAPABILITIES:
+- Real-time Stripe balance (available + pending)
+- Payout history with transaction-level detail (which customers paid in each deposit)
+- Cash flow analysis (money in vs out, net, trend)
+- Fee analysis (effective processing rate, card vs ACH comparison)
+- Instant payout requests (1% fee — always show fee before executing)
+- Reconciliation tracking (match Stripe deposits to bank records)
+- CSV/OFX export for Capital One import or CPA handoff
+
+KEY FACTS:
+- Payments are processed via Stripe (card, Apple Pay, Google Pay, ACH)
+- Standard payouts take 2 business days to reach Capital One
+- Instant payouts arrive in minutes but cost 1% of the amount
+- The business bank is Capital One
+
+RESPONSE STYLE:
+- Always show dollar amounts with 2 decimal places for financial data
+- When showing balance, include both available and pending with the distinction
+- For payouts, include the arrival date (when it actually hits the bank)
+- For cash flow, always show net (in minus out) with a clear positive/negative indicator
+- When discussing fees, show both the dollar amount and the effective percentage rate
+- For instant payouts, ALWAYS show the fee calculation and confirm before executing`,
 };
 
 function getToolsForContext(context) {
@@ -383,6 +412,9 @@ function getToolsForContext(context) {
   if (context === 'email') {
     return [...TOOLS, ...EMAIL_TOOLS];
   }
+  if (context === 'banking') {
+    return [...TOOLS, ...BANKING_TOOLS];
+  }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
@@ -408,6 +440,9 @@ function executeToolByName(toolName, input, techContext) {
   }
   if (EMAIL_TOOL_NAMES.has(toolName)) {
     return executeEmailTool(toolName, input);
+  }
+  if (BANKING_TOOL_NAMES.has(toolName)) {
+    return executeBankingTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -762,6 +797,15 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'leads', label: 'Email Leads', prompt: 'How many leads came in via email this month? Show me the recent ones.', icon: '📈' },
       { id: 'blocked', label: 'Blocked Senders', prompt: 'How many spam senders are blocked? Show the top domains.', icon: '🚫' },
       { id: 'stats', label: 'Email Stats', prompt: 'Email volume and classification breakdown this month', icon: '📊' },
+    ] });
+  } else if (context === 'banking') {
+    res.json({ actions: [
+      { id: 'balance', label: 'Stripe Balance', prompt: "What's my Stripe balance right now?", icon: '💳' },
+      { id: 'payouts', label: 'Recent Payouts', prompt: 'Show me recent payouts to the bank', icon: '🏦' },
+      { id: 'cash_flow', label: 'Cash Flow', prompt: 'Cash flow this month — am I cash positive?', icon: '📊' },
+      { id: 'fees', label: 'Fee Analysis', prompt: 'How much are we paying in Stripe fees? What is the effective rate?', icon: '💸' },
+      { id: 'reconcile', label: 'Reconciliation', prompt: 'Any unreconciled payouts?', icon: '✅' },
+      { id: 'export', label: 'Export', prompt: 'Export this month payouts as CSV', icon: '📥' },
     ] });
   } else {
     res.json({ actions: baseActions });
