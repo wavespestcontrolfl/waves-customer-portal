@@ -23,6 +23,7 @@ const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-
 const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intelligence-bar/procurement-tools');
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
+const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -40,6 +41,7 @@ const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
 const REVENUE_TOOL_NAMES = new Set(REVENUE_TOOLS.map(t => t.name));
 const TECH_TOOL_NAMES = new Set(TECH_TOOLS.map(t => t.name));
+const REVIEW_TOOL_NAMES = new Set(REVIEW_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -199,6 +201,29 @@ RESPONSE STYLE:
 - For customer info, lead with the actionable stuff: gate codes, pet warnings, special instructions
 - If asked "what's next?", show only the next stop with address and service type
 - Weather: just say "good to spray" or "hold off — wind at 18mph" — don't write a paragraph`,
+
+  reviews: `
+REVIEWS & REPUTATION CONTEXT:
+You are on the Reviews page. The operator manages Google reviews across 4 GBP locations (Bradenton/Parrish, Sarasota/LWR, Venice/North Port, Port Charlotte/Punta Gorda).
+
+REVIEW CAPABILITIES:
+- Review stats: total, avg rating, per-location breakdown, star distribution, response rate
+- Find unresponded reviews (prioritized by low ratings)
+- Draft AI-powered review replies (uses Claude to generate personalized responses)
+- Post replies to Google reviews
+- Find outreach candidates (customers eligible for review requests)
+- Trigger review request SMS to specific customers
+- Search reviews by text, rating, location
+- Review trends over time (monthly volume, rating trajectory, response rate)
+- Review velocity pipeline (sent→reminded→reviewed conversion)
+
+REPUTATION MANAGEMENT STYLE:
+- Negative reviews (1-3 stars) are TOP PRIORITY — always surface these first
+- Draft replies should be genuine and SWFL-specific, not corporate
+- For review requests, prioritize Gold/Platinum tier customers (higher satisfaction, more likely to leave 5 stars)
+- Don't over-ask — check if the customer was already sent a request in the last 30 days
+- Target: 4.8+ average rating, 90%+ response rate, 10+ new reviews per month
+- When drafting replies, ALWAYS show the draft and ask for approval before posting`,
 };
 
 function getToolsForContext(context) {
@@ -217,8 +242,11 @@ function getToolsForContext(context) {
   if (context === 'revenue') {
     return [...TOOLS, ...REVENUE_TOOLS];
   }
+  if (context === 'reviews') {
+    return [...TOOLS, ...REVIEW_TOOLS];
+  }
   if (context === 'tech') {
-    return TECH_TOOLS; // Tech portal gets ONLY tech tools — no write operations
+    return TECH_TOOLS;
   }
   return TOOLS;
 }
@@ -227,6 +255,9 @@ function getToolsForContext(context) {
 function executeToolByName(toolName, input, techContext) {
   if (TECH_TOOL_NAMES.has(toolName)) {
     return executeTechTool(toolName, input, techContext || {});
+  }
+  if (REVIEW_TOOL_NAMES.has(toolName)) {
+    return executeReviewTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -529,6 +560,17 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'remaining', label: 'How Many Left?', prompt: 'How many stops do I have left today?', icon: '📊' },
       { id: 'protocol', label: 'Pest Protocol', prompt: 'What products and rates for quarterly pest control?', icon: '📖' },
       { id: 'lawn_protocol', label: 'Lawn Protocol', prompt: 'Lawn care protocol for St. Augustine Track A', icon: '🌿' },
+    ] });
+  } else if (context === 'reviews') {
+    res.json({ actions: [
+      { id: 'stats', label: 'Review Stats', prompt: 'How are our Google reviews? Give me the full picture.', icon: '⭐' },
+      { id: 'unresponded', label: 'Needs Reply', prompt: 'Show me reviews that need a reply — prioritize negative ones', icon: '💬' },
+      { id: 'draft_all', label: 'Draft Replies', prompt: 'Draft AI replies for all unresponded reviews', icon: '✍️' },
+      { id: 'outreach', label: 'Outreach Candidates', prompt: 'Who should we ask for reviews? Show Gold and Platinum customers first.', icon: '📧' },
+      { id: 'trends', label: 'Review Trends', prompt: 'Are our reviews improving? Show the 6-month trend.', icon: '📈' },
+      { id: 'velocity', label: 'Velocity Pipeline', prompt: "What's our review request conversion rate?", icon: '🔄' },
+      { id: 'negative', label: 'Negative Reviews', prompt: 'Show me all 1-2 star reviews. Any patterns?', icon: '⚠️' },
+      { id: 'by_location', label: 'By Location', prompt: 'Compare review counts and ratings across all 4 locations', icon: '📍' },
     ] });
   } else {
     res.json({ actions: baseActions });
