@@ -134,7 +134,7 @@ router.post('/', async (req, res) => {
           await twilioClient.calls.create({
             to: WAVES_ADMIN_PHONE,
             from: '+19412972606',
-            url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(phoneFormatted)}&callerIdNumber=${encodeURIComponent('+19412972606')}`,
+            url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(phoneFormatted)}&callerIdNumber=${encodeURIComponent('+19412972606')}&leadName=${encodeURIComponent(firstName)}`,
             record: true,
           });
           callConnected = true;

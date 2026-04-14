@@ -235,12 +235,14 @@ router.post('/outbound-admin-prompt', async (req, res) => {
   try {
     const customerNumber = req.query.customerNumber || req.body.customerNumber;
     const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber;
+    const leadName = req.query.leadName || req.body.leadName || '';
     const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
 
+    const namePrompt = leadName ? `New quote request from ${leadName}.` : `Outbound call to ${customerNumber.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1 $2 $3')}.`;
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather numDigits="1" action="https://${domain}/api/webhooks/twilio/outbound-connect?customerNumber=${encodeURIComponent(customerNumber)}&amp;callerIdNumber=${encodeURIComponent(callerIdNumber)}" method="POST" timeout="10">
-    <Say voice="alice">Outbound call to ${customerNumber.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1 $2 $3')}. Press 1 to connect.</Say>
+    <Say voice="alice">${namePrompt} Press 1 to connect.</Say>
   </Gather>
   <Say voice="alice">No input received. Goodbye.</Say>
 </Response>`;
