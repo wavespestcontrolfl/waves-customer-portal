@@ -234,7 +234,7 @@ function PropertyAlerts({ alerts }) {
 
 /* ── Service Card ─────────────────────────────────────── */
 
-function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onReschedule, onProtocol, onLawnPhotos }) {
+function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onLawnPhotos }) {
   const [updating, setUpdating] = useState(false);
   const [lawnUploading, setLawnUploading] = useState(false);
   const [lawnDone, setLawnDone] = useState(false);
@@ -537,11 +537,18 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
           </span>
         )}
         {status !== 'completed' && status !== 'skipped' && (
-          <button onClick={() => onReschedule?.(service)} style={{
-            ...btnBase, background: 'transparent', color: D.amber, border: `1px solid ${D.amber}44`,
-          }}>
-            🔄 Reschedule
-          </button>
+          <>
+            <button onClick={() => onReschedule?.(service)} style={{
+              ...btnBase, background: 'transparent', color: D.amber, border: `1px solid ${D.amber}44`,
+            }}>
+              🔄 Reschedule
+            </button>
+            <button onClick={() => onDelete?.(service)} style={{
+              ...btnBase, background: 'transparent', color: D.red, border: `1px solid ${D.red}44`,
+            }}>
+              🗑 Delete
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -583,7 +590,7 @@ function groupMultiServiceStops(services) {
   return [...result, ...singles];
 }
 
-function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onProtocol }) {
+function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onDelete, onProtocol }) {
   const [collapsed, setCollapsed] = useState(false);
 
   const completedCount = tech.completedServices || tech.services.filter(s => s.status === 'completed').length;
@@ -681,6 +688,7 @@ function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete,
                 onStatusChange={onStatusChange}
                 onComplete={onComplete}
                 onReschedule={onReschedule}
+                onDelete={onDelete}
                 onProtocol={onProtocol}
               />
             </div>
@@ -2152,6 +2160,30 @@ export default function SchedulePage() {
     handleStatusChange(serviceId, 'completed');
   }, [handleStatusChange]);
 
+  const handleDelete = useCallback(async (service) => {
+    const name = service.customerName || service.customer_name || 'this customer';
+    if (!window.confirm(`Delete service for ${name}?\n\nThis will cancel the scheduled service.`)) return;
+    try {
+      await adminFetch(`/admin/schedule/${service.id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: 'cancelled' }),
+      });
+      // Remove from local state
+      setData(prev => {
+        if (!prev) return prev;
+        const updatedServices = prev.services.filter(s => s.id !== service.id);
+        const updatedTechSummary = prev.techSummary.map(tech => ({
+          ...tech,
+          services: tech.services.filter(s => s.id !== service.id),
+          totalServices: tech.services.filter(s => s.id !== service.id).length,
+        }));
+        return { ...prev, services: updatedServices, techSummary: updatedTechSummary };
+      });
+    } catch (err) {
+      alert('Failed to delete service: ' + err.message);
+    }
+  }, []);
+
   const handlePanelClose = useCallback((wasCompleted) => {
     setCompletingService(null);
   }, []);
@@ -2418,6 +2450,7 @@ export default function SchedulePage() {
           onStatusChange={handleStatusChange}
           onComplete={handleComplete}
           onReschedule={svc => setRescheduleService(svc)}
+          onDelete={handleDelete}
           onProtocol={svc => setProtocolService(svc)}
         />
       ))}
@@ -2462,6 +2495,7 @@ export default function SchedulePage() {
                   onStatusChange={handleStatusChange}
                   onComplete={handleComplete}
                   onReschedule={svc2 => setRescheduleService(svc2)}
+                  onDelete={handleDelete}
                   onProtocol={svc2 => setProtocolService(svc2)}
                 />
               </div>
