@@ -354,12 +354,7 @@ export default function PayPage() {
       <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Poppins:wght@400;500;600&display=swap" rel="stylesheet" />
 
       {/* ── Header ── */}
-      <div style={{ background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: isMobile ? '24px 16px 32px' : '32px 24px 40px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
-        <div style={{ position: 'absolute', bottom: -2, left: 0, right: 0, height: 30 }}>
-          <svg viewBox="0 0 1440 60" fill="none" style={{ width: '100%', height: '100%', display: 'block' }}>
-            <path d="M0 30 C360 0 720 60 1080 30 C1260 15 1380 0 1440 10 L1440 60 L0 60 Z" fill={W.offWhite} />
-          </svg>
-        </div>
+      <div style={{ background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: isMobile ? '24px 16px' : '32px 24px', textAlign: 'center' }}>
         <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: isMobile ? 40 : 48, maxWidth: '80%', objectFit: 'contain' }} />
       </div>
 
@@ -457,12 +452,12 @@ export default function PayPage() {
               <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Invoice</div>
               <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>{invoice.invoiceNumber}</div>
             </div>
-            {invoice.dueDate && !isPaid && !isNaN(new Date(invoice.dueDate).getTime()) && (
-              <div style={{ fontSize: 12, color: W.textCaption }}>Due {new Date(invoice.dueDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
-            )}
-            {!invoice.dueDate && !isPaid && (
-              <div style={{ fontSize: 12, color: W.textCaption }}>Due upon receipt</div>
-            )}
+            {!isPaid && (() => {
+              if (!invoice.dueDate) return <div style={{ fontSize: 12, color: W.textCaption }}>Due upon receipt</div>;
+              const d = new Date(String(invoice.dueDate).split('T')[0] + 'T12:00:00');
+              if (isNaN(d.getTime())) return <div style={{ fontSize: 12, color: W.textCaption }}>Due upon receipt</div>;
+              return <div style={{ fontSize: 12, color: W.textCaption }}>Due {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>;
+            })()}
           </div>
 
           <div style={{ padding: isMobile ? 14 : 20 }}>

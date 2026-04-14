@@ -487,7 +487,7 @@ const StripeService = {
     const piParams = {
       amount: amountCents,
       currency: 'usd',
-      payment_method_types: ['card'],
+      automatic_payment_methods: { enabled: true },
       description: `Invoice ${invoice.invoice_number} — ${invoice.title || 'Waves Pest Control'}`,
       metadata: {
         waves_invoice_id: invoiceId,

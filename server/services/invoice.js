@@ -21,8 +21,14 @@ try {
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
-function generateToken() {
-  return crypto.randomBytes(32).toString('hex'); // 64 char hex string
+function generateToken(customer, serviceDate) {
+  const first = (customer?.first_name || 'customer').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const last = (customer?.last_name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const d = serviceDate ? new Date(serviceDate) : new Date();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const suffix = crypto.randomBytes(3).toString('hex'); // 6 random chars
+  return `${first}-${last}-${month}${day}-${suffix}`.replace(/--+/g, '-');
 }
 
 async function nextInvoiceNumber() {
@@ -129,7 +135,7 @@ const InvoiceService = {
     }
     const total = Math.round((afterDiscount + taxAmount) * 100) / 100;
 
-    const token = generateToken();
+    const token = generateToken(customer, serviceData.service_date);
     const invoiceNumber = await nextInvoiceNumber();
 
     const [invoice] = await db('invoices').insert({
@@ -361,9 +367,12 @@ const InvoiceService = {
         service_date: formattedDate || 'today',
         pay_url: payUrl,
       });
-    } catch { /* template lookup failed */ }
+    } catch (err) {
+      logger.warn(`[invoice] Template lookup failed: ${err.message}`);
+    }
 
-    if (!body) {
+    // Fallback — always use inline if template returned null or still has unreplaced vars
+    if (!body || body.includes('{first_name}') || body.includes('{service_type}')) {
       body = `Hi ${customer.first_name}! Your invoice for ${serviceType} completed on ${formattedDate || 'today'} is ready: ${payUrl}\n\n` +
         `Questions or requests? Reply to this message. Thank you for choosing Waves!`;
     }
