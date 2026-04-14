@@ -235,15 +235,21 @@ router.post('/sms', async (req, res) => {
     }
 
     // WAVES AI ASSISTANT — route through conversational AI engine
-    // Check both feature gate AND the admin toggle (system_config)
+    // Only active on the dedicated AI assistant number
+    const AI_ASSISTANT_NUMBER = '+18559260203';
+    const toClean = (To || '').replace(/\D/g, '');
+    const isAiNumber = toClean === '18559260203' || toClean === '8559260203' || To === AI_ASSISTANT_NUMBER;
+
     let aiAutoReplyOn = false;
-    if (isEnabled('aiAssistantAutoReply')) {
-      aiAutoReplyOn = true;
-    } else {
-      try {
-        const toggle = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
-        if (toggle?.value === 'true') aiAutoReplyOn = true;
-      } catch { /* ignore */ }
+    if (isAiNumber) {
+      if (isEnabled('aiAssistantAutoReply')) {
+        aiAutoReplyOn = true;
+      } else {
+        try {
+          const toggle = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
+          if (toggle?.value === 'true') aiAutoReplyOn = true;
+        } catch { /* ignore */ }
+      }
     }
     if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn) {
       try {
