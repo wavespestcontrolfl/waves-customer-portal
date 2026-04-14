@@ -6038,137 +6038,131 @@ function ServiceTracker() {
           </div>
         </div>
 
-        {/* Two columns */}
-        <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-          {/* Left */}
-          <div style={{ flex: '1 1 280px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {/* ETA */}
-            {step === 3 && eta && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-                <span style={{ fontSize: 18 }}>🚐</span>
-                <div style={{ flex: 1 }}><div style={{ height: 5, borderRadius: 3, background: B.grayLight, overflow: 'hidden' }}><div style={{ height: '100%', borderRadius: 3, background: `linear-gradient(90deg, ${B.wavesBlue}, ${B.green})`, width: `${Math.max(10, 100 - eta * 3)}%`, transition: 'width 1s ease' }} /></div></div>
-                <span style={{ fontSize: 16, fontWeight: 900, color: B.navy, fontFamily: FONTS.ui }}>~{eta}m</span>
-              </div>
-            )}
-
-            {/* Tech card */}
+        {/* Full-width stacked cards */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+          {/* ETA */}
+          {step === 3 && eta && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <div style={{
-                width: 38, height: 38, borderRadius: '50%',
-                background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
-                border: `2px solid ${B.yellow}`,
-                color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 14, fontWeight: 800, fontFamily: FONTS.heading, flexShrink: 0,
-              }}>{techInitials}</div>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{techName}</div>
-                <span style={{ display: 'inline-block', fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: B.yellow, color: '#1E1E2B', fontFamily: FONTS.ui, marginTop: 1 }}>{svcType}</span>
-              </div>
+              <span style={{ fontSize: 18 }}>🚐</span>
+              <div style={{ flex: 1 }}><div style={{ height: 5, borderRadius: 3, background: B.grayLight, overflow: 'hidden' }}><div style={{ height: '100%', borderRadius: 3, background: `linear-gradient(90deg, ${B.wavesBlue}, ${B.green})`, width: `${Math.max(10, 100 - eta * 3)}%`, transition: 'width 1s ease' }} /></div></div>
+              <span style={{ fontSize: 16, fontWeight: 900, color: B.navy, fontFamily: FONTS.ui }}>~{eta}m</span>
             </div>
+          )}
 
-            {/* Live notes */}
-            {notes.length > 0 && (
-              <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 5 }}>Live Updates</div>
-                {notes.map((n, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 6, marginBottom: i < notes.length - 1 ? 5 : 0 }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 10, flexShrink: 0 }}>
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: B.wavesBlue }} />
-                      {i < notes.length - 1 && <div style={{ width: 1.5, flex: 1, background: B.bluePale, marginTop: 1 }} />}
-                    </div>
-                    <div><div style={{ fontSize: 11, color: B.navy, fontWeight: 500, lineHeight: 1.3 }}>{n.note}</div><div style={{ fontSize: 9, color: '#90A4AE' }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
-                  </div>
-                ))}
+          {/* Tech card */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
+            <div style={{
+              width: 38, height: 38, borderRadius: '50%',
+              background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
+              border: `2px solid ${B.yellow}`,
+              color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 14, fontWeight: 800, fontFamily: FONTS.heading, flexShrink: 0,
+            }}>{techInitials}</div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{techName}</div>
+              <span style={{ display: 'inline-block', fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: B.yellow, color: '#1E1E2B', fontFamily: FONTS.ui, marginTop: 1 }}>{svcType}</span>
+            </div>
+          </div>
+
+          {/* Office card */}
+          <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{office.name}</div>
+              <div style={{ fontSize: 9, color: '#90A4AE' }}>Open 24 hrs</div>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.red, color: '#fff', textDecoration: 'none' }}>📞 Call</a>
+              <a href={`sms:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}>💬 Text</a>
+            </div>
+          </div>
+
+          {/* Pre-arrival checklist */}
+          {step < 5 && (
+            <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Before Your Tech Arrives</div>
+              {[
+                propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
+                  ? { icon: '✅', text: 'Gate code on file', ok: true }
+                  : { icon: '⚠️', text: 'No gate code on file', ok: false },
+                propertyPrefs?.petCount > 0 && propertyPrefs?.petSecuredPlan
+                  ? { icon: '✅', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 40)}`, ok: true }
+                  : { icon: '⚠️', text: 'Secure pets before tech arrives', ok: false },
+                { icon: '🔓', text: 'Ensure gates are unlocked', ok: true },
+                ...(isLawn ? [
+                  { icon: '💧', text: 'Turn off irrigation 24hrs before', ok: true },
+                  { icon: '🌿', text: "Don't mow 3 days before/after", ok: true },
+                ] : []),
+                ...(isPest ? [
+                  { icon: '🏠', text: 'Clear counters and baseboards', ok: true },
+                  { icon: '🐠', text: 'Cover fish tanks and pet bowls', ok: true },
+                ] : []),
+                ...(isMosquito ? [
+                  { icon: '💧', text: 'Remove standing water', ok: true },
+                  { icon: '✅', text: 'Exterior only — no indoor prep', ok: true },
+                ] : []),
+                ...(isTermite ? [
+                  { icon: '🏠', text: 'Clear access to garage/attic', ok: true },
+                ] : []),
+              ].map((item, i) => (
+                <div key={i} style={{
+                  display: 'flex', gap: 5, alignItems: 'center', marginBottom: 3,
+                  borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
+                  paddingLeft: item.ok ? 0 : 6,
+                }}>
+                  <span style={{ flexShrink: 0, fontSize: 11 }}>{item.icon}</span>
+                  <span style={{ fontSize: 11, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.grayDark : B.navy, lineHeight: 1.3 }}>{item.text}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* What to Expect */}
+          <div style={{ borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}`, overflow: 'hidden' }}>
+            <div onClick={() => setShowExpect(!showExpect)} style={{
+              padding: '7px 12px', cursor: 'pointer',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>What to Expect</span>
+              <span style={{ fontSize: 12, color: B.grayMid, transform: showExpect ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
+            </div>
+            {showExpect && (
+              <div style={{ padding: '0 12px 8px', borderTop: `1px solid ${B.grayLight}` }}>
+                <div style={{ fontSize: 11, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>{whatToExpect}</div>
               </div>
             )}
           </div>
 
-          {/* Right */}
-          <div style={{ flex: '1 1 220px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {/* Office card — compact */}
+          {/* Live notes */}
+          {notes.length > 0 && (
             <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{office.name}</div>
-                <div style={{ fontSize: 9, color: '#90A4AE' }}>Open 24 hrs</div>
-              </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.red, color: '#fff', textDecoration: 'none' }}>📞 Call</a>
-                <a href={`sms:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}>💬 Text</a>
-              </div>
-            </div>
-
-            {/* Pre-arrival checklist — compact */}
-            {step < 5 && (
-              <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Before Your Tech Arrives</div>
-                {[
-                  propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
-                    ? { icon: '✅', text: 'Gate code on file', ok: true }
-                    : { icon: '⚠️', text: 'No gate code on file', ok: false },
-                  propertyPrefs?.petCount > 0 && propertyPrefs?.petSecuredPlan
-                    ? { icon: '✅', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 40)}`, ok: true }
-                    : { icon: '⚠️', text: 'Secure pets before tech arrives', ok: false },
-                  { icon: '🔓', text: 'Ensure gates are unlocked', ok: true },
-                  ...(isLawn ? [
-                    { icon: '💧', text: 'Turn off irrigation 24hrs before', ok: true },
-                    { icon: '🌿', text: "Don't mow 3 days before/after", ok: true },
-                  ] : []),
-                  ...(isPest ? [
-                    { icon: '🏠', text: 'Clear counters and baseboards', ok: true },
-                    { icon: '🐠', text: 'Cover fish tanks and pet bowls', ok: true },
-                  ] : []),
-                  ...(isMosquito ? [
-                    { icon: '💧', text: 'Remove standing water', ok: true },
-                    { icon: '✅', text: 'Exterior only — no indoor prep', ok: true },
-                  ] : []),
-                  ...(isTermite ? [
-                    { icon: '🏠', text: 'Clear access to garage/attic', ok: true },
-                  ] : []),
-                ].map((item, i) => (
-                  <div key={i} style={{
-                    display: 'flex', gap: 5, alignItems: 'center', marginBottom: 3,
-                    borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
-                    paddingLeft: item.ok ? 0 : 6,
-                  }}>
-                    <span style={{ flexShrink: 0, fontSize: 11 }}>{item.icon}</span>
-                    <span style={{ fontSize: 11, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.grayDark : B.navy, lineHeight: 1.3 }}>{item.text}</span>
+              <div style={{ fontSize: 10, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 5 }}>Live Updates</div>
+              {notes.map((n, i) => (
+                <div key={i} style={{ display: 'flex', gap: 6, marginBottom: i < notes.length - 1 ? 5 : 0 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 10, flexShrink: 0 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: B.wavesBlue }} />
+                    {i < notes.length - 1 && <div style={{ width: 1.5, flex: 1, background: B.bluePale, marginTop: 1 }} />}
                   </div>
-                ))}
-              </div>
-            )}
+                  <div><div style={{ fontSize: 11, color: B.navy, fontWeight: 500, lineHeight: 1.3 }}>{n.note}</div><div style={{ fontSize: 9, color: '#90A4AE' }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
+                </div>
+              ))}
+            </div>
+          )}
 
-            {/* What to Expect */}
-            <div style={{ borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}`, overflow: 'hidden' }}>
-              <div onClick={() => setShowExpect(!showExpect)} style={{
-                padding: '7px 12px', cursor: 'pointer',
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              }}>
-                <span style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>What to Expect</span>
-                <span style={{ fontSize: 12, color: B.grayMid, transform: showExpect ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
-              </div>
-              {showExpect && (
-                <div style={{ padding: '0 12px 8px', borderTop: `1px solid ${B.grayLight}` }}>
-                  <div style={{ fontSize: 11, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>{whatToExpect}</div>
+          {/* Completion summary */}
+          {step === 7 && summary && (
+            <div style={{ padding: '8px 12px', borderRadius: 10, background: '#E8F5E9', border: `1px solid ${B.green}33` }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: B.green, marginBottom: 4 }}>Service Summary</div>
+              {summary.productsApplied?.length > 0 && (
+                <div style={{ marginBottom: 6 }}>
+                  <div style={{ fontSize: 10, color: B.grayDark, fontWeight: 600, marginBottom: 3 }}>Products:</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>{summary.productsApplied.map((p, i) => (<span key={i} style={{ fontSize: 9, padding: '2px 6px', borderRadius: 5, background: B.white, color: B.navy, fontWeight: 600 }}>{p}</span>))}</div>
                 </div>
               )}
+              {summary.areasTreated?.length > 0 && <div style={{ fontSize: 11, color: B.grayDark, marginBottom: 4 }}><strong>Areas:</strong> {summary.areasTreated.join(' · ')}</div>}
+              {summary.recommendations && <div style={{ fontSize: 11, color: B.grayDark, fontStyle: 'italic' }}>💡 {summary.recommendations}</div>}
+              {summary.nextVisitDate && <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, marginTop: 4 }}>Next visit: {new Date(summary.nextVisitDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>}
             </div>
-
-            {/* Completion summary */}
-            {step === 7 && summary && (
-              <div style={{ padding: '8px 12px', borderRadius: 10, background: '#E8F5E9', border: `1px solid ${B.green}33` }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: B.green, marginBottom: 4 }}>Service Summary</div>
-                {summary.productsApplied?.length > 0 && (
-                  <div style={{ marginBottom: 6 }}>
-                    <div style={{ fontSize: 10, color: B.grayDark, fontWeight: 600, marginBottom: 3 }}>Products:</div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>{summary.productsApplied.map((p, i) => (<span key={i} style={{ fontSize: 9, padding: '2px 6px', borderRadius: 5, background: B.white, color: B.navy, fontWeight: 600 }}>{p}</span>))}</div>
-                  </div>
-                )}
-                {summary.areasTreated?.length > 0 && <div style={{ fontSize: 11, color: B.grayDark, marginBottom: 4 }}><strong>Areas:</strong> {summary.areasTreated.join(' · ')}</div>}
-                {summary.recommendations && <div style={{ fontSize: 11, color: B.grayDark, fontStyle: 'italic' }}>💡 {summary.recommendations}</div>}
-                {summary.nextVisitDate && <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, marginTop: 4 }}>Next visit: {new Date(summary.nextVisitDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>}
-              </div>
-            )}
-          </div>
+          )}
         </div>
       </div>
 
@@ -7637,11 +7631,12 @@ export default function PortalPage() {
           textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'🤖'} Chat</button>
-        <a href="mailto:contact@wavespestcontrol.com" onClick={(e) => { e.preventDefault(); window.location.href = 'mailto:contact@wavespestcontrol.com'; }} style={{
+        <a href="mailto:contact@wavespestcontrol.com" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
           background: B.red, color: '#fff', fontSize: 12,
           textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
+          textDecoration: 'none',
         }}>{'✉️'} Email</a>
       </div>
 
