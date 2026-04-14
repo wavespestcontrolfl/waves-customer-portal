@@ -339,7 +339,7 @@ function voiceAgentRoutes(app, httpServer) {
       `<?xml version="1.0" encoding="UTF-8"?>
        <Response>
          <Play>${greetingAudio}</Play>
-         <Dial timeout="25"
+         <Dial timeout="18"
            record="record-from-answer-dual"
            recordingStatusCallback="https://${domain}/api/webhooks/twilio/recording-status"
            recordingStatusCallbackEvent="completed"

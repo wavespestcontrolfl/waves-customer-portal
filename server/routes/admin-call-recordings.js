@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 
@@ -119,6 +120,12 @@ const DISPOSITION_LABELS = {
 router.put('/calls/:id/disposition', async (req, res, next) => {
   try {
     const { disposition } = req.body;
+
+    // Auto-add disposition column if missing
+    const cols = await db('call_log').columnInfo();
+    if (!cols.disposition) {
+      await db.schema.alterTable('call_log', t => t.string('disposition', 50)).catch(() => {});
+    }
 
     // Find the call record
     let call = await db('call_log').where({ id: req.params.id }).first();
