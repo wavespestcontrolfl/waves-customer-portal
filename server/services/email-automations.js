@@ -148,6 +148,24 @@ const AUTOMATIONS = {
     smsTemplate: null,
     enabled: true,
   },
+  payment_failed: {
+    name: 'Payment Failed',
+    description: 'Sent when autopay fails — friendly heads-up before retry',
+    trigger: 'manual',
+    beehiivAutomationId: process.env.BEEHIIV_AUTO_PAYMENT_FAILED || 'aut_bf915f3e-8ca2-4355-be54-9a66e9633296',
+    tags: ['payment failed'],
+    smsTemplate: null,
+    enabled: true,
+  },
+  referral_nudge: {
+    name: 'Referral Nudge',
+    description: 'Post-service nudge encouraging customer to refer friends and family',
+    trigger: 'manual',
+    beehiivAutomationId: process.env.BEEHIIV_AUTO_REFERRAL || 'aut_45641d64-3111-49c2-87bb-3f1fe6ccce25',
+    tags: ['referral'],
+    smsTemplate: null,
+    enabled: true,
+  },
 };
 
 const EmailAutomationService = {
