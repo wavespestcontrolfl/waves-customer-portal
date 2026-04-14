@@ -153,6 +153,24 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   if (invoiceUpdated > 0) {
     logger.info(`[stripe-webhook] Updated ${invoiceUpdated} invoice(s) to paid for PI: ${piId}`);
   }
+
+  // If ACH payment succeeded, resolve any pending ACH failures for this customer
+  const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
+  if (pmType === 'us_bank_account') {
+    try {
+      const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+      if (payment?.customer_id) {
+        await db('ach_failure_log')
+          .where({ customer_id: payment.customer_id, resolved: false })
+          .update({ resolved: true, resolution: 'retry_success' })
+          .catch(() => {});
+        await db('customers').where({ id: payment.customer_id })
+          .update({ ach_status: 'active', ach_failure_count: 0 })
+          .catch(() => {});
+        logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
+      }
+    } catch { /* non-critical */ }
+  }
 }
 
 /**
@@ -183,6 +201,12 @@ async function handlePaymentIntentFailed(paymentIntent) {
     }
   } catch (err) {
     logger.debug(`[stripe-webhook] Health rescore lookup failed: ${err.message}`);
+  }
+
+  // ── ACH failure handling ──
+  const pmType = paymentIntent.last_payment_error?.payment_method?.type;
+  if (pmType === 'us_bank_account') {
+    await handleAchFailure(paymentIntent, failureMessage);
   }
 }
 
@@ -280,6 +304,107 @@ async function handlePayoutEvent(payout, eventType) {
     }
   } catch (err) {
     logger.error(`[stripe-webhook] Payout notification failed: ${err.message}`);
+  }
+}
+
+/**
+ * ACH failure handling — escalating response:
+ * 1st fail: notify customer, Stripe auto-retries
+ * 2nd fail (same invoice): switch to card, flag ACH needs_verification
+ * 3rd fail (90 days): suspend ACH, switch default to card
+ */
+async function handleAchFailure(paymentIntent, failureReason) {
+  const piId = paymentIntent.id;
+
+  try {
+    // Find the customer
+    const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+    if (!payment?.customer_id) return;
+    const customer = await db('customers').where({ id: payment.customer_id }).first();
+    if (!customer) return;
+
+    // Log the failure
+    try {
+      await db('ach_failure_log').insert({
+        customer_id: customer.id,
+        stripe_payment_intent_id: piId,
+        failure_reason: failureReason,
+      });
+    } catch { /* table may not exist yet */ }
+
+    // Count recent ACH failures (last 90 days)
+    let recentFailures = 0;
+    try {
+      recentFailures = Number((await db('ach_failure_log')
+        .where({ customer_id: customer.id, resolved: false })
+        .where('failure_date', '>=', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
+        .count('* as cnt')
+        .first())?.cnt || 0);
+    } catch { /* table may not exist */ }
+
+    // Send SMS notification
+    try {
+      const twilio = require('../services/twilio');
+      const phone = customer.phone;
+      if (phone) {
+        if (recentFailures >= 3) {
+          // 3rd failure — ACH suspended
+          await twilio.sendSMS(phone,
+            `Hi ${customer.first_name}, your bank payment failed again. We've updated your default payment to your card. To re-enable your 3% bank payment discount, update your bank account at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing. — Waves Pest Control`
+          );
+        } else if (recentFailures >= 2) {
+          // 2nd failure — card fallback
+          await twilio.sendSMS(phone,
+            `Hi ${customer.first_name}, your bank payment failed again. We've switched this payment to your card on file. Your 3% bank payment discount will resume once your bank account is verified. — Waves Pest Control`
+          );
+        } else {
+          // 1st failure — notify + auto-retry
+          await twilio.sendSMS(phone,
+            `Hi ${customer.first_name}, your bank payment didn't go through. We'll retry automatically in 3 business days. No action needed. — Waves Pest Control`
+          );
+        }
+      }
+    } catch (smsErr) {
+      logger.error(`[stripe-webhook] ACH failure SMS failed: ${smsErr.message}`);
+    }
+
+    // Update customer ACH status based on failure count
+    try {
+      if (recentFailures >= 3) {
+        // Suspend ACH — switch default to card
+        await db('customers').where({ id: customer.id }).update({
+          ach_status: 'suspended',
+          ach_failure_count: recentFailures,
+        });
+        // Try to set card as default payment method
+        const cardMethod = await db('payment_methods')
+          .where({ customer_id: customer.id, method_type: 'card' })
+          .first();
+        if (cardMethod) {
+          await db('payment_methods')
+            .where({ customer_id: customer.id })
+            .update({ is_default: false });
+          await db('payment_methods')
+            .where({ id: cardMethod.id })
+            .update({ is_default: true });
+        }
+        logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} — 3+ failures in 90 days`);
+      } else if (recentFailures >= 2) {
+        await db('customers').where({ id: customer.id }).update({
+          ach_status: 'needs_verification',
+          ach_failure_count: recentFailures,
+        });
+        logger.warn(`[stripe-webhook] ACH needs verification for customer ${customer.id}`);
+      } else {
+        await db('customers').where({ id: customer.id }).update({
+          ach_failure_count: recentFailures,
+        });
+      }
+    } catch (dbErr) {
+      logger.error(`[stripe-webhook] ACH status update failed: ${dbErr.message}`);
+    }
+  } catch (err) {
+    logger.error(`[stripe-webhook] ACH failure handler error: ${err.message}`);
   }
 }
 

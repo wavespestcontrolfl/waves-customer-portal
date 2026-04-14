@@ -57,7 +57,7 @@ const DiscountEngine = {
   /**
    * Calculate all applicable discounts for a customer + subtotal.
    */
-  async calculateDiscounts(customerId, { subtotal = 0, serviceKey, serviceCategory, isEstimate = false } = {}) {
+  async calculateDiscounts(customerId, { subtotal = 0, serviceKey, serviceCategory, isEstimate = false, paymentMethod } = {}) {
     const customer = customerId
       ? await db('customers').where({ id: customerId }).first()
       : null;
@@ -123,6 +123,9 @@ const DiscountEngine = {
       // Service filter
       if (disc.service_key_filter && serviceKey && disc.service_key_filter !== serviceKey) continue;
       if (disc.service_category_filter && serviceCategory && disc.service_category_filter !== serviceCategory) continue;
+
+      // Payment method condition (ACH discount only applies when paying via bank)
+      if (disc.payment_method_condition && disc.payment_method_condition !== paymentMethod) continue;
 
       // Min subtotal
       if (disc.min_subtotal && subtotal < Number(disc.min_subtotal)) continue;
@@ -291,17 +294,42 @@ const DiscountEngine = {
   /**
    * Enforce composite discount cap (25% max from all sources).
    * Takes basePrice and finalPrice, returns adjusted finalPrice.
+   * ACH discount is exempt — it's a payment processing offset, not a service discount.
+   * Pass achDiscountAmount to exclude it from cap calculation.
    */
-  async enforceCompositeCap(basePrice, finalPrice) {
+  async enforceCompositeCap(basePrice, finalPrice, { achDiscountAmount = 0 } = {}) {
     if (basePrice <= 0) return finalPrice;
     let cap = 0.25;
     try {
       const row = await db('pricing_config').where({ config_key: 'WG_COMPOSITE_CAP' }).first();
       if (row) cap = parseFloat(row.config_value);
     } catch { /* use default */ }
-    const effectiveDiscount = 1 - (finalPrice / basePrice);
-    if (effectiveDiscount > cap) return Math.round(basePrice * (1 - cap) * 100) / 100;
+    // Exclude ACH discount from cap calculation
+    const priceBeforeAch = finalPrice + achDiscountAmount;
+    const effectiveDiscount = 1 - (priceBeforeAch / basePrice);
+    if (effectiveDiscount > cap) {
+      const capped = Math.round(basePrice * (1 - cap) * 100) / 100;
+      return capped - achDiscountAmount; // Re-apply ACH discount after capping
+    }
     return finalPrice;
+  },
+
+  /**
+   * Calculate ACH discount for a given amount.
+   * Returns { discount, rate } or null if not applicable.
+   */
+  async getAchDiscount(amount, paymentMethod) {
+    if (paymentMethod !== 'us_bank_account') return null;
+    try {
+      const disc = await db('discounts')
+        .where({ discount_key: 'ach_payment_discount', is_active: true })
+        .first();
+      if (!disc) return null;
+      const rate = Number(disc.amount) / 100;
+      return { discount: Math.round(amount * rate * 100) / 100, rate };
+    } catch {
+      return { discount: Math.round(amount * 0.03 * 100) / 100, rate: 0.03 };
+    }
   },
 
   /**

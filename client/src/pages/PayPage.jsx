@@ -106,6 +106,7 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, on
             type: 'tabs',
             defaultCollapsed: false,
           },
+          paymentMethodOrder: ['us_bank_account', 'card', 'apple_pay', 'google_pay'],
           wallets: {
             applePay: 'auto',
             googlePay: 'auto',
@@ -171,6 +172,17 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, on
 
   return (
     <div>
+      {/* ACH savings nudge */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12,
+        padding: '10px 14px', borderRadius: 10,
+        background: W.greenLight, border: `1px solid ${W.green}33`,
+      }}>
+        <span style={{ fontSize: 18 }}>🏦</span>
+        <span style={{ fontSize: 13, color: '#2E7D32', fontWeight: 500 }}>
+          Save 3% when you pay by bank account
+        </span>
+      </div>
       <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
 
       {elementError && (

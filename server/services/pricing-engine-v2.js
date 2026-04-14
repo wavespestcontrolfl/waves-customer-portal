@@ -460,11 +460,12 @@ function interpolate(v, breakpoints) {
 // ─────────────────────────────────────────────
 function calcLawn(turfSf, grassType, p) {
   // Pricing lookup from Lawn_Pricing_v4_TimeScaled.xlsx
+  // Lawn pricing brackets — 3% increase applied (payment model restructure)
   const LAWN_PRICES = {
-    st_augustine: { name: 'St. Augustine', pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
-    bermuda: { name: 'Bermuda', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
-    zoysia: { name: 'Zoysia', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
-    bahia: { name: 'Bahia', pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] }
+    st_augustine: { name: 'St. Augustine', pts: [[0,36,46,57,67],[3000,36,46,57,67],[3500,36,46,57,70],[4000,36,46,57,75],[5000,36,46,61,87],[6000,36,47,68,99],[7000,39,52,75,110],[8000,42,57,82,122],[10000,48,66,97,144],[12000,56,75,112,167],[15000,65,89,134,201],[20000,82,111,170,258]] },
+    bermuda: { name: 'Bermuda', pts: [[0,41,52,62,77],[4000,41,52,62,77],[5000,41,52,62,89],[6000,41,52,69,100],[7000,41,53,76,111],[8000,43,58,84,124],[10000,49,67,99,146],[12000,57,76,114,170],[15000,67,91,136,205],[20000,83,114,174,264]] },
+    zoysia: { name: 'Zoysia', pts: [[0,41,52,62,77],[4000,41,52,62,77],[5000,41,52,63,90],[6000,41,52,70,101],[7000,41,54,77,113],[8000,43,58,85,125],[10000,50,68,100,148],[12000,58,77,115,172],[15000,68,92,138,208],[20000,85,115,176,267]] },
+    bahia: { name: 'Bahia', pts: [[0,31,41,52,62],[3000,31,41,52,62],[3500,31,41,52,65],[4000,31,41,52,70],[5000,31,41,57,80],[6000,33,43,63,90],[7000,36,47,69,100],[8000,38,52,75,110],[10000,44,60,89,130],[12000,49,68,101,149],[15000,59,79,121,179],[20000,73,100,152,230]] }
   };
 
   const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
@@ -518,10 +519,11 @@ function calcPestBase(footprint, p, mods) {
   const adjItems = [];
 
   // Footprint adjustment — based on actual chemical cost + labor data
+  // Footprint adjustments — 3% increase applied
   const fpAdj = interpolate(footprint, [
-    { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
+    { at: 800, adj: -21 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
     { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 },
-    { at: 4000, adj: 20 }, { at: 5500, adj: 28 }
+    { at: 4000, adj: 21 }, { at: 5500, adj: 29 }
   ]);
   adj += fpAdj;
   adjItems.push({ name: `Footprint (${footprint.toLocaleString()} sf)`, value: fpAdj });
@@ -582,7 +584,7 @@ function calcPestBase(footprint, p, mods) {
     adjItems.push({ name: `Property type (${p.propertyType})`, value: propTypeAdj });
   }
 
-  const basePrice = Math.max(89, 117 + adj);
+  const basePrice = Math.max(92, 121 + adj);
   return basePrice;
 }
 
@@ -737,12 +739,13 @@ function calcMosquito(p, mods) {
   // Cap raised from 1.50 to 2.0 for extreme water proximity
   pr = Math.min(2.0, pr);
 
+  // Mosquito base prices — 3% increase applied
   const bp = {
-    SMALL: { b: 80, s: 90, g: 100, p: 110 },
-    QUARTER: { b: 90, s: 100, g: 115, p: 125 },
-    THIRD: { b: 100, s: 110, g: 125, p: 135 },
-    HALF: { b: 110, s: 125, g: 145, p: 155 },
-    ACRE: { b: 140, s: 155, g: 180, p: 200 }
+    SMALL: { b: 82, s: 93, g: 103, p: 113 },
+    QUARTER: { b: 93, s: 103, g: 118, p: 129 },
+    THIRD: { b: 103, s: 113, g: 129, p: 139 },
+    HALF: { b: 113, s: 129, g: 149, p: 160 },
+    ACRE: { b: 144, s: 160, g: 185, p: 206 }
   };
   const base = bp[sz] || bp.SMALL;
 
@@ -800,9 +803,9 @@ function calcTermiteBait(footprint, p, mods) {
     stations,
     constructionMult: conMult,
     foundationAdj: foundAdj,
-    advance: { install: advanceInstall, basicMo: 35, premierMo: 65 },
-    trelona: { install: trelonaInstall, basicMo: 35, premierMo: 65 },
-    wgMonthly: 35 // Basic tier default
+    advance: { install: advanceInstall, basicMo: 36, premierMo: 67 },
+    trelona: { install: trelonaInstall, basicMo: 36, premierMo: 67 },
+    wgMonthly: 36 // Basic tier default
   };
 }
 
@@ -872,7 +875,7 @@ function calcTrenching(footprint, p, mods, applyOT) {
   const dirtLF = Math.round(perim * (1 - cp));
   const concreteLF = Math.round(perim * cp);
 
-  let basePrice = Math.max(600, dirtLF * 10 + concreteLF * 14);
+  let basePrice = Math.max(618, dirtLF * 10.30 + concreteLF * 14.42);
 
   // ── NEW: Foundation modifier ──
   const foundAdj = mods.termiteFoundationAdj || 0;
@@ -887,7 +890,7 @@ function calcTrenching(footprint, p, mods, applyOT) {
     price: applyOT(basePrice),
     detail: `${dirtLF} LF dirt + ${concreteLF} LF concrete`,
     perimeter: perim,
-    renewal: 325,
+    renewal: 335,
     foundationAdj: foundAdj,
     constructionMult: conMult
   };
@@ -898,9 +901,9 @@ function calcTrenching(footprint, p, mods, applyOT) {
 // WDO INSPECTION — with construction & foundation modifiers
 // ─────────────────────────────────────────────
 function calcWDO(footprint, p, mods, applyOT) {
-  let basePrice = 175;
-  if (footprint > 2500) basePrice = 200;
-  if (footprint > 3500) basePrice = 225;
+  let basePrice = 180;
+  if (footprint > 2500) basePrice = 206;
+  if (footprint > 3500) basePrice = 232;
 
   // ── NEW: WDO time multiplier based on construction + foundation ──
   const timeMult = mods.wdoTimeMult || 1.0;
@@ -970,7 +973,7 @@ function calcFoam(points, applyOT) {
   const cost = t.c * FM_CAN + t.l * LABOR_RATE + FM_BITS;
   return {
     name: 'Drill-and-Foam Termite',
-    price: applyOT(Math.max(250, Math.round(cost / 0.45))),
+    price: applyOT(Math.max(258, Math.round(cost / 0.45))),
     detail: `${t.n} | ${t.c} cans`,
     points, tier: t.n
   };
@@ -1022,15 +1025,16 @@ function calcTopdress(turfSf, applyOT) {
 // RODENT TRAPPING
 // ─────────────────────────────────────────────
 function calcRodentTrap(footprint, lotSqFt, applyOT) {
-  let p = 350;
+  // Rodent trapping — 3% increase applied (base 350→361)
+  let p = 361;
   p += interpolate(footprint, [
-    { at: 800, adj: -25 }, { at: 1500, adj: -10 }, { at: 2000, adj: 0 },
-    { at: 2500, adj: 20 }, { at: 3000, adj: 40 }, { at: 4000, adj: 65 }
+    { at: 800, adj: -26 }, { at: 1500, adj: -10 }, { at: 2000, adj: 0 },
+    { at: 2500, adj: 21 }, { at: 3000, adj: 41 }, { at: 4000, adj: 67 }
   ]);
   p += interpolate(lotSqFt, [
-    { at: 5000, adj: 0 }, { at: 10000, adj: 10 }, { at: 15000, adj: 20 }, { at: 25000, adj: 35 }
+    { at: 5000, adj: 0 }, { at: 10000, adj: 10 }, { at: 15000, adj: 21 }, { at: 25000, adj: 36 }
   ]);
-  return { name: 'Rodent Trapping', price: applyOT(Math.max(350, p)), detail: 'Setup + check visits' };
+  return { name: 'Rodent Trapping', price: applyOT(Math.max(361, p)), detail: 'Setup + check visits' };
 }
 
 
@@ -1038,7 +1042,8 @@ function calcRodentTrap(footprint, lotSqFt, applyOT) {
 // FLEA
 // ─────────────────────────────────────────────
 function calcFlea(footprint, p, applyOT) {
-  let fi = 225, ff = 125;
+  // Flea — 3% increase applied (225→232, 125→129)
+  let fi = 232, ff = 129;
   fi += interpolate(footprint, [{ at: 800, adj: -25 }, { at: 1200, adj: -15 }, { at: 1500, adj: -5 }, { at: 2000, adj: 0 }, { at: 2500, adj: 15 }, { at: 3000, adj: 25 }, { at: 4000, adj: 40 }]);
   ff += interpolate(footprint, [{ at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -3 }, { at: 2000, adj: 0 }, { at: 2500, adj: 8 }, { at: 3000, adj: 15 }, { at: 4000, adj: 25 }]);
   fi += interpolate(p.lotSqFt, [{ at: 3000, adj: -15 }, { at: 5000, adj: -5 }, { at: 7500, adj: 0 }, { at: 10000, adj: 10 }, { at: 15000, adj: 20 }, { at: 25000, adj: 35 }]);
@@ -1047,7 +1052,7 @@ function calcFlea(footprint, p, applyOT) {
   else if (p.treeDensity === 'MODERATE') { fi += 10; ff += 5; }
   if (p.landscapeComplexity === 'COMPLEX') { fi += 15; ff += 10; }
   else if (p.landscapeComplexity === 'MODERATE') { fi += 5; ff += 5; }
-  fi = Math.max(185, fi); ff = Math.max(95, ff);
+  fi = Math.max(191, fi); ff = Math.max(98, ff);
   return { name: 'Flea (2-visit)', price: applyOT(fi + ff), detail: `$${fi} + $${ff}` };
 }
 
@@ -1057,14 +1062,16 @@ function calcFlea(footprint, p, applyOT) {
 // ─────────────────────────────────────────────
 function calcRoach(footprint, p, roachType, pestResult, applyOT) {
   if (roachType === 'REGULAR') {
-    const bpp = pestResult?.perApp || 117;
-    return { name: 'Regular Roach', price: applyOT(Math.max(150, Math.round(bpp * 1.15 * 1.30))), detail: 'Enhanced treatment' };
+    // Roach — 3% increase applied (150→155, 117→121)
+    const bpp = pestResult?.perApp || 121;
+    return { name: 'Regular Roach', price: applyOT(Math.max(155, Math.round(bpp * 1.15 * 1.30))), detail: 'Enhanced treatment' };
   }
-  let gp = 450 + interpolate(footprint, [
-    { at: 800, adj: -40 }, { at: 1200, adj: -20 }, { at: 1500, adj: -10 },
-    { at: 2000, adj: 0 }, { at: 2500, adj: 25 }, { at: 3000, adj: 50 }, { at: 4000, adj: 85 }
+  // German roach — 3% increase applied (450→464, floor 400→412)
+  let gp = 464 + interpolate(footprint, [
+    { at: 800, adj: -41 }, { at: 1200, adj: -21 }, { at: 1500, adj: -10 },
+    { at: 2000, adj: 0 }, { at: 2500, adj: 26 }, { at: 3000, adj: 52 }, { at: 4000, adj: 88 }
   ]);
-  return { name: 'German Roach (3-visit)', price: applyOT(Math.max(400, gp)), detail: 'Gel+IGR+monitoring' };
+  return { name: 'German Roach (3-visit)', price: applyOT(Math.max(412, gp)), detail: 'Gel+IGR+monitoring' };
 }
 
 
@@ -1072,7 +1079,8 @@ function calcRoach(footprint, p, roachType, pestResult, applyOT) {
 // STINGING INSECT
 // ─────────────────────────────────────────────
 function calcSting(species, tier, removal, aggressive, height, confined, urgency, afterHours, pestResult) {
-  const tierBase = { 1: 150, 2: 250, 3: 435, 4: 775 };
+  // Stinging insect tiers — 3% increase applied
+  const tierBase = { 1: 155, 2: 258, 3: 448, 4: 799 };
   let price = tierBase[tier] || 250;
   const speciesNames = {
     PAPER_WASP: 'Paper Wasps', YJ_AERIAL: 'Yellow Jackets (aerial)',
@@ -1121,14 +1129,16 @@ function calcBedbug(rooms, method, footprint, applyOT) {
     const lv2 = 25 + Math.max(0, (rooms - 1) * 20) + DRIVE_TIME;
     const mpr = 50.42;
     let cp = Math.round((mpr * rooms + LABOR_RATE * (lv1 / 60) + mpr * rooms * 0.5 + LABOR_RATE * (lv2 / 60)) / 0.35 * 100) / 100;
-    const fl = 400 + (rooms - 1) * 250;
+    // Bed bug chemical — 3% increase applied (400→412, 250→258)
+    const fl = 412 + (rooms - 1) * 258;
     if (cp < fl) cp = fl;
     if (footprint > 2500) cp = Math.round(cp * 1.10);
     else if (footprint > 1800) cp = Math.round(cp * 1.05);
     results.push({ method: 'Chemical', price: applyOT(cp), detail: `${rooms} room${rooms > 1 ? 's' : ''}, 2 visits` });
   }
   if (method !== 'CHEMICAL') {
-    let hpr = rooms === 1 ? 1000 : rooms === 2 ? 850 : 750;
+    // Bed bug heat — 3% increase applied (1000→1030, 850→876, 750→773)
+    let hpr = rooms === 1 ? 1030 : rooms === 2 ? 876 : 773;
     let hp = hpr * rooms;
     if (footprint > 2500) hp = Math.round(hp * 1.10);
     else if (footprint < 1200) hp = Math.round(hp * 0.95);
@@ -1142,9 +1152,10 @@ function calcBedbug(rooms, method, footprint, applyOT) {
 // EXCLUSION
 // ─────────────────────────────────────────────
 function calcExclusion(simple, moderate, advanced, waive, applyOT) {
-  const sc = simple * 37.50 + moderate * 75 + advanced * 150;
-  const ep = Math.max(150, Math.round(sc));
-  const insp = waive ? 0 : 85;
+  // Exclusion — 3% increase applied (37.50→39, 75→77, 150→155, floor 150→155, inspection 85→88)
+  const sc = simple * 39 + moderate * 77 + advanced * 155;
+  const ep = Math.max(155, Math.round(sc));
+  const insp = waive ? 0 : 88;
   const total = applyOT(ep) + insp;
   let tier = 'Basic';
   if (advanced > 0) tier = 'Advanced (Roof)';
@@ -1152,7 +1163,7 @@ function calcExclusion(simple, moderate, advanced, waive, applyOT) {
   return {
     name: 'Rodent Exclusion',
     price: total,
-    detail: `${tier} — ${simple + moderate + advanced} points${insp > 0 ? ' + $85 inspect' : ' (inspect waived)'}`,
+    detail: `${tier} — ${simple + moderate + advanced} points${insp > 0 ? ' + $88 inspect' : ' (inspect waived)'}`,
     points: { simple, moderate, advanced }, inspectionFee: insp, tier
   };
 }

@@ -2930,7 +2930,7 @@ function BillingTab({ customer }) {
         }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Auto Pay Enrollment</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free.</div>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Save 3% with bank payment.</div>
           </div>
           <span style={{
             fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
