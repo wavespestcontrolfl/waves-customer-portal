@@ -136,6 +136,53 @@ const SERVICE_DETAILS = {
       { title: 'Service Reporting & Documentation', text: "Every visit — from the initial inspection through ongoing monitoring — is documented with a detailed digital service report. Reports include findings at each bait station, trap results, photos of exclusion work, new activity observations, and any recommendations for property improvements. This documentation creates a complete, trackable history of your rodent control program — showing what was done, what was found, and how the situation is improving over time.", tags: ['Digital Reports', 'Photo Documentation', 'Treatment Calendar'] },
     ],
   },
+  lawnOneTime: {
+    header: 'One-Time Lawn Services.',
+    subheader: 'Restoration, Renovation & Single-Visit Treatments',
+    intro: "Not every lawn needs a year-round program to get results. Our one-time services are designed for targeted restoration, seasonal renovation, or single-visit treatments — whether you're repairing damaged turf, preparing for sod or plugging, or addressing a specific weed, pest, or disease issue that needs immediate attention.",
+    groups: [
+      { groupTitle: 'Lawn Restoration & Renovation', sections: [
+        { title: 'Lawn Plugging', text: "Repair thin, bare, or damaged areas of your lawn by installing fresh St. Augustine grass plugs into the existing turf. Plugs are planted at your choice of spacing density — from economy spacing for gradual fill-in to premium tight spacing for faster, fuller coverage. We use fresh-cut plugs installed with professional equipment for consistent depth and soil contact, giving each plug the best chance to root and spread. Plugging is ideal for shaded areas where sod struggles to establish, for repairing chinch bug or drought damage, or for thickening thin turf without the cost of full sod replacement.", tags: ['St. Augustine', 'Multiple Densities', 'Shade Repair', 'Chinch Bug Recovery'] },
+        { title: 'Top Dressing', text: "A thin, uniform layer of clean sand is spread across the lawn surface to smooth out uneven terrain, improve soil structure, accelerate thatch decomposition, and promote healthier root development. Top dressing is applied at either a light maintenance depth or a heavier renovation depth depending on the condition of the turf. It's especially effective after dethatching or core aeration — filling in the voids left behind and creating a better growing environment at the soil surface. We use a professional top dresser for even, consistent distribution across the entire lawn.", tags: ['Sand Application', 'Level Correction', 'Thatch Reduction', 'Post-Dethatch'] },
+        { title: 'Dethatching', text: "Excess thatch — the layer of dead stems, roots, and organic matter between the grass blades and the soil surface — blocks water, nutrients, and air from reaching the root zone when it builds up beyond a half-inch. Our mechanical dethatching service uses a professional power dethatcher to cut through and remove this buildup, restoring proper air and water movement into the soil. After dethatching, your lawn may look rough for a few weeks, but recovers stronger and denser as the turf fills back in with improved root-zone access. Best performed during the active growing season (spring through early fall in Southwest Florida) when the grass can recover quickly.", tags: ['Power Dethatcher', 'Root Zone Access', 'Spring/Summer Timing'] },
+        { title: 'Overseeding', text: "For lawns with thin or patchy coverage where plugging isn't necessary, overseeding introduces new grass seed into the existing turf to improve density and fill in gaps. Seed is distributed evenly across the lawn and lightly worked into the soil surface for good seed-to-soil contact. Overseeding is most effective when combined with core aeration or dethatching — both of which create openings in the turf canopy and soil surface that give seed a better chance to germinate. We'll recommend the right seed variety based on your turf type, sun exposure, and the specific conditions of your lawn.", tags: ['Density Improvement', 'Seed-to-Soil Contact', 'Pairs With Aeration'] },
+      ]},
+      { groupTitle: 'Single-Visit Lawn Treatments', sections: [
+        { title: 'One-Time Fertilization', text: "A single professional fertilizer application to boost color, density, and overall turf health — without committing to a full-year program. We select the right formulation based on your grass type, time of year, and what your lawn needs most: a balanced slow-release granular for general nutrition, a high-nitrogen blend for quick green-up, or a micronutrient and iron package for color correction during fertilizer restriction periods. Application rates are calibrated to your lawn's square footage and follow all local fertilizer ordinances, including Manatee, Sarasota, and Charlotte County seasonal blackout requirements.", tags: ['Slow-Release Granular', 'Blackout Compliant', 'No Annual Commitment'] },
+        { title: 'One-Time Weed Control', text: "A targeted herbicide application to knock back weeds that have gotten ahead of your lawn. Pre-emergent treatments create a barrier in the top layer of soil that prevents weed seeds from germinating — ideal when applied ahead of the spring or fall weed flush. Post-emergent treatments use selective herbicides to kill active weeds without harming your turf, targeting broadleaf weeds, sedges, and grassy invaders based on what's growing in your lawn. Herbicide selection is matched to your grass type and the specific weed species present to ensure effective control and turf safety. Results are typically visible within 7–21 days depending on the weed type and product used.", tags: ['Pre-Emergent Barrier', 'Post-Emergent Spot Treat', 'Turf-Safe Selective'] },
+        { title: 'One-Time Lawn Pest Control', text: "When you're dealing with an active lawn pest problem — chinch bugs, sod webworms, armyworms, mole crickets, grubs, or fire ants — a single targeted insecticide application can stop the damage and protect your turf from further loss. We identify the pest causing the damage, select the right chemistry for that species, and apply at the correct rate and timing to maximize effectiveness. For chinch bugs and sod webworms in St. Augustine lawns, early intervention is critical — a few weeks of unchecked feeding can destroy large areas of turf.", tags: ['Chinch Bug', 'Sod Webworm', 'Armyworm', 'Emergency Response'] },
+        { title: 'One-Time Fungicide Treatment', text: "Fungal diseases like large patch, dollar spot, gray leaf spot, and Pythium can spread quickly in Southwest Florida's warm, humid conditions — especially during the fall transition and summer wet season. Our one-time fungicide treatment applies a curative or preventive fungicide matched to the disease identified in your lawn. For active large patch infections, we use a combination approach to address the disease on multiple fronts. Because fungal diseases are often linked to overwatering, we'll also evaluate your irrigation schedule and provide recommendations to reduce the conditions that caused the outbreak.", tags: ['Large Patch', 'Dollar Spot', 'Curative + Preventive', 'Irrigation Review'] },
+      ]},
+    ],
+    footer: "One-time services are priced per visit based on lawn size and treatment type. Restoration services like plugging, top dressing, and dethatching are often most effective when combined — ask about package pricing. Customers on a WaveGuard recurring lawn care plan receive preferred pricing on all one-time services.",
+  },
+  termiteOneTime: {
+    header: 'One-Time Termite Treatments.',
+    subheader: 'Liquid Barrier, Attic Remediation, Pre-Slab & Foam Injection',
+    intro: "When termite activity is confirmed or prevention is needed beyond a bait station system, we offer a full range of one-time treatment options — from perimeter liquid barriers and attic wood treatments to new construction pre-slab applications and precision foam injection into active galleries. Each method is selected based on the termite species, location of activity, and the construction type of your home.",
+    groups: [
+      { groupTitle: 'Liquid Barrier — Termite Trenching', sections: [
+        { title: 'How Termite Trenching Works', text: "A shallow trench is excavated along the full foundation perimeter of your home, and a professional-grade, non-repellent liquid termiticide is applied directly into the soil at label rates. The trench is then backfilled, leaving a continuous chemical barrier in the soil surrounding your foundation. Subterranean termites foraging through the treated soil contact the product unknowingly — picking it up and transferring it to nestmates through normal colony interactions. This transfer effect doesn't just repel termites; it systematically eliminates the colony from within.", tags: ['Full Perimeter', 'Non-Repellent', 'Colony Transfer Effect'] },
+        { title: 'Fast-Acting & Long-Lasting Protection', text: "Liquid barrier treatments begin killing termites within days of contact — significantly faster than bait station systems, which can take months to achieve colony reduction. A properly applied liquid treatment provides 5–10 years of continuous soil protection with a single application and no ongoing service contract. For homeowners dealing with an active subterranean infestation or looking for the fastest, most cost-effective treatment with the longest residual, liquid trenching is typically the strongest option.", tags: ['Days to Kill', '5–10 Year Residual', 'No Recurring Fee'] },
+        { title: 'Dirt Trenching & Concrete Drilling', text: "Treatment is applied along the entire foundation perimeter — both soil sections and areas adjacent to concrete. In soil areas, a standard trench is dug, treated, and backfilled. Where the foundation meets concrete — garage slabs, driveways, patios, sidewalks, and pool decks — we drill through the concrete at regular intervals, inject termiticide into the soil beneath using a sub-slab injection rod, and patch each drill point. This ensures complete, unbroken barrier coverage around the entire structure, including the areas termites are most likely to exploit.", tags: ['Soil Trenching', 'Sub-Slab Injection', 'Drill & Patch'] },
+      ]},
+      { groupTitle: 'Attic Remediation — Borate Wood Treatment', sections: [
+        { title: 'How Borate Wood Treatment Works', text: "A professional-grade borate solution is applied directly to exposed wood surfaces in your attic — trusses, rafters, sheathing, joists, and any accessible structural framing. The borate penetrates into the wood and remains there permanently, creating a protective barrier inside the wood itself. Any wood-destroying organism that feeds on treated wood — subterranean termites, drywood termites, carpenter ants, powderpost beetles, and wood-decay fungi — ingests the borate and is eliminated. Once applied, the treatment does not evaporate, break down, or lose effectiveness over time.", tags: ['Borate Penetration', 'Permanent Protection', 'Multi-Organism'] },
+        { title: 'Lifetime Protection on Treated Wood', text: "Unlike liquid soil treatments that degrade over time or bait systems that require ongoing monitoring, borate wood treatment is a one-time application that provides permanent protection on every piece of wood it contacts. This makes it especially valuable for drywood termite prevention — the species that enters structures from the air and infests the wood directly, bypassing soil barriers entirely. In Southwest Florida, where both subterranean and drywood termite pressure is year-round, treating the attic with borate is one of the most effective long-term investments a homeowner can make in structural protection.", tags: ['One-Time Application', 'Drywood Prevention', 'No Recurring Cost'] },
+        { title: 'What Gets Treated', text: "We treat all accessible wood surfaces in the attic space — roof trusses, top chord and bottom chord members, web bracing, ridge beams, hip and valley rafters, ceiling joists, plywood roof sheathing, collar ties, gable framing, and any exposed fascia or soffit framing accessible from inside the attic. Treatment is applied using a combination of spray and foam application methods to ensure complete coverage of all wood surfaces, including joints, overlaps, and hard-to-reach areas where drywood termites are most likely to establish colonies.", tags: ['Full Attic Coverage', 'Spray & Foam', 'Joints & Overlaps'] },
+      ]},
+      { groupTitle: 'Pre-Slab Treatment — New Construction', sections: [
+        { title: 'Pre-Construction Soil Treatment', text: "Before the concrete slab is poured on new construction, we apply a non-repellent termiticide directly to the prepared soil surface at full label rates. This creates a continuous treated zone beneath the entire slab — the area most vulnerable to subterranean termite entry through expansion joints, plumbing penetrations, and cracks that may develop over time. Pre-slab treatment is the single most effective time to protect a structure from termites, because the soil is fully accessible before it's permanently sealed under concrete. Once the slab is poured, this level of coverage is no longer possible without drilling.", tags: ['Before Concrete Pour', 'Full Slab Coverage', 'Non-Repellent'] },
+        { title: 'Builder Warranty & Homeowner Transfer', text: "Every pre-slab treatment includes a builder's warranty covering the initial protection period. This warranty is transferable to the homeowner at closing, providing documented termite protection from day one of occupancy. Extended warranty terms are available for homeowners who want longer coverage, and the pre-slab treatment ties naturally into an ongoing termite bait station monitoring program for continuous, layered protection over the life of the home. We coordinate directly with your builder's schedule to ensure treatment is completed on time and does not delay the construction timeline.", tags: ['Builder Warranty', 'Transferable', 'Builder Coordination'] },
+      ]},
+      { groupTitle: 'Foam Injection — Localized Treatment', sections: [
+        { title: 'Precision Drill-and-Inject Treatment', text: "When termite activity is confirmed in a specific area of the structure — a wall void, door frame, window frame, sill plate, or structural joint — we use a precision drill-and-inject method to deliver expanding termiticide foam directly into the infested area. Small holes are drilled at strategic points, and a non-repellent foam formulation is injected that expands to fill galleries, voids, and hidden spaces where termites are actively feeding. The foam creates strong, long-lasting cell walls that maintain contact with surrounding wood surfaces, delivering sustained control in areas that liquid sprays and granular products cannot reach.", tags: ['Expanding Foam', 'Gallery Penetration', 'Wall Void Access'] },
+        { title: 'When Foam Treatment Is the Right Choice', text: "Foam injection is the surgical option — used when termite activity is localized to a specific area rather than distributed across the entire structure. It's the right tool for drywood termite infestations caught early in a single wall or room, for subterranean activity found at a specific slab penetration or expansion joint, for door frames and window frames showing evidence of damage, and for areas inaccessible to standard liquid treatment. Foam treatment is a targeted, lower-cost alternative to full perimeter trenching or tent fumigation when the scope of the problem is contained.", tags: ['Localized Infestations', 'Drywood Spot Treatment', 'Cost-Effective'] },
+        { title: 'Drill Points, Patching & Documentation', text: "Each drill point is carefully placed based on the location of confirmed activity and the construction details of the infested area. After foam injection is complete, all drill holes are sealed and patched to restore the finished surface. Every drill point location, product applied, and finding is documented in your service report with photos, giving you a clear record of exactly what was treated and where.", tags: ['Surface Patching', 'Scalable Scope', 'Photo Documentation'] },
+      ]},
+    ],
+    footer: "All one-time termite treatments begin with a professional termite inspection to confirm the species, location, and scope of activity before recommending a treatment method. Treatments can be paired with a WaveGuard termite bait station program for ongoing monitoring and long-term warranty protection after the initial treatment is complete.",
+  },
 };
 
 const PERKS = [
@@ -939,6 +986,58 @@ export default function EstimateViewPage() {
                   )}
                 </div>
               ))}
+            </ServiceDropdown>
+          )}
+
+          {hasLawn && (
+            <ServiceDropdown title="🌱 One-Time Lawn Services">
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.lawnOneTime.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.lawnOneTime.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.lawnOneTime.intro}</div>
+              {SERVICE_DETAILS.lawnOneTime.groups.map((g, gi) => (
+                <div key={gi}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
+                  {g.sections.map((s, i) => (
+                    <div key={i} style={{ marginBottom: 14 }}>
+                      <DetailSection title={s.title} text={s.text} />
+                      {s.tags && (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                          {s.tags.map((tag, ti) => (
+                            <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+              <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.lawnOneTime.footer}</div>
+            </ServiceDropdown>
+          )}
+
+          {hasTermite && (
+            <ServiceDropdown title="🔨 One-Time Termite Treatments">
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.termiteOneTime.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.termiteOneTime.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.termiteOneTime.intro}</div>
+              {SERVICE_DETAILS.termiteOneTime.groups.map((g, gi) => (
+                <div key={gi}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
+                  {g.sections.map((s, i) => (
+                    <div key={i} style={{ marginBottom: 14 }}>
+                      <DetailSection title={s.title} text={s.text} />
+                      {s.tags && (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                          {s.tags.map((tag, ti) => (
+                            <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+              <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.termiteOneTime.footer}</div>
             </ServiceDropdown>
           )}
         </div>
