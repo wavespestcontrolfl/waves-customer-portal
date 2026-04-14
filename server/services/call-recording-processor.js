@@ -115,7 +115,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "zip": "string or null",
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
-  "preferred_date_time": "the raw text of when they want the appointment, or null",
+  "preferred_date_time": "the specific date AND time confirmed, or null",
   "is_voicemail": true/false,
   "is_spam": true/false,
   "sentiment": "positive/neutral/negative/frustrated",
@@ -124,6 +124,12 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "lead_quality": "hot/warm/cold/spam",
   "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, Rodent Control, Bed Bug Treatment, WDO Inspection, Tree & Shrub Care, or null"
 }
+
+IMPORTANT — appointment_confirmed rules:
+- Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
+- Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
+- If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
+- preferred_date_time must include the confirmed time, not just a date.
 
 Return ONLY valid JSON, no markdown.`,
     }],
@@ -403,17 +409,36 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Step 5: If appointment detected, send confirmation SMS
+    // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
+    // Guard: reject vague date/time (must contain an actual time like "10 AM", "2:30 PM", "noon")
     let appointmentResult = null;
-    if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId) {
+    const timeStr = (extracted.preferred_date_time || '').toLowerCase();
+    const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
+    if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime) {
       try {
         const customer = await db('customers').where({ id: customerId }).first();
         if (customer?.phone) {
           const firstName = customer.first_name || extracted.first_name || '';
-          const smsBody = `Hello ${firstName}! Your ${extracted.matched_service || extracted.requested_service || 'service'} appointment has been scheduled.\n\n` +
-            `Date/Time: ${extracted.preferred_date_time}\n\n` +
-            `We'll send you a reminder before your appointment. Reply to this text or call (941) 318-7612 with any questions.\n\n` +
-            `— Waves Pest Control 🌊`;
+          const serviceType = extracted.matched_service || extracted.requested_service || 'service';
+
+          // Use SMS template if available, fall back to inline
+          let smsBody;
+          try {
+            const tpl = await db('sms_templates').where({ template_key: 'appointment_call_confirmed' }).first();
+            if (tpl?.body) {
+              smsBody = tpl.body
+                .replace(/\{first_name\}/g, firstName)
+                .replace(/\{service_type\}/g, serviceType)
+                .replace(/\{date_time\}/g, extracted.preferred_date_time);
+            }
+          } catch { /* template table may not exist */ }
+
+          if (!smsBody) {
+            smsBody = `Hello ${firstName}! Your ${serviceType} appointment has been scheduled.\n\n` +
+              `Date/Time: ${extracted.preferred_date_time}\n\n` +
+              `We'll send you a reminder before your appointment. Reply to this text or call (941) 318-7612 with any questions.\n\n` +
+              `— Waves Pest Control 🌊`;
+          }
 
           await TwilioService.sendSMS(customer.phone, smsBody);
           appointmentResult = { smsSent: true, service: extracted.matched_service, dateTime: extracted.preferred_date_time };
