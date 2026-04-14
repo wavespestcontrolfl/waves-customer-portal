@@ -119,8 +119,21 @@ async function updateService(id, data) {
       update[key] = numericKeys.has(key) && data[key] === '' ? null : data[key];
     }
   }
-  const [row] = await db('services').where({ id }).update(update).returning('*');
-  return row;
+  try {
+    const [row] = await db('services').where({ id }).update(update).returning('*');
+    return row;
+  } catch (err) {
+    // If a column doesn't exist yet (migration pending), strip it and retry
+    if (err.code === '42703') {
+      const colMatch = err.message.match(/column "(\w+)"/);
+      if (colMatch) {
+        delete update[colMatch[1]];
+        const [row] = await db('services').where({ id }).update(update).returning('*');
+        return row;
+      }
+    }
+    throw err;
+  }
 }
 
 /**

@@ -137,14 +137,14 @@ function DashboardTab({ domain }) {
 function AdvisorTab() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
   useEffect(() => { adminFetch('/admin/seo/advisor').then(d => { setReport(d.report); setLoading(false); }).catch(() => setLoading(false)); }, []);
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading SEO advisor...</div>;
-  const [generating, setGenerating] = useState(false);
   const generate = async () => {
     setGenerating(true);
     try {
-      await adminFetch('/admin/seo/sync', { method: 'POST', body: JSON.stringify({ daysBack: 28 }) }).catch(() => {});
-      const r = await adminFetch('/admin/seo/advisor/generate', { method: 'POST', body: JSON.stringify({}) });
+      await adminPost('/admin/seo/sync', { daysBack: 28 }).catch(() => {});
+      const r = await adminPost('/admin/seo/advisor/generate', {});
       if (r.report) setReport(r.report);
     } catch { /* failed */ }
     setGenerating(false);

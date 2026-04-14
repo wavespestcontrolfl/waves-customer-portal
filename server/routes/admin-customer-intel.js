@@ -153,6 +153,18 @@ router.put('/retention/:id/approve', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PUT /api/admin/customers/intelligence/retention/:id/skip — skip outreach
+router.put('/retention/:id/skip', async (req, res, next) => {
+  try {
+    const [updated] = await db('retention_outreach')
+      .where('id', req.params.id)
+      .update({ status: 'skipped', updated_at: new Date() })
+      .returning('*');
+    if (!updated) return res.status(404).json({ error: 'Outreach not found' });
+    res.json({ outreach: updated });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/customers/intelligence/retention/:id/outcome — record outcome
 router.put('/retention/:id/outcome', async (req, res, next) => {
   try {

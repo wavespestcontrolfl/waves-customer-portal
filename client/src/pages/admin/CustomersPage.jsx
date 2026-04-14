@@ -366,6 +366,12 @@ function CustomerIntelligenceTab() {
     setData(d);
   };
 
+  const handleSkip = async (outreachId) => {
+    await adminFetch(`/admin/customers/intelligence/retention/${outreachId}/skip`, { method: 'PUT', body: JSON.stringify({}) });
+    const d = await adminFetch('/admin/customers/intelligence');
+    setData(d);
+  };
+
   const handleUpsellStatus = async (upsellId, status) => {
     await adminFetch(`/admin/customers/intelligence/upsells/${upsellId}`, { method: 'PUT', body: JSON.stringify({ status }) });
     const d = await adminFetch('/admin/customers/intelligence');
@@ -471,7 +477,7 @@ function CustomerIntelligenceTab() {
                   {o.outreach_type === 'sms' ? '✅ Approve & Send' : '✅ Approve & Call'}
                 </button>
                 <button style={{ padding: '5px 12px', borderRadius: 5, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 11, cursor: 'pointer' }}>✏️ Edit</button>
-                <button style={{ padding: '5px 12px', borderRadius: 5, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 11, cursor: 'pointer' }}>⏭ Skip</button>
+                <button onClick={() => handleSkip(o.id)} style={{ padding: '5px 12px', borderRadius: 5, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 11, cursor: 'pointer' }}>⏭ Skip</button>
               </div>
             </div>
           ))}
@@ -598,7 +604,7 @@ const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 const TIER_PIN_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0ea5e9' };
 const STAGE_PIN_COLORS = { active_customer: '#10b981', won: '#10b981', new_lead: '#0ea5e9', contacted: '#0ea5e9', estimate_sent: '#f59e0b', at_risk: '#ef4444', churned: '#ef4444' };
 
-function CustomerMap({ customers, onSelect }) {
+function CustomerMap({ customers: _ignored, onSelect }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
   const markersRef = useRef([]);
@@ -608,6 +614,14 @@ function CustomerMap({ customers, onSelect }) {
   const [filterStage, setFilterStage] = useState('all');
   const [stats, setStats] = useState({ total: 0, mapped: 0, unmapped: 0 });
   const [selectedPin, setSelectedPin] = useState(null);
+  const [customers, setCustomers] = useState([]);
+
+  // Load ALL customers for the map (not paginated)
+  useEffect(() => {
+    adminFetch('/admin/customers?limit=5000')
+      .then(data => setCustomers(Array.isArray(data) ? data : data.customers || []))
+      .catch(() => {});
+  }, []);
 
   // Load Google Maps script
   useEffect(() => {
