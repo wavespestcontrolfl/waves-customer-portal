@@ -1,6 +1,31 @@
+import React, { Component } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme';
+
+class PageErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error('[Page crash]', error, info.componentStack); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 60, textAlign: 'center' }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>{'⚠️'}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#e2e8f0', marginBottom: 8 }}>Something went wrong</div>
+          <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 20, maxWidth: 400, margin: '0 auto 20px' }}>
+            {this.state.error.message}
+          </div>
+          <button onClick={() => { this.setState({ error: null }); window.location.reload(); }} style={{
+            padding: '10px 24px', background: '#0ea5e9', color: '#fff', border: 'none',
+            borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          }}>Reload Page</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
 import OnboardingPage from './pages/OnboardingPage';
@@ -102,7 +127,7 @@ export default function App() {
             <Route index element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading...</div>}><TechHomePage /></Suspense>} />
             <Route path="estimate" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><TechEstimatorPage /></Suspense>} />
           </Route>
-          <Route path="/admin" element={<AdminLayout />}>
+          <Route path="/admin" element={<PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
             <Route path="dashboard" element={<AdminDashboardPage />} />
             <Route path="customers" element={<AdminCustomersPage />} />

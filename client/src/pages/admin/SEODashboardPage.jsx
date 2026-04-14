@@ -201,6 +201,8 @@ export default function WavesSEODashboard() {
   const [aiData, setAiData] = useState(null);
   const [rankData, setRankData] = useState(null);
   const [backlinkData, setBacklinkData] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState('');
 
   useEffect(() => {
     setLoading(true);
@@ -319,9 +321,6 @@ export default function WavesSEODashboard() {
       </div>
     );
   }
-
-  const [syncing, setSyncing] = useState(false);
-  const [syncMsg, setSyncMsg] = useState('');
 
   const runSync = async () => {
     setSyncing(true); setSyncMsg('Syncing GSC data...');

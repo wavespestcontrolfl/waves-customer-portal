@@ -45,6 +45,9 @@ class AIOverviewTracker {
   }
 
   async getDashboard() {
+    const hasTable = await db.schema.hasTable('seo_target_keywords');
+    if (!hasTable) return { total: 0, withAIO: 0, wavesCited: 0, geoScore: 0, results: [], citationCounts: {}, quickWins: [] };
+
     const keywords = await db('seo_target_keywords').where('priority', 1);
     const results = [];
 
@@ -54,12 +57,15 @@ class AIOverviewTracker {
         .orderBy('check_date', 'desc')
         .first();
 
+      let sources = [];
+      try { sources = typeof latest?.ai_overview_sources === 'string' ? JSON.parse(latest.ai_overview_sources) : (latest?.ai_overview_sources || []); } catch { /* corrupt json */ }
+
       results.push({
         keyword: kw.keyword,
         city: kw.primary_city,
-        aioPresent: !!(latest?.ai_overview_sources && JSON.parse(latest.ai_overview_sources || '[]').length > 0),
+        aioPresent: sources.length > 0,
         wavesCited: latest?.ai_overview_cited || false,
-        sources: latest?.ai_overview_sources ? JSON.parse(latest.ai_overview_sources) : [],
+        sources,
       });
     }
 
