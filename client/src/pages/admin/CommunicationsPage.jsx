@@ -385,15 +385,20 @@ function CallLogTab() {
   };
 
   const handleDisposition = async (callId, value) => {
+    if (value === 'spam' && !confirm('Block this number and delete the call log? This cannot be undone.')) return;
     setDispositions(prev => ({ ...prev, [callId]: value }));
     setSavingDisp(callId);
     try {
-      await adminFetch(`/admin/call-recordings/calls/${callId}/disposition`, {
+      const r = await adminFetch(`/admin/call-recordings/calls/${callId}/disposition`, {
         method: 'PUT',
         body: JSON.stringify({ disposition: value }),
       });
-    } catch {
-      // Silently keep the local state even if save fails
+      if (r.deleted) {
+        // Spam — remove from call list
+        setCalls(prev => prev.filter(c => c.id !== callId));
+      }
+    } catch (e) {
+      alert('Tag failed: ' + e.message);
     } finally {
       setSavingDisp(null);
     }

@@ -106,43 +106,73 @@ router.get('/audio/:id', async (req, res) => {
 // CALL DISPOSITION — Tag calls + block spam numbers
 // ═══════════════════════════════════════════════════════════════════
 
+// Disposition labels for timeline entries
+const DISPOSITION_LABELS = {
+  new_lead_booked: 'New Lead — Booked',
+  new_lead_no_booking: 'New Lead — No Booking',
+  existing_service_q: 'Service Question',
+  existing_complaint: 'Complaint',
+  spam: 'Spam / Wrong Number',
+};
+
 // PUT /calls/:id/disposition — tag a call
 router.put('/calls/:id/disposition', async (req, res, next) => {
   try {
     const { disposition } = req.body;
-    const call = await db('call_log').where({ id: req.params.id }).first();
-    if (!call) {
-      // Try by twilio_call_sid
-      const bySid = await db('call_log').where({ twilio_call_sid: req.params.id }).first();
-      if (!bySid) return res.status(404).json({ error: 'Call not found' });
-      await db('call_log').where({ id: bySid.id }).update({ disposition, updated_at: new Date() });
-    } else {
-      await db('call_log').where({ id: req.params.id }).update({ disposition, updated_at: new Date() });
-    }
 
-    // If spam — add to blocked numbers
+    // Find the call record
+    let call = await db('call_log').where({ id: req.params.id }).first();
+    if (!call) call = await db('call_log').where({ twilio_call_sid: req.params.id }).first();
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+
     if (disposition === 'spam') {
-      const callRecord = call || await db('call_log').where({ twilio_call_sid: req.params.id }).first();
-      if (callRecord?.from_phone) {
+      // SPAM: block number + delete call from log
+      if (call.from_phone) {
         await db.raw(`
           CREATE TABLE IF NOT EXISTS blocked_numbers (
-            id serial PRIMARY KEY,
-            phone varchar(20) NOT NULL UNIQUE,
-            reason varchar(50) DEFAULT 'spam',
-            blocked_by varchar(100),
+            id serial PRIMARY KEY, phone varchar(20) NOT NULL UNIQUE,
+            reason varchar(50) DEFAULT 'spam', blocked_by varchar(100),
             blocked_at timestamptz DEFAULT NOW()
           )
         `).catch(() => {});
         await db('blocked_numbers').insert({
-          phone: callRecord.from_phone,
-          reason: 'spam',
-          blocked_by: 'admin',
+          phone: call.from_phone, reason: 'spam', blocked_by: 'admin',
         }).onConflict('phone').ignore();
-        logger.info(`[calls] Blocked spam number: ${callRecord.from_phone}`);
+        logger.info(`[calls] Blocked spam number: ${call.from_phone}`);
       }
-    }
+      // Delete the call log entry
+      await db('call_log').where({ id: call.id }).del();
+      // Delete any SMS sent to this number (missed call follow-up etc.)
+      if (call.from_phone) {
+        await db('sms_log').where({ to_phone: call.from_phone }).del().catch(() => {});
+      }
+      res.json({ success: true, disposition, deleted: true });
+    } else {
+      // NON-SPAM: save disposition + attach to customer timeline
+      await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
 
-    res.json({ success: true, disposition });
+      // Attach to customer timeline if customer_id exists
+      if (call.customer_id) {
+        const label = DISPOSITION_LABELS[disposition] || disposition;
+        const duration = call.duration_seconds ? `${Math.floor(call.duration_seconds / 60)}m ${call.duration_seconds % 60}s` : '';
+        await db('customer_interactions').insert({
+          customer_id: call.customer_id,
+          interaction_type: 'inbound_call',
+          subject: `Call tagged: ${label}${duration ? ` (${duration})` : ''}`,
+          body: call.transcript_text || null,
+          metadata: JSON.stringify({
+            disposition,
+            callSid: call.twilio_call_sid,
+            phone: call.from_phone,
+            duration: call.duration_seconds,
+            recordingUrl: call.recording_url || null,
+          }),
+        }).catch(() => {});
+        logger.info(`[calls] Tagged call ${call.id} as "${label}" → customer ${call.customer_id} timeline`);
+      }
+
+      res.json({ success: true, disposition });
+    }
   } catch (err) { next(err); }
 });
 
