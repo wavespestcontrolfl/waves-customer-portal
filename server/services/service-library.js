@@ -84,7 +84,33 @@ async function createService(data) {
   if (!data.service_key && data.name) {
     data.service_key = data.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').substring(0, 80);
   }
-  const [row] = await db('services').insert(data).returning('*');
+  // Only insert known columns; convert empty-string numerics to null
+  const allowed = [
+    'service_key', 'name', 'short_name', 'description', 'internal_notes',
+    'category', 'subcategory', 'billing_type', 'is_waveguard',
+    'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
+    'scheduling_buffer_minutes', 'requires_follow_up', 'follow_up_interval_days',
+    'frequency', 'visits_per_year',
+    'pricing_type', 'base_price', 'price_range_min', 'price_range_max', 'pricing_model_key',
+    'is_taxable', 'tax_category', 'tax_service_key',
+    'requires_license', 'license_category', 'requires_certification', 'min_tech_skill_level',
+    'default_equipment', 'default_products', 'typical_materials_cost',
+    'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
+    'is_active', 'is_archived',
+  ];
+  const numericKeys = new Set([
+    'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
+    'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
+    'base_price', 'price_range_min', 'price_range_max',
+    'min_tech_skill_level', 'typical_materials_cost', 'sort_order',
+  ]);
+  const insert = {};
+  for (const key of allowed) {
+    if (data[key] !== undefined) {
+      insert[key] = numericKeys.has(key) && data[key] === '' ? null : data[key];
+    }
+  }
+  const [row] = await db('services').insert(insert).returning('*');
   return row;
 }
 

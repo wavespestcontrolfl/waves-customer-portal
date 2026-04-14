@@ -68,6 +68,15 @@ router.post('/', async (req, res, next) => {
   }
 });
 
+// PUT /packages/:id — update package (must be before /:id to avoid being shadowed)
+router.put('/packages/:id', async (req, res, next) => {
+  try {
+    const pkg = await serviceLibrary.updatePackage(req.params.id, req.body);
+    if (!pkg) return res.status(404).json({ error: 'Package not found' });
+    res.json(pkg);
+  } catch (err) { next(err); }
+});
+
 // PUT /:id — update service
 router.put('/:id', async (req, res, next) => {
   try {
@@ -83,15 +92,6 @@ router.delete('/:id', async (req, res, next) => {
     const service = await serviceLibrary.deactivateService(req.params.id);
     if (!service) return res.status(404).json({ error: 'Service not found' });
     res.json({ success: true, service });
-  } catch (err) { next(err); }
-});
-
-// PUT /packages/:id — update package
-router.put('/packages/:id', async (req, res, next) => {
-  try {
-    const pkg = await serviceLibrary.updatePackage(req.params.id, req.body);
-    if (!pkg) return res.status(404).json({ error: 'Package not found' });
-    res.json(pkg);
   } catch (err) { next(err); }
 });
 
