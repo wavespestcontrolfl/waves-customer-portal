@@ -135,6 +135,64 @@ Return ONLY valid JSON, no markdown.`,
   return JSON.parse(cleaned);
 }
 
+// ── Lead Synopsis via Claude (Sales Strategist prompt) ──
+async function generateLeadSynopsis(transcription) {
+  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  try {
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1200,
+      messages: [{
+        role: 'user',
+        content: `Role:
+You are a Sales Strategist and Customer Experience Analyst for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties). You think like a local business owner — direct, practical, no corporate fluff.
+
+Analyze the following lead interaction (call transcription or SMS thread):
+${transcription}
+
+Step 0 — Qualify the Lead (Gate Check):
+Before any analysis, determine whether this interaction is a new inbound lead — someone reaching out for the first time via website, phone, or text requesting services or information.
+If the interaction is any of the following, respond with only: "Not a new lead — no analysis needed." and stop.
+- An existing customer calling about a scheduled service, billing, or account issue
+- A vendor, solicitor, robocall, or spam
+- An internal team conversation
+- A callback or follow-up on an already-quoted job
+
+If it IS a new lead, proceed with the full analysis below.
+
+Step 1 — Service Request Identification:
+List every service the caller/texter is asking about or implying they need. Be specific. Examples: general pest control (interior/exterior), lawn care program, mosquito treatment, termite inspection, rodent exclusion, WDO inspection, tree & shrub care, fire ant treatment, etc. If they describe a problem without naming a service, map it to the correct Waves service.
+
+Step 2 — Lead Intelligence:
+- Primary Pain Point: Urgent infestation? Frustration with a previous provider? Aesthetic/lawn health concern? Quote the specific language they used.
+- Buying Triggers: Words or questions that signal purchase intent — asking about scheduling, pricing, "how soon can someone come out," comparing providers, describing urgency. List each one.
+- Trust Barriers: Any hesitation signals — pet/child safety concerns, contract aversion, price sensitivity, skepticism about effectiveness, bad past experience. List each one.
+- Property Context: Anything mentioned about property size, location, HOA, type (single-family, condo, new construction), or existing conditions.
+
+Step 3 — Actionable Strategy:
+A. Immediate Close — What to Say Right Now
+Write the exact words (2–4 sentences) the person calling them back or responding to their text should say to win this job today. Match the tone to the customer's energy.
+
+B. WaveGuard Positioning
+Based on their specific pain point, write one concise pitch (2–3 sentences) that positions the WaveGuard recurring membership as the solution — not as an upsell, but as the answer to the exact problem they described. Use their own language back at them.
+
+C. Office Follow-Up Action
+One specific, concrete step Virginia or the office should take within the next 2 hours to keep this lead warm. Not generic ("follow up") — specific.
+
+Formatting:
+Use markdown headers (##) for sections. Use bullet points. Keep the entire output under 400 words. Write like you're handing a cheat sheet to a technician sitting in the truck.`,
+      }],
+    });
+
+    return response.content[0]?.text?.trim() || null;
+  } catch (err) {
+    logger.error(`[call-proc] Synopsis generation failed: ${err.message}`);
+    return null;
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 // MAIN PROCESSOR
 // ══════════════════════════════════════════════════════════════
@@ -162,6 +220,15 @@ const CallRecordingProcessor = {
           updated_at: new Date(),
         });
         logger.info(`[call-proc] Gemini transcription complete: ${transcription.length} chars`);
+      }
+    }
+
+    // Fallback: re-check DB in case Twilio built-in transcription arrived after initial load
+    if (!transcription) {
+      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
+      if (freshCall?.transcription) {
+        transcription = freshCall.transcription;
+        logger.info(`[call-proc] Using Twilio transcription (arrived after initial load): ${transcription.length} chars`);
       }
     }
 
@@ -392,9 +459,27 @@ const CallRecordingProcessor = {
       }).catch(() => {});
     }
 
+    // Step 7b: Generate lead synopsis (Sales Strategist analysis)
+    let synopsis = null;
+    if (transcription && !extracted.is_spam && !extracted.is_voicemail) {
+      try {
+        synopsis = await generateLeadSynopsis(transcription);
+        if (synopsis) {
+          await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(() => {});
+          // Also write to lead if one was created
+          if (leadResult?.lead?.id) {
+            await db('leads').where({ id: leadResult.lead.id }).update({ lead_synopsis: synopsis }).catch(() => {});
+          }
+          logger.info(`[call-proc] Lead synopsis generated: ${synopsis.length} chars`);
+        }
+      } catch (err) {
+        logger.error(`[call-proc] Synopsis failed (non-blocking): ${err.message}`);
+      }
+    }
+
     // Step 8: CSR Coach scoring — auto-score every transcribed call
     let csrScoreResult = null;
-    if (transcript && transcript.length > 50) {
+    if (transcription && transcription.length > 50) {
       try {
         const CSRCoach = require('./csr/csr-coach');
         const scoreResult = await CSRCoach.scoreCall({
@@ -402,7 +487,7 @@ const CallRecordingProcessor = {
           customerId: customerId || null,
           callDirection: 'inbound',
           callSource: call.to_phone || 'unknown',
-          transcript,
+          transcript: transcription,
           metadata: {
             callSid,
             duration: call.duration_seconds,
@@ -439,11 +524,12 @@ const CallRecordingProcessor = {
       .whereNotNull('recording_url')
       .where(function () {
         this.whereNull('processing_status')
-          .orWhere('processing_status', 'pending');
+          .orWhere('processing_status', 'pending')
+          .orWhere('processing_status', 'no_transcription');
       })
       .where('duration_seconds', '>', 10)
       .orderBy('created_at', 'desc')
-      .limit(10);
+      .limit(20);
 
     const results = [];
     for (const call of pending) {
@@ -455,6 +541,21 @@ const CallRecordingProcessor = {
       }
     }
     return { processed: results.length, results };
+  },
+
+  /**
+   * Generate or regenerate lead synopsis for a single call.
+   */
+  async generateSynopsis(callSid) {
+    const call = await db('call_log').where('twilio_call_sid', callSid).first();
+    if (!call) throw new Error(`Call not found: ${callSid}`);
+    if (!call.transcription) throw new Error('No transcription available');
+
+    const synopsis = await generateLeadSynopsis(call.transcription);
+    if (synopsis) {
+      await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(() => {});
+    }
+    return { success: true, synopsis };
   },
 
   /**

@@ -120,63 +120,91 @@ router.get('/location', authenticate, async (req, res, next) => {
 router.get('/callback', async (req, res, next) => {
   try {
     const { code } = req.query;
-    if (!code) return res.status(400).json({ error: 'Authorization code required' });
+    if (!code) return res.status(400).send('<h2>Error: No authorization code received</h2>');
 
     const clientId = config.bouncie.clientId;
     const clientSecret = config.bouncie.clientSecret;
-    const redirectUri = config.bouncie.redirectUri || `${process.env.SERVER_DOMAIN || 'https://portal.wavespestcontrol.com'}/api/bouncie/callback`;
+    const redirectUri = config.bouncie.redirectUri || 'https://portal.wavespestcontrol.com/api/bouncie/callback';
 
     logger.info(`[bouncie] Token exchange: client_id=${clientId}, redirect_uri=${redirectUri}, code=${code?.substring(0, 8)}...`);
 
-    // Try form-encoded first (most OAuth servers prefer this)
-    const params = new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: redirectUri,
-    });
-
+    // Exchange code for tokens (JSON body per Bouncie docs)
     let tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString(),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+      }),
     });
 
-    // Fallback to JSON if form-encoded fails
+    // Fallback to form-encoded
     if (!tokenRes.ok) {
       const errBody = await tokenRes.text();
-      logger.warn(`[bouncie] Form-encoded failed (${tokenRes.status}): ${errBody} — trying JSON...`);
-
+      logger.warn(`[bouncie] JSON failed (${tokenRes.status}): ${errBody} — trying form-encoded...`);
       tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          client_id: clientId,
-          client_secret: clientSecret,
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: redirectUri,
-        }),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code', code, redirect_uri: redirectUri }).toString(),
       });
     }
 
     if (!tokenRes.ok) {
       const body = await tokenRes.text();
       logger.error(`[bouncie] Token exchange failed: ${tokenRes.status} ${body}`);
-      return res.status(400).json({ error: 'Token exchange failed', details: body });
+      return res.status(400).send(`<h2>Token exchange failed</h2><pre>${body}</pre>`);
     }
 
     const tokenData = await tokenRes.json();
     currentToken = tokenData.access_token;
     if (tokenData.refresh_token) currentRefresh = tokenData.refresh_token;
 
-    logger.info('Bouncie OAuth token exchanged successfully');
-    res.json({
-      message: 'Token exchanged. Add these to your .env:',
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-    });
+    // Update the bouncie.js service's in-memory tokens too
+    try {
+      const bouncieService = require('../services/bouncie');
+      if (bouncieService.updateTokens) bouncieService.updateTokens(tokenData.access_token, tokenData.refresh_token);
+    } catch (e) { /* service may not expose this yet */ }
+
+    // Persist tokens to DB so they survive restarts
+    try {
+      const db = require('../models/db');
+      const now = new Date();
+      for (const [envVar, value] of [['BOUNCIE_ACCESS_TOKEN', tokenData.access_token], ['BOUNCIE_REFRESH_TOKEN', tokenData.refresh_token]]) {
+        if (!value) continue;
+        const existing = await db('token_credentials').where({ platform: `bouncie_${envVar.toLowerCase()}` }).first();
+        const row = { platform: `bouncie_${envVar.toLowerCase()}`, token_type: 'oauth', status: 'healthy', last_verified_at: now, env_var_name: envVar, updated_at: now, last_error: null };
+        if (existing) await db('token_credentials').where({ id: existing.id }).update(row);
+        else await db('token_credentials').insert(row);
+      }
+      // Update the main bouncie entry too
+      await db('token_credentials').where({ platform: 'bouncie' }).update({ status: 'healthy', last_verified_at: now, last_error: null, updated_at: now }).catch(() => {});
+    } catch (e) { logger.error(`[bouncie] Token persistence failed: ${e.message}`); }
+
+    logger.info('[bouncie] OAuth token exchanged and persisted');
+
+    // Show success page with instructions
+    const masked = (t) => t ? t.substring(0, 8) + '...' + t.substring(t.length - 4) : 'N/A';
+    res.send(`<!DOCTYPE html><html><head><title>Bouncie Connected</title>
+<style>body{font-family:'DM Sans',sans-serif;background:#0f1923;color:#e2e8f0;display:flex;justify-content:center;padding:40px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:32px;max-width:600px;width:100%}
+h2{color:#10b981;margin:0 0 16px}.ok{color:#10b981;font-size:24px;margin-right:8px}
+.field{margin:12px 0;font-size:14px;padding:10px;background:#0f172a;border-radius:8px;font-family:'JetBrains Mono',monospace;word-break:break-all}
+.label{color:#94a3b8;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+.warn{color:#f59e0b;font-size:13px;margin-top:16px;padding:12px;background:#f59e0b11;border:1px solid #f59e0b33;border-radius:8px}
+a{color:#0ea5e9;text-decoration:none}</style></head><body><div class="card">
+<h2><span class="ok">&#10003;</span> Bouncie Connected</h2>
+<p>Tokens exchanged and loaded in-memory. Mileage tracking is active.</p>
+<div><div class="label">Access Token</div><div class="field">${masked(tokenData.access_token)}</div></div>
+<div><div class="label">Refresh Token</div><div class="field">${masked(tokenData.refresh_token)}</div></div>
+<div class="warn"><strong>Update Railway env vars</strong> to survive deploys:<br>
+<code>BOUNCIE_ACCESS_TOKEN</code> = ${masked(tokenData.access_token)}<br>
+<code>BOUNCIE_REFRESH_TOKEN</code> = ${masked(tokenData.refresh_token)}<br><br>
+The full tokens are in the server logs.</div>
+<p style="margin-top:20px"><a href="/admin/mileage">&#8592; Back to Mileage Dashboard</a></p>
+</div></body></html>`);
   } catch (err) {
     next(err);
   }

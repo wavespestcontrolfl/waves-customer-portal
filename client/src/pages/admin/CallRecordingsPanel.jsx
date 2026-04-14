@@ -210,7 +210,7 @@ export default function CallRecordingsPanel() {
                   {action && (
                     <span style={{ color: action.color, fontWeight: 600 }}>{action.text}{action.icon}</span>
                   )}
-                  {isPending && (
+                  {(!r.processing_status || r.processing_status === 'pending' || r.processing_status === 'no_transcription') && (
                     <button onClick={e => { e.stopPropagation(); processOne(r.twilio_call_sid); }} style={{ ...sBtn(D.teal, D.white), padding: '2px 8px', fontSize: 10 }}>Process</button>
                   )}
                 </div>
@@ -220,7 +220,7 @@ export default function CallRecordingsPanel() {
         </div>
 
         {/* Detail panel */}
-        {selected && <RecordingDetail recording={selected} onClose={() => setSelected(null)} />}
+        {selected && <RecordingDetail recording={selected} onClose={() => setSelected(null)} onUpdate={loadData} />}
       </div>
 
       {/* Source Analytics Section */}
@@ -251,14 +251,90 @@ export default function CallRecordingsPanel() {
   );
 }
 
-function RecordingDetail({ recording, onClose }) {
-  const r = recording;
+function RecordingDetail({ recording, onClose, onUpdate }) {
+  const [r, setR] = useState(recording);
+  const [generatingSynopsis, setGeneratingSynopsis] = useState(false);
+  const [processingOne, setProcessingOne] = useState(false);
+  const [synopsisExpanded, setSynopsisExpanded] = useState(true);
+  const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   const extraction = parseExtraction(r);
   const classification = getClassification(r);
   const action = getActionStatus(r);
 
+  // Update local state when parent selection changes
+  useEffect(() => { setR(recording); }, [recording]);
+
+  const handleProcess = async () => {
+    setProcessingOne(true);
+    try {
+      await adminFetch(`/admin/call-recordings/process/${r.twilio_call_sid}`, { method: 'POST' });
+      const fresh = await adminFetch(`/admin/call-recordings/recording/${r.id}`);
+      if (fresh?.recording) setR(fresh.recording);
+      if (onUpdate) onUpdate();
+    } catch (e) { /* ignore */ }
+    setProcessingOne(false);
+  };
+
+  const handleGenerateSynopsis = async () => {
+    setGeneratingSynopsis(true);
+    try {
+      const result = await adminFetch(`/admin/call-recordings/synopsis/${r.twilio_call_sid}`, { method: 'POST' });
+      if (result?.synopsis) {
+        setR(prev => ({ ...prev, lead_synopsis: result.synopsis }));
+        if (onUpdate) onUpdate();
+      }
+    } catch (e) { /* ignore */ }
+    setGeneratingSynopsis(false);
+  };
+
+  // Simple markdown-ish renderer for synopsis
+  const renderSynopsis = (text) => {
+    if (!text) return null;
+    const lines = text.split('\n');
+    const elements = [];
+    let key = 0;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) { elements.push(<div key={key++} style={{ height: 6 }} />); continue; }
+      if (trimmed.startsWith('## ')) {
+        elements.push(<div key={key++} style={{ fontSize: 13, fontWeight: 700, color: D.teal, marginTop: 10, marginBottom: 4 }}>{trimmed.replace(/^##\s*/, '')}</div>);
+      } else if (trimmed.startsWith('### ')) {
+        elements.push(<div key={key++} style={{ fontSize: 12, fontWeight: 600, color: D.white, marginTop: 8, marginBottom: 2 }}>{trimmed.replace(/^###\s*/, '')}</div>);
+      } else if (trimmed.startsWith('**') && trimmed.endsWith('**')) {
+        elements.push(<div key={key++} style={{ fontSize: 12, fontWeight: 700, color: D.white, marginTop: 8, marginBottom: 2 }}>{trimmed.replace(/\*\*/g, '')}</div>);
+      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        const bulletText = trimmed.replace(/^[-*]\s*/, '');
+        // Handle bold within bullets
+        const parts = bulletText.split(/(\*\*[^*]+\*\*)/g);
+        elements.push(
+          <div key={key++} style={{ fontSize: 12, color: D.text, lineHeight: 1.6, paddingLeft: 12, position: 'relative' }}>
+            <span style={{ position: 'absolute', left: 0, color: D.muted }}>-</span>
+            {parts.map((part, i) => part.startsWith('**') && part.endsWith('**')
+              ? <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{part.replace(/\*\*/g, '')}</strong>
+              : <span key={i}>{part}</span>
+            )}
+          </div>
+        );
+      } else {
+        const parts = trimmed.split(/(\*\*[^*]+\*\*)/g);
+        elements.push(
+          <div key={key++} style={{ fontSize: 12, color: D.text, lineHeight: 1.6 }}>
+            {parts.map((part, i) => part.startsWith('**') && part.endsWith('**')
+              ? <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{part.replace(/\*\*/g, '')}</strong>
+              : <span key={i}>{part}</span>
+            )}
+          </div>
+        );
+      }
+    }
+    return elements;
+  };
+
+  const canProcess = !r.processing_status || r.processing_status === 'pending' || r.processing_status === 'no_transcription';
+  const canGenerateSynopsis = r.transcription && r.processing_status === 'processed';
+
   return (
-    <div style={{ position: 'sticky', top: 20 }}>
+    <div style={{ position: 'sticky', top: 20, maxHeight: 'calc(100vh - 40px)', overflowY: 'auto' }}>
       <div style={sCard}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Call Details</div>
@@ -269,6 +345,21 @@ function RecordingDetail({ recording, onClose }) {
         <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
           {classification && <span style={sBadge(classification.bg, classification.color)}>{classification.label}</span>}
           {action && <span style={sBadge(action.color === D.green ? `${D.green}22` : `${action.color}22`, action.color)}>{action.text}{action.icon}</span>}
+          {r.processing_status && <span style={sBadge(`${D.muted}22`, D.muted)}>{r.processing_status}</span>}
+        </div>
+
+        {/* Action buttons */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+          {canProcess && (
+            <button onClick={handleProcess} disabled={processingOne} style={{ ...sBtn(D.teal, D.white), opacity: processingOne ? 0.5 : 1 }}>
+              {processingOne ? 'Processing...' : 'Process Recording'}
+            </button>
+          )}
+          {canGenerateSynopsis && (
+            <button onClick={handleGenerateSynopsis} disabled={generatingSynopsis} style={{ ...sBtn(D.purple, D.white), opacity: generatingSynopsis ? 0.5 : 1 }}>
+              {generatingSynopsis ? 'Generating...' : r.lead_synopsis ? 'Regenerate Synopsis' : 'Generate Synopsis'}
+            </button>
+          )}
         </div>
 
         {/* Receiving number label */}
@@ -280,6 +371,24 @@ function RecordingDetail({ recording, onClose }) {
         {(r.recording_url || r.recording_sid) && (
           <div style={{ marginBottom: 16 }}>
             <audio controls src={`${API_BASE}/admin/call-recordings/audio/${r.recording_sid || r.id}`} style={{ width: '100%', height: 36 }} />
+          </div>
+        )}
+
+        {/* Lead Synopsis — prominent section */}
+        {r.lead_synopsis && (
+          <div style={{ marginBottom: 16 }}>
+            <div
+              onClick={() => setSynopsisExpanded(!synopsisExpanded)}
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: 8 }}
+            >
+              <div style={{ fontSize: 13, fontWeight: 700, color: D.teal, textTransform: 'uppercase', letterSpacing: 1 }}>Lead Synopsis</div>
+              <span style={{ fontSize: 11, color: D.muted }}>{synopsisExpanded ? '\u25B2' : '\u25BC'}</span>
+            </div>
+            {synopsisExpanded && (
+              <div style={{ padding: 14, background: `${D.teal}08`, border: `1px solid ${D.teal}33`, borderRadius: 10, lineHeight: 1.6 }}>
+                {renderSynopsis(r.lead_synopsis)}
+              </div>
+            )}
           </div>
         )}
 
@@ -325,8 +434,16 @@ function RecordingDetail({ recording, onClose }) {
         {/* Transcription */}
         {r.transcription && (
           <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Transcription</div>
-            <div style={{ fontSize: 11, color: D.muted, lineHeight: 1.7, padding: 10, background: D.input, borderRadius: 8, maxHeight: 300, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>{r.transcription}</div>
+            <div
+              onClick={() => setTranscriptExpanded(!transcriptExpanded)}
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: 4 }}
+            >
+              <div style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1 }}>Transcription</div>
+              <span style={{ fontSize: 11, color: D.muted }}>{transcriptExpanded ? '\u25B2' : '\u25BC'}</span>
+            </div>
+            {transcriptExpanded && (
+              <div style={{ fontSize: 11, color: D.muted, lineHeight: 1.7, padding: 10, background: D.input, borderRadius: 8, maxHeight: 300, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>{r.transcription}</div>
+            )}
           </div>
         )}
       </div>

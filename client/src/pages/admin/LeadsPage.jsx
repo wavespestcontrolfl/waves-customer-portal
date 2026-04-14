@@ -115,6 +115,43 @@ if (typeof document !== 'undefined' && !document.getElementById('speed-to-lead-p
   document.head.appendChild(style);
 }
 
+function LeadSynopsisBlock({ synopsis }) {
+  const [expanded, setExpanded] = useState(true);
+  if (!synopsis) return null;
+
+  const renderLine = (line, key) => {
+    const t = line.trim();
+    if (!t) return <div key={key} style={{ height: 4 }} />;
+    if (t.startsWith('## ')) return <div key={key} style={{ fontSize: 13, fontWeight: 700, color: C.teal, marginTop: 10, marginBottom: 4 }}>{t.replace(/^##\s*/, '')}</div>;
+    if (t.startsWith('### ')) return <div key={key} style={{ fontSize: 12, fontWeight: 600, color: C.white, marginTop: 8, marginBottom: 2 }}>{t.replace(/^###\s*/, '')}</div>;
+    if (t.startsWith('**') && t.endsWith('**')) return <div key={key} style={{ fontSize: 12, fontWeight: 700, color: C.white, marginTop: 8, marginBottom: 2 }}>{t.replace(/\*\*/g, '')}</div>;
+    if (t.startsWith('- ') || t.startsWith('* ')) {
+      const text = t.replace(/^[-*]\s*/, '');
+      const parts = text.split(/(\*\*[^*]+\*\*)/g);
+      return <div key={key} style={{ fontSize: 12, color: C.text, lineHeight: 1.6, paddingLeft: 14, position: 'relative' }}>
+        <span style={{ position: 'absolute', left: 0, color: C.muted }}>-</span>
+        {parts.map((p, i) => p.startsWith('**') && p.endsWith('**')
+          ? <strong key={i} style={{ color: C.white, fontWeight: 600 }}>{p.replace(/\*\*/g, '')}</strong>
+          : <span key={i}>{p}</span>)}
+      </div>;
+    }
+    const parts = t.split(/(\*\*[^*]+\*\*)/g);
+    return <div key={key} style={{ fontSize: 12, color: C.text, lineHeight: 1.6 }}>
+      {parts.map((p, i) => p.startsWith('**') && p.endsWith('**')
+        ? <strong key={i} style={{ color: C.white, fontWeight: 600 }}>{p.replace(/\*\*/g, '')}</strong>
+        : <span key={i}>{p}</span>)}
+    </div>;
+  };
+
+  return <div style={{ border: `1px solid ${C.teal}44`, borderRadius: 10, padding: 14, marginBottom: 14, backgroundColor: C.teal + '08' }}>
+    <div onClick={() => setExpanded(!expanded)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: expanded ? 8 : 0 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: C.teal, textTransform: 'uppercase', letterSpacing: 1 }}>Lead Synopsis</div>
+      <span style={{ fontSize: 11, color: C.muted }}>{expanded ? '\u25B2' : '\u25BC'}</span>
+    </div>
+    {expanded && <div style={{ lineHeight: 1.6 }}>{synopsis.split('\n').map((l, i) => renderLine(l, i))}</div>}
+  </div>;
+}
+
 function SpeedToLeadTimer({ firstContactAt }) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -418,6 +455,8 @@ export default function LeadsPage() {
                         </div>
                       </div>
                     </div>
+                    {/* Lead Synopsis (AI Sales Strategist analysis) */}
+                    {lead.lead_synopsis && <LeadSynopsisBlock synopsis={lead.lead_synopsis} />}
                     {/* AI Suggested Reply */}
                     {(() => {
                       const triageActivity = leadActivities.find(a => a.activity_type === 'ai_triage' && a.metadata);

@@ -419,6 +419,19 @@ const server = app.listen(PORT, () => {
       }
     }, 15 * 60 * 1000);
 
+    // Process unprocessed call recordings every 10 minutes (safety net)
+    setInterval(async () => {
+      try {
+        const processor = require('./services/call-recording-processor');
+        const result = await processor.processAllPending();
+        if (result.processed > 0) {
+          logger.info(`[call-proc-cron] Processed ${result.processed} pending recording(s)`);
+        }
+      } catch (err) {
+        logger.error(`[call-proc-cron] Failed: ${err.message}`);
+      }
+    }, 10 * 60 * 1000);
+
     // Log memory every 5 minutes to catch leaks / OOM before SIGTERM
     setInterval(() => {
       const m = process.memoryUsage();

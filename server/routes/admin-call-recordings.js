@@ -60,6 +60,14 @@ router.post('/process-all', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /synopsis/:callSid — generate or regenerate lead synopsis
+router.post('/synopsis/:callSid', async (req, res, next) => {
+  try {
+    const result = await CallRecordingProcessor.generateSynopsis(req.params.callSid);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // GET /recording/:id — get single recording detail
 router.get('/recording/:id', async (req, res, next) => {
   try {

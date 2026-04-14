@@ -74,14 +74,14 @@ function getVisitDuration(service) {
   return null;
 }
 
-function generateServiceReportPDF(customer, service, products, res) {
+function generateServiceReportPDF(customer, service, products, res, extra = {}) {
+  const { compliance = [], invoice = null } = extra;
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
 
-  // Build filename: Waves_FirstName_LastName_MonthDay_Year.pdf
+  // Build filename: firstName-lastName-YYYY-MM-DD.pdf
   const svcDate = new Date(typeof service.service_date === 'string' ? service.service_date + 'T12:00:00' : service.service_date);
-  const monthDay = `${String(svcDate.getMonth() + 1).padStart(2, '0')}${String(svcDate.getDate()).padStart(2, '0')}`;
-  const year = svcDate.getFullYear();
-  const fileName = `Waves_${customer.first_name}_${customer.last_name}_${monthDay}_${year}.pdf`;
+  const dateStr = `${svcDate.getFullYear()}-${String(svcDate.getMonth() + 1).padStart(2, '0')}-${String(svcDate.getDate()).padStart(2, '0')}`;
+  const fileName = `${customer.first_name}-${customer.last_name}-${dateStr}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
@@ -92,19 +92,52 @@ function generateServiceReportPDF(customer, service, products, res) {
   const visitDuration = getVisitDuration(service);
   const isCallback = service.is_callback || (service.service_type && service.service_type.toLowerCase().includes('callback'));
 
+  // Parse weather data
+  let weather = null;
+  for (const field of ['weather_data', 'weather_at_service']) {
+    if (service[field]) {
+      try { weather = typeof service[field] === 'string' ? JSON.parse(service[field]) : service[field]; } catch { /* ignore */ }
+      if (weather) break;
+    }
+  }
+
+  // Parse structured notes / AI report
+  let structuredNotes = null;
+  if (service.structured_notes) {
+    try { structuredNotes = typeof service.structured_notes === 'string' ? JSON.parse(service.structured_notes) : service.structured_notes; } catch { /* ignore */ }
+  }
+  let aiReport = null;
+  if (service.ai_report) {
+    try { aiReport = typeof service.ai_report === 'string' ? JSON.parse(service.ai_report) : service.ai_report; } catch { /* ignore */ }
+  }
+
+  // Parse areas serviced
+  let areasServiced = null;
+  if (service.areas_serviced) {
+    try { areasServiced = typeof service.areas_serviced === 'string' ? JSON.parse(service.areas_serviced) : service.areas_serviced; } catch { /* ignore */ }
+  }
+
+  // Interior serviced flag
+  const interiorServiced = service.customer_interaction === 'interior' ||
+    (areasServiced && (areasServiced.interior === true || (Array.isArray(areasServiced) && areasServiced.some(a => /interior/i.test(a)))));
+
+  // Build compliance lookup by product name
+  const complianceByProduct = {};
+  compliance.forEach(c => {
+    if (c.product_id) complianceByProduct[c.product_id] = c;
+  });
+
   // ══════════════════════════════════════════════════════
-  // HEADER BAR — navy background with white text
+  // HEADER BAR
   // ══════════════════════════════════════════════════════
   doc.save();
   doc.rect(0, 0, 612, 80).fill(NAVY);
   doc.fontSize(22).font('Helvetica-Bold').fillColor('#fff').text('WAVES', L + 10, 18);
   doc.fontSize(9).font('Helvetica').fillColor(TEAL).text('LAWN & PEST CONTROL', L + 10, 42);
   doc.fontSize(8).fillColor('#ccc').text('Licensed & Insured | FL License #JF336375', L + 10, 56);
-
-  // Right side — contact info
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', R - 150, 22, { width: 150, align: 'right' });
   doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('wavespestcontrol.com', R - 150, 36, { width: 150, align: 'right' });
-  doc.text('Bradenton, FL', R - 150, 48, { width: 150, align: 'right' });
+  doc.text('Bradenton, FL 34211', R - 150, 48, { width: 150, align: 'right' });
   doc.restore();
 
   // ══════════════════════════════════════════════════════
@@ -130,34 +163,44 @@ function generateServiceReportPDF(customer, service, products, res) {
   y = infoRow(doc, 'Phone:', customer.phone || '', L + 8, y, 70, 180);
   if (customer.email) y = infoRow(doc, 'Email:', customer.email, L + 8, y, 70, 180);
 
-  // Right column — Service (placed at same starting Y as customer)
+  // Right column — Service
   let y2 = 130;
   y2 = sectionHeader(doc, 'Service Information', colMid, y2);
   y2 = infoRow(doc, 'Date:', formatDate(service.service_date), colMid + 8, y2, 80, 170);
   y2 = infoRow(doc, 'Service:', service.service_type, colMid + 8, y2, 80, 170);
   y2 = infoRow(doc, 'Technician:', service.technician_name || 'Waves Team', colMid + 8, y2, 80, 170);
-  y2 = infoRow(doc, 'Status:', service.status === 'completed' ? 'Completed' : service.status, colMid + 8, y2, 80, 170);
-
-  // Visit duration
+  if (service.technician_license) {
+    y2 = infoRow(doc, 'License #:', service.technician_license, colMid + 8, y2, 80, 170);
+  }
+  // Time in / time out
+  if (service.check_in_time) {
+    const inTime = new Date(service.check_in_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const outTime = service.check_out_time ? new Date(service.check_out_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '—';
+    y2 = infoRow(doc, 'Time In/Out:', `${inTime} — ${outTime}`, colMid + 8, y2, 80, 170);
+  }
   if (visitDuration) {
     y2 = infoRow(doc, 'Time on site:', `${visitDuration} minutes`, colMid + 8, y2, 80, 170);
   }
-
-  // WaveGuard tier if available
   if (customer.waveguard_tier) {
     y2 = infoRow(doc, 'Plan:', `WaveGuard ${customer.waveguard_tier}`, colMid + 8, y2, 80, 170);
   }
+  // Interior / Exterior flag
+  const serviceScope = interiorServiced ? 'Interior & Exterior' : 'Exterior Only';
+  y2 = infoRow(doc, 'Serviced:', serviceScope, colMid + 8, y2, 80, 170);
 
   y = Math.max(y, y2) + 12;
 
   // ══════════════════════════════════════════════════════
-  // PROPERTY SNAPSHOT — light blue bar with key-value pairs
+  // PROPERTY SNAPSHOT + ENVIRONMENTAL CONDITIONS
   // ══════════════════════════════════════════════════════
   const snapshotItems = [];
   if (customer.lawn_type) snapshotItems.push({ label: 'Lawn Type', value: customer.lawn_type });
-  if (customer.property_sqft) snapshotItems.push({ label: 'Treated Area', value: `${Number(customer.property_sqft).toLocaleString()} sq ft` });
+  if (customer.property_sqft) snapshotItems.push({ label: 'Property Size', value: `${Number(customer.property_sqft).toLocaleString()} sq ft` });
+  // Treated area from compliance records
+  const totalTreated = compliance.reduce((s, c) => s + (c.area_treated_sqft || 0), 0);
+  if (totalTreated > 0) snapshotItems.push({ label: 'Area Treated', value: `${Number(totalTreated).toLocaleString()} sq ft` });
   if (customer.waveguard_tier) snapshotItems.push({ label: 'WaveGuard', value: customer.waveguard_tier });
-  if (visitDuration) snapshotItems.push({ label: 'Visit Duration', value: `${visitDuration} min` });
+  if (visitDuration) snapshotItems.push({ label: 'Duration', value: `${visitDuration} min` });
 
   if (snapshotItems.length) {
     y = sectionHeader(doc, 'Property Snapshot', L, y);
@@ -168,6 +211,31 @@ function generateServiceReportPDF(customer, service, products, res) {
       const xPos = L + i * snapColW + 12;
       doc.fontSize(7).font('Helvetica').fillColor('#555').text(item.label, xPos, y + 3, { width: snapColW - 20 });
       doc.fontSize(10).font('Helvetica-Bold').fillColor(NAVY).text(item.value, xPos, y + 13, { width: snapColW - 20 });
+    });
+    doc.restore();
+    y += 34;
+  }
+
+  // Environmental conditions bar
+  const envItems = [];
+  if (weather) {
+    if (weather.temp) envItems.push({ label: 'Temperature', value: typeof weather.temp === 'number' ? `${weather.temp}°F` : weather.temp });
+    if (weather.wind) envItems.push({ label: 'Wind', value: weather.wind });
+    if (weather.humidity) envItems.push({ label: 'Humidity', value: typeof weather.humidity === 'number' ? `${weather.humidity}%` : weather.humidity });
+    if (weather.cloudCover) envItems.push({ label: 'Cloud Cover', value: typeof weather.cloudCover === 'number' ? `${weather.cloudCover}%` : weather.cloudCover });
+  }
+  // Soil readings from service record
+  if (service.soil_temp) envItems.push({ label: 'Soil Temp', value: `${service.soil_temp}°F` });
+
+  if (envItems.length) {
+    y = sectionHeader(doc, 'Conditions at Time of Service', L, y);
+    doc.save();
+    doc.roundedRect(L, y, W, 24, 3).fill('#E8F5E9');
+    const envColW = W / envItems.length;
+    envItems.forEach((item, i) => {
+      const xPos = L + i * envColW + 12;
+      doc.fontSize(7).font('Helvetica').fillColor('#555').text(item.label, xPos, y + 3, { width: envColW - 20 });
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#2E7D32').text(item.value, xPos, y + 13, { width: envColW - 20 });
     });
     doc.restore();
     y += 34;
@@ -190,10 +258,9 @@ function generateServiceReportPDF(customer, service, products, res) {
   }
 
   // ══════════════════════════════════════════════════════
-  // MEASUREMENTS (if lawn)
+  // LAWN MEASUREMENTS (if applicable)
   // ══════════════════════════════════════════════════════
   const measurements = [];
-  if (service.soil_temp) measurements.push({ label: 'Soil Temp', value: `${service.soil_temp}°F` });
   if (service.thatch_measurement) measurements.push({ label: 'Thatch', value: `${service.thatch_measurement}"` });
   if (service.soil_ph) measurements.push({ label: 'Soil pH', value: `${service.soil_ph}` });
   if (service.soil_moisture) measurements.push({ label: 'Moisture', value: `${service.soil_moisture}` });
@@ -212,53 +279,81 @@ function generateServiceReportPDF(customer, service, products, res) {
   }
 
   // ══════════════════════════════════════════════════════
-  // PRODUCTS APPLIED — customer-friendly table
+  // PRODUCTS APPLIED — enhanced with EPA, target pests, dilution
   // ══════════════════════════════════════════════════════
   if (products.length) {
     y = sectionHeader(doc, 'Products Applied', L, y);
 
-    // Table header — customer-friendly columns
-    const cols = [L + 4, L + 180, L + 350, L + 460];
-    const colLabels = ['Product Name', 'What It Does', 'Area / Method', 'Rate'];
-
-    doc.save();
-    doc.rect(L, y, W, 16).fill('#E8EDF2');
-    doc.fontSize(8).font('Helvetica-Bold').fillColor('#444');
-    colLabels.forEach((lbl, i) => doc.text(lbl, cols[i], y + 4));
-    doc.restore();
-    y += 18;
-
     products.forEach((p, i) => {
-      if (y > 680) { doc.addPage(); y = 50; }
-      const rowH = p.active_ingredient ? 28 : 18;
+      if (y > 650) { doc.addPage(); y = 50; }
+
+      // Find matching compliance record for this product
+      const comp = compliance.find(c => c.product_id === p.product_id) || {};
+      const epa = p.epa_reg_number || comp.epa_registration_number || '';
+      const dilution = p.catalog_dilution_rate || comp.dilution_rate || '';
+      const targetPest = comp.target_pest || '';
+      const targetArea = p.application_area || comp.application_site || p.application_method || '';
+      const signalWord = p.catalog_signal_word || '';
+      const formulation = p.catalog_formulation || '';
+
       const bg = i % 2 === 0 ? '#fff' : LIGHT_BG;
+      const rowH = 42 + (targetPest ? 12 : 0);
+
       doc.save();
       doc.rect(L, y, W, rowH).fill(bg);
-      // Product name (bold)
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#333');
-      doc.text(p.product_name || '', cols[0], y + 4, { width: 170 });
-      // Active ingredient in small text below product name
+
+      // Row 1: Product name + Active ingredient + EPA
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#333').text(p.product_name || '', L + 8, y + 4, { width: 200 });
       if (p.active_ingredient) {
-        doc.fontSize(6.5).font('Helvetica').fillColor('#888');
-        doc.text(`Active: ${p.active_ingredient}`, cols[0], y + 16, { width: 170 });
+        doc.fontSize(7).font('Helvetica').fillColor('#888').text(`Active: ${p.active_ingredient}${formulation ? ` (${formulation})` : ''}`, L + 8, y + 16, { width: 200 });
       }
-      // What It Does — friendly description from category
-      doc.fontSize(8).font('Helvetica').fillColor('#333');
-      doc.text(friendlyProductDescription(p.product_category), cols[1], y + 4, { width: 165 });
-      // Area / Method
-      doc.text(p.application_method || p.target_area || '—', cols[2], y + 4, { width: 105 });
-      // Rate
-      doc.text(p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}`.trim() : '—', cols[3], y + 4, { width: 80 });
+      if (epa) {
+        doc.fontSize(7).font('Helvetica').fillColor('#888').text(`EPA Reg. #${epa}`, L + 8, y + 26, { width: 200 });
+      }
+      if (signalWord) {
+        doc.fontSize(7).font('Helvetica-Bold').fillColor(signalWord === 'Danger' ? RED : '#B8860B').text(signalWord.toUpperCase(), L + 210, y + 4, { width: 60 });
+      }
+
+      // Row 1 right side: Application details
+      const detailX = L + 280;
+      doc.fontSize(7.5).font('Helvetica').fillColor('#555').text('Method:', detailX, y + 4, { width: 40 });
+      doc.font('Helvetica').fillColor('#333').text(targetArea || '—', detailX + 42, y + 4, { width: 200 });
+      doc.fontSize(7.5).fillColor('#555').text('Rate:', detailX, y + 16, { width: 40 });
+      doc.fillColor('#333').text(p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}`.trim() : '—', detailX + 42, y + 16, { width: 200 });
+      if (dilution) {
+        doc.fontSize(7.5).fillColor('#555').text('Dilution:', detailX, y + 28, { width: 42 });
+        doc.fillColor('#333').text(dilution, detailX + 42, y + 28, { width: 200 });
+      }
+      if (p.total_amount) {
+        doc.fontSize(7.5).fillColor('#555').text('Applied:', detailX + 160, y + 28, { width: 38 });
+        doc.fillColor('#333').text(`${p.total_amount} ${p.amount_unit || ''}`.trim(), detailX + 200, y + 28, { width: 80 });
+      }
+
+      // Target pests row
+      if (targetPest) {
+        doc.fontSize(7.5).font('Helvetica').fillColor(TEAL).text(`Target: ${targetPest}`, L + 8, y + 36, { width: W - 16 });
+      }
+
       doc.restore();
-      y += rowH;
+      y += rowH + 2;
     });
-    y += 10;
+    y += 8;
   }
 
   // ══════════════════════════════════════════════════════
-  // STRUCTURED TECH NOTES — What We Did / Found / Next
+  // WHAT WE DID
   // ══════════════════════════════════════════════════════
   const notes = (service.technician_notes || '').trim();
+  if (notes) {
+    if (y > 620) { doc.addPage(); y = 50; }
+    y = sectionHeader(doc, 'What We Did', L, y);
+    doc.fontSize(9).font('Helvetica').fillColor('#333').text(notes, L + 8, y, { width: W - 16, lineGap: 3 });
+    y = doc.y + 12;
+  }
+
+  // ══════════════════════════════════════════════════════
+  // WHAT I NOTICED — tech observations from field_flags, structured_notes, AI report
+  // ══════════════════════════════════════════════════════
   let fieldObs = null;
   if (service.field_flags) {
     try {
@@ -267,55 +362,71 @@ function generateServiceReportPDF(customer, service, products, res) {
     } catch { /* ignore */ }
   }
 
-  // "What We Did" section
-  if (notes) {
-    if (y > 620) { doc.addPage(); y = 50; }
-    y = sectionHeader(doc, 'What We Did', L, y);
-    // If notes are long (>= 100 chars), use first 2/3 for "What We Did"
-    let whatWeDid = notes;
-    if (notes.length >= 100) {
-      const splitIdx = Math.floor(notes.length * 0.67);
-      // Try to split at a sentence boundary
-      const sentenceEnd = notes.lastIndexOf('.', splitIdx);
-      whatWeDid = sentenceEnd > splitIdx * 0.5 ? notes.substring(0, sentenceEnd + 1) : notes.substring(0, splitIdx);
-    }
-    doc.fontSize(9).font('Helvetica').fillColor('#333').text(whatWeDid.trim(), L + 8, y, {
-      width: W - 16, lineGap: 3,
+  const observations = [];
+  if (fieldObs) {
+    Object.entries(fieldObs).forEach(([key, val]) => {
+      if (typeof val === 'boolean' && !val) return;
+      observations.push(`${key.replace(/_/g, ' ')}: ${typeof val === 'boolean' ? 'Yes' : val}`);
     });
-    y = doc.y + 12;
+  }
+  if (structuredNotes?.observations) {
+    const obs = Array.isArray(structuredNotes.observations) ? structuredNotes.observations : [structuredNotes.observations];
+    observations.push(...obs);
+  }
+  if (aiReport?.observations) {
+    const obs = Array.isArray(aiReport.observations) ? aiReport.observations : [aiReport.observations];
+    observations.push(...obs);
   }
 
-  // "What We Found" section — from field_flags or remaining notes
-  const hasObservations = fieldObs || (notes.length >= 100);
-  if (hasObservations) {
-    if (y > 660) { doc.addPage(); y = 50; }
-    y = sectionHeader(doc, 'What We Found', L, y);
-    if (fieldObs) {
-      Object.entries(fieldObs).forEach(([key, val]) => {
-        if (y > 700) { doc.addPage(); y = 50; }
-        doc.fontSize(9).font('Helvetica-Bold').fillColor('#555').text(`${key}:`, L + 8, y, { width: 140, continued: false });
-        doc.font('Helvetica').fillColor('#333').text(` ${val}`, L + 8 + doc.widthOfString(`${key}: `), y, { width: W - 30 });
-        y += 14;
-      });
-    }
-    // If notes were long, show the remainder here
-    if (notes.length >= 100) {
-      const splitIdx = Math.floor(notes.length * 0.67);
-      const sentenceEnd = notes.lastIndexOf('.', splitIdx);
-      const cutoff = sentenceEnd > splitIdx * 0.5 ? sentenceEnd + 1 : splitIdx;
-      const remainder = notes.substring(cutoff).trim();
-      if (remainder) {
-        doc.fontSize(9).font('Helvetica').fillColor('#333').text(remainder, L + 8, y, {
-          width: W - 16, lineGap: 3,
-        });
-        y = doc.y + 6;
-      }
-    }
+  if (observations.length) {
+    if (y > 620) { doc.addPage(); y = 50; }
+    y = sectionHeader(doc, 'What I Noticed', L, y);
+    observations.forEach(obs => {
+      if (y > 700) { doc.addPage(); y = 50; }
+      doc.fontSize(8.5).font('Helvetica').fillColor('#333');
+      doc.text(`  \u2022  ${obs}`, L + 8, y, { width: W - 24, lineGap: 2 });
+      y = doc.y + 4;
+    });
     y += 6;
   }
 
-  // "What's Next" section — aftercare tips based on service type
-  if (y > 660) { doc.addPage(); y = 50; }
+  // ══════════════════════════════════════════════════════
+  // WHAT WE RECOMMEND — property-specific tips
+  // ══════════════════════════════════════════════════════
+  const recommendations = [];
+  if (structuredNotes?.recommendations) {
+    const recs = Array.isArray(structuredNotes.recommendations) ? structuredNotes.recommendations : [structuredNotes.recommendations];
+    recommendations.push(...recs);
+  }
+  if (aiReport?.recommendations) {
+    const recs = Array.isArray(aiReport.recommendations) ? aiReport.recommendations : [aiReport.recommendations];
+    recommendations.push(...recs);
+  }
+  if (service.irrigation_recommendation) {
+    try {
+      const irr = typeof service.irrigation_recommendation === 'string' ? JSON.parse(service.irrigation_recommendation) : service.irrigation_recommendation;
+      if (irr.recommendation) recommendations.push(irr.recommendation);
+    } catch { /* ignore */ }
+  }
+
+  if (recommendations.length) {
+    if (y > 620) { doc.addPage(); y = 50; }
+    y = sectionHeader(doc, 'What We Recommend', L, y);
+    doc.save();
+    doc.roundedRect(L, y, W, 4 + recommendations.length * 16, 3).fill('#F0F7FC');
+    doc.roundedRect(L, y, 4, 4 + recommendations.length * 16, 2).fill(TEAL);
+    recommendations.forEach((rec, i) => {
+      doc.fontSize(8.5).font('Helvetica').fillColor('#333');
+      doc.text(`  \u2022  ${rec}`, L + 14, y + 6 + i * 16, { width: W - 28, lineGap: 2 });
+    });
+    doc.restore();
+    y += 10 + recommendations.length * 16;
+  }
+
+  // ══════════════════════════════════════════════════════
+  // WHAT'S NEXT — aftercare tips
+  // ══════════════════════════════════════════════════════
+  if (y > 640) { doc.addPage(); y = 50; }
   y = sectionHeader(doc, "What's Next", L, y);
   doc.save();
   doc.roundedRect(L, y, W, 36, 3).fill('#F0FAF0');
@@ -328,6 +439,24 @@ function generateServiceReportPDF(customer, service, products, res) {
   y += 46;
 
   // ══════════════════════════════════════════════════════
+  // SERVICE VALUE (if invoice exists)
+  // ══════════════════════════════════════════════════════
+  if (invoice && invoice.total_amount) {
+    if (y > 690) { doc.addPage(); y = 50; }
+    doc.save();
+    doc.roundedRect(L, y, W, 22, 3).fill(LIGHT_BG);
+    doc.fontSize(8).font('Helvetica').fillColor('#555').text('Service Value:', L + 10, y + 6);
+    doc.font('Helvetica-Bold').fillColor(NAVY).text(`$${Number(invoice.total_amount).toFixed(2)}`, L + 85, y + 6);
+    if (isCallback) {
+      doc.font('Helvetica').fillColor(GREEN).text('Included with WaveGuard — $0.00 billed', L + 160, y + 6);
+    } else {
+      doc.font('Helvetica').fillColor('#555').text('View full invoice at portal.wavespestcontrol.com', L + 160, y + 6);
+    }
+    doc.restore();
+    y += 30;
+  }
+
+  // ══════════════════════════════════════════════════════
   // SAFETY NOTICE
   // ══════════════════════════════════════════════════════
   if (y > 680) { doc.addPage(); y = 50; }
@@ -338,14 +467,14 @@ function generateServiceReportPDF(customer, service, products, res) {
     L + 10, y + 6, { width: W - 20 }
   );
   doc.fontSize(7).font('Helvetica').fillColor('#B8860B').text(
-    'National Pest Emergency Poison Control: (800) 222-1222',
+    'National Poison Control: (800) 222-1222 | FL Dept. of Agriculture: (850) 617-7870',
     L + 10, y + 18, { width: W - 20 }
   );
   doc.restore();
   y += 36;
 
   // ══════════════════════════════════════════════════════
-  // FOOTER — enhanced with full business details
+  // FOOTER
   // ══════════════════════════════════════════════════════
   doc.save();
   doc.rect(0, 730, 612, 62).fill(NAVY);
@@ -355,15 +484,15 @@ function generateServiceReportPDF(customer, service, products, res) {
   );
   doc.fontSize(7).font('Helvetica').fillColor('#ccc').text(
     '13649 Luxe Ave #110, Bradenton, FL 34211 · (941) 318-7612',
-    0, 752, { width: 612, align: 'center' }
+    0, 750, { width: 612, align: 'center' }
   );
-  doc.text(
-    'wavespestcontrol.com · View this report in your Waves portal',
-    0, 763, { width: 612, align: 'center' }
-  );
-  doc.fontSize(7).fillColor('#999').text(
-    'National Pest Emergency Poison Control: (800) 222-1222',
-    0, 774, { width: 612, align: 'center' }
+  const techLine = service.technician_name && service.technician_name !== 'Waves Team'
+    ? `Your technician: ${service.technician_name}${service.technician_license ? ` (FL #${service.technician_license})` : ''}`
+    : 'wavespestcontrol.com';
+  doc.text(techLine, 0, 760, { width: 612, align: 'center' });
+  doc.fillColor('#999').text(
+    'View this report in your Waves portal · National Poison Control: (800) 222-1222',
+    0, 770, { width: 612, align: 'center' }
   );
   doc.restore();
 
@@ -455,16 +584,50 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
     const service = await db('service_records')
       .where({ 'service_records.id': req.params.serviceRecordId, 'service_records.customer_id': req.customerId })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'technicians.name as technician_name')
+      .select(
+        'service_records.*',
+        'technicians.name as technician_name',
+        'technicians.phone as technician_phone',
+        'technicians.fl_applicator_license as technician_license',
+        'technicians.photo_url as technician_photo',
+      )
       .first();
 
     if (!service) return res.status(404).json({ error: 'Service record not found' });
 
-    const products = await db('service_products')
-      .where({ service_record_id: service.id });
+    // Get products with catalog enrichment (EPA, dilution, signal word)
+    const products = await db('service_products as sp')
+      .where({ 'sp.service_record_id': service.id })
+      .leftJoin('products_catalog as pc', function () {
+        this.on('pc.name', 'sp.product_name')
+          .orOn('pc.name', 'sp.product_name');
+      })
+      .select(
+        'sp.*',
+        'pc.dilution_rate as catalog_dilution_rate',
+        'pc.signal_word as catalog_signal_word',
+        'pc.rain_free_hours as catalog_rain_free_hours',
+        'pc.formulation as catalog_formulation',
+        'pc.restricted_use as catalog_restricted_use',
+      );
+
+    // Get compliance records for EPA reg numbers and target pests
+    const compliance = await db('property_application_history')
+      .where({ service_record_id: service.id })
+      .select('product_id', 'epa_registration_number', 'target_pest', 'application_method',
+        'dilution_rate', 'area_treated_sqft', 'wind_speed_mph', 'weather_conditions', 'application_site')
+      .catch(() => []);
+
+    // Get invoice total if available
+    const invoice = await db('invoices')
+      .where({ customer_id: req.customerId })
+      .where('service_date', service.service_date)
+      .select('total_amount', 'status', 'id')
+      .first()
+      .catch(() => null);
 
     const customer = req.customer;
-    generateServiceReportPDF(customer, service, products, res);
+    generateServiceReportPDF(customer, service, products, res, { compliance, invoice });
   } catch (err) {
     next(err);
   }

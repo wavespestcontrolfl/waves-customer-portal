@@ -314,6 +314,15 @@ class BouncieService {
 
     return { etaMinutes: 15, distanceMiles: null, source: 'default' };
   }
+
+  /**
+   * Update in-memory tokens (called from OAuth callback route)
+   */
+  updateTokens(accessToken, refreshToken) {
+    if (accessToken) currentToken = accessToken;
+    if (refreshToken) currentRefresh = refreshToken;
+    logger.info('[bouncie] In-memory tokens updated from OAuth callback');
+  }
 }
 
 module.exports = new BouncieService();
