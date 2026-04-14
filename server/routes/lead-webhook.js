@@ -158,8 +158,8 @@ router.post('/', async (req, res) => {
     // Auto-reply to lead — always send during business hours (whether call connected or not)
     try {
       const replyMsg = isDuringHours
-        ? `Hello ${firstName}! Waves here! We received your quote request. One of our specialists will be calling soon—feel free to reply if you'd rather chat by message.\n\nThank you for considering Waves!`
-        : `Hello ${firstName}! Thanks for reaching out to Waves. We received your info and will follow up first thing in the morning with a custom quote.\n\nQuestions? Reply to this message.\nThank you for choosing Waves!`;
+        ? `Hello ${firstName}! Thanks for reaching out to Waves! What are you interested in — Pest Control, Lawn Care, or a One-Time Service? Reply and we'll get you a quote right away.`
+        : `Hello ${firstName}! Thanks for reaching out to Waves! What are you interested in — Pest Control, Lawn Care, or a One-Time Service? We'll follow up first thing in the morning with a custom quote.`;
       await TwilioService.sendSMS(phoneFormatted, replyMsg,
         { customerId: customer.id, messageType: 'auto_reply', customerLocationId: location.id }
       );
