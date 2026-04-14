@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import NotificationBell from './NotificationBell';
+import GlobalCommandPalette from './admin/GlobalCommandPalette';
 
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', red: '#ef4444' };
 
@@ -185,6 +186,9 @@ export default function AdminLayout() {
       <div style={{ flex: 1, marginLeft: 240, padding: '24px 28px', overflowY: 'auto', minHeight: '100vh' }} className="admin-main">
         <Outlet />
       </div>
+
+      {/* Global ⌘K Command Palette */}
+      <GlobalCommandPalette />
 
       {/* Mobile-responsive CSS */}
       <style>{`

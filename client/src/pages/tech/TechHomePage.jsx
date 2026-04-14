@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 
 const DARK = {
   bg: '#0f1923',
@@ -82,6 +83,9 @@ export default function TechHomePage() {
         <StatCard label="Services" value={total} />
         <StatCard label="Completed" value={completed} color="#22c55e" />
       </div>
+
+      {/* Field Assistant */}
+      <TechIntelligenceBar />
 
       {/* Quick Actions */}
       <h2 style={{

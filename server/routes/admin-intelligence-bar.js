@@ -22,6 +22,7 @@ const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intellige
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
 const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intelligence-bar/procurement-tools');
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
+const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -38,6 +39,7 @@ const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
 const REVENUE_TOOL_NAMES = new Set(REVENUE_TOOLS.map(t => t.name));
+const TECH_TOOL_NAMES = new Set(TECH_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -175,6 +177,28 @@ ANALYSIS STYLE:
 - Use the $35/hr loaded labor rate as the cost baseline
 - When comparing periods, highlight the biggest mover (positive or negative)
 - Be direct about what's working and what isn't`,
+
+  tech: `
+TECH FIELD PORTAL CONTEXT:
+You are the field assistant for a Waves Pest Control technician. Keep responses SHORT and actionable — this person is on a phone between stops.
+
+FIELD CAPABILITIES (READ-ONLY):
+- Today's route with stop order, addresses, service types
+- Customer details: property info, gate codes, pet warnings, special notes
+- Service history: what was done last time, products used, tech notes
+- Product info: label rates, mixing ratios, MOA groups
+- Treatment protocols: pest, lawn (5 tracks), mosquito, tree & shrub
+- Customer account status: tier, balance, health score
+- Knowledge base: pest ID, treatment guidance, SWFL-specific advice
+- Weather: current conditions, spray/no-spray recommendation
+
+RESPONSE STYLE:
+- Keep it under 200 words — the tech is in the field
+- Lead with the answer, skip the preamble
+- For product rates, give the specific number: "Demand CS: 0.8 oz per 1000 sq ft"
+- For customer info, lead with the actionable stuff: gate codes, pet warnings, special instructions
+- If asked "what's next?", show only the next stop with address and service type
+- Weather: just say "good to spray" or "hold off — wind at 18mph" — don't write a paragraph`,
 };
 
 function getToolsForContext(context) {
@@ -193,10 +217,17 @@ function getToolsForContext(context) {
   if (context === 'revenue') {
     return [...TOOLS, ...REVENUE_TOOLS];
   }
+  if (context === 'tech') {
+    return TECH_TOOLS; // Tech portal gets ONLY tech tools — no write operations
+  }
   return TOOLS;
 }
 
-function executeToolByName(toolName, input) {
+// techContext is only set for tech portal calls
+function executeToolByName(toolName, input, techContext) {
+  if (TECH_TOOL_NAMES.has(toolName)) {
+    return executeTechTool(toolName, input, techContext || {});
+  }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
   }
@@ -285,8 +316,17 @@ router.post('/query', async (req, res, next) => {
       systemPrompt += `\n\nCURRENT PAGE STATE:\n${JSON.stringify(pageData, null, 2)}`;
     }
 
+    // Build tech context for tech portal calls
+    const techContext = context === 'tech' ? {
+      techId: req.technicianId || null,
+      techName: req.technicianName || pageData?.tech_name || null,
+    } : null;
+
     // Select tools based on context
     const tools = getToolsForContext(context);
+
+    // For tech context, use a simpler model to reduce latency in the field
+    const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || 'claude-sonnet-4-20250514') : MODEL;
 
     // Build messages array (support multi-turn conversation)
     const messages = [
@@ -302,8 +342,8 @@ router.post('/query', async (req, res, next) => {
     // Tool-use loop
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await anthropic.messages.create({
-        model: MODEL,
-        max_tokens: 4096,
+        model: model,
+        max_tokens: context === 'tech' ? 1024 : 4096,
         system: systemPrompt,
         tools,
         messages: currentMessages,
@@ -322,7 +362,7 @@ router.post('/query', async (req, res, next) => {
       for (const toolUse of toolUses) {
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, toolUse.input);
 
-        const result = await executeToolByName(toolUse.name, toolUse.input);
+        const result = await executeToolByName(toolUse.name, toolUse.input, techContext);
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
@@ -480,6 +520,15 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'ad_roi', label: 'Ad ROI', prompt: "What's our ad attribution? ROAS and CAC by channel?", icon: '📣' },
       { id: 'quarter', label: 'Quarter View', prompt: "How's revenue this quarter compared to last quarter?", icon: '📈' },
       { id: 'low_margin', label: 'Low Margin Alert', prompt: 'Which service lines are below our 55% margin target?', icon: '⚠️' },
+    ] });
+  } else if (context === 'tech') {
+    res.json({ actions: [
+      { id: 'route', label: "Today's Route", prompt: "What's my route today?", icon: '📅' },
+      { id: 'next', label: "What's Next?", prompt: "What's my next stop? Any special notes?", icon: '➡️' },
+      { id: 'weather', label: 'Spray Check', prompt: 'Can I spray right now? Check wind and rain.', icon: '🌤️' },
+      { id: 'remaining', label: 'How Many Left?', prompt: 'How many stops do I have left today?', icon: '📊' },
+      { id: 'protocol', label: 'Pest Protocol', prompt: 'What products and rates for quarterly pest control?', icon: '📖' },
+      { id: 'lawn_protocol', label: 'Lawn Protocol', prompt: 'Lawn care protocol for St. Augustine Track A', icon: '🌿' },
     ] });
   } else {
     res.json({ actions: baseActions });
