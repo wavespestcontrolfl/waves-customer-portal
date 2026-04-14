@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext, Component } from 'react';
 import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
 import { LeadsSection } from './LeadsTabs';
+import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
 
 class EstimateErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -2160,74 +2161,7 @@ function WebsiteQuotesView() {
 // =========================================================================
 // WRAPPER — tabs between Pipeline view and New Estimate tool
 // =========================================================================
-function PricingLogicTab() {
-  const [configs, setConfigs] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(null);
-  const [editData, setEditData] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [filter, setFilter] = useState('all');
-  const API_BASE = import.meta.env.VITE_API_URL || '/api';
-  const af = (p, o = {}) => fetch(`${API_BASE}${p}`, { ...o, headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json', ...o.headers } }).then(r => r.json());
-
-  useEffect(() => { af('/admin/pricing-config').then(d => { setConfigs(d.configs || []); setLoading(false); }).catch(() => setLoading(false)); }, []);
-
-  const handleSave = async (key) => {
-    setSaving(true);
-    try {
-      const parsed = JSON.parse(editData);
-      await af(`/admin/pricing-config/${key}`, { method: 'PUT', body: JSON.stringify({ data: parsed }) });
-      setConfigs(prev => prev.map(c => c.config_key === key ? { ...c, data: parsed } : c));
-      setEditing(null);
-    } catch (e) { alert('Invalid JSON: ' + e.message); }
-    setSaving(false);
-  };
-
-  const catColors = { pest: '#ef4444', lawn: '#22c55e', waveguard: '#0ea5e9', other: '#94a3b8' };
-  const categories = [...new Set(configs.map(c => c.category))];
-  const filtered = filter === 'all' ? configs : configs.filter(c => c.category === filter);
-
-  if (loading) return <div style={{ color: C.gray, padding: 40, textAlign: 'center' }}>Loading pricing config...</div>;
-
-  return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: C.white }}>{filtered.length} Pricing Configurations</div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button onClick={() => setFilter('all')} style={{ padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer', background: filter === 'all' ? C.teal : C.card, color: filter === 'all' ? C.white : C.gray }}>All</button>
-          {categories.map(c => (
-            <button key={c} onClick={() => setFilter(c)} style={{ padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer', background: filter === c ? (catColors[c] || C.teal) : C.card, color: filter === c ? C.white : C.gray, textTransform: 'capitalize' }}>{c}</button>
-          ))}
-        </div>
-      </div>
-
-      {filtered.map(c => (
-        <div key={c.config_key} style={{ background: C.card, borderRadius: 10, padding: '14px 16px', border: `1px solid ${C.border}`, marginBottom: 8, borderLeft: `3px solid ${catColors[c.category] || C.gray}` }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-            <div>
-              <span style={{ fontSize: 13, fontWeight: 600, color: C.white }}>{c.name}</span>
-              <span style={{ fontSize: 10, marginLeft: 8, padding: '2px 6px', borderRadius: 4, background: (catColors[c.category] || C.gray) + '22', color: catColors[c.category] || C.gray, textTransform: 'capitalize' }}>{c.category}</span>
-            </div>
-            {editing === c.config_key ? (
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => handleSave(c.config_key)} disabled={saving} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: C.green, color: C.white }}>{saving ? '...' : 'Save'}</button>
-                <button onClick={() => setEditing(null)} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: 'transparent', color: C.gray, border: `1px solid ${C.border}` }}>Cancel</button>
-              </div>
-            ) : (
-              <button onClick={() => { setEditing(c.config_key); setEditData(JSON.stringify(c.data, null, 2)); }} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: C.teal + '22', color: C.teal }}>Edit</button>
-            )}
-          </div>
-          {c.description && <div style={{ fontSize: 11, color: C.gray, marginBottom: 6 }}>{c.description}</div>}
-          {editing === c.config_key ? (
-            <textarea value={editData} onChange={e => setEditData(e.target.value)} rows={Math.min(20, editData.split('\n').length + 2)} style={{ width: '100%', padding: 10, background: C.dark, border: `1px solid ${C.border}`, borderRadius: 8, color: C.white, fontSize: 12, fontFamily: "'JetBrains Mono', monospace", resize: 'vertical', outline: 'none', boxSizing: 'border-box' }} />
-          ) : (
-            <pre style={{ fontSize: 11, color: C.gray, lineHeight: 1.4, margin: 0, whiteSpace: 'pre-wrap', fontFamily: "'JetBrains Mono', monospace", maxHeight: 200, overflow: 'auto' }}>{JSON.stringify(c.data, null, 2)}</pre>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
+// PricingLogicTab replaced by PricingLogicPanel component
 
 export default function EstimatePage() {
   const [activeTab, setActiveTab] = useState('leads');
@@ -2259,7 +2193,7 @@ export default function EstimatePage() {
       {activeTab === 'leads' && <LeadsSection />}
       {activeTab === 'estimates' && <EstimatePipelineView />}
       {activeTab === 'new' && <EstimateToolView />}
-      {activeTab === 'pricing' && <PricingLogicTab />}
+      {activeTab === 'pricing' && <PricingLogicPanel />}
     </div>
   );
 }
