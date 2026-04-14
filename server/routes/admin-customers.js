@@ -13,7 +13,7 @@ router.get('/', async (req, res, next) => {
   try {
     const { search, stage, tier, tag, source, area, city, sort = 'lead_score', order = 'desc', page = 1, limit = 100 } = req.query;
 
-    let query = db('customers').select(
+    let query = db('customers').whereNull('customers.deleted_at').select(
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
@@ -49,19 +49,19 @@ router.get('/', async (req, res, next) => {
     const sortCol = { lead_score: 'lead_score', name: 'first_name', rate: 'monthly_rate', last_contact: 'last_contact_date', revenue: 'lifetime_revenue' }[sort] || 'lead_score';
     query = query.orderBy(sortCol, order === 'asc' ? 'asc' : 'desc');
 
-    const total = await db('customers').count('* as count').first();
+    const total = await db('customers').whereNull('deleted_at').count('* as count').first();
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const customers = await query.limit(parseInt(limit)).offset(offset);
 
     // Pipeline counts
-    const pipelineCounts = await db('customers').select('pipeline_stage').count('* as count').groupBy('pipeline_stage');
+    const pipelineCounts = await db('customers').whereNull('deleted_at').select('pipeline_stage').count('* as count').groupBy('pipeline_stage');
     const pipelineMap = {};
     pipelineCounts.forEach(p => { pipelineMap[p.pipeline_stage || 'unknown'] = parseInt(p.count); });
 
     // Available filters
     const allTags = await db('customer_tags').select('tag').groupBy('tag').orderBy('tag');
-    const allSources = await db('customers').select('lead_source').whereNotNull('lead_source').groupBy('lead_source');
-    const allAreas = await db('customers').select('city').whereNotNull('city').where('city', '!=', '').groupBy('city').orderBy('city');
+    const allSources = await db('customers').whereNull('deleted_at').select('lead_source').whereNotNull('lead_source').groupBy('lead_source');
+    const allAreas = await db('customers').whereNull('deleted_at').select('city').whereNotNull('city').where('city', '!=', '').groupBy('city').orderBy('city');
 
     res.json({
       customers: customers.map(c => ({
@@ -108,6 +108,7 @@ router.get('/pipeline/view', async (req, res, next) => {
     for (const stage of stages) {
       const customers = await db('customers')
         .where({ pipeline_stage: stage })
+        .whereNull('customers.deleted_at')
         .leftJoin('customer_tags', 'customers.id', 'customer_tags.customer_id')
         .select('customers.*')
         .groupBy('customers.id')
@@ -144,7 +145,7 @@ router.post('/:id/sync-square', (req, res) => {
 router.get('/:id/timeline', async (req, res, next) => {
   try {
     const customerId = req.params.id;
-    const customer = await db('customers').where({ id: customerId }).first();
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     const timeline = [];
@@ -247,7 +248,7 @@ router.get('/:id/timeline', async (req, res, next) => {
 // GET /api/admin/customers/:id — full detail
 router.get('/:id', async (req, res, next) => {
   try {
-    const c = await db('customers').where({ id: req.params.id }).first();
+    const c = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
     const [tags, interactions, prefs, services, estimates, payments, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts] = await Promise.all([
@@ -468,31 +469,26 @@ router.post('/sync-square', (req, res) => {
   res.json({ message: 'Square sync disabled — migrated to Stripe', synced: 0 });
 });
 
-// DELETE /api/admin/customers/:id — delete a customer and related records
+// DELETE /api/admin/customers/:id — soft-delete a customer
 router.delete('/:id', async (req, res, next) => {
   try {
-    const customer = await db('customers').where({ id: req.params.id }).first();
+    const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    // Delete related records — explicit cascade for all tables with customer_id FK
-    const cascadeTables = [
-      'customer_health_scores', 'customer_health_history', 'customer_health_alerts',
-      'customer_save_sequences', 'customer_discounts', 'customer_subscriptions',
-      'sms_scheduling_sessions', 'referrals', 'referral_promoters',
-      'estimates', 'scheduled_services', 'payments', 'invoices',
-      'service_records', 'service_requests', 'service_tracking',
-      'property_preferences', 'notification_prefs', 'appointment_reminders',
-      'customer_interactions', 'customer_tags', 'activity_log',
-      'sms_log', 'call_log', 'reschedule_log',
-      'leads', 'lead_activities',
-    ];
-    for (const table of cascadeTables) {
-      await db(table).where({ customer_id: req.params.id }).del().catch(() => {});
-    }
-    await db('notifications').where({ recipient_id: req.params.id }).del().catch(() => {});
+    await db('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
+    logger.info(`[customers] Soft-deleted customer ${customer.first_name} ${customer.last_name} (${req.params.id})`);
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
 
-    await db('customers').where({ id: req.params.id }).del();
-    logger.info(`[customers] Deleted customer ${customer.first_name} ${customer.last_name} (${req.params.id})`);
+// PATCH /api/admin/customers/:id/restore — restore a soft-deleted customer (admin only)
+router.patch('/:id/restore', async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).whereNotNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found or not deleted' });
+
+    await db('customers').where({ id: req.params.id }).update({ deleted_at: null });
+    logger.info(`[customers] Restored customer ${customer.first_name} ${customer.last_name} (${req.params.id})`);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -502,7 +498,8 @@ router.post('/fix-tiers', async (req, res, next) => {
   try {
     const customers = await db('customers')
       .select('customers.id', 'customers.waveguard_tier')
-      .whereIn('customers.pipeline_stage', ['active_customer', 'won']);
+      .whereIn('customers.pipeline_stage', ['active_customer', 'won'])
+      .whereNull('deleted_at');
 
     let updated = 0;
     for (const c of customers) {

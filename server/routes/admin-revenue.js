@@ -67,8 +67,8 @@ router.get('/overview', async (req, res, next) => {
     const totalHours = services.reduce((s, r) => s + parseFloat(r.labor_hours || 0), 0);
     const prevRev = prevServices.reduce((s, r) => s + parseFloat(r.revenue || 0), 0);
 
-    const mrr = await db('customers').where({ active: true }).where('monthly_rate', '>', 0).sum('monthly_rate as total').first();
-    const custCount = await db('customers').where({ active: true }).count('* as count').first();
+    const mrr = await db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first();
+    const custCount = await db('customers').where({ active: true }).whereNull('deleted_at').count('* as count').first();
 
     // By service line
     const byLine = {};

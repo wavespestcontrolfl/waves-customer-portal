@@ -42,8 +42,8 @@ router.get('/', async (req, res, next) => {
     ] = await Promise.all([
       db('payments').where({ status: 'paid' }).where('payment_date', '>=', som).where('payment_date', '<=', today).sum('amount as total').first(),
       db('payments').where({ status: 'paid' }).where('payment_date', '>=', solm).where('payment_date', '<=', eolm).sum('amount as total').first(),
-      db('customers').where({ active: true }).count('* as count').first(),
-      db('customers').where({ active: true }).where('created_at', '>=', som).count('* as count').first(),
+      db('customers').where({ active: true }).whereNull('deleted_at').count('* as count').first(),
+      db('customers').where({ active: true }).whereNull('deleted_at').where('created_at', '>=', som).count('* as count').first(),
       db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', new Date().toISOString()).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
         db.raw("COUNT(*) as total"),
@@ -51,7 +51,7 @@ router.get('/', async (req, res, next) => {
       ).first(),
       db('estimates').where({ status: 'accepted' }).whereNotNull('accepted_at').whereNotNull('sent_at').where('accepted_at', '>=', som)
         .select(db.raw("AVG(EXTRACT(EPOCH FROM (accepted_at - sent_at)) / 3600) as avg_hrs")).first(),
-      db('customers').where({ active: true }).where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
+      db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
       db('payments').where({ status: 'paid' }).where('payment_date', '>=', som).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
       // Today's schedule
       db('scheduled_services')
@@ -65,7 +65,7 @@ router.get('/', async (req, res, next) => {
       // Recent activity
       db('activity_log').orderBy('created_at', 'desc').limit(15),
       // Tier revenue
-      db('customers').where({ active: true }).select('waveguard_tier').count('* as count').sum('monthly_rate as revenue').groupBy('waveguard_tier'),
+      db('customers').where({ active: true }).whereNull('deleted_at').select('waveguard_tier').count('* as count').sum('monthly_rate as revenue').groupBy('waveguard_tier'),
       // Google reviews — use Places API totals from _stats rows, fallback to actual review count
       (async () => {
         try {
@@ -153,9 +153,10 @@ router.get('/forecast', async (req, res, next) => {
     const today = new Date();
     const todayStr = today.toISOString().split('T')[0];
 
-    // MRR — sum of monthly_rate for all active customers
+    // MRR — sum of monthly_rate for all active, non-deleted customers
     const mrrResult = await db('customers')
       .where({ active: true })
+      .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
       .sum('monthly_rate as total')
       .count('* as count')
