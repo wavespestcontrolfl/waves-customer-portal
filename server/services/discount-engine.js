@@ -135,10 +135,10 @@ const DiscountEngine = {
     let totalDiscount = 0;
     const results = applied.map(disc => {
       let dollars = 0;
-      if (disc.discount_type === 'percentage') {
+      if (disc.discount_type === 'percentage' || disc.discount_type === 'variable_percentage') {
         dollars = Math.round(subtotal * (Number(disc.amount) / 100) * 100) / 100;
         if (disc.max_discount_dollars) dollars = Math.min(dollars, Number(disc.max_discount_dollars));
-      } else if (disc.discount_type === 'fixed_amount') {
+      } else if (disc.discount_type === 'fixed_amount' || disc.discount_type === 'variable_amount') {
         dollars = Number(disc.amount);
       } else if (disc.discount_type === 'free_service') {
         dollars = subtotal; // entire service is free

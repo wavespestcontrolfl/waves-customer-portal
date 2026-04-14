@@ -14,7 +14,8 @@ const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${
 const thS = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${D.border}` };
 const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13, color: D.text };
 
-const TYPE_COLORS = { percentage: { bg: '#0ea5e920', c: D.teal }, fixed_amount: { bg: '#f59e0b20', c: D.amber }, free_service: { bg: '#10b98120', c: D.green } };
+const TYPE_COLORS = { percentage: { bg: '#0ea5e920', c: D.teal }, fixed_amount: { bg: '#f59e0b20', c: D.amber }, variable_amount: { bg: '#a855f620', c: '#a855f6' }, variable_percentage: { bg: '#10b98120', c: D.green }, free_service: { bg: '#10b98120', c: D.green } };
+const TYPE_LABELS = { percentage: 'Percentage (%)', fixed_amount: 'Amount ($)', variable_amount: 'Variable ($)', variable_percentage: 'Variable (%)', free_service: 'Free Service' };
 const EMPTY = { discount_key: '', name: '', description: '', discount_type: 'percentage', amount: 0, max_discount_dollars: '', applies_to: 'all', service_category_filter: '', service_key_filter: '', requires_waveguard_tier: '', is_waveguard_tier_discount: false, requires_military: false, requires_senior: false, requires_referral: false, requires_new_customer: false, requires_multi_home: false, requires_prepayment: false, min_service_count: '', min_subtotal: '', is_stackable: true, stack_group: '', priority: 100, promo_code: '', promo_code_expiry: '', promo_code_max_uses: '', is_active: true, is_auto_apply: false, show_in_estimates: true, show_in_invoices: true, show_in_scheduling: false, sort_order: '', color: '#0ea5e9', icon: '' };
 
 export default function DiscountsPage() {
@@ -118,8 +119,8 @@ export default function DiscountsPage() {
                   <tr key={d.id} style={{ opacity: d.is_active ? 1 : 0.45 }}>
                     <td style={tdS}>{d.icon || ''}</td>
                     <td style={{ ...tdS, fontWeight: 600, color: D.white }}>{d.name}</td>
-                    <td style={tdS}><span style={sBadge(tc.bg, tc.c)}>{d.discount_type}</span></td>
-                    <td style={tdS}>{d.discount_type === 'percentage' ? `${d.amount}%` : d.discount_type === 'fixed_amount' ? `$${Number(d.amount).toFixed(2)}` : 'Free'}</td>
+                    <td style={tdS}><span style={sBadge(tc.bg, tc.c)}>{TYPE_LABELS[d.discount_type] || d.discount_type}</span></td>
+                    <td style={tdS}>{d.discount_type.includes('percentage') ? `${d.amount}%` : d.discount_type.includes('amount') || d.discount_type === 'fixed_amount' ? `$${Number(d.amount).toFixed(2)}` : 'Free'}</td>
                     <td style={{ ...tdS, fontSize: 11 }}>{rules.length ? rules.join(', ') : <span style={{ color: D.muted }}>None</span>}</td>
                     <td style={{ ...tdS, fontSize: 11 }}>{d.stack_group || <span style={{ color: D.muted }}>-</span>}</td>
                     <td style={tdS}>{d.is_auto_apply ? <span style={sBadge(D.green + '20', D.green)}>Auto</span> : <span style={{ color: D.muted }}>Manual</span>}</td>
@@ -148,10 +149,10 @@ export default function DiscountsPage() {
             {/* Mechanics */}
             <label style={{ color: D.muted, fontSize: 11 }}>Type
               <select style={sInput} value={form.discount_type} onChange={e => upd('discount_type', e.target.value)}>
-                <option value="percentage">Percentage</option><option value="fixed_amount">Fixed Amount</option><option value="free_service">Free Service</option>
+                <option value="fixed_amount">Amount ($)</option><option value="percentage">Percentage (%)</option><option value="variable_amount">Variable Amount ($)</option><option value="variable_percentage">Variable Percentage (%)</option><option value="free_service">Free Service</option>
               </select>
             </label>
-            <label style={{ color: D.muted, fontSize: 11 }}>Amount {form.discount_type === 'percentage' ? '(%)' : '($)'}<input type="number" style={sInput} value={form.amount} onChange={e => upd('amount', e.target.value)} /></label>
+            <label style={{ color: D.muted, fontSize: 11 }}>Amount {form.discount_type.includes('percentage') ? '(%)' : '($)'}{form.discount_type.startsWith('variable') ? ' — base/default' : ''}<input type="number" style={sInput} value={form.amount} onChange={e => upd('amount', e.target.value)} /></label>
             <label style={{ color: D.muted, fontSize: 11 }}>Max Discount ($)<input type="number" style={sInput} value={form.max_discount_dollars} onChange={e => upd('max_discount_dollars', e.target.value)} /></label>
             <label style={{ color: D.muted, fontSize: 11 }}>Priority (lower = first)<input type="number" style={sInput} value={form.priority} onChange={e => upd('priority', e.target.value)} /></label>
 
@@ -252,7 +253,7 @@ export default function DiscountsPage() {
                 const tc = TYPE_COLORS[d.discount_type] || TYPE_COLORS.percentage;
                 return (
                   <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}22` }}>
-                    <div><span style={{ marginRight: 8 }}>{d.icon}</span><span style={{ color: D.white, fontWeight: 600 }}>{d.name}</span> <span style={sBadge(tc.bg, tc.c)}>{d.discount_type === 'percentage' ? `${d.amount}%` : d.discount_type === 'fixed_amount' ? `$${d.amount}` : 'Free'}</span></div>
+                    <div><span style={{ marginRight: 8 }}>{d.icon}</span><span style={{ color: D.white, fontWeight: 600 }}>{d.name}</span> <span style={sBadge(tc.bg, tc.c)}>{d.discount_type.includes('percentage') ? `${d.amount}%` : d.discount_type.includes('amount') || d.discount_type === 'fixed_amount' ? `$${d.amount}` : 'Free'}</span></div>
                     <div style={{ color: D.red, fontWeight: 600 }}>-${d.discount_dollars.toFixed(2)}</div>
                   </div>
                 );
