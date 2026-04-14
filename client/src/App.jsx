@@ -72,6 +72,7 @@ const ServiceLibraryPage = lazy(() => import('./pages/admin/ServiceLibraryPage')
 const DiscountsPage = lazy(() => import('./pages/admin/DiscountsPage'));
 const CompliancePage = lazy(() => import('./pages/admin/CompliancePage'));
 const BadgesPage = lazy(() => import('./pages/admin/BadgesPage'));
+const AdminEmailPage = lazy(() => import('./pages/admin/EmailPage'));
 import BookingPage from './pages/BookingPage';
 
 function ProtectedRoute({ children }) {
@@ -164,6 +165,7 @@ export default function App() {
             <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />
             <Route path="badges" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading badges...</div>}><BadgesPage /></Suspense>} />
+            <Route path="email" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading email...</div>}><AdminEmailPage /></Suspense>} />
           </Route>
           <Route
             path="/*"

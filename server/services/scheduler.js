@@ -172,6 +172,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 MINUTES — Email sync (Gmail → PostgreSQL)
+  // =========================================================================
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      const { syncEmails } = require('./email/email-sync');
+      const result = await syncEmails();
+      if (result.newEmails > 0) {
+        logger.info(`[email-sync] Synced ${result.newEmails} new emails`);
+      }
+    } catch (err) {
+      logger.error(`[email-sync] Cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 HOURS — Estimate follow-up SMS (unviewed, viewed-not-accepted, expiring)
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {

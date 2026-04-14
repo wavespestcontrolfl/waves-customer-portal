@@ -31,8 +31,10 @@
     "archiver": "^7.0.1",
     "csv-parse": "^6.2.1",
     "google-ads-api": "^23.0.0",
+    "googleapis": "^171.4.0",
     "imapflow": "^1.2.18",
     "nodemailer": "^8.0.4",
+    "playwright": "^1.59.1",
     "stripe": "^22.0.0",
     "ws": "^8.20.0"
   }

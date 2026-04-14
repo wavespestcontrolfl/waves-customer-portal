@@ -22,6 +22,7 @@ const NAV_SECTIONS = [
     { path: '/admin/reviews', icon: '⭐', label: 'Reviews' },
     { path: '/admin/referrals', icon: '🎁', label: 'Referrals' },
     { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },
+    { path: '/admin/email', icon: '📧', label: 'Email' },
   ]},
   { section: 'Marketing', items: [
     { path: '/admin/ppc', icon: '📣', label: 'PPC' },
