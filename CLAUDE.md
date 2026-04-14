@@ -2,6 +2,13 @@
 
 This file provides context for Claude Code sessions working on the waves-customer-portal monorepo.
 
+## Dev Workflow
+
+- Always start `npm run dev` in background on session start
+- Monitor build output for errors and warnings
+- If errors appear, diagnose and fix immediately before continuing other work
+- After every commit, create a fresh tar.gz in ~/Downloads (exclude node_modules, .git, dist)
+
 ## Rules
 
 1. **Only touch what you're asked to touch.** If the task is "add a tool to the Intelligence Bar," don't refactor the route file, don't update the UI theme, don't reorganize imports in unrelated files.

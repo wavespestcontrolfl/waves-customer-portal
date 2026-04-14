@@ -37,6 +37,104 @@ router.get('/blog', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Named blog routes (must be before /:id to avoid being shadowed) ──
+
+// GET /api/admin/content/blog/audit
+router.get('/blog/audit', async (req, res, next) => {
+  try {
+    const recent = await db('ai_audits')
+      .where('audit_type', 'blog_content')
+      .orderBy('audit_date', 'desc')
+      .first();
+
+    if (recent && (Date.now() - new Date(recent.audit_date).getTime()) < 3600000) {
+      return res.json({
+        audit: typeof recent.report_data === 'string' ? JSON.parse(recent.report_data) : recent.report_data,
+        cached: true,
+        auditDate: recent.audit_date,
+      });
+    }
+
+    const audit = await BlogAuditor.runFullAudit();
+    await db('ai_audits').insert({
+      audit_type: 'blog_content',
+      audit_date: new Date(),
+      report_data: JSON.stringify(audit),
+      recommendation_count: audit.recommendations?.length || 0,
+      critical_issues: audit.duplicates?.length || 0,
+      status: 'completed',
+    });
+
+    res.json({ audit, cached: false, auditDate: new Date() });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/content/blog/analytics
+router.get('/blog/analytics', async (req, res, next) => {
+  try {
+    const all = await db('blog_posts');
+
+    const byStatus = {};
+    const byTag = {};
+    const byCity = {};
+    const bySource = {};
+
+    for (const p of all) {
+      byStatus[p.status] = (byStatus[p.status] || 0) + 1;
+      if (p.tag) byTag[p.tag] = (byTag[p.tag] || 0) + 1;
+      if (p.city) byCity[p.city] = (byCity[p.city] || 0) + 1;
+      bySource[p.source || 'unknown'] = (bySource[p.source || 'unknown'] || 0) + 1;
+    }
+
+    const published = all.filter(p => p.status === 'published');
+    const avgSEO = published.filter(p => p.seo_score).reduce((s, p) => s + p.seo_score, 0) / (published.filter(p => p.seo_score).length || 1);
+    const avgWordCount = published.filter(p => p.word_count).reduce((s, p) => s + p.word_count, 0) / (published.filter(p => p.word_count).length || 1);
+
+    const today = new Date().toISOString().split('T')[0];
+    const weekOut = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
+    const upcoming = await db('blog_posts')
+      .where('publish_date', '>=', today)
+      .where('publish_date', '<=', weekOut)
+      .orderBy('publish_date', 'asc');
+
+    res.json({
+      total: all.length,
+      byStatus,
+      byTag: Object.entries(byTag).sort((a, b) => b[1] - a[1]),
+      byCity: Object.entries(byCity).sort((a, b) => b[1] - a[1]),
+      bySource,
+      avgSEOScore: Math.round(avgSEO),
+      avgWordCount: Math.round(avgWordCount),
+      upcoming,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/content/blog/overlap-check
+router.get('/blog/overlap-check', async (req, res, next) => {
+  try {
+    const queued = await db('blog_posts').where('status', 'queued');
+    const published = await db('blog_posts').where('status', 'published');
+    const overlaps = [];
+
+    for (const q of queued) {
+      const qkw = (q.keyword || '').toLowerCase();
+      if (!qkw || qkw.length < 5) continue;
+      for (const p of published) {
+        const pkw = (p.keyword || '').toLowerCase();
+        if (pkw && (qkw.includes(pkw) || pkw.includes(qkw))) {
+          overlaps.push({
+            queued: { id: q.id, title: q.title, keyword: q.keyword, city: q.city },
+            existing: { id: p.id, title: p.title, keyword: p.keyword, city: p.city },
+          });
+        }
+      }
+    }
+
+    res.json({ overlaps, count: overlaps.length });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/content/blog/:id
 router.get('/blog/:id', async (req, res, next) => {
   try {
@@ -167,116 +265,6 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
     } catch { /* column may not exist */ }
 
     res.json(result);
-  } catch (err) { next(err); }
-});
-
-// =========================================================================
-// AUDIT
-// =========================================================================
-
-// GET /api/admin/content/blog/audit
-router.get('/blog/audit', async (req, res, next) => {
-  try {
-    // Check for recent audit
-    const recent = await db('ai_audits')
-      .where('audit_type', 'blog_content')
-      .orderBy('audit_date', 'desc')
-      .first();
-
-    if (recent && (Date.now() - new Date(recent.audit_date).getTime()) < 3600000) {
-      // Return cached audit if less than 1 hour old
-      return res.json({
-        audit: typeof recent.report_data === 'string' ? JSON.parse(recent.report_data) : recent.report_data,
-        cached: true,
-        auditDate: recent.audit_date,
-      });
-    }
-
-    // Run fresh audit
-    const audit = await BlogAuditor.runFullAudit();
-
-    // Store
-    await db('ai_audits').insert({
-      audit_type: 'blog_content',
-      audit_date: new Date(),
-      report_data: JSON.stringify(audit),
-      recommendation_count: audit.recommendations?.length || 0,
-      critical_issues: audit.duplicates?.length || 0,
-      status: 'completed',
-    });
-
-    res.json({ audit, cached: false, auditDate: new Date() });
-  } catch (err) { next(err); }
-});
-
-// =========================================================================
-// ANALYTICS
-// =========================================================================
-
-// GET /api/admin/content/blog/analytics
-router.get('/blog/analytics', async (req, res, next) => {
-  try {
-    const all = await db('blog_posts');
-
-    const byStatus = {};
-    const byTag = {};
-    const byCity = {};
-    const bySource = {};
-
-    for (const p of all) {
-      byStatus[p.status] = (byStatus[p.status] || 0) + 1;
-      if (p.tag) byTag[p.tag] = (byTag[p.tag] || 0) + 1;
-      if (p.city) byCity[p.city] = (byCity[p.city] || 0) + 1;
-      bySource[p.source || 'unknown'] = (bySource[p.source || 'unknown'] || 0) + 1;
-    }
-
-    const published = all.filter(p => p.status === 'published');
-    const avgSEO = published.filter(p => p.seo_score).reduce((s, p) => s + p.seo_score, 0) / (published.filter(p => p.seo_score).length || 1);
-    const avgWordCount = published.filter(p => p.word_count).reduce((s, p) => s + p.word_count, 0) / (published.filter(p => p.word_count).length || 1);
-
-    // Upcoming (next 7 days)
-    const today = new Date().toISOString().split('T')[0];
-    const weekOut = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
-    const upcoming = await db('blog_posts')
-      .where('publish_date', '>=', today)
-      .where('publish_date', '<=', weekOut)
-      .orderBy('publish_date', 'asc');
-
-    res.json({
-      total: all.length,
-      byStatus,
-      byTag: Object.entries(byTag).sort((a, b) => b[1] - a[1]),
-      byCity: Object.entries(byCity).sort((a, b) => b[1] - a[1]),
-      bySource,
-      avgSEOScore: Math.round(avgSEO),
-      avgWordCount: Math.round(avgWordCount),
-      upcoming,
-    });
-  } catch (err) { next(err); }
-});
-
-// GET /api/admin/content/blog/overlap-check
-router.get('/blog/overlap-check', async (req, res, next) => {
-  try {
-    const queued = await db('blog_posts').where('status', 'queued');
-    const published = await db('blog_posts').where('status', 'published');
-    const overlaps = [];
-
-    for (const q of queued) {
-      const qkw = (q.keyword || '').toLowerCase();
-      if (!qkw || qkw.length < 5) continue;
-      for (const p of published) {
-        const pkw = (p.keyword || '').toLowerCase();
-        if (pkw && (qkw.includes(pkw) || pkw.includes(qkw))) {
-          overlaps.push({
-            queued: { id: q.id, title: q.title, keyword: q.keyword, city: q.city },
-            existing: { id: p.id, title: p.title, keyword: p.keyword, city: p.city },
-          });
-        }
-      }
-    }
-
-    res.json({ overlaps, count: overlaps.length });
   } catch (err) { next(err); }
 });
 
