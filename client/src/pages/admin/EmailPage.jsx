@@ -15,6 +15,44 @@ const D = {
   text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
 };
 
+const CATEGORY_COLORS = {
+  lead_inquiry: D.green,
+  customer_request: D.teal,
+  complaint: D.red,
+  vendor_invoice: D.purple,
+  vendor_communication: D.purple,
+  scheduling: D.amber,
+  review_notification: D.amber,
+  regulatory: D.red,
+  marketing_newsletter: D.muted,
+  internal: D.teal,
+  spam: D.red,
+  other: D.muted,
+};
+
+const CATEGORY_LABELS = {
+  lead_inquiry: 'Lead',
+  customer_request: 'Customer',
+  complaint: 'Complaint',
+  vendor_invoice: 'Invoice',
+  vendor_communication: 'Vendor',
+  scheduling: 'Scheduling',
+  review_notification: 'Review',
+  regulatory: 'Regulatory',
+  marketing_newsletter: 'Newsletter',
+  internal: 'Internal',
+  spam: 'Spam',
+  other: 'Other',
+};
+
+const AUTO_ACTION_LABELS = {
+  lead_inquiry: 'Lead created',
+  spam: 'Blocked & trashed',
+  marketing_newsletter: 'Unsubscribed',
+  vendor_invoice: 'Expense logged',
+  complaint: 'Flagged urgent',
+};
+
 function timeAgo(dateStr) {
   const d = new Date(dateStr);
   const now = new Date();
@@ -40,6 +78,10 @@ export default function EmailPage() {
   const [replyText, setReplyText] = useState('');
   const [sending, setSending] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [digest, setDigest] = useState(null);
+  const [tab, setTab] = useState('inbox'); // inbox | blocked
+  const [blocked, setBlocked] = useState([]);
+  const [blockInput, setBlockInput] = useState('');
 
   const loadStatus = useCallback(async () => {
     try {
@@ -57,12 +99,24 @@ export default function EmailPage() {
     } catch { /* ignore */ }
   }, []);
 
+  const loadDigest = useCallback(async () => {
+    try {
+      const r = await adminFetch('/api/admin/email/daily-digest');
+      const d = await r.json();
+      setDigest(d);
+    } catch { /* ignore */ }
+  }, []);
+
   const loadEmails = useCallback(async () => {
     try {
       const params = new URLSearchParams({ page, limit: 50, is_archived: showArchived });
       if (filter === 'unread') params.set('category', 'unread');
       else if (filter === 'starred') params.set('category', 'starred');
       else if (filter === 'vendor') params.set('category', 'vendor');
+      else if (filter === 'leads') params.set('category', 'leads');
+      else if (filter === 'invoices') params.set('category', 'invoices');
+      else if (filter === 'customer') params.set('category', 'customer');
+      else if (filter === 'complaints') params.set('category', 'complaints');
       if (search) params.set('search', search);
 
       const r = await adminFetch(`/api/admin/email/inbox?${params}`);
@@ -72,8 +126,18 @@ export default function EmailPage() {
     } catch { /* ignore */ }
   }, [filter, search, page, showArchived]);
 
+  const loadBlocked = useCallback(async () => {
+    try {
+      const r = await adminFetch('/api/admin/email/blocked');
+      const d = await r.json();
+      setBlocked(d.blocked || []);
+    } catch { /* ignore */ }
+  }, []);
+
   useEffect(() => { loadStatus(); }, [loadStatus]);
-  useEffect(() => { if (status?.connected) { loadStats(); loadEmails(); } }, [status, loadStats, loadEmails]);
+  useEffect(() => {
+    if (status?.connected) { loadStats(); loadEmails(); loadDigest(); }
+  }, [status, loadStats, loadEmails, loadDigest]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -81,6 +145,7 @@ export default function EmailPage() {
       await adminFetch('/api/admin/email/sync', { method: 'POST' });
       await loadEmails();
       await loadStats();
+      await loadDigest();
     } catch { /* ignore */ }
     setSyncing(false);
   };
@@ -89,13 +154,11 @@ export default function EmailPage() {
     setSelectedEmail(email);
     setReplyText('');
     try {
-      // Mark as read
       if (!email.is_read) {
         await adminFetch(`/api/admin/email/message/${email.id}/read`, { method: 'POST' });
         setEmails(prev => prev.map(e => e.id === email.id ? { ...e, is_read: true } : e));
         loadStats();
       }
-      // Load thread
       const r = await adminFetch(`/api/admin/email/thread/${email.gmail_thread_id}`);
       const d = await r.json();
       setThread(d.thread || []);
@@ -129,13 +192,23 @@ export default function EmailPage() {
     } catch { /* ignore */ }
   };
 
+  const handleReclassify = async (emailId) => {
+    try {
+      const r = await adminFetch(`/api/admin/email/message/${emailId}/reclassify`, { method: 'POST' });
+      const d = await r.json();
+      setEmails(prev => prev.map(e => e.id === emailId
+        ? { ...e, classification: d.classification?.category, extracted_data: d.classification }
+        : e
+      ));
+    } catch { /* ignore */ }
+  };
+
   const handleReply = async () => {
     if (!replyText.trim() || !selectedEmail) return;
     setSending(true);
     try {
       await adminFetch('/api/admin/email/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           to: selectedEmail.from_address,
           subject: `Re: ${selectedEmail.subject || ''}`,
@@ -144,12 +217,35 @@ export default function EmailPage() {
         }),
       });
       setReplyText('');
-      // Reload thread
       const r = await adminFetch(`/api/admin/email/thread/${selectedEmail.gmail_thread_id}`);
       const d = await r.json();
       setThread(d.thread || []);
     } catch { /* ignore */ }
     setSending(false);
+  };
+
+  const handleBlock = async () => {
+    if (!blockInput.trim()) return;
+    try {
+      const isEmail = blockInput.includes('@');
+      await adminFetch('/api/admin/email/block', {
+        method: 'POST',
+        body: JSON.stringify({
+          email_address: isEmail ? blockInput.trim() : null,
+          domain: isEmail ? null : blockInput.trim(),
+          reason: 'Manual block from admin portal',
+        }),
+      });
+      setBlockInput('');
+      loadBlocked();
+    } catch { /* ignore */ }
+  };
+
+  const handleUnblock = async (id) => {
+    try {
+      await adminFetch(`/api/admin/email/blocked/${id}`, { method: 'DELETE' });
+      setBlocked(prev => prev.filter(b => b.id !== id));
+    } catch { /* ignore */ }
   };
 
   // Not connected — show connect card
@@ -172,7 +268,6 @@ export default function EmailPage() {
     );
   }
 
-  // Loading
   if (!status) {
     return <div style={{ padding: 40, color: D.muted }}>Loading...</div>;
   }
@@ -181,6 +276,10 @@ export default function EmailPage() {
     { key: 'all', label: 'All', count: stats?.total },
     { key: 'unread', label: 'Unread', count: stats?.unread },
     { key: 'starred', label: 'Starred', count: stats?.starred },
+    { key: 'leads', label: 'Leads', color: D.green },
+    { key: 'invoices', label: 'Invoices', color: D.purple },
+    { key: 'customer', label: 'Customer', color: D.teal },
+    { key: 'complaints', label: 'Complaints', color: D.red },
     { key: 'vendor', label: 'Vendor', count: stats?.vendor },
   ];
 
@@ -195,11 +294,43 @@ export default function EmailPage() {
             {status?.lastSync && ` \u2014 synced ${timeAgo(status.lastSync)}`}
           </div>
         </div>
-        <button onClick={handleSync} disabled={syncing} style={{
-          padding: '8px 20px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
-          fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: syncing ? 0.6 : 1,
-        }}>{syncing ? 'Syncing...' : 'Sync Now'}</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={handleSync} disabled={syncing} style={{
+            padding: '8px 20px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+            fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: syncing ? 0.6 : 1,
+          }}>{syncing ? 'Syncing...' : 'Sync Now'}</button>
+        </div>
       </div>
+
+      {/* Daily digest card */}
+      {digest && digest.total_received > 0 && (
+        <div style={{ background: D.card, borderRadius: 10, padding: '14px 20px', border: `1px solid ${D.border}`, marginBottom: 16, display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>Today</div>
+          <div style={{ fontSize: 12, color: D.muted }}>
+            <span style={{ color: D.text, fontFamily: "'JetBrains Mono', monospace" }}>{digest.total_received}</span> received
+          </div>
+          {digest.leads_created > 0 && (
+            <div style={{ fontSize: 12, color: D.green }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{digest.leads_created}</span> leads created
+            </div>
+          )}
+          {digest.spam_blocked > 0 && (
+            <div style={{ fontSize: 12, color: D.red }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{digest.spam_blocked}</span> spam blocked
+            </div>
+          )}
+          {digest.invoices_processed > 0 && (
+            <div style={{ fontSize: 12, color: D.purple }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{digest.invoices_processed}</span> invoices
+            </div>
+          )}
+          {digest.domains_blocked_today > 0 && (
+            <div style={{ fontSize: 12, color: D.amber }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{digest.domains_blocked_today}</span> domains blocked
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Stats bar */}
       {stats && (
@@ -218,191 +349,297 @@ export default function EmailPage() {
         </div>
       )}
 
-      {/* Filter bar */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-        {filters.map(f => (
-          <button key={f.key} onClick={() => { setFilter(f.key); setPage(1); }} style={{
-            padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
-            background: filter === f.key ? D.teal + '22' : 'transparent',
-            color: filter === f.key ? D.teal : D.muted,
-          }}>
-            {f.label}{f.count != null ? ` (${f.count})` : ''}
-          </button>
+      {/* Tab toggle: Inbox | Blocked Senders */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, background: D.card, borderRadius: 8, padding: 3, width: 'fit-content', border: `1px solid ${D.border}` }}>
+        {[
+          { key: 'inbox', label: 'Inbox' },
+          { key: 'blocked', label: 'Blocked Senders' },
+        ].map(t => (
+          <button key={t.key} onClick={() => { setTab(t.key); if (t.key === 'blocked') loadBlocked(); }} style={{
+            padding: '7px 18px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
+            background: tab === t.key ? D.teal : 'transparent',
+            color: tab === t.key ? D.white : D.muted,
+          }}>{t.label}</button>
         ))}
-        <button onClick={() => { setShowArchived(!showArchived); setPage(1); }} style={{
-          padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
-          background: showArchived ? D.amber + '22' : 'transparent',
-          color: showArchived ? D.amber : D.muted,
-        }}>
-          {showArchived ? 'Archived' : 'Archived'}
-        </button>
-        <div style={{ flex: 1 }} />
-        <input
-          value={search}
-          onChange={e => { setSearch(e.target.value); setPage(1); }}
-          placeholder="Search emails..."
-          style={{
-            padding: '8px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
-            color: D.text, fontSize: 13, width: 240, outline: 'none',
-          }}
-        />
       </div>
 
-      {/* Email list */}
-      <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, overflow: 'hidden' }}>
-        {emails.length === 0 ? (
-          <div style={{ padding: 40, textAlign: 'center', color: D.muted, fontSize: 14 }}>No emails found</div>
-        ) : emails.map(email => {
-          const isSelected = selectedEmail?.id === email.id;
-          const vendorData = email.classification === 'vendor' && email.extracted_data
-            ? (typeof email.extracted_data === 'string' ? JSON.parse(email.extracted_data) : email.extracted_data)
-            : null;
+      {/* BLOCKED SENDERS TAB */}
+      {tab === 'blocked' && (
+        <div>
+          {/* Block input */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+            <input
+              value={blockInput}
+              onChange={e => setBlockInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleBlock()}
+              placeholder="Block domain or email (e.g. spammer.com or bad@example.com)"
+              style={{
+                flex: 1, padding: '10px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
+                color: D.text, fontSize: 13, outline: 'none',
+              }}
+            />
+            <button onClick={handleBlock} style={{
+              padding: '10px 20px', background: D.red, color: D.white, border: 'none', borderRadius: 8,
+              fontSize: 13, fontWeight: 600, cursor: 'pointer',
+            }}>Block</button>
+          </div>
 
-          return (
-            <div key={email.id}>
-              <div
-                onClick={() => openEmail(email)}
-                style={{
-                  padding: '14px 20px', cursor: 'pointer', display: 'flex', gap: 12, alignItems: 'flex-start',
-                  borderBottom: `1px solid ${D.border}`,
-                  background: isSelected ? D.teal + '11' : (email.is_read ? 'transparent' : D.bg + '88'),
-                }}
-              >
-                {/* Star */}
-                <span onClick={e => handleStar(e, email)} style={{ cursor: 'pointer', fontSize: 16, flexShrink: 0, marginTop: 2 }}>
-                  {email.is_starred ? '\u2B50' : '\u2606'}
-                </span>
-
-                {/* Unread dot */}
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: email.is_read ? 'transparent' : D.teal, flexShrink: 0, marginTop: 7 }} />
-
-                {/* Content */}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-                    <div style={{ fontSize: 13, fontWeight: email.is_read ? 400 : 700, color: email.is_read ? D.muted : D.white, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {email.from_name || email.from_address}
-                    </div>
-                    <div style={{ fontSize: 11, color: D.muted, flexShrink: 0, marginLeft: 8, fontFamily: "'JetBrains Mono', monospace" }}>
-                      {timeAgo(email.received_at)}
-                    </div>
+          {/* Blocked list */}
+          <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, overflow: 'hidden' }}>
+            {blocked.length === 0 ? (
+              <div style={{ padding: 40, textAlign: 'center', color: D.muted, fontSize: 14 }}>No blocked senders</div>
+            ) : blocked.map(b => (
+              <div key={b.id} style={{ padding: '12px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${D.border}` }}>
+                <div>
+                  <div style={{ fontSize: 13, color: D.white, fontWeight: 600 }}>
+                    {b.domain || b.email_address}
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: email.is_read ? 400 : 600, color: email.is_read ? D.muted : D.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 2 }}>
-                    {email.subject || '(no subject)'}
-                    {email.has_attachments && ' \uD83D\uDCCE'}
-                  </div>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                    <div style={{ fontSize: 12, color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                      {email.snippet}
-                    </div>
-                    {vendorData && (
-                      <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: D.purple + '22', color: D.purple, fontWeight: 600, flexShrink: 0 }}>
-                        {vendorData.vendor_name}
-                      </span>
-                    )}
+                  <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                    {b.reason} {b.blocked_count > 0 && `\u2014 ${b.blocked_count} emails caught`}
+                    <span style={{ marginLeft: 8 }}>{timeAgo(b.created_at)}</span>
                   </div>
                 </div>
+                <button onClick={() => handleUnblock(b.id)} style={{
+                  padding: '5px 14px', fontSize: 11, borderRadius: 6, border: `1px solid ${D.border}`,
+                  background: 'transparent', color: D.muted, cursor: 'pointer',
+                }}>Unblock</button>
               </div>
+            ))}
+          </div>
+        </div>
+      )}
 
-              {/* Expanded thread view */}
-              {isSelected && (
-                <div style={{ background: D.bg, borderBottom: `1px solid ${D.border}`, padding: '20px 24px' }}>
-                  {/* Actions */}
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                    {[
-                      { label: 'Archive', icon: '\uD83D\uDCE5', action: () => handleArchive(email.id) },
-                      { label: 'Trash', icon: '\uD83D\uDDD1\uFE0F', action: () => handleTrash(email.id) },
-                    ].map(a => (
-                      <button key={a.label} onClick={a.action} style={{
-                        padding: '5px 12px', fontSize: 12, borderRadius: 6, border: `1px solid ${D.border}`,
-                        background: 'transparent', color: D.muted, cursor: 'pointer',
-                      }}>{a.icon} {a.label}</button>
-                    ))}
-                  </div>
+      {/* INBOX TAB */}
+      {tab === 'inbox' && (
+        <>
+          {/* Filter bar */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            {filters.map(f => (
+              <button key={f.key} onClick={() => { setFilter(f.key); setPage(1); }} style={{
+                padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
+                background: filter === f.key ? (f.color || D.teal) + '22' : 'transparent',
+                color: filter === f.key ? (f.color || D.teal) : D.muted,
+              }}>
+                {f.label}{f.count != null ? ` (${f.count})` : ''}
+              </button>
+            ))}
+            <button onClick={() => { setShowArchived(!showArchived); setPage(1); }} style={{
+              padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
+              background: showArchived ? D.amber + '22' : 'transparent',
+              color: showArchived ? D.amber : D.muted,
+            }}>Archived</button>
+            <div style={{ flex: 1 }} />
+            <input
+              value={search}
+              onChange={e => { setSearch(e.target.value); setPage(1); }}
+              placeholder="Search emails..."
+              style={{
+                padding: '8px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
+                color: D.text, fontSize: 13, width: 240, outline: 'none',
+              }}
+            />
+          </div>
 
-                  {/* Thread messages */}
-                  {thread.map((msg, i) => (
-                    <div key={msg.id} style={{ marginBottom: 16, background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}` }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                        <div>
-                          <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{msg.from_name || msg.from_address}</span>
-                          <span style={{ fontSize: 12, color: D.muted, marginLeft: 8 }}>&lt;{msg.from_address}&gt;</span>
+          {/* Email list */}
+          <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, overflow: 'hidden' }}>
+            {emails.length === 0 ? (
+              <div style={{ padding: 40, textAlign: 'center', color: D.muted, fontSize: 14 }}>No emails found</div>
+            ) : emails.map(email => {
+              const isSelected = selectedEmail?.id === email.id;
+              const extractedData = email.extracted_data
+                ? (typeof email.extracted_data === 'string' ? JSON.parse(email.extracted_data) : email.extracted_data)
+                : null;
+              const category = email.classification;
+              const categoryColor = CATEGORY_COLORS[category];
+              const categoryLabel = CATEGORY_LABELS[category];
+              const autoActionLabel = AUTO_ACTION_LABELS[category];
+
+              return (
+                <div key={email.id}>
+                  <div
+                    onClick={() => openEmail(email)}
+                    style={{
+                      padding: '14px 20px', cursor: 'pointer', display: 'flex', gap: 12, alignItems: 'flex-start',
+                      borderBottom: `1px solid ${D.border}`,
+                      background: isSelected ? D.teal + '11' : (email.is_read ? 'transparent' : D.bg + '88'),
+                    }}
+                  >
+                    {/* Star */}
+                    <span onClick={e => handleStar(e, email)} style={{ cursor: 'pointer', fontSize: 16, flexShrink: 0, marginTop: 2 }}>
+                      {email.is_starred ? '\u2B50' : '\u2606'}
+                    </span>
+
+                    {/* Unread dot */}
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: email.is_read ? 'transparent' : D.teal, flexShrink: 0, marginTop: 7 }} />
+
+                    {/* Content */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                        <div style={{ fontSize: 13, fontWeight: email.is_read ? 400 : 700, color: email.is_read ? D.muted : D.white, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {email.from_name || email.from_address}
                         </div>
-                        <span style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
-                          {new Date(msg.received_at).toLocaleString()}
-                        </span>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 8 }}>
+                          {/* Category badge */}
+                          {categoryLabel && (
+                            <span style={{
+                              fontSize: 10, padding: '2px 8px', borderRadius: 4,
+                              background: categoryColor + '22', color: categoryColor, fontWeight: 600,
+                            }}>{categoryLabel}</span>
+                          )}
+                          <span style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                            {timeAgo(email.received_at)}
+                          </span>
+                        </div>
                       </div>
-                      {msg.to_address && <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>To: {msg.to_address}</div>}
-                      <div
-                        style={{ fontSize: 13, color: D.text, lineHeight: 1.6, wordBreak: 'break-word' }}
-                        dangerouslySetInnerHTML={{ __html: msg.body_html || (msg.body_text || '').replace(/\n/g, '<br>') }}
-                      />
-                      {msg.attachments?.length > 0 && (
-                        <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          {msg.attachments.map(att => (
-                            <a
-                              key={att.id}
-                              href={`/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`}
-                              target="_blank" rel="noopener noreferrer"
-                              style={{
-                                padding: '6px 12px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 6,
-                                fontSize: 12, color: D.teal, textDecoration: 'none',
-                              }}
-                            >
-                              {'\uD83D\uDCCE'} {att.filename} ({Math.round((att.size_bytes || 0) / 1024)}KB)
-                            </a>
-                          ))}
+                      <div style={{ fontSize: 13, fontWeight: email.is_read ? 400 : 600, color: email.is_read ? D.muted : D.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 2 }}>
+                        {email.subject || '(no subject)'}
+                        {email.has_attachments && ' \uD83D\uDCCE'}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <div style={{ fontSize: 12, color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                          {email.snippet}
+                        </div>
+                        {extractedData?.vendor_name && (
+                          <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: D.purple + '22', color: D.purple, fontWeight: 600, flexShrink: 0 }}>
+                            {extractedData.vendor_name}
+                          </span>
+                        )}
+                      </div>
+                      {/* Auto-action indicator */}
+                      {autoActionLabel && (
+                        <div style={{ fontSize: 11, color: categoryColor, marginTop: 4, opacity: 0.8 }}>
+                          {'\u2713'} {autoActionLabel}
                         </div>
                       )}
                     </div>
-                  ))}
-
-                  {/* Reply box */}
-                  <div style={{ background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}` }}>
-                    <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>Reply to {email.from_name || email.from_address}</div>
-                    <textarea
-                      value={replyText}
-                      onChange={e => setReplyText(e.target.value)}
-                      placeholder="Type your reply..."
-                      rows={4}
-                      style={{
-                        width: '100%', padding: 12, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6,
-                        color: D.text, fontSize: 13, resize: 'vertical', outline: 'none', fontFamily: "'DM Sans', sans-serif",
-                        boxSizing: 'border-box',
-                      }}
-                    />
-                    <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
-                      <button disabled style={{
-                        padding: '8px 16px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-                        background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, cursor: 'not-allowed',
-                      }}>AI Draft (Session 2)</button>
-                      <button onClick={handleReply} disabled={sending || !replyText.trim()} style={{
-                        padding: '8px 20px', borderRadius: 6, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer',
-                        background: D.teal, color: D.white, opacity: sending || !replyText.trim() ? 0.5 : 1,
-                      }}>{sending ? 'Sending...' : 'Send Reply'}</button>
-                    </div>
                   </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
 
-      {/* Pagination */}
-      {total > 50 && (
-        <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16 }}>
-          <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} style={{
-            padding: '6px 14px', borderRadius: 6, fontSize: 12, border: `1px solid ${D.border}`,
-            background: 'transparent', color: page === 1 ? D.muted : D.text, cursor: page === 1 ? 'default' : 'pointer',
-          }}>Previous</button>
-          <span style={{ padding: '6px 14px', fontSize: 12, color: D.muted }}>
-            Page {page} of {Math.ceil(total / 50)}
-          </span>
-          <button onClick={() => setPage(p => p + 1)} disabled={page >= Math.ceil(total / 50)} style={{
-            padding: '6px 14px', borderRadius: 6, fontSize: 12, border: `1px solid ${D.border}`,
-            background: 'transparent', color: page >= Math.ceil(total / 50) ? D.muted : D.text, cursor: page >= Math.ceil(total / 50) ? 'default' : 'pointer',
-          }}>Next</button>
-        </div>
+                  {/* Expanded thread view */}
+                  {isSelected && (
+                    <div style={{ background: D.bg, borderBottom: `1px solid ${D.border}`, padding: '20px 24px' }}>
+                      {/* Actions */}
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                        {[
+                          { label: 'Archive', icon: '\uD83D\uDCE5', action: () => handleArchive(email.id) },
+                          { label: 'Trash', icon: '\uD83D\uDDD1\uFE0F', action: () => handleTrash(email.id) },
+                          { label: 'Reclassify', icon: '\uD83E\uDD16', action: () => handleReclassify(email.id) },
+                        ].map(a => (
+                          <button key={a.label} onClick={a.action} style={{
+                            padding: '5px 12px', fontSize: 12, borderRadius: 6, border: `1px solid ${D.border}`,
+                            background: 'transparent', color: D.muted, cursor: 'pointer',
+                          }}>{a.icon} {a.label}</button>
+                        ))}
+                      </div>
+
+                      {/* Classification detail */}
+                      {extractedData && (
+                        <div style={{ background: D.card, borderRadius: 8, padding: '10px 14px', border: `1px solid ${D.border}`, marginBottom: 16, fontSize: 12 }}>
+                          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                            <span style={{ color: D.muted }}>AI classification:</span>
+                            <span style={{ color: categoryColor, fontWeight: 600 }}>{categoryLabel || category}</span>
+                            {extractedData.urgency && (
+                              <span style={{ color: extractedData.urgency === 'high' ? D.red : D.amber }}>
+                                Urgency: {extractedData.urgency}
+                              </span>
+                            )}
+                            {extractedData.person_name && (
+                              <span style={{ color: D.text }}>{extractedData.person_name}</span>
+                            )}
+                            {extractedData.phone && (
+                              <span style={{ color: D.text, fontFamily: "'JetBrains Mono', monospace" }}>{extractedData.phone}</span>
+                            )}
+                            {extractedData.service_interest && (
+                              <span style={{ color: D.green }}>{extractedData.service_interest}</span>
+                            )}
+                            {extractedData.invoice_amount && (
+                              <span style={{ color: D.purple, fontFamily: "'JetBrains Mono', monospace" }}>${extractedData.invoice_amount}</span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Thread messages */}
+                      {thread.map((msg) => (
+                        <div key={msg.id} style={{ marginBottom: 16, background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}` }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                            <div>
+                              <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{msg.from_name || msg.from_address}</span>
+                              <span style={{ fontSize: 12, color: D.muted, marginLeft: 8 }}>&lt;{msg.from_address}&gt;</span>
+                            </div>
+                            <span style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                              {new Date(msg.received_at).toLocaleString()}
+                            </span>
+                          </div>
+                          {msg.to_address && <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>To: {msg.to_address}</div>}
+                          <div
+                            style={{ fontSize: 13, color: D.text, lineHeight: 1.6, wordBreak: 'break-word' }}
+                            dangerouslySetInnerHTML={{ __html: msg.body_html || (msg.body_text || '').replace(/\n/g, '<br>') }}
+                          />
+                          {msg.attachments?.length > 0 && (
+                            <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              {msg.attachments.map(att => (
+                                <a
+                                  key={att.id}
+                                  href={`/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`}
+                                  target="_blank" rel="noopener noreferrer"
+                                  style={{
+                                    padding: '6px 12px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 6,
+                                    fontSize: 12, color: D.teal, textDecoration: 'none',
+                                  }}
+                                >
+                                  {'\uD83D\uDCCE'} {att.filename} ({Math.round((att.size_bytes || 0) / 1024)}KB)
+                                </a>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+
+                      {/* Reply box */}
+                      <div style={{ background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}` }}>
+                        <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>Reply to {email.from_name || email.from_address}</div>
+                        <textarea
+                          value={replyText}
+                          onChange={e => setReplyText(e.target.value)}
+                          placeholder="Type your reply..."
+                          rows={4}
+                          style={{
+                            width: '100%', padding: 12, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6,
+                            color: D.text, fontSize: 13, resize: 'vertical', outline: 'none', fontFamily: "'DM Sans', sans-serif",
+                            boxSizing: 'border-box',
+                          }}
+                        />
+                        <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
+                          <button onClick={handleReply} disabled={sending || !replyText.trim()} style={{
+                            padding: '8px 20px', borderRadius: 6, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer',
+                            background: D.teal, color: D.white, opacity: sending || !replyText.trim() ? 0.5 : 1,
+                          }}>{sending ? 'Sending...' : 'Send Reply'}</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Pagination */}
+          {total > 50 && (
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16 }}>
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} style={{
+                padding: '6px 14px', borderRadius: 6, fontSize: 12, border: `1px solid ${D.border}`,
+                background: 'transparent', color: page === 1 ? D.muted : D.text, cursor: page === 1 ? 'default' : 'pointer',
+              }}>Previous</button>
+              <span style={{ padding: '6px 14px', fontSize: 12, color: D.muted }}>
+                Page {page} of {Math.ceil(total / 50)}
+              </span>
+              <button onClick={() => setPage(p => p + 1)} disabled={page >= Math.ceil(total / 50)} style={{
+                padding: '6px 14px', borderRadius: 6, fontSize: 12, border: `1px solid ${D.border}`,
+                background: 'transparent', color: page >= Math.ceil(total / 50) ? D.muted : D.text, cursor: page >= Math.ceil(total / 50) ? 'default' : 'pointer',
+              }}>Next</button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

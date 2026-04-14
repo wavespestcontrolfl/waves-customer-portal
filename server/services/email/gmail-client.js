@@ -105,6 +105,8 @@ function parseMessage(msg) {
   const fromName = fromMatch ? fromMatch[1].trim() : '';
   const fromAddress = fromMatch ? fromMatch[2].trim() : fromRaw.trim();
 
+  const listUnsubscribe = getHeader('List-Unsubscribe');
+
   const body = extractBody(msg.payload);
   const attachments = extractAttachments(msg.payload, msg.id);
 
@@ -123,6 +125,7 @@ function parseMessage(msg) {
     received_at: new Date(parseInt(msg.internalDate)),
     is_read: !(msg.labelIds || []).includes('UNREAD'),
     is_starred: (msg.labelIds || []).includes('STARRED'),
+    list_unsubscribe: listUnsubscribe || null,
     attachments,
     historyId: msg.historyId,
   };

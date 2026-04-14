@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
+const { isBlocked } = require('./spam-blocker');
 
 async function syncEmails() {
   const connected = await gmailClient.isConnected();
@@ -189,7 +190,29 @@ async function upsertEmail(parsed) {
     return false; // not new
   }
 
+  // Check blocklist before inserting — skip blocked senders
+  if (await isBlocked(parsed.from_address)) {
+    // Auto-trash without wasting a Sonnet call
+    try { await gmailClient.trashMessage(parsed.gmail_id); } catch (e) { /* non-critical */ }
+    emailData.is_archived = true;
+    emailData.classification = 'spam';
+    emailData.auto_action = 'blocked_sender_trashed';
+    await db('emails').insert(emailData);
+    return true; // counted as new but auto-handled
+  }
+
   const [email] = await db('emails').insert(emailData).returning('*');
+
+  // Store list_unsubscribe for auto-unsubscribe
+  if (parsed.list_unsubscribe) {
+    await db('emails').where('id', email.id).update({
+      extracted_data: JSON.stringify({
+        ...((email.extracted_data && typeof email.extracted_data === 'string') ? JSON.parse(email.extracted_data) : (email.extracted_data || {})),
+        list_unsubscribe: parsed.list_unsubscribe,
+      }),
+    });
+    email.list_unsubscribe = parsed.list_unsubscribe;
+  }
 
   // Store attachment metadata
   if (parsed.attachments?.length > 0) {
@@ -202,6 +225,18 @@ async function upsertEmail(parsed) {
         size_bytes: att.size_bytes,
       });
     }
+  }
+
+  // Classify in background (don't block sync)
+  if (!email.classification || email.classification === 'vendor') {
+    setImmediate(async () => {
+      try {
+        const { classifyEmail } = require('./email-classifier');
+        await classifyEmail(email);
+      } catch (err) {
+        logger.error(`[email-sync] Classification failed for ${email.id}: ${err.message}`);
+      }
+    });
   }
 
   return true; // new email

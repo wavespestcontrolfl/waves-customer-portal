@@ -3,6 +3,9 @@ const router = express.Router();
 const db = require('../models/db');
 const gmailClient = require('../services/email/gmail-client');
 const { syncEmails } = require('../services/email/email-sync');
+const { classifyEmail } = require('../services/email/email-classifier');
+const { executeAutoAction } = require('../services/email/email-actions');
+const { blockSpamSender, unblockSender } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
 
 // ============================================
@@ -90,7 +93,11 @@ router.get('/inbox', async (req, res) => {
 
     if (category === 'unread') query = query.where('is_read', false);
     else if (category === 'starred') query = query.where('is_starred', true);
-    else if (category === 'vendor') query = query.where('classification', 'vendor');
+    else if (category === 'vendor') query = query.whereIn('classification', ['vendor_invoice', 'vendor_communication']);
+    else if (category === 'leads') query = query.where('classification', 'lead_inquiry');
+    else if (category === 'invoices') query = query.where('classification', 'vendor_invoice');
+    else if (category === 'customer') query = query.whereIn('classification', ['customer_request', 'scheduling']);
+    else if (category === 'complaints') query = query.where('classification', 'complaint');
     else if (is_read === 'false') query = query.where('is_read', false);
     else if (is_read === 'true') query = query.where('is_read', true);
 
@@ -322,6 +329,161 @@ router.delete('/vendors/:id', async (req, res) => {
   try {
     await db('vendor_email_domains').where('id', req.params.id).del();
     res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// AI Classification & Auto-Actions (Session 2)
+// ============================================
+
+// POST /message/:id/reclassify — re-run Sonnet classification
+router.post('/message/:id/reclassify', async (req, res) => {
+  try {
+    const email = await db('emails').where('id', req.params.id).first();
+    if (!email) return res.status(404).json({ error: 'Not found' });
+
+    const classification = await classifyEmail(email);
+    await db('emails').where('id', email.id).update({
+      classification: classification.category,
+      extracted_data: JSON.stringify(classification),
+    });
+
+    // Run auto-action for the new classification
+    await executeAutoAction(email, classification);
+
+    logger.info(`[email] Reclassified ${email.id} as ${classification.category}`);
+    res.json({ classification });
+  } catch (err) {
+    logger.error(`[email] Reclassify error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /vendor-invoices — list emails classified as vendor invoices
+router.get('/vendor-invoices', async (req, res) => {
+  try {
+    const invoices = await db('emails')
+      .where('classification', 'vendor_invoice')
+      .orderBy('received_at', 'desc')
+      .limit(100)
+      .select('id', 'gmail_id', 'from_address', 'from_name', 'subject', 'snippet',
+        'received_at', 'extracted_data', 'has_attachments', 'expense_id');
+
+    res.json({ invoices, total: invoices.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /daily-digest — today's email activity summary
+router.get('/daily-digest', async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const todayEmails = await db('emails').where('received_at', '>=', today);
+
+    const digest = {
+      total_received: todayEmails.length,
+      unread: todayEmails.filter(e => !e.is_read).length,
+      by_category: {},
+      leads_created: 0,
+      spam_blocked: 0,
+      invoices_processed: 0,
+    };
+
+    todayEmails.forEach(e => {
+      const cat = e.classification || 'unclassified';
+      digest.by_category[cat] = (digest.by_category[cat] || 0) + 1;
+    });
+
+    digest.leads_created = digest.by_category.lead_inquiry || 0;
+    digest.spam_blocked = digest.by_category.spam || 0;
+    digest.invoices_processed = digest.by_category.vendor_invoice || 0;
+
+    // Blocked count today
+    const [blocked] = await db('blocked_email_senders')
+      .where('created_at', '>=', today)
+      .count('* as count');
+    digest.domains_blocked_today = parseInt(blocked.count);
+
+    res.json(digest);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// Blocked senders
+// ============================================
+
+// GET /blocked — list all blocked senders
+router.get('/blocked', async (req, res) => {
+  try {
+    const blocked = await db('blocked_email_senders')
+      .orderBy('created_at', 'desc');
+    res.json({ blocked, total: blocked.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /block — manually block a domain/sender
+router.post('/block', async (req, res) => {
+  try {
+    const { email_address, domain, reason } = req.body;
+    if (!email_address && !domain) return res.status(400).json({ error: 'email_address or domain required' });
+
+    const blockDomain = domain || email_address.split('@')[1];
+
+    // Create Gmail filter
+    let gmailFilterId = null;
+    try {
+      const gmail = await gmailClient.getGmail();
+      const filter = await gmail.users.settings.filters.create({
+        userId: 'me',
+        requestBody: { criteria: { from: `@${blockDomain}` }, action: { removeLabelIds: ['INBOX'], addLabelIds: ['TRASH'] } },
+      });
+      gmailFilterId = filter.data.id;
+    } catch (e) {
+      logger.warn(`[email] Gmail filter creation failed: ${e.message}`);
+    }
+
+    const [entry] = await db('blocked_email_senders')
+      .insert({
+        email_address: email_address || null,
+        domain: blockDomain,
+        gmail_filter_id: gmailFilterId,
+        reason: reason || 'Manual block',
+      })
+      .returning('*');
+
+    logger.info(`[email] Manually blocked domain: ${blockDomain}`);
+    res.json(entry);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /blocked/:id — unblock a sender
+router.delete('/blocked/:id', async (req, res) => {
+  try {
+    await unblockSender(req.params.id);
+    res.json({ unblocked: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /unsubscribe-log — list unsubscribe attempts
+router.get('/unsubscribe-log', async (req, res) => {
+  try {
+    const log = await db('email_unsubscribe_log')
+      .orderBy('created_at', 'desc')
+      .limit(100);
+    res.json({ log, total: log.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
