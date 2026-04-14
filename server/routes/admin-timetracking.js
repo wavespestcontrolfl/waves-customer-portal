@@ -446,4 +446,58 @@ router.get('/analytics/comparison', async (req, res, next) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// TECHNICIAN MANAGEMENT — CRUD
+// ═══════════════════════════════════════════════════════════════════
+
+// GET /technicians — list all technicians (including inactive)
+router.get('/technicians', async (req, res, next) => {
+  try {
+    const techs = await db('technicians').orderBy('active', 'desc').orderBy('name');
+    res.json({ technicians: techs });
+  } catch (err) { next(err); }
+});
+
+// POST /technicians — add a new technician
+router.post('/technicians', async (req, res, next) => {
+  try {
+    const { name, phone, email } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+    const [tech] = await db('technicians').insert({
+      name: name.trim(),
+      phone: phone || null,
+      email: email || null,
+      active: true,
+    }).returning('*');
+    logger.info(`[team] Added technician: ${tech.name}`);
+    res.json({ success: true, technician: tech });
+  } catch (err) { next(err); }
+});
+
+// PUT /technicians/:id — update a technician
+router.put('/technicians/:id', async (req, res, next) => {
+  try {
+    const { name, phone, email, active } = req.body;
+    const updates = {};
+    if (name !== undefined) updates.name = name.trim();
+    if (phone !== undefined) updates.phone = phone;
+    if (email !== undefined) updates.email = email;
+    if (active !== undefined) updates.active = active;
+    updates.updated_at = new Date();
+    await db('technicians').where({ id: req.params.id }).update(updates);
+    const tech = await db('technicians').where({ id: req.params.id }).first();
+    logger.info(`[team] Updated technician: ${tech.name} (active=${tech.active})`);
+    res.json({ success: true, technician: tech });
+  } catch (err) { next(err); }
+});
+
+// DELETE /technicians/:id — deactivate (soft delete)
+router.delete('/technicians/:id', async (req, res, next) => {
+  try {
+    await db('technicians').where({ id: req.params.id }).update({ active: false, updated_at: new Date() });
+    logger.info(`[team] Deactivated technician: ${req.params.id}`);
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

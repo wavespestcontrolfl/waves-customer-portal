@@ -59,6 +59,7 @@ export default function TimeTrackingPage() {
           { key: 'timesheet', label: 'Timesheet' },
           { key: 'entries', label: 'Entries' },
           { key: 'analytics', label: 'Analytics' },
+          { key: 'team', label: 'Team' },
         ].map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
@@ -72,6 +73,7 @@ export default function TimeTrackingPage() {
       {tab === 'timesheet' && <TimesheetTab showToast={showToast} />}
       {tab === 'entries' && <EntriesTab showToast={showToast} />}
       {tab === 'analytics' && <AnalyticsTab />}
+      {tab === 'team' && <TeamTab showToast={showToast} />}
 
       <div style={{ position: 'fixed', bottom: 20, right: 20, background: D.card, border: `1px solid ${D.green}`, borderRadius: 8, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 32px rgba(0,0,0,.4)', zIndex: 300, fontSize: 12, transform: toast ? 'translateY(0)' : 'translateY(80px)', opacity: toast ? 1 : 0, transition: 'all .3s', pointerEvents: 'none' }}>
         <span style={{ color: D.green }}>OK</span><span style={{ color: D.text }}>{toast}</span>
@@ -892,5 +894,132 @@ function OvertimeTable({ data }) {
         )}
       </tbody>
     </table>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TEAM TAB — Manage technicians
+// ═══════════════════════════════════════════════════════════════════
+function TeamTab({ showToast }) {
+  const [techs, setTechs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState({ name: '', phone: '', email: '' });
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await adminFetch('/admin/timetracking/technicians');
+      setTechs(res.technicians || []);
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleSave = async () => {
+    if (!form.name.trim()) return;
+    setSaving(true);
+    try {
+      if (editingId) {
+        await adminFetch(`/admin/timetracking/technicians/${editingId}`, { method: 'PUT', body: JSON.stringify(form) });
+        showToast('Technician updated');
+      } else {
+        await adminFetch('/admin/timetracking/technicians', { method: 'POST', body: JSON.stringify(form) });
+        showToast('Technician added');
+      }
+      setShowAdd(false); setEditingId(null); setForm({ name: '', phone: '', email: '' });
+      load();
+    } catch (e) { showToast('Failed: ' + e.message); }
+    setSaving(false);
+  };
+
+  const handleToggleActive = async (tech) => {
+    try {
+      await adminFetch(`/admin/timetracking/technicians/${tech.id}`, { method: 'PUT', body: JSON.stringify({ active: !tech.active }) });
+      showToast(tech.active ? `${tech.name} deactivated` : `${tech.name} activated`);
+      load();
+    } catch (e) { showToast('Failed: ' + e.message); }
+  };
+
+  const startEdit = (tech) => {
+    setEditingId(tech.id);
+    setForm({ name: tech.name, phone: tech.phone || '', email: tech.email || '' });
+    setShowAdd(true);
+  };
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading team...</div>;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Technicians</div>
+        <button onClick={() => { setShowAdd(true); setEditingId(null); setForm({ name: '', phone: '', email: '' }); }} style={sBtn(D.teal, D.white)}>+ Add Technician</button>
+      </div>
+
+      {/* Add / Edit form */}
+      {showAdd && (
+        <div style={{ ...sCard, marginBottom: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>{editingId ? 'Edit Technician' : 'New Technician'}</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Name *</div>
+              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. John D." style={sInput} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Phone</div>
+              <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} placeholder="+19415551234" style={sInput} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Email</div>
+              <input value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="john@wavespestcontrol.com" style={sInput} />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={handleSave} disabled={saving || !form.name.trim()} style={{ ...sBtn(D.green, D.white), opacity: saving || !form.name.trim() ? 0.5 : 1 }}>
+              {saving ? 'Saving...' : editingId ? 'Update' : 'Add'}
+            </button>
+            <button onClick={() => { setShowAdd(false); setEditingId(null); }} style={sBtn('transparent', D.muted)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Tech list */}
+      <div style={sCard}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr>
+              {['Name', 'Phone', 'Email', 'Status', 'Actions'].map(h => (
+                <th key={h} style={{ textAlign: 'left', padding: '8px 12px', borderBottom: `1px solid ${D.border}`, fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {techs.map(t => (
+              <tr key={t.id} style={{ opacity: t.active ? 1 : 0.5 }}>
+                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.white, fontWeight: 600 }}>{t.name}</td>
+                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontFamily: MONO, fontSize: 12 }}>{t.phone || '\u2014'}</td>
+                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 12 }}>{t.email || '\u2014'}</td>
+                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}` }}>
+                  <span style={sBadge(t.active ? D.green + '22' : D.red + '22', t.active ? D.green : D.red)}>{t.active ? 'Active' : 'Inactive'}</span>
+                </td>
+                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}` }}>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={() => startEdit(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 11, cursor: 'pointer' }}>Edit</button>
+                    <button onClick={() => handleToggleActive(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: t.active ? D.red : D.green, fontSize: 11, cursor: 'pointer' }}>
+                      {t.active ? 'Deactivate' : 'Activate'}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {techs.length === 0 && (
+              <tr><td colSpan={5} style={{ padding: 20, textAlign: 'center', color: D.muted }}>No technicians found. Add your first one above.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
