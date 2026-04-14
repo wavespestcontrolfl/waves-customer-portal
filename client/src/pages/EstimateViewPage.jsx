@@ -183,6 +183,37 @@ const SERVICE_DETAILS = {
     ],
     footer: "All one-time termite treatments begin with a professional termite inspection to confirm the species, location, and scope of activity before recommending a treatment method. Treatments can be paired with a WaveGuard termite bait station program for ongoing monitoring and long-term warranty protection after the initial treatment is complete.",
   },
+  pestOneTime: {
+    header: 'One-Time Pest Treatments.',
+    subheader: 'Single-Visit & Multi-Visit Specialty Protocols',
+    intro: "Not every pest problem requires a recurring program. Our one-time treatments are designed for specific infestations, urgent situations, or customers who need a targeted solution without a long-term commitment. Every treatment is priced based on your home's size and the scope of the problem — and every one-time customer receives preferred pricing if they choose to transition to a recurring pest control plan.",
+    groups: [
+      { groupTitle: 'General Pest Treatment', sections: [
+        { title: 'One-Time General Pest Treatment', text: "A single professional interior and exterior pest treatment covering 75+ common household pests — ants, roaches, spiders, silverfish, earwigs, crickets, centipedes, pill bugs, and other crawling and flying insects. The visit includes a full property inspection to identify activity and entry points, an exterior perimeter barrier spray, interior crack-and-crevice treatment in active areas, de-webbing of eaves and entryways, and a detailed service report with findings and recommendations. This is the same comprehensive treatment included in our quarterly program — delivered as a single visit for customers who need immediate help or want to try the service before committing to a recurring plan.", tags: ['75+ Pests', 'Interior & Exterior', 'Single Visit'] },
+      ]},
+      { groupTitle: 'Mosquito Event Spray', sections: [
+        { title: 'One-Time Mosquito Barrier Treatment', text: "A full barrier spray treatment of your property for a single occasion — a wedding, graduation, holiday gathering, outdoor dinner, or any event where you want to reduce mosquito activity in your yard. We apply a residual barrier spray to all foliage, shrub beds, fence lines, lanai and screen perimeters, eave junctions, and shaded resting areas — the same professional-grade treatment used in our recurring mosquito programs. Standing water sources are inspected and treated with larvicide. Results typically last 3–4 weeks depending on weather conditions.", tags: ['Event Ready', '3–4 Week Results', 'Full Barrier + Larvicide'] },
+      ]},
+      { groupTitle: 'Flea & Tick Treatment', sections: [
+        { title: 'Two-Visit Flea Treatment Protocol', text: "Flea infestations require more than a single spray — the flea life cycle includes eggs, larvae, and pupae stages that are resistant to most contact insecticides. Our two-visit protocol is designed to break that cycle completely. Visit 1 includes a thorough interior treatment of all carpeted areas, baseboards, upholstered furniture, pet resting areas, and cracks where flea larvae develop — combined with a full yard spray targeting flea larvae and adult fleas in shaded, moist areas of the landscape. Visit 2 is a follow-up treatment approximately two weeks later to catch the next generation of fleas emerging from protected pupal stages that survived the initial treatment.", tags: ['2-Visit Protocol', 'Interior + Yard', 'Life Cycle Disruption'] },
+        { title: 'Customer Preparation & Pet Coordination', text: "Effective flea treatment requires coordination between our treatment and your household preparation. Before each visit, we provide detailed instructions for pre-treatment preparation — vacuuming all floors and upholstery, washing pet bedding, and ensuring pets are treated with a veterinarian-recommended flea preventive. Pet flea treatment is critical: without it, pets will reintroduce fleas into the home and the infestation will return regardless of how effective our treatment is. We'll walk you through the preparation steps and answer any questions before we arrive.", tags: ['Prep Instructions', 'Pet Vet Coordination', 'Reintroduction Prevention'] },
+      ]},
+      { groupTitle: 'German Cockroach Treatment', sections: [
+        { title: 'Three-Visit German Cockroach Protocol', text: "German cockroaches are the most difficult household pest to eliminate — they reproduce rapidly, develop resistance to common products, and hide deep inside wall voids, appliance motors, and electrical chaseways where surface sprays can't reach. Our intensive three-visit protocol attacks the problem from multiple angles. Visit 1 is the full treatment: professional gel bait placed in all harborage zones, insect growth regulator (IGR) applied to disrupt the reproductive cycle, and a crack-and-crevice application targeting active hiding spots in kitchens, bathrooms, and utility areas. Visit 2 at two weeks reassesses activity levels, refreshes bait placements, and treats any new harborage areas discovered. Visit 3 at four weeks confirms elimination, replaces monitoring traps, and verifies the population is collapsing.", tags: ['3-Visit Protocol', 'Gel Bait + IGR', 'Crack & Crevice'] },
+        { title: 'Monitoring & Bait Rotation', text: "Sticky monitoring traps are placed in key areas during the initial treatment to track population trends between visits. Trap counts give us an objective measure of progress — not just whether roaches are still visible, but whether the population is declining as expected. Bait formulations are rotated between visits using different active ingredients to prevent bait aversion — a well-documented behavior in German cockroach populations where the colony learns to avoid a bait product that has been effective. Product rotation ensures the treatment stays ahead of the pest's ability to adapt.", tags: ['Trap Monitoring', 'Population Tracking', 'Bait Aversion Prevention'] },
+      ]},
+      { groupTitle: 'Wasp, Bee & Stinging Insect Removal', sections: [
+        { title: 'Stinging Insect Nest Removal', text: "We remove active nests of paper wasps, red wasps, yellow jackets, mud daubers, and other stinging insects from eaves, soffits, porch ceilings, shutters, mailboxes, play equipment, pool cages, and other areas around your home where nests pose a safety risk. Treatment includes a targeted application of a fast-acting contact insecticide to eliminate active adults, followed by physical removal of the nest structure and a residual treatment of the nesting site to discourage rebuilding. For customers on a recurring pest control program, wasp and stinging insect nest removal is included at no additional charge as part of your regular service visits.", tags: ['Nest Removal', 'Contact + Residual', 'Included on Program'] },
+        { title: 'Bee & Honeybee Situations', text: "If the stinging insects on your property are honeybees, we take a different approach. Honeybees are critical pollinators and are protected in many contexts. Whenever possible, we coordinate with local beekeepers for safe relocation of honeybee colonies rather than extermination. If the colony is established inside a wall void, soffit, or other structural cavity, removal may require opening the structure to extract the hive, comb, and honey — which we can coordinate or refer to a specialist. We'll assess the situation on-site and recommend the safest, most responsible course of action for both you and the bees.", tags: ['Beekeeper Referral', 'Safe Relocation', 'Structural Hive Removal'] },
+      ]},
+      { groupTitle: 'Bed Bug Treatment', sections: [
+        { title: 'Chemical Bed Bug Treatment — Two-Visit Protocol', text: "For light to moderate bed bug infestations, our two-visit chemical protocol delivers effective elimination using professional-grade residual insecticides that are not available in retail products. Visit 1 includes a thorough inspection to map the extent of the infestation, followed by treatment of mattresses, box springs, bed frames, headboards, baseboards, nightstands, and all cracks and crevices in the affected room. Visit 2 at approximately two weeks reapplies treatment to catch any bed bugs that have emerged from eggs since the initial visit — eggs are resistant to most contact insecticides and take 7–10 days to hatch. Pricing is per room, and additional rooms can be added based on the scope of the infestation.", tags: ['2-Visit Protocol', 'Per Room Pricing', 'Light to Moderate'] },
+        { title: 'Heat Treatment — Single-Visit Elimination', text: "For heavier infestations or situations where chemical treatment alone may not be sufficient, heat treatment is the most effective single-visit option. Professional heating equipment raises the temperature of the affected room to a lethal threshold — sustained for several hours — killing bed bugs in all life stages including eggs, which are resistant to most chemical products. Heat penetrates mattresses, furniture, wall voids, and personal belongings that chemical treatments may not reach. No chemical residue is left behind, and the room can typically be reoccupied the same day after cool-down. Heat treatment is priced per room and is the preferred method when complete, single-visit elimination is the priority.", tags: ['All Life Stages', 'Single Visit', 'No Chemical Residue'] },
+        { title: 'Inspection, Preparation & Follow-Up', text: "Every bed bug treatment begins with a detailed inspection to confirm the presence of bed bugs, identify the scope of the infestation across the home, and determine whether chemical or heat treatment — or a combination — is the right approach. We provide a pre-treatment preparation checklist covering laundering, decluttering, and mattress encasement recommendations. After treatment, a follow-up inspection is scheduled to verify elimination and check for any signs of re-emergence. If additional treatment is needed, it's addressed immediately. Our goal is complete elimination — confirmed, not assumed.", tags: ['Confirmed Elimination', 'Prep Checklist', 'Follow-Up Inspection'] },
+      ]},
+    ],
+    footer: "All one-time pest treatments include a 30-day callback guarantee — if the problem returns within 30 days of treatment, we come back at no additional charge. Treatments are priced based on your home's size and the scope of the problem. Customers who transition to a recurring WaveGuard pest control plan after a one-time treatment receive preferred pricing and ongoing protection to prevent the problem from returning.",
+  },
 };
 
 const PERKS = [
@@ -1038,6 +1069,32 @@ export default function EstimateViewPage() {
                 </div>
               ))}
               <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.termiteOneTime.footer}</div>
+            </ServiceDropdown>
+          )}
+
+          {hasPest && (
+            <ServiceDropdown title="🐛 One-Time Pest Treatments">
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.pestOneTime.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pestOneTime.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pestOneTime.intro}</div>
+              {SERVICE_DETAILS.pestOneTime.groups.map((g, gi) => (
+                <div key={gi}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
+                  {g.sections.map((s, i) => (
+                    <div key={i} style={{ marginBottom: 14 }}>
+                      <DetailSection title={s.title} text={s.text} />
+                      {s.tags && (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                          {s.tags.map((tag, ti) => (
+                            <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+              <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.pestOneTime.footer}</div>
             </ServiceDropdown>
           )}
         </div>
