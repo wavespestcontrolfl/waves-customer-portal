@@ -287,7 +287,9 @@ function detectSpanish(text) {
 }
 
 // ── Streaming AI Response with Tool Use ─────────────────────
-async function aiResponseStream(sessionData, ws) {
+const MAX_TOOL_ROUNDS = 8;
+
+async function aiResponseStream(sessionData, ws, depth = 0) {
   // #6: Use dynamic prompt if available, fall back to static
   let systemPrompt = SYSTEM_PROMPT;
   try {
@@ -299,6 +301,12 @@ async function aiResponseStream(sessionData, ws) {
   // #7: If Spanish was detected, append Spanish instruction
   if (sessionData.languageDetected === 'es') {
     systemPrompt += "\n\n## LANGUAGE\nThe caller is speaking Spanish. Respond in Spanish. Use natural, friendly Mexican/Central American Spanish appropriate for Southwest Florida's Latino community.";
+  }
+
+  if (!anthropic) {
+    logger.error('[VoiceAgent] Anthropic client not initialized — cannot respond');
+    ws.send(JSON.stringify({ type: "text", token: "I'm sorry, I'm having trouble right now. Please call back or text us at 941-318-7612.", last: true }));
+    return;
   }
 
   const stream = await anthropic.messages.create({
@@ -321,10 +329,12 @@ async function aiResponseStream(sessionData, ws) {
         fullResponse += chunk.delta.text;
         // #8: Track current response for live monitoring
         sessionData.currentResponse = fullResponse;
-        ws.send(JSON.stringify({
-          type: "text",
-          token: chunk.delta.text,
-        }));
+        if (ws.readyState === 1) {
+          ws.send(JSON.stringify({
+            type: "text",
+            token: chunk.delta.text,
+          }));
+        }
       }
       if (chunk.delta.type === "input_json_delta" && chunk.delta.partial_json) {
         toolInput += chunk.delta.partial_json;
@@ -393,7 +403,12 @@ async function aiResponseStream(sessionData, ws) {
       currentToolUse = null;
       toolInput = "";
 
-      await aiResponseStream(sessionData, ws);
+      if (depth < MAX_TOOL_ROUNDS) {
+        await aiResponseStream(sessionData, ws, depth + 1);
+      } else {
+        logger.warn(`[VoiceAgent] Max tool rounds (${MAX_TOOL_ROUNDS}) reached for call ${sessionData.callSid}`);
+        ws.send(JSON.stringify({ type: "text", token: "Let me get you to a team member who can help further. Please hold.", last: true }));
+      }
       return;
     }
   }

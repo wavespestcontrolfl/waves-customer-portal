@@ -296,22 +296,25 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
         .orderBy('scheduled_date', 'asc')
         .first();
 
-      if (existing) {
-        await db('scheduled_services').where({ id: existing.id }).update({
-          status: 'cancelled',
-          notes: db.raw("COALESCE(notes, '') || ?", ['\nRescheduled via SMS to ' + slot.fullDate]),
-          updated_at: new Date(),
-        });
-      }
+      // Cancel old + book new atomically
+      const result = await db.transaction(async trx => {
+        if (existing) {
+          await trx('scheduled_services').where({ id: existing.id }).update({
+            status: 'cancelled',
+            notes: trx.raw("COALESCE(notes, '') || ?", ['\nRescheduled via SMS to ' + slot.fullDate]),
+            updated_at: new Date(),
+          });
+        }
 
-      // Book via AvailabilityEngine
-      const result = await AvailabilityEngine.confirmBooking(
-        null, // no estimate
-        customer.id,
-        slot.date,
-        slot.startTime24,
-        'Booked via conversational SMS'
-      );
+        // Book via AvailabilityEngine
+        return AvailabilityEngine.confirmBooking(
+          null, // no estimate
+          customer.id,
+          slot.date,
+          slot.startTime24,
+          'Booked via conversational SMS'
+        );
+      });
 
       // Mark session complete
       await this.updateSession(session.id, {

@@ -483,10 +483,12 @@ const CallRecordingProcessor = {
             const parsedDate = new Date(extracted.preferred_date_time);
             let scheduledDate, windowStart;
             if (!isNaN(parsedDate.getTime())) {
-              scheduledDate = parsedDate.toISOString().split('T')[0];
-              const hrs = String(parsedDate.getHours()).padStart(2, '0');
-              const mins = String(parsedDate.getMinutes()).padStart(2, '0');
-              windowStart = `${hrs}:${mins}`;
+              // Use Eastern Time for scheduling (server may be UTC)
+              const etOptions = { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false };
+              const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(parsedDate);
+              scheduledDate = etDate; // YYYY-MM-DD in Eastern
+              const etTime = new Intl.DateTimeFormat('en-US', etOptions).format(parsedDate);
+              windowStart = etTime;
             } else {
               // Fallback: try to extract date and time from the string
               const dateMatch = extracted.preferred_date_time.match(/(\w+ \d{1,2}(?:,?\s*\d{4})?)/);

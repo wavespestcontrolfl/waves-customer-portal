@@ -86,7 +86,7 @@ router.get('/recording/:id', async (req, res, next) => {
 router.get('/audio/:id', async (req, res) => {
   try {
     const config = require('../config');
-    const recording = await db('call_recordings').where({ id: req.params.id })
+    const recording = await db('call_log').where({ id: req.params.id })
       .orWhere({ recording_sid: req.params.id })
       .first();
 
