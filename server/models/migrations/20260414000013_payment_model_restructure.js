@@ -209,8 +209,8 @@ exports.up = async function(knex) {
   // ── 4. ACH failure log table ──
   if (!(await knex.schema.hasTable('ach_failure_log'))) {
     await knex.schema.createTable('ach_failure_log', t => {
-      t.increments('id').primary();
-      t.integer('customer_id').references('id').inTable('customers');
+      t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
+      t.uuid('customer_id').references('id').inTable('customers');
       t.string('stripe_payment_intent_id', 255);
       t.string('failure_reason', 255);
       t.timestamp('failure_date').defaultTo(knex.fn.now());
