@@ -12,6 +12,14 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+
+function capitalizeName(name) {
+  if (!name) return '';
+  return name.trim().toLowerCase()
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
+    .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
+}
 const TwilioService = require('./twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
@@ -218,15 +226,33 @@ const CallRecordingProcessor = {
         const leadSource = numberConfig ? TWILIO_NUMBERS.getLeadSourceFromNumber(call.to_phone) : { source: 'phone_call' };
 
         try {
+          // Parse address if AI extracted a full address string
+          let addrLine = extracted.address_line1 || extracted.address || '';
+          let addrCity = extracted.city || '';
+          let addrState = extracted.state || 'FL';
+          let addrZip = extracted.zip || '';
+          if (addrLine && !addrCity) {
+            // Try to parse "8224 Abalone Loop, Parrish 34219" → parts
+            const parts = addrLine.split(',').map(p => p.trim());
+            if (parts.length >= 2) {
+              addrLine = parts[0];
+              const cityZip = parts[parts.length - 1].match(/^(.+?)\s*(?:FL\s*)?(\d{5})?$/i);
+              if (cityZip) {
+                addrCity = capitalizeName(cityZip[1].replace(/\s*FL\s*/i, '').trim());
+                if (cityZip[2]) addrZip = cityZip[2];
+              }
+            }
+          }
+
           const [newCust] = await db('customers').insert({
-            first_name: extracted.first_name,
-            last_name: extracted.last_name || '',
+            first_name: capitalizeName(extracted.first_name),
+            last_name: capitalizeName(extracted.last_name || ''),
             phone,
             email: extracted.email || null,
-            address_line1: extracted.address_line1 || '',
-            city: extracted.city || '',
-            state: 'FL',
-            zip: extracted.zip || '',
+            address_line1: addrLine,
+            city: addrCity,
+            state: addrState,
+            zip: addrZip,
             referral_code: code,
             lead_source: leadSource.source || 'phone_call',
             lead_source_detail: numberConfig?.domain || 'inbound call',

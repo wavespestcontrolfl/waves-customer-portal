@@ -4,6 +4,14 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
+function capitalizeName(name) {
+  if (!name) return '';
+  return name.trim().toLowerCase()
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
+    .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
+}
+
 // =========================================================================
 // POST /api/webhooks/twilio/voice — Inbound voice call webhook
 //
@@ -36,8 +44,8 @@ router.post('/voice', async (req, res) => {
           if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 0) {
             // Create a lightweight customer record with the caller name
             const nameParts = callerName.trim().split(/\s+/);
-            const firstName = nameParts[0] || 'Unknown';
-            const lastName = nameParts.slice(1).join(' ') || '';
+            const firstName = capitalizeName(nameParts[0] || 'Unknown');
+            const lastName = capitalizeName(nameParts.slice(1).join(' ') || '');
             try {
               const [newCust] = await db('customers').insert({
                 first_name: firstName,
@@ -50,7 +58,7 @@ router.post('/voice', async (req, res) => {
                 last_contact_date: new Date(),
                 last_contact_type: 'call_inbound',
                 member_since: new Date().toISOString().split('T')[0],
-                waveguard_tier: 'none',
+                waveguard_tier: null,
                 crm_notes: `Auto-created from Twilio Lookup: ${callerName}`,
               }).returning('*');
               customer = newCust;

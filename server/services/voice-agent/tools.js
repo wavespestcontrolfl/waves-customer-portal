@@ -316,7 +316,7 @@ async function executeTool(toolName, input, sessionData) {
               address_line1: input.property_address || '',
               city: extractCity(input.property_address) || '',
               state: 'FL', zip: '',
-              waveguard_tier: input.waveguard_tier || "none",
+              waveguard_tier: input.waveguard_tier || null,
               lead_source: "voice_agent",
               internal_notes: input.notes || null,
               created_at: new Date(),

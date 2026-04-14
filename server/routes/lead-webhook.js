@@ -8,6 +8,14 @@ const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 
 const { aiTriageLead } = require('../services/lead-triage');
+
+function capitalizeName(name) {
+  if (!name) return '';
+  return name.trim().toLowerCase()
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
+    .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
+}
 const leadAttribution = require('../services/lead-attribution');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
@@ -36,8 +44,8 @@ router.post('/', async (req, res) => {
 
     // Parse name
     const nameParts = rawName.trim().split(/\s+/);
-    const firstName = nameParts[0] || 'Unknown';
-    const lastName = nameParts.slice(1).join(' ') || '';
+    const firstName = capitalizeName(nameParts[0] || 'Unknown');
+    const lastName = capitalizeName(nameParts.slice(1).join(' ') || '');
 
     // Clean phone
     const phone = cleanPhone(rawPhone);

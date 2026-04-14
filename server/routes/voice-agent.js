@@ -19,6 +19,15 @@ const {
 } = require('../services/voice-agent/agent');
 const { analyzeSentiment } = require('../services/call-sentiment');
 
+// Properly capitalize a name: "BILLY" → "Billy", "mcdonald" → "McDonald"
+function capitalizeName(name) {
+  if (!name) return '';
+  return name.trim().toLowerCase()
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
+    .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
+}
+
 // ── Missed call SMS — fires when call goes to voicemail ──
 // Rate limited: max 1 per customer per day
 async function sendMissedCallSMS(callerPhone, callerName, callSid) {
@@ -224,8 +233,8 @@ function voiceAgentRoutes(app, httpServer) {
 
               if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 1) {
                 const nameParts = callerName.trim().split(/\s+/);
-                const firstName = nameParts[0] || 'Unknown';
-                const lastName = nameParts.slice(1).join(' ') || '';
+                const firstName = capitalizeName(nameParts[0] || 'Unknown');
+                const lastName = capitalizeName(nameParts.slice(1).join(' ') || '');
                 const numberConfig = TWILIO_NUMBERS.findByNumber(to);
                 const leadSource = numberConfig ? TWILIO_NUMBERS.getLeadSourceFromNumber(to) : { source: 'phone_call' };
 
@@ -242,7 +251,7 @@ function voiceAgentRoutes(app, httpServer) {
                     pipeline_stage_changed_at: new Date(),
                     last_contact_date: new Date(),
                     last_contact_type: 'call_inbound',
-                    waveguard_tier: 'none',
+                    waveguard_tier: null,
                     crm_notes: `Auto-created from CNAM: ${callerName}${callerType ? ` (${callerType})` : ''}`,
                   }).returning('*');
                   customer = newCust;
