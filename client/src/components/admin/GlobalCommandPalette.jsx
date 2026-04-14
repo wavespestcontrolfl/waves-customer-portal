@@ -28,7 +28,7 @@ const ROUTE_CONTEXT_MAP = {
   '/admin': 'dashboard',
   '/admin/customers': 'customers',
   '/admin/health': 'customers',
-  '/admin/leads': 'customers',
+  '/admin/leads': 'leads',
   '/admin/seo': 'seo',
   '/admin/wordpress': 'wordpress',
   '/admin/ppc': 'seo',
@@ -55,6 +55,7 @@ const CONTEXT_LABELS = {
   reviews: 'Reviews & Reputation',
   comms: 'Communications',
   tax: 'Tax Center',
+  leads: 'Leads Pipeline',
 };
 
 const CONTEXT_COLORS = {
@@ -70,6 +71,7 @@ const CONTEXT_COLORS = {
   reviews: D.amber,
   comms: '#3b82f6',
   tax: D.purple,
+  leads: D.amber,
 };
 
 function detectContext(pathname) {

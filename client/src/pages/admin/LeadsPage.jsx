@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -955,6 +956,8 @@ export default function LeadsPage() {
   return <div style={{ padding:24, maxWidth:1400, margin:'0 auto', color:C.text }}>
     <h1 style={{ margin:'0 0 8px', fontSize:24, color:C.white }}>Lead Attribution & Marketing ROI</h1>
     <p style={{ margin:'0 0 24px', fontSize:14, color:C.muted }}>Track every lead from first touch to conversion</p>
+
+    <SEOIntelligenceBar context="leads" />
 
     <TabBar tabs={[
       { key:'pipeline', label:'Pipeline' },

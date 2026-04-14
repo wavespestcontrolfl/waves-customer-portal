@@ -26,6 +26,7 @@ const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/te
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
 const { COMMS_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
+const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
 const logger = require('../services/logger');
 
 let Anthropic;
@@ -46,6 +47,7 @@ const TECH_TOOL_NAMES = new Set(TECH_TOOLS.map(t => t.name));
 const REVIEW_TOOL_NAMES = new Set(REVIEW_TOOLS.map(t => t.name));
 const COMMS_TOOL_NAMES = new Set(COMMS_TOOLS.map(t => t.name));
 const TAX_TOOL_NAMES = new Set(TAX_TOOLS.map(t => t.name));
+const LEADS_TOOL_NAMES = new Set(LEADS_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -291,6 +293,37 @@ RESPONSE STYLE:
 - For equipment, note Section 179 eligibility when discussing write-offs
 - P&L should show gross margin % and net margin % alongside dollar amounts
 - Remind the operator to consult their CPA for final tax decisions`,
+
+  leads: `
+LEADS PIPELINE CONTEXT:
+You are on the Leads page. Virginia uses this daily to manage the sales pipeline.
+
+PIPELINE STAGES (in order):
+new → contacted → estimate_sent → estimate_viewed → negotiating → won
+Dead ends: lost, unresponsive, disqualified, duplicate
+
+LEAD SOURCES: Google Ads, Google LSA, Organic, Referral, Door Knock campaigns, Nextdoor, Facebook, Walk-In, AI Agent, Voicemail, Email
+LEAD TYPES: inbound_call, inbound_sms, form_submission, chat_widget, walk_in, referral, ai_agent, voicemail, email_inquiry
+
+LEADS CAPABILITIES:
+- Pipeline overview: total, active, won, lost, conversion rate, avg response time, CPA, ROI
+- Query/filter leads by status, source, name, service interest
+- Find stale leads (no activity in N hours — these are going cold)
+- Full funnel analysis with stage-to-stage conversion rates and bottleneck detection
+- Source performance comparison: conversion rate, CPA, ROI per source
+- Lost lead analysis: reasons, fixable vs unfixable, competitor mentions
+- Response time distribution and its correlation with conversion
+- Update single lead status (with confirmation)
+- Bulk update: move matching leads to a new status (dry-run first, then execute)
+
+RESPONSE STYLE:
+- Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost
+- Response time under 5 minutes correlates strongly with conversion — flag slow responses
+- When showing the funnel, identify the bottleneck stage (lowest conversion between stages)
+- For source performance, rank by ROI not just volume — a source with 3 leads and 100% conversion beats one with 50 leads and 2%
+- For bulk updates, ALWAYS run dry_run first to show the count, then ask for confirmation
+- When marking leads as lost, always ask for the lost_reason
+- Virginia is the primary user — be direct about what needs attention NOW`,
 };
 
 function getToolsForContext(context) {
@@ -318,6 +351,9 @@ function getToolsForContext(context) {
   if (context === 'tax') {
     return [...TOOLS, ...TAX_TOOLS];
   }
+  if (context === 'leads') {
+    return [...TOOLS, ...LEADS_TOOLS];
+  }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
@@ -337,6 +373,9 @@ function executeToolByName(toolName, input, techContext) {
   }
   if (TAX_TOOL_NAMES.has(toolName)) {
     return executeTaxTool(toolName, input);
+  }
+  if (LEADS_TOOL_NAMES.has(toolName)) {
+    return executeLeadsTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -671,6 +710,17 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'advisor', label: 'Run Advisor', prompt: 'Run the AI tax advisor — check for savings opportunities and regulation changes.', icon: '🤖' },
       { id: 'ar', label: 'A/R Aging', prompt: "Who owes us money? Show me the accounts receivable aging.", icon: '⚠️' },
       { id: 'mileage', label: 'Mileage', prompt: 'Mileage deduction so far this year?', icon: '🚗' },
+    ] });
+  } else if (context === 'leads') {
+    res.json({ actions: [
+      { id: 'overview', label: 'Pipeline Overview', prompt: 'How does the pipeline look? Active leads, conversion rate, response time.', icon: '📊' },
+      { id: 'stale', label: 'Stale Leads', prompt: "Which leads haven't been contacted in 48 hours? These are going cold.", icon: '🔴' },
+      { id: 'funnel', label: 'Funnel', prompt: "Show me the funnel. Where's the bottleneck?", icon: '🔄' },
+      { id: 'sources', label: 'Source ROI', prompt: 'Compare lead sources by conversion rate and ROI', icon: '📈' },
+      { id: 'lost', label: 'Lost Analysis', prompt: 'Why are we losing leads? Break down by reason.', icon: '❌' },
+      { id: 'response', label: 'Response Times', prompt: 'How fast are we responding? Does speed correlate with conversion?', icon: '⏱️' },
+      { id: 'new_leads', label: 'New Leads', prompt: 'Show me all new leads this week', icon: '🆕' },
+      { id: 'cleanup', label: 'Pipeline Cleanup', prompt: 'How many unresponsive leads older than 30 days should we move to lost?', icon: '🧹' },
     ] });
   } else {
     res.json({ actions: baseActions });
