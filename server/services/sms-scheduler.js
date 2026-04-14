@@ -299,7 +299,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
       if (existing) {
         await db('scheduled_services').where({ id: existing.id }).update({
           status: 'cancelled',
-          notes: db.raw("COALESCE(notes, '') || '\nRescheduled via SMS to " + slot.fullDate + "'"),
+          notes: db.raw("COALESCE(notes, '') || ?", ['\nRescheduled via SMS to ' + slot.fullDate]),
           updated_at: new Date(),
         });
       }

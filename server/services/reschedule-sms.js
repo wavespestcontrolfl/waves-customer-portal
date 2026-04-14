@@ -61,7 +61,12 @@ class RescheduleSMS {
 
     if (!pending) return null;
 
-    const options = typeof pending.notes === 'string' ? JSON.parse(pending.notes) : (pending.notes || {});
+    let options = {};
+    try {
+      options = typeof pending.notes === 'string' ? JSON.parse(pending.notes) : (pending.notes || {});
+    } catch (e) {
+      logger.warn(`[reschedule-sms] Failed to parse notes for log ${pending.id}: ${e.message}`);
+    }
     const reply = (messageBody || '').trim().toLowerCase();
     const responseTime = pending.sms_sent_at ? Math.round((Date.now() - new Date(pending.sms_sent_at).getTime()) / 60000) : null;
 

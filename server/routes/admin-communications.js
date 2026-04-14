@@ -5,6 +5,7 @@ const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
+const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 

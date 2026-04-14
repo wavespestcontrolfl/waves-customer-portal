@@ -1428,10 +1428,10 @@ export default function CommunicationsPage() {
     if (smsFilter === 'all') return true;
     if (smsFilter === 'sent') return t.messages.some(m => m.direction === 'outbound');
     if (smsFilter === 'received') return t.messages.some(m => m.direction === 'inbound');
-    if (smsFilter === 'auto_reply') return t.messages.some(m => m.message_type === 'auto_reply' || m.message_type === 'ai_draft');
-    if (smsFilter === 'reminder') return t.messages.some(m => m.message_type === 'reminder' || m.message_type === 'confirmation' || m.message_type === 'appointment_confirmation');
-    if (smsFilter === 'review_request') return t.messages.some(m => m.message_type === 'review_request');
-    if (smsFilter === 'estimate') return t.messages.some(m => m.message_type === 'estimate');
+    if (smsFilter === 'auto_reply') return t.messages.some(m => m.messageType === 'auto_reply' || m.messageType === 'ai_draft');
+    if (smsFilter === 'reminder') return t.messages.some(m => m.messageType === 'reminder' || m.messageType === 'confirmation' || m.messageType === 'appointment_confirmation');
+    if (smsFilter === 'review_request') return t.messages.some(m => m.messageType === 'review_request');
+    if (smsFilter === 'estimate') return t.messages.some(m => m.messageType === 'estimate');
     return true;
   });
 

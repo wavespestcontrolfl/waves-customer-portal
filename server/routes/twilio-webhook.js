@@ -177,13 +177,13 @@ router.post('/sms', async (req, res) => {
     const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
       : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
 
-    await db('sms_log').insert({
+    const [smsLogEntry] = await db('sms_log').insert({
       customer_id: customer?.id || null,
       direction: 'inbound', from_phone: From, to_phone: To,
       message_body: Body, twilio_sid: MessageSid, status: 'received',
       message_type: messageType,
       metadata: JSON.stringify({ locationId: numberConfig.locationId, source: numberConfig.type, domain: numberConfig.domain }),
-    });
+    }).returning('id');
 
     await db('activity_log').insert({
       customer_id: customer?.id || null,
@@ -300,7 +300,7 @@ router.post('/sms', async (req, res) => {
 
         // Store draft for approval — DO NOT send
         await db('message_drafts').insert({
-          sms_log_id: null, // could link to sms_log entry
+          sms_log_id: smsLogEntry?.id || null,
           customer_id: customer.id,
           inbound_message: Body,
           draft_response: draft.draft,
