@@ -51,16 +51,38 @@ const SERVICE_DETAILS = {
     ],
   },
   treeShrub: {
-    header: 'Tree & Shrub Care — 6–8 Applications/Year',
-    intro: "Our Shrub and Tree Care program provides comprehensive maintenance designed to promote the long-term health, beauty, and vitality of ornamental plants, trees, and palms. Through proactive monitoring and precise treatments, we address nutrient deficiencies, pest infestations, and disease pressures before they impact plant performance.",
-    services: [
-      { title: 'Root Zone Fertilization', text: 'Enhances plant and palm growth and color through targeted nutrient delivery.' },
-      { title: 'Insect and Mite Control', text: 'Provides year-round protection against damaging pests such as scale, aphids, and mites.' },
-      { title: 'Disease Control', text: 'Treats and prevents a wide range of tree, shrub, and palm diseases, including bud rot and leaf spot.' },
-      { title: 'Horticultural Oil', text: 'Controls insects in their overwintering or larval stages for cleaner, healthier foliage.' },
-      { title: 'Hort Fertilization', text: 'Balances essential nutrients like magnesium, manganese, and potassium to strengthen foliage and improve overall vigor.' },
-      { title: 'Systemic and Foliar Treatments', text: 'Utilize precision applications to protect canopy health and sustain long-term vitality.' },
-      { title: 'Professional Monitoring and Pruning', text: 'Ensures proper canopy structure, early pest detection, and balanced plant growth.' },
+    header: 'Full-Service Tree & Shrub Care, Defined.',
+    subheader: 'WaveGuard Tree & Shrub — 6–8 Applications Per Year',
+    intro: "Protect and strengthen your landscape investment with a year-round tree and shrub care program built for Southwest Florida. Through proactive monitoring, targeted nutrition, and precision pest and disease treatments, we keep ornamental plants, trees, and palms healthy, vibrant, and resilient — season after season.",
+    sections: [
+      { title: 'Plant Health Inspection & Monitoring', text: "Every service visit begins with a detailed visual assessment of trees, shrubs, palms, and ornamental plantings across the property. We evaluate foliage color and density, canopy structure, root zone conditions, and signs of pest activity, disease progression, or nutrient stress. Findings from each inspection guide treatment adjustments and are documented in your service report — allowing us to track trends, catch problems early, and refine the program over time.", tags: ['Canopy Assessment', 'Root Zone Check', 'Trend Tracking'] },
+      { title: 'Root Zone Fertilization', text: "A scheduled fertilization program delivers balanced, slow-release nutrition directly to the root zone of trees, shrubs, and ornamental plantings. Controlled-release granular formulations provide steady macro- and micronutrient availability throughout the growing season, promoting strong root development, consistent foliage color, and improved stress tolerance. Application rates and timing are adjusted based on plant species, soil conditions, and seasonal demand.", tags: ['Slow-Release Nutrition', 'Root Development', 'Seasonal Adjustment'] },
+      { title: 'Palm Nutrition Program', text: "Southwest Florida palms have specialized nutritional needs that standard landscape fertilizers don't address. Our palm-specific program uses formulations designed for Florida's sandy, alkaline soils — delivering potassium, magnesium, manganese, and other critical micronutrients in controlled-release form to prevent and correct common deficiency symptoms like frizzle top, yellowing fronds, and orange spotting. Supplemental foliar micronutrient applications support faster visual recovery when deficiencies are detected.", tags: ['Palm-Specific Formula', 'Micronutrient Correction', 'Frizzle Top Prevention'] },
+      { title: 'Insect & Mite Control', text: "Year-round protection against the damaging insects and mites that target ornamental plants in our climate — including whiteflies, scale, aphids, mealybugs, spider mites, and thrips. Treatments combine systemic products applied as soil drenches with targeted foliar sprays for contact and residual control. Product selection follows a strict mode-of-action rotation schedule, alternating between chemical classes at each visit to prevent resistance buildup in persistent pest populations.", tags: ['Systemic + Foliar', 'MOA Rotation', 'Resistance Management'] },
+      { title: 'Disease Prevention & Fungicide Program', text: "Fungal and bacterial diseases thrive in Southwest Florida's heat and humidity. Our program applies preventive and curative fungicide treatments based on seasonal risk windows, environmental conditions, and plant species susceptibility. We target common landscape pathogens including leaf spot, anthracnose, sooty mold, powdery mildew, and bud rot in palms. Fungicide selection follows FRAC group rotation protocols to maintain long-term product efficacy and prevent pathogen resistance.", tags: ['Preventive + Curative', 'FRAC Rotation', 'Bud Rot Protection'] },
+      { title: 'Horticultural Oil Applications', text: "Horticultural oil treatments provide a low-toxicity, broad-spectrum option for controlling soft-bodied insects in their egg, larval, and overwintering stages. Applied as a foliar spray, these treatments suffocate scale crawlers, whitefly nymphs, mites, and mealybugs on contact while leaving minimal residue. Oil applications also help reduce sooty mold buildup on foliage by suppressing the honeydew-producing insects that cause it — resulting in cleaner, healthier-looking plants.", tags: ['Low-Toxicity', 'Scale & Whitefly', 'Sooty Mold Reduction'] },
+      { title: 'Trunk Injection Services', text: "For high-value trees and palms requiring targeted treatment, we offer direct trunk injection using professional micro-infusion technology. This method delivers insecticides, fungicides, or nutrients directly into the vascular system of the tree — bypassing soil conditions and environmental losses for faster, more precise results. Trunk injection is especially effective for treating palm diseases like lethal bronzing, systemic insect infestations, and micronutrient deficiencies that respond poorly to soil or foliar applications alone.", tags: ['Micro-Infusion', 'Vascular Delivery', 'Lethal Bronzing'] },
+      { title: 'Foliar Micronutrient & Biostimulant Applications', text: "Supplemental foliar sprays deliver chelated micronutrients — iron, manganese, zinc, and magnesium — directly through leaf tissue for faster correction of visible deficiency symptoms like chlorosis, interveinal yellowing, and reduced vigor. Biostimulant additives support improved nutrient uptake, root activity, and overall plant resilience. These applications complement the root zone fertilization program and are timed to seasonal growth phases for maximum benefit.", tags: ['Chelated Micros', 'Chlorosis Correction', 'Biostimulant'] },
+      { title: 'Growth Regulation for Ornamentals', text: "Plant growth regulator applications help manage the size and shape of ornamental shrubs and hedges, reducing the frequency of mechanical pruning while promoting denser, more compact growth. PGR treatments redirect the plant's energy from excessive vertical growth toward root development and lateral branching — resulting in thicker canopies, improved stress tolerance, and a more manicured appearance with less maintenance.", tags: ['Growth Management', 'Denser Canopy', 'Reduced Pruning'] },
+      { title: 'Seasonal Treatment Scheduling', text: "Pest pressures, disease risk, and nutritional demands change throughout the year, and our treatment schedule adapts accordingly. Service timing and product selection are aligned to Southwest Florida's seasonal cycles — heavier insect and fungicide coverage during the warm, humid months when pressure peaks, and nutrient-focused applications during cooler growth periods. Programs are available from 4 to 8 visits per year depending on landscape size, plant diversity, and the level of protection your property requires.", tags: ['Flexible Frequency', 'Seasonal Adaptation', '4–8 Visits/Year'] },
+      { title: 'Service Reporting & Recommendations', text: "Each visit concludes with a detailed digital service report documenting inspection findings, products applied, target pests or diseases observed, and the current health status of key plants on the property. Reports include actionable recommendations for irrigation adjustments, mulch management, pruning needs, and other cultural practices that support long-term plant health — turning every visit into a consultative service experience, not just an application.", tags: ['Digital Reports', 'Cultural Recs', 'Plant Health Tracking'] },
+    ],
+  },
+  palmInjection: {
+    header: 'Professional Palm Injection Services.',
+    subheader: 'Trunk Injection — Preventive & Curative Treatments',
+    intro: "Protect your palms from the inside out. Our professional trunk injection service delivers insecticides, fungicides, antibiotics, and nutrients directly into the vascular system of the tree — bypassing soil conditions and environmental losses for faster, more precise results where it matters most.",
+    sections: [
+      { title: 'How Trunk Injection Works', text: "Using professional micro-infusion equipment, we inject treatment products directly into the trunk of the palm through small, precision-drilled ports. The product is drawn up through the tree's vascular system and distributed throughout the canopy, roots, and growing tissue. This delivers active ingredients exactly where they're needed — without relying on soil uptake, weather conditions, or surface applications that can drift or degrade. Injection ports seal naturally over time with minimal impact to the tree.", tags: ['Micro-Infusion', 'Vascular Delivery', 'Precision Dosing'] },
+      { title: 'Lethal Bronzing Disease Prevention & Treatment', text: "Lethal bronzing is a fatal phytoplasma disease that kills palms from the inside — and it's spreading across Southwest Florida. There is no soil-applied cure. Trunk injection with antibiotic formulations is the only proven treatment method, and it is most effective when applied preventively before symptoms appear. For palms already showing early-stage symptoms — premature fruit drop, lower frond browning, or spear leaf collapse — injection can slow or halt progression if caught in time. We recommend preventive treatments every 4–6 months for high-value palms in affected areas.", tags: ['Phytoplasma', 'Preventive Protocol', 'Early Intervention'] },
+      { title: 'Systemic Insect Protection', text: "Trunk-injected insecticides provide systemic, season-long protection against the most damaging palm pests in our region — including spiral whitefly, rugose spiraling whitefly, palm weevils, royal palm bugs, and scale insects. Because the product is distributed through the tree's internal tissue, it reaches pests feeding deep within the canopy that foliar sprays often miss. Systemic insecticide injections are especially effective for tall palms where spray coverage is impractical or incomplete.", tags: ['Spiral Whitefly', 'Palm Weevil', 'Season-Long Control'] },
+      { title: 'Fungicide Injection for Disease Control', text: "Fungal pathogens like Phytophthora bud rot, Ganoderma butt rot, Thielaviopsis trunk rot, and Pestalotiopsis can devastate palms if left unchecked. Trunk-injected fungicides — including phosphorous acid and systemic triazole formulations — deliver curative and preventive protection directly into the tree's vascular system. This method is significantly more effective than soil drenches or foliar sprays for deep-seated fungal infections, particularly in palms where root access is limited or compromised.", tags: ['Bud Rot', 'Ganoderma', 'Systemic Fungicide'] },
+      { title: 'Palm Nutritional Injection', text: "Nutrient deficiencies are among the most common health issues for palms in Southwest Florida's sandy, alkaline soils — especially potassium, manganese, magnesium, and iron. Trunk injection delivers chelated micronutrients and balanced nutritional formulations directly into the vascular system, producing faster, more visible results than soil-applied fertilizers. This is especially valuable for palms showing advanced deficiency symptoms like frizzle top, yellowing fronds, or stunted new growth that haven't responded to granular treatments alone.", tags: ['Chelated Micronutrients', 'Frizzle Top', 'Fast Visual Recovery'] },
+      { title: 'Combination Treatments', text: "For palms facing multiple stressors — or for proactive owners who want comprehensive protection in a single visit — we offer combination injection treatments that pair insecticide, fungicide, and nutritional products in one service. Combo treatments are particularly effective for high-value specimen palms, newly transplanted palms under establishment stress, and properties in areas with active lethal bronzing or whitefly pressure. Dosing is calculated based on trunk diameter to ensure proper delivery for each individual tree.", tags: ['Multi-Product', 'DBH-Based Dosing', 'Single Visit'] },
+      { title: 'Palm Health Assessment', text: "Before any injection, we perform a thorough visual health assessment of each palm — evaluating canopy fullness, frond color and condition, spear leaf integrity, trunk stability, and visible symptoms of disease, pest activity, or nutritional stress. This assessment determines which treatment products are appropriate, identifies palms that may need priority attention, and establishes a documented baseline for tracking improvement over time.", tags: ['Canopy Evaluation', 'Spear Leaf Check', 'Baseline Documentation'] },
+      { title: 'Recommended Treatment Schedules', text: "Treatment frequency depends on the type of injection and the condition of the palm. Nutritional injections are typically recommended once or twice per year. Preventive insecticide treatments provide season-long systemic protection with a single annual injection. Lethal bronzing prevention requires treatments every 4–6 months for ongoing protection. Curative treatments for active infections may require an accelerated initial schedule followed by maintenance intervals. We build a treatment calendar specific to your palms and their needs.", tags: ['Annual to Biannual', 'Custom Calendar', 'Condition-Based'] },
+      { title: 'Why Injection Over Spray or Soil Drench', text: "Trunk injection offers several advantages over traditional foliar sprays and soil-applied treatments for palms. There is no spray drift, no runoff, and no product lost to UV degradation or rainfall. Delivery is immediate and precise — the full dose reaches the target tissue. For tall palms, injection eliminates the coverage limitations of ground-based spray equipment. And for diseases like lethal bronzing, injection is not just the best option — it's the only viable treatment method available.", tags: ['Zero Drift', 'No Runoff', 'Full Dose Delivery'] },
+      { title: 'Service Reporting & Follow-Up', text: "Every injection visit is documented with a digital service report that includes the palms treated, products and dosages applied, health assessment findings for each tree, and photos when relevant. Reports include follow-up recommendations — whether that's scheduling the next treatment window, monitoring a palm showing early symptoms, or flagging a tree that may need removal before it becomes a hazard. Our goal is to give you a clear, ongoing picture of your palm health, not just a one-time treatment.", tags: ['Digital Reports', 'Photo Documentation', 'Treatment Calendar'] },
     ],
   },
 };
@@ -772,18 +794,41 @@ export default function EstimateViewPage() {
 
           {hasTS && (
             <ServiceDropdown title="🌳 Tree & Shrub Care" defaultOpen={firstOpenService === 'treeShrub'}>
-              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>{SERVICE_DETAILS.treeShrub.header}</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.treeShrub.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.treeShrub.subheader}</div>
               <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.treeShrub.intro}</div>
-              {SERVICE_DETAILS.treeShrub.services.map((s, i) => (
-                <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'flex-start' }}>
-                  <span style={{ color: B.green, fontSize: 14, flexShrink: 0, marginTop: 1 }}>✓</span>
-                  <div>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: B.navy }}>{s.title}:</span>{' '}
-                    <span style={{ fontSize: 13, color: '#455A64' }}>{s.text}</span>
-                  </div>
+              {SERVICE_DETAILS.treeShrub.sections.map((s, i) => (
+                <div key={i} style={{ marginBottom: 14 }}>
+                  <DetailSection title={s.title} text={s.text} />
+                  {s.tags && (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                      {s.tags.map((tag, ti) => (
+                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
-              <div style={{ fontSize: 11, color: B.grayMid, fontStyle: 'italic', marginTop: 8 }}>*Available as an additional add-on service</div>
+            </ServiceDropdown>
+          )}
+
+          {hasTS && (
+            <ServiceDropdown title="🌴 Palm Injection Services">
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.palmInjection.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.palmInjection.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.palmInjection.intro}</div>
+              {SERVICE_DETAILS.palmInjection.sections.map((s, i) => (
+                <div key={i} style={{ marginBottom: 14 }}>
+                  <DetailSection title={s.title} text={s.text} />
+                  {s.tags && (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                      {s.tags.map((tag, ti) => (
+                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
             </ServiceDropdown>
           )}
 
