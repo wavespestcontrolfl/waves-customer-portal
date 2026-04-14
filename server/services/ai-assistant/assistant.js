@@ -114,7 +114,7 @@ class WavesAssistant {
         const response = await anthropic.messages.create({
           model: MODEL,
           max_tokens: 800,
-          system: SYSTEM_PROMPT + (conversation.context_snapshot ? `\n\nCUSTOMER CONTEXT:\n${conversation.context_snapshot}` : ''),
+          system: SYSTEM_PROMPT + (conversation.context_snapshot ? `\n\nCUSTOMER CONTEXT:\n${typeof conversation.context_snapshot === 'object' ? (conversation.context_snapshot.summary || JSON.stringify(conversation.context_snapshot)) : conversation.context_snapshot}` : ''),
           tools: TOOLS,
           messages,
         });
@@ -206,7 +206,7 @@ class WavesAssistant {
       }
     } catch { /* context unavailable */ }
 
-    // Create new conversation
+    // Create new conversation — context_snapshot is jsonb so wrap string in valid JSON
     const [conv] = await db('ai_conversations').insert({
       customer_id: customerId || null,
       channel,
@@ -215,7 +215,7 @@ class WavesAssistant {
       last_activity_at: now,
       timeout_at: new Date(now.getTime() + CONVERSATION_TIMEOUT_MS),
       message_count: 0,
-      context_snapshot: contextSnapshot,
+      context_snapshot: contextSnapshot ? JSON.stringify({ summary: contextSnapshot }) : null,
     }).returning('*');
 
     return conv;

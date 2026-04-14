@@ -135,6 +135,11 @@ router.post('/assess', async (req, res, next) => {
     const season = lawnAssessment.getSeason(month);
     const adjustedScores = lawnAssessment.applySeasonalAdjustment(displayScores, month);
 
+    if (!adjustedScores) {
+      logger.error('[lawn-assessment] adjustedScores is null after scoring pipeline');
+      return res.status(500).json({ error: 'Scoring pipeline produced no results' });
+    }
+
     // Check if this is the first assessment (baseline)
     const existingCount = await db('lawn_assessments')
       .where({ customer_id: customerId })
@@ -185,6 +190,7 @@ router.post('/assess', async (req, res, next) => {
       analyzedCount: validResults.length,
     });
   } catch (err) {
+    logger.error(`[lawn-assessment] POST /assess failed: ${err.message}`, { stack: err.stack });
     next(err);
   }
 });

@@ -5,7 +5,6 @@ const DISPATCH_ENV_CHECKS = [
   ['ANTHROPIC_API_KEY', 'AI scoring/optimization will use rule-based fallback'],
   ['TWILIO_ACCOUNT_SID', 'SMS notifications on cancel/reschedule will be skipped'],
   ['TWILIO_AUTH_TOKEN', 'SMS notifications on cancel/reschedule will be skipped'],
-  ['SQUARE_ACCESS_TOKEN', 'Square revenue lookups will use estimates'],
 ];
 for (const [key, fallback] of DISPATCH_ENV_CHECKS) {
   if (!process.env[key]) console.warn(`[dispatch] Missing env var: ${key} — ${fallback}`);

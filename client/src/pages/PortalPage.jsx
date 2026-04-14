@@ -6089,7 +6089,7 @@ function ServiceTracker() {
             <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{office.name}</div>
-                <div style={{ fontSize: 9, color: '#90A4AE' }}>Mon-Fri 7-5 · Sat 8-12</div>
+                <div style={{ fontSize: 9, color: '#90A4AE' }}>Open 24 hrs</div>
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.red, color: '#fff', textDecoration: 'none' }}>📞 Call</a>
@@ -7528,7 +7528,7 @@ export default function PortalPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto' }} />
           <div>
-            <div style={{ fontSize: 14, fontWeight: 800, color: B.white, fontFamily: FONTS.heading }}>WAVES LAWN & PEST</div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: B.white, fontFamily: FONTS.heading }}>WAVES</div>
             <div style={{ fontSize: 9, color: B.blueLight, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>Customer Portal</div>
           </div>
         </div>
@@ -7553,10 +7553,16 @@ export default function PortalPage() {
                 <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
               </div>
               {[
-                { icon: '🏡', label: 'My Property', action: () => { setActiveTab('property'); setShowMenu(false); } },
-                { icon: '📄', label: 'Documents', action: () => { setActiveTab('documents'); setShowMenu(false); } },
+                { icon: '🏠', label: 'Home', action: () => { setActiveTab('dashboard'); setShowMenu(false); } },
+                { icon: '🛡️', label: 'My Plan', action: () => { setActiveTab('plan'); setShowMenu(false); } },
                 { icon: '📅', label: 'Schedule', action: () => { setActiveTab('schedule'); setShowMenu(false); } },
                 { icon: '💳', label: 'Billing', action: () => { setActiveTab('billing'); setShowMenu(false); } },
+                { icon: '📋', label: 'Service History', action: () => { setActiveTab('services'); setShowMenu(false); } },
+                { icon: '🆘', label: 'Request Service', action: () => { setActiveTab('request'); setShowMenu(false); } },
+                { icon: '🎁', label: 'Refer & Earn', action: () => { setActiveTab('refer'); setShowMenu(false); } },
+                { icon: '📄', label: 'Documents', action: () => { setActiveTab('documents'); setShowMenu(false); } },
+                { icon: '🏡', label: 'My Property', action: () => { setActiveTab('property'); setShowMenu(false); } },
+                { icon: '💡', label: 'Learn', action: () => { setActiveTab('learn'); setShowMenu(false); } },
               ].map(item => (
                 <div key={item.label} onClick={item.action} style={{
                   padding: '11px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
@@ -7631,12 +7637,12 @@ export default function PortalPage() {
           textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'🤖'} Chat</button>
-        <a href="mailto:contact@wavespestcontrol.com" style={{
+        <button onClick={() => { window.open('mailto:contact@wavespestcontrol.com', '_blank'); }} style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
           background: B.red, color: '#fff', fontSize: 12,
           textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>{'✉️'} Email</a>
+        }}>{'✉️'} Email</button>
       </div>
 
       {/* AI Chat Widget */}
