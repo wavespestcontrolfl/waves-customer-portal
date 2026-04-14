@@ -81,13 +81,30 @@ function TaxRatesTab() {
 // ═══════════════════════════════════════════════════════════════
 function ServiceTaxabilityTab() {
   const [services, setServices] = useState([]);
-  useEffect(() => { adminFetch('/admin/tax/service-taxability').then(d => setServices(d.services || [])).catch(() => {}); }, []);
+  const [toggling, setToggling] = useState(null);
+  const load = () => adminFetch('/admin/tax/service-taxability').then(d => setServices(d.services || [])).catch(() => {});
+  useEffect(() => { load(); }, []);
+
+  const toggleTaxable = async (s) => {
+    setToggling(s.id);
+    try {
+      await adminFetch(`/admin/tax/service-taxability/${s.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ isTaxable: !s.isTaxable }),
+      });
+      setServices(prev => prev.map(svc => svc.id === s.id ? { ...svc, isTaxable: !svc.isTaxable } : svc));
+    } catch (err) {
+      alert('Failed to update: ' + (err.message || 'Unknown error'));
+    }
+    setToggling(null);
+  };
+
   return (
     <div>
       <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 4 }}>Service Taxability Matrix</div>
-      <div style={{ fontSize: 11, color: D.muted, marginBottom: 14 }}>Which services require FL sales tax collection</div>
+      <div style={{ fontSize: 11, color: D.muted, marginBottom: 14 }}>Click a service to toggle FL sales tax collection</div>
       {services.map(s => (
-        <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, marginBottom: 4 }}>
+        <div key={s.id} onClick={() => toggleTaxable(s)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, marginBottom: 4, cursor: 'pointer', opacity: toggling === s.id ? 0.5 : 1 }}>
           <span style={{ width: 10, height: 10, borderRadius: '50%', background: s.isTaxable ? D.green : D.muted, flexShrink: 0 }} />
           <div style={{ flex: 1 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{s.serviceLabel}</span>
