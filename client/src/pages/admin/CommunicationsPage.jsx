@@ -1481,7 +1481,7 @@ export default function CommunicationsPage() {
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
-        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Call' }, { key: 'recordings', label: 'Call Recordings' }, { key: 'numbers', label: 'Phone Numbers' }, { key: 'templates', label: 'SMS Templates' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
+        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Calls' }, { key: 'templates', label: 'SMS Templates' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
           <button key={t.key} onClick={() => setCommsTab(t.key)} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
@@ -1491,10 +1491,8 @@ export default function CommunicationsPage() {
         ))}
       </div>
 
-      {commsTab === 'recordings' ? <CallRecordingsPanel /> : commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'templates' ? (
+      {commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'templates' ? (
         <SmsTemplatesTab />
-      ) : commsTab === 'numbers' ? (
-        <PhoneNumbersTab channelStats={channelStats} maxChannel={maxChannel} stats={stats} />
       ) : <>
 
       {/* --- SMS Stats with health indicators --- */}
