@@ -41,13 +41,15 @@ router.post('/:id/send', async (req, res, next) => {
     const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
     const sendMethod = req.body?.sendMethod || 'both';
+    const monthlyTotal = parseFloat(estimate.monthly_total || 0);
+    const annualTotal = parseFloat(estimate.annual_total || 0);
+    const priceLine = monthlyTotal > 0 ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr` : '';
 
     // Send SMS
     if ((sendMethod === 'sms' || sendMethod === 'both') && estimate.customer_phone) {
       try {
-        await TwilioService.sendSMS(estimate.customer_phone,
-          `Hi ${firstName}! Your Waves Pest Control estimate is ready.\n\n${viewUrl}\n\nQuestions? Reply to this text or call (941) 318-7612.`
-        );
+        const smsBody = `Hi ${firstName}! Your Waves Pest Control estimate is ready.${priceLine ? `\n\n${priceLine}` : ''}\n\n${viewUrl}\n\nQuestions? Reply to this text or call (941) 318-7612.`;
+        await TwilioService.sendSMS(estimate.customer_phone, smsBody);
       } catch (e) { logger.error(`Estimate SMS failed: ${e.message}`); }
     }
 
@@ -73,7 +75,7 @@ router.post('/:id/send', async (req, res, next) => {
               <h2 style="color: #0ea5e9;">Waves Pest Control</h2>
               <p>Hi ${firstName},</p>
               <p>Your customized service estimate is ready for review.</p>
-              ${monthlyLine ? `<p style="font-size: 18px; font-weight: bold; color: #10b981;">${monthlyLine}</p>` : ''}
+              ${priceLine ? `<p style="font-size: 18px; font-weight: bold; color: #10b981;">${priceLine}</p>` : ''}
               <p><a href="${viewUrl}" style="display: inline-block; padding: 14px 28px; background: #0ea5e9; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">View Your Estimate</a></p>
               <p style="color: #666; font-size: 14px;">Questions? Call us at (941) 318-7612 or reply to this email.</p>
               <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />

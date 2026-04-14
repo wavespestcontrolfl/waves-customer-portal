@@ -292,7 +292,11 @@ function EstimateToolView() {
 
   /* ── field setter ─────────────────────────────────────────── */
   const set = useCallback((key, val) => setForm(f => ({ ...f, [key]: val })), []);
-  const toggle = useCallback((key) => setForm(f => ({ ...f, [key]: !f[key] })), []);
+  const toggle = useCallback((key) => {
+    setForm(f => ({ ...f, [key]: !f[key] }));
+    // Reset generated estimate so bottom preview bar updates
+    if (key.startsWith('svc')) { setEstimate(null); setSavedId(null); }
+  }, []);
 
   /* ── auto-estimate attic / preslab ────────────────────────── */
   useEffect(() => {
@@ -657,7 +661,7 @@ function EstimateToolView() {
 
   /* ── save estimate ────────────────────────────────────────── */
   async function doSave() {
-    if (!estimate) return;
+    if (!estimate) return null;
     setSaving(true);
     try {
       const E = estimate;
@@ -679,19 +683,22 @@ function EstimateToolView() {
       });
       if (!r.ok) throw new Error('Save failed: ' + r.status);
       const d = await r.json();
-      setSavedId(d.id || d.estimateId);
-    } catch (e) { alert(e.message); }
-    setSaving(false);
+      const id = d.id || d.estimateId;
+      setSavedId(id);
+      return id;
+    } catch (e) { alert(e.message); return null; }
+    finally { setSaving(false); }
   }
 
   /* ── send estimate ────────────────────────────────────────── */
-  async function doSend() {
-    if (!savedId) { alert('Save the estimate first.'); return; }
+  async function doSend(id) {
+    const useId = id || savedId;
+    if (!useId) { alert('Save the estimate first.'); return; }
     setSending(true);
     try {
       const method = form.sendMethod || 'both';
       const scheduled = form.scheduleSend && form.scheduledAt ? form.scheduledAt : null;
-      const r = await fetch(`/api/admin/estimates/${savedId}/send`, {
+      const r = await fetch(`/api/admin/estimates/${useId}/send`, {
         method: 'POST', headers: authHeaders,
         body: JSON.stringify({ sendMethod: method, scheduledAt: scheduled }),
       });
@@ -1078,24 +1085,24 @@ function EstimateToolView() {
                     if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
                     set('sendMethod', 'sms');
-                    await doSave();
-                    setTimeout(() => doSend(), 500);
+                    const id = await doSave();
+                    if (id) await doSend(id);
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule SMS' : 'SMS Only'}</button>
                   <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerEmail) { alert('Enter an email.'); return; }
                     if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
                     set('sendMethod', 'email');
-                    await doSave();
-                    setTimeout(() => doSend(), 500);
+                    const id = await doSave();
+                    if (id) await doSend(id);
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule Email' : 'Email Only'}</button>
                   <button style={{ ...sBtn(C.teal, 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerPhone && !form.customerEmail) { alert('Enter phone or email.'); return; }
                     if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
                     set('sendMethod', 'both');
-                    await doSave();
-                    setTimeout(() => doSend(), 500);
+                    const id = await doSave();
+                    if (id) await doSend(id);
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule Both' : 'Both'}</button>
                 </div>
                 <button style={{ ...sBtn('transparent', C.gray), fontSize: 13, padding: '10px 16px', border: `1px solid ${C.border}` }} onClick={() => setShowSendForm(false)}>Cancel</button>
@@ -1135,6 +1142,9 @@ function EstimateToolView() {
           ) : (
             <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
             <div style={sPanel}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+                <button style={{ padding: '6px 14px', background: 'transparent', border: `1px solid ${C.border}`, borderRadius: 8, color: C.gray, fontSize: 12, fontWeight: 600, cursor: 'pointer' }} onClick={() => { setEstimate(null); setSavedId(null); setShowSendForm(false); }}>New Estimate</button>
+              </div>
               <div style={{ maxHeight: 'calc(100vh - 120px)', overflowY: 'auto', paddingRight: 10 }}>
                 {/* ── Summary Card ──────────────────────── */}
                 {(E.recurring.serviceCount > 0 || E.oneTime.total > 0) && (
