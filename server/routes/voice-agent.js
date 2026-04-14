@@ -80,7 +80,7 @@ function voiceAgentRoutes(app, httpServer) {
   // ── Voice Agent TwiML (action URL after dial timeout) ────
   app.all('/api/webhooks/twilio/voice-agent', async (req, res) => {
     try {
-    const domain = process.env.SERVER_DOMAIN || req.headers.host;
+    const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
     const wsUrl = `wss://${domain}/ws/voice-agent`;
     const callSid = req.body?.CallSid || req.query?.CallSid;
     const dialStatus = req.body?.DialCallStatus || req.query?.DialCallStatus;
@@ -161,7 +161,7 @@ function voiceAgentRoutes(app, httpServer) {
   // ── Ring-First TwiML (replaces Studio Flow) ────────────
   app.all('/api/webhooks/twilio/voice-ring-first', async (req, res) => {
     try {
-    const domain = process.env.SERVER_DOMAIN || req.headers.host;
+    const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
     const callSid = req.body?.CallSid || req.query?.CallSid;
     const from = req.body?.From || req.query?.From;
     const to = req.body?.To || req.query?.To;

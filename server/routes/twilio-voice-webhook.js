@@ -227,7 +227,7 @@ router.post('/outbound-admin-prompt', async (req, res) => {
   try {
     const customerNumber = req.query.customerNumber || req.body.customerNumber;
     const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber;
-    const domain = process.env.SERVER_DOMAIN || req.headers.host;
+    const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
