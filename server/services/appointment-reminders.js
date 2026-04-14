@@ -77,7 +77,7 @@ async function isLandline(customerId, phone) {
 
 // ── Send SMS with landline guard ──
 
-async function safeSend(customerId, phone, body) {
+async function safeSend(customerId, phone, body, messageType = 'appointment_reminder') {
   if (!phone) {
     logger.warn(`[appt-remind] No phone for customer ${customerId}, skipping SMS`);
     return false;
@@ -89,7 +89,7 @@ async function safeSend(customerId, phone, body) {
 
   await TwilioService.sendSMS(phone, body, {
     customerId,
-    messageType: 'appointment_reminder',
+    messageType,
   });
   return true;
 }
@@ -167,7 +167,7 @@ const AppointmentReminders = {
 
             const body = `Hello ${firstName}! Your ${serviceType || 'service'} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`;
 
-            const sent = await safeSend(customerId, customer.phone, body);
+            const sent = await safeSend(customerId, customer.phone, body, 'confirmation');
 
             if (sent) {
               await db('appointment_reminders')
