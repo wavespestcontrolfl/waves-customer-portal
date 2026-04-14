@@ -5683,8 +5683,7 @@ function ServiceTracker() {
     { num: 3, label: 'EN ROUTE' },
     { num: 4, label: 'ON-SITE' },
     { num: 5, label: 'IN PROGRESS' },
-    { num: 6, label: 'WRAPPING UP' },
-    { num: 7, label: 'COMPLETE' },
+    { num: 6, label: 'COMPLETE' },
   ];
 
   const fmtTime = (t) => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
@@ -5694,7 +5693,7 @@ function ServiceTracker() {
   // Estimated completion
   const avgDurations = { lawn: 45, pest: 35, mosquito: 25, termite: 60 };
   const svcDuration = isLawn ? avgDurations.lawn : isPest ? avgDurations.pest : isMosquito ? avgDurations.mosquito : isTermite ? avgDurations.termite : 40;
-  const estComplete = step >= 4 && step < 7 && tracker.steps[3]?.completedAt
+  const estComplete = step >= 4 && step < 6 && tracker.steps[3]?.completedAt
     ? new Date(new Date(tracker.steps[3].completedAt).getTime() + svcDuration * 60000)
     : null;
 
@@ -5749,7 +5748,7 @@ function ServiceTracker() {
             const isCurrent = i + 1 === step;
             const isFuture = i + 1 > step;
             const isFirst = i === 0;
-            const isLast = i === 6;
+            const isLast = i === STEPS.length - 1;
             const chevronW = 10;
 
             const bg = isComplete ? `linear-gradient(135deg, ${B.wavesBlue}, #64B5F6)` : isCurrent ? B.red : 'rgba(255,255,255,0.08)';
@@ -5805,22 +5804,7 @@ function ServiceTracker() {
           })}
         </div>
 
-        {/* Labels below */}
-        <div style={{ display: 'flex', marginTop: 6, padding: '0 4px' }}>
-          {STEPS.map((s, i) => {
-            const isComplete = i + 1 < step;
-            const isCurrent = i + 1 === step;
-            const isFuture = i + 1 > step;
-            return (
-              <div key={s.num} style={{
-                flex: 1, textAlign: 'center',
-                fontSize: 7, fontWeight: isCurrent ? 800 : 600,
-                fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.8,
-                color: isCurrent ? B.yellow : isComplete ? '#fff' : 'rgba(255,255,255,0.35)',
-              }}>{s.label}</div>
-            );
-          })}
-        </div>
+        {/* Labels removed — text inside chevrons is sufficient */}
       </div>
 
       {/* Wave divider */}
