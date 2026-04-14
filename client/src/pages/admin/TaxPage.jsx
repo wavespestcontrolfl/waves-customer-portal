@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', cardHover: '#253347', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#a855f7', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', blue: '#3b82f6', orange: '#f97316' };
@@ -1043,6 +1044,9 @@ export default function TaxPage() {
         <h1 style={{ fontSize: 22, fontWeight: 700, color: D.white, margin: 0, fontFamily: "'DM Sans', sans-serif" }}>Tax Center</h1>
         <p style={{ fontSize: 13, color: D.muted, margin: '4px 0 0' }}>Tax rates, filing calendar, expenses, depreciation & AI tax advisor</p>
       </div>
+
+      {/* Intelligence Bar */}
+      <SEOIntelligenceBar context="tax" />
 
       {/* Dashboard stats */}
       {d && activeTab === 'overview' && (

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import ReviewVelocityEngine from './ReviewVelocityEngine';
 import GBPManagementPanel from './GBPManagement';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
@@ -1272,6 +1273,9 @@ export default function ReviewsPage() {
 
   return (
     <div>
+      {/* ====================== INTELLIGENCE BAR ====================== */}
+      <SEOIntelligenceBar context="reviews" />
+
       {/* ====================== TAB TOGGLE ====================== */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
         {[
