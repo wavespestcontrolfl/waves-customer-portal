@@ -218,11 +218,30 @@ const EmailAutomationService = {
       beehiivResult = { skipped: 'BEEHIIV_API_KEY not configured' };
     }
 
-    // Step 2: SMS
-    if (auto.smsTemplate && customer.phone) {
+    // Step 2: SMS — check DB template first, fall back to inline
+    if ((auto.smsTemplate || auto.smsTemplateKey) && customer.phone) {
       try {
-        await TwilioService.sendSMS(customer.phone, auto.smsTemplate(customer));
-        smsResult = { sent: true, to: customer.phone };
+        let smsBody = null;
+
+        // Try DB template (editable from SMS Templates admin)
+        const templateKey = auto.smsTemplateKey || `auto_${key}`;
+        try {
+          const templates = require('../routes/admin-sms-templates');
+          smsBody = await templates.getTemplate(templateKey, {
+            first_name: customer.first_name || '',
+            last_name: customer.last_name || '',
+          });
+        } catch { /* template lookup failed — fall back to inline */ }
+
+        // Fall back to inline template function
+        if (!smsBody && auto.smsTemplate) {
+          smsBody = auto.smsTemplate(customer);
+        }
+
+        if (smsBody) {
+          await TwilioService.sendSMS(customer.phone, smsBody);
+          smsResult = { sent: true, to: customer.phone };
+        }
       } catch (err) {
         logger.error(`[email-auto] SMS failed for ${key}: ${err.message}`);
         smsResult = { error: err.message };
