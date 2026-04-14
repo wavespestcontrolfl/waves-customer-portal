@@ -31,6 +31,90 @@ function generateToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+/**
+ * Smart review send-time calculator.
+ * Instead of a flat 90-180 min delay, pick the moment the customer is most
+ * likely relaxed, on their phone, and has experienced the result of the service.
+ *
+ * @param {Date} completedAt - when the service was completed
+ * @param {string} serviceType - e.g. 'pest_control', 'lawn_care', 'mosquito'
+ * @returns {Date} optimal send timestamp
+ */
+function calculateReviewSendTime(completedAt, serviceType) {
+  const hour = completedAt.getHours();
+  const day = completedAt.getDay(); // 0=Sun, 6=Sat
+
+  // ±15 min jitter so messages don't all land at the same second
+  const jitter = () => Math.floor(Math.random() * 31) - 15;
+
+  function atHour(date, targetHour) {
+    const d = new Date(date);
+    const h = Math.floor(targetHour);
+    const m = Math.round((targetHour - h) * 60) + jitter();
+    d.setHours(h, Math.max(0, m), 0, 0);
+    return d;
+  }
+
+  function nextDayAtHour(date, targetHour) {
+    const d = new Date(date);
+    d.setDate(d.getDate() + 1);
+    return atHour(d, targetHour);
+  }
+
+  function addMins(date, mins) {
+    return new Date(date.getTime() + (mins + jitter()) * 60000);
+  }
+
+  const EVENING = 18.5;  // 6:30 PM — golden window
+  const MORNING = 10;    // 10:00 AM
+
+  const svc = (serviceType || '').toLowerCase();
+
+  // ── Service-type overrides ──────────────────────────────────
+
+  // Mosquito / WaveGuard: delay until evening when they're outside enjoying the yard
+  if (svc.includes('mosquito') || svc.includes('waveguard')) {
+    if (hour < 16) return atHour(completedAt, EVENING);
+    return nextDayAtHour(completedAt, MORNING);
+  }
+
+  // Lawn care / tree & shrub: let them see the results first
+  if (svc.includes('lawn') || svc.includes('tree') || svc.includes('shrub') || svc.includes('dethatch')) {
+    if (hour < 16) return atHour(completedAt, EVENING);   // same evening
+    return nextDayAtHour(completedAt, MORNING);            // next morning
+  }
+
+  // WDO / first-time inspections: high anxiety → high relief, capture it fast
+  if (svc.includes('wdo')) {
+    const send = addMins(completedAt, 90);
+    // Guard: never after 8 PM
+    if (send.getHours() >= 20) return nextDayAtHour(completedAt, MORNING);
+    return send;
+  }
+
+  // ── Day-of-week overrides ──────────────────────────────────
+
+  // Saturday service → Sunday 10:30 AM
+  if (day === 6) {
+    const d = new Date(completedAt);
+    d.setDate(d.getDate() + 1);
+    return atHour(d, 10.5);
+  }
+
+  // Friday afternoon → Saturday 10 AM
+  if (day === 5 && hour >= 14) {
+    return nextDayAtHour(completedAt, 10);
+  }
+
+  // ── Default time-of-day logic ──────────────────────────────
+
+  if (hour >= 7 && hour < 12) return addMins(completedAt, 120);  // morning: 2-hour delay
+  if (hour >= 12 && hour < 15) return addMins(completedAt, 90);  // early afternoon: 90 min
+  if (hour >= 15 && hour < 17) return atHour(completedAt, EVENING); // late afternoon: 6:30 PM
+  // After 5 PM or before 7 AM — next morning 10 AM
+  return nextDayAtHour(completedAt, MORNING);
+}
+
 // ══════════════════════════════════════════════════════════════
 const ReviewService = {
 
@@ -65,11 +149,14 @@ const ReviewService = {
       }
     }
 
-    // Randomize delay between 90-180 minutes for 'auto' to look organic
+    // Smart timing: pick the moment the customer is most likely to leave a review
     let scheduledFor = null;
     if (triggeredBy === 'auto') {
-      const mins = delayMinutes || (90 + Math.floor(Math.random() * 90)); // 90-180 min
-      scheduledFor = new Date(Date.now() + mins * 60000);
+      if (delayMinutes) {
+        scheduledFor = new Date(Date.now() + delayMinutes * 60000);
+      } else {
+        scheduledFor = calculateReviewSendTime(new Date(), serviceType);
+      }
     }
     // 'tech' trigger = immediate (delayMinutes = 0 or null)
 

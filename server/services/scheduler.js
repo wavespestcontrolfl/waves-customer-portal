@@ -677,9 +677,10 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10AM — Review follow-up reminders (48hr non-responders)
+  // DAILY 6:30PM — Review follow-up reminders (48hr non-responders)
+  // Evening golden window: people are done with dinner, scrolling phones
   // =========================================================================
-  cron.schedule('0 10 * * *', async () => {
+  cron.schedule('30 18 * * *', async () => {
     logger.info('Running: review follow-up reminders');
     try {
       const ReviewService = require('./review-request');
