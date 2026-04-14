@@ -214,6 +214,33 @@ const SERVICE_DETAILS = {
     ],
     footer: "All one-time pest treatments include a 30-day callback guarantee — if the problem returns within 30 days of treatment, we come back at no additional charge. Treatments are priced based on your home's size and the scope of the problem. Customers who transition to a recurring WaveGuard pest control plan after a one-time treatment receive preferred pricing and ongoing protection to prevent the problem from returning.",
   },
+  rodentOneTime: {
+    header: 'One-Time Rodent Services.',
+    subheader: 'Trapping, Exclusion & Sanitation — Permanent Solutions',
+    intro: "Solve your rodent problem the right way — with a structured approach that removes the animals, seals the entry points, and cleans up what they left behind. Each service can be performed individually or combined into a complete resolution package. After the initial work is done, ongoing bait station monitoring is available to keep your home protected long-term.",
+    groups: [
+      { groupTitle: 'Rodent Trapping', sections: [
+        { title: 'Inspection & Activity Assessment', text: "Every rodent trapping service begins with a detailed inspection of your home — interior and exterior — to identify the species involved, the scope of activity, entry points being used, and the areas of heaviest concentration. We examine attic spaces, garages, utility areas, behind appliances, and under sinks for droppings, rub marks, gnaw damage, nesting material, and other evidence of rodent presence. This assessment determines how many traps are needed, where they should be placed, and how many service visits the situation requires. You receive a full inspection report documenting findings and our recommended treatment plan before any work begins.", tags: ['Species Identification', 'Activity Mapping', 'Treatment Plan'] },
+        { title: 'Professional Trap Deployment', text: "Professional snap traps are deployed in strategic interior locations based on the activity patterns identified during inspection — along confirmed runways, near droppings concentrations, inside attic spaces, in garage and utility areas, behind appliances, and at entry points where rodents are entering the living space. Traps are placed in tamper-resistant stations or in areas inaccessible to children and pets. We use mechanical snap traps rather than interior rodenticide to eliminate the risk of rodents dying in wall voids, attic insulation, or other inaccessible areas and causing odor problems inside the home.", tags: ['Snap Traps', 'Strategic Placement', 'No Interior Poison'] },
+        { title: 'Check & Reset Visits', text: "After the initial trap deployment, we return on a regular schedule — typically every 3–5 days during active trapping — to check all traps, remove any catches, reset and reposition traps as needed, and monitor activity levels. Each visit is documented with a service report showing which traps fired, locations of catches, and remaining activity indicators. The trapping program continues until interior activity is confirmed eliminated — meaning multiple consecutive check visits with no new catches and no fresh signs of activity. Most residential situations are resolved within 1–3 weeks of active trapping depending on the severity of the infestation.", tags: ['3–5 Day Checks', 'Documented Catches', 'Confirmed Elimination'] },
+      ]},
+      { groupTitle: 'Rodent Exclusion', sections: [
+        { title: 'Entry Point Sealing', text: "Exclusion is the most critical step in permanent rodent control — without it, new rodents will simply re-enter through the same gaps and the problem returns. We seal every identified entry point using materials rodents cannot chew through: copper mesh packed into gaps before sealing with pest-block expanding foam, galvanized hardware cloth secured over larger openings like gable vents and soffit gaps, and sheet metal or steel plates for high-traffic entry zones. Common entry points in Southwest Florida homes include A/C line penetrations, plumbing roof vents, soffit-to-fascia junctions, garage door margins and weather stripping gaps, dryer vents, gable vents without proper screening, pipe and wire penetrations through exterior walls, and any gap larger than a quarter-inch.", tags: ['Copper Mesh', 'Hardware Cloth', 'Steel Plate', 'Quarter-Inch Standard'] },
+        { title: 'Roof Rat–Specific Exclusion', text: "Southwest Florida's primary rodent threat is the roof rat — agile climbers that access structures from above through rooflines, soffit junctions, and overhanging tree branches. Roof rat exclusion requires more than ground-level sealing. We inspect and seal at the roofline level: soffit-to-wall transitions, ridge vent openings, plumbing stacks, attic fan housings, chimney gaps, and any point where the roof structure meets a vertical wall. Overhanging branches that provide aerial access to the roof are identified and documented for trimming. Every sealed point is photographed before and after so you have a clear record of the work performed.", tags: ['Roofline Access', 'Soffit Junctions', 'Before & After Photos'] },
+        { title: 'Harborage Reduction Recommendations', text: "Sealing entry points is only part of the picture. The landscape and property conditions around your home directly influence how much rodent pressure your exclusion work will face over time. We evaluate and provide specific recommendations for reducing harborage and food sources — trimming vegetation at least three feet from the foundation and roofline, removing dense ground cover against walls, addressing fruit trees dropping unpicked fruit, relocating woodpiles and debris away from the structure, managing pet food storage, and adjusting bird feeder placement. These recommendations are included in your service report with clear, actionable steps.", tags: ['Vegetation Clearance', 'Food Source Control', 'Actionable Report'] },
+      ]},
+      { groupTitle: 'Rodent Sanitation', sections: [
+        { title: 'Droppings & Contamination Cleanup', text: "Rodent infestations leave behind droppings, urine, nesting material, and food debris that pose real health risks — including exposure to hantavirus, salmonella, leptospirosis, and other pathogens. After trapping and exclusion are complete, we provide professional sanitation of affected areas. This includes removal of droppings and nesting material from accessible surfaces in attics, garages, utility closets, and storage areas, followed by treatment with professional-grade antimicrobial and deodorizing agents to neutralize contamination and eliminate lingering odors. All waste material is bagged and removed from the property.", tags: ['Droppings Removal', 'Antimicrobial Treatment', 'Odor Neutralization'] },
+        { title: 'Attic Insulation Assessment', text: "In cases of prolonged or heavy rodent activity, attic insulation can become heavily contaminated with urine, droppings, and nesting material — compressed, soiled, and no longer performing its insulating function. We assess the condition of your attic insulation during the sanitation process and provide an honest evaluation of whether surface cleaning is sufficient or whether partial or full insulation removal and replacement is warranted. For significant contamination, we can coordinate professional insulation removal and blown-in replacement services to restore your attic to a clean, properly insulated state.", tags: ['Insulation Evaluation', 'Removal Coordination', 'Energy Efficiency'] },
+        { title: 'Pheromone & Scent Trail Elimination', text: "Rodents leave behind pheromone and urine scent trails that serve as chemical highways — guiding other rodents directly to the same entry points, runways, and nesting sites that the previous population used. Even after trapping and exclusion, these invisible scent markers can attract new rodents from the surrounding area to test your sealed entry points. Our sanitation process includes treatment of confirmed runways, entry point interiors, and high-activity zones with products designed to neutralize these scent trails, reducing the chemical signals that draw new rodents to your home and making your exclusion work more durable over time.", tags: ['Pheromone Removal', 'Runway Treatment', 'Future Prevention'] },
+      ]},
+      { groupTitle: 'Ongoing Maintenance — Keep It Solved', sections: [
+        { title: 'Monthly Bait Station Monitoring Program', text: "After the initial trapping, exclusion, and sanitation work is complete, the best way to ensure rodents don't return is ongoing bait station monitoring. Tamper-resistant exterior bait stations are installed at strategic points around your home's perimeter, and a licensed technician inspects every station monthly — checking bait consumption, replenishing as needed, inspecting exclusion work for any signs of compromise, and monitoring the exterior for new rodent activity. This recurring program catches changes in rodent pressure early, before a new population can re-establish, and keeps your exclusion work maintained and verified over time. Monthly monitoring is available as a standalone service or as an add-on to any WaveGuard pest control plan.", tags: ['Monthly Visits', 'Bait Replenishment', 'Exclusion Verification'] },
+        { title: 'Why Ongoing Monitoring Matters', text: "Rodent exclusion is highly effective, but no home is permanently sealed. Settlement shifts, weather exposure, new utility work, roof repairs, and even normal aging can create new gaps over time. Neighboring properties, construction activity, and seasonal rodent migration patterns also change the pressure your home faces. Monthly monitoring ensures that if any new vulnerability develops — or if rodent pressure in your area increases — it's detected and addressed immediately rather than discovered after rodents have already re-entered the structure. The cost of preventing re-entry is a fraction of the cost of repeating a full trapping and exclusion service.", tags: ['Prevent Re-Entry', 'Seasonal Pressure Shifts', 'Lower Cost Than Repeating'] },
+      ]},
+    ],
+    footer: "Rodent trapping, exclusion, and sanitation are each available as standalone one-time services or combined into a complete resolution package. Most active infestations benefit from all three — trapping removes the population, exclusion prevents re-entry, and sanitation eliminates the health hazards and scent trails left behind. After the initial work is done, our monthly bait station monitoring program provides ongoing protection.",
+  },
 };
 
 const PERKS = [
@@ -1095,6 +1122,32 @@ export default function EstimateViewPage() {
                 </div>
               ))}
               <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.pestOneTime.footer}</div>
+            </ServiceDropdown>
+          )}
+
+          {hasRodent && (
+            <ServiceDropdown title="🐀 One-Time Rodent Services">
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.rodentOneTime.header}</div>
+              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.rodentOneTime.subheader}</div>
+              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.rodentOneTime.intro}</div>
+              {SERVICE_DETAILS.rodentOneTime.groups.map((g, gi) => (
+                <div key={gi}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
+                  {g.sections.map((s, i) => (
+                    <div key={i} style={{ marginBottom: 14 }}>
+                      <DetailSection title={s.title} text={s.text} />
+                      {s.tags && (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
+                          {s.tags.map((tag, ti) => (
+                            <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+              <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.rodentOneTime.footer}</div>
             </ServiceDropdown>
           )}
         </div>
