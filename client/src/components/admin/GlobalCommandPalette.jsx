@@ -27,8 +27,7 @@ const ROUTE_CONTEXT_MAP = {
   '/admin/dashboard': 'dashboard',
   '/admin': 'dashboard',
   '/admin/customers': 'customers',
-  '/admin/health': 'customers',
-  '/admin/leads': 'leads',
+  '/admin/estimates': 'leads',
   '/admin/seo': 'seo',
   '/admin/wordpress': 'wordpress',
   '/admin/ppc': 'seo',
@@ -56,7 +55,7 @@ const CONTEXT_LABELS = {
   reviews: 'Reviews & Reputation',
   comms: 'Communications',
   tax: 'Tax Center',
-  leads: 'Leads Pipeline',
+  leads: 'Pipeline',
   email: 'Email',
 };
 

@@ -155,9 +155,9 @@ export default function App() {
             <Route path="inventory" element={<AdminInventoryPage />} />
             <Route path="wordpress" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading WordPress...</div>}><AdminWordPressSitesPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
-            <Route path="health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customer health...</div>}><CustomerHealthPage /></Suspense>} />
+            <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
             <Route path="timetracking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading time tracking...</div>}><TimeTrackingPage /></Suspense>} />
-            <Route path="leads" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading leads...</div>}><LeadsPage /></Suspense>} />
+            <Route path="leads" element={<Navigate to="/admin/estimates" replace />} />
             <Route path="fleet" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading fleet...</div>}><EquipmentMaintenancePage /></Suspense>} />
             <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
             <Route path="discounts" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading discounts...</div>}><DiscountsPage /></Suspense>} />

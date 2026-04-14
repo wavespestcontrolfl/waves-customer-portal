@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import Customer360Profile from '../../components/admin/Customer360Profile';
 import IntelligenceBar from '../../components/admin/IntelligenceBar';
+import { CustomerHealthSection } from './CustomerHealthTabs';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
@@ -834,7 +836,8 @@ export default function CustomersPage() {
   const [pipelineData, setPipelineData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [view, setView] = useState('directory'); // 'directory' | 'pipeline'
+  const [searchParams] = useSearchParams();
+  const [view, setView] = useState(searchParams.get('view') || 'directory');
   const [search, setSearch] = useState('');
   const [filterStage, setFilterStage] = useState('all');
   const [filterTier, setFilterTier] = useState('all');
@@ -1058,6 +1061,7 @@ export default function CustomersPage() {
               { key: 'directory', label: '\ud83d\udccb Directory' },
               { key: 'map', label: '\ud83d\uddfa Map' },
               { key: 'pipeline', label: '\ud83d\udd00 Pipeline' },
+              { key: 'health', label: '\u2764\ufe0f Health' },
               { key: 'intelligence', label: '\ud83e\udd16 AI Advisor' },
             ].map(v => (
               <button key={v.key} onClick={() => setView(v.key)} style={{
@@ -1353,6 +1357,9 @@ export default function CustomersPage() {
           })}
         </div>
       )}
+
+      {/* ====================== HEALTH VIEW ====================== */}
+      {view === 'health' && <CustomerHealthSection />}
 
       {/* ====================== INTELLIGENCE TAB ====================== */}
       {view === 'intelligence' && <CustomerIntelligenceTab />}

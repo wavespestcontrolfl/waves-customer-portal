@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext, Component } from 'react';
 import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
+import { LeadsSection } from './LeadsTabs';
 
 class EstimateErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -2230,31 +2231,34 @@ function PricingLogicTab() {
 }
 
 export default function EstimatePage() {
-  const [activeTab, setActiveTab] = useState('pipeline');
+  const [activeTab, setActiveTab] = useState('leads');
+
+  const tabs = [
+    { key: 'leads', label: '📈 Leads' },
+    { key: 'estimates', label: '📋 Estimates' },
+    { key: 'new', label: '⚡ Create Estimate' },
+    { key: 'pricing', label: '💰 Pricing Logic' },
+  ];
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div style={{ fontSize: 28, fontWeight: 700, color: C.white }}>Pipeline</div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => setActiveTab('pricing')} style={{
-            padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            fontSize: 13, fontWeight: 600,
-            background: activeTab === 'pricing' ? '#f59e0b' : C.card,
-            color: activeTab === 'pricing' ? C.dark : C.gray,
-            transition: 'all 0.15s',
-          }}>💰 Pricing Logic</button>
-          <button onClick={() => setActiveTab(activeTab === 'new' ? 'pipeline' : 'new')} style={{
-            padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            fontSize: 13, fontWeight: 600,
-            background: activeTab === 'new' ? C.card : C.teal,
-            color: activeTab === 'new' ? C.gray : C.dark,
-            transition: 'all 0.15s',
-          }}>{activeTab === 'new' ? '← Back to Pipeline' : '⚡ Create Estimate'}</button>
+          {tabs.map(t => (
+            <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
+              padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              fontSize: 13, fontWeight: 600,
+              background: activeTab === t.key ? (t.key === 'pricing' ? '#f59e0b' : C.teal) : C.card,
+              color: activeTab === t.key ? (t.key === 'pricing' ? C.dark : '#fff') : C.gray,
+              transition: 'all 0.15s',
+            }}>{t.label}</button>
+          ))}
         </div>
       </div>
 
-      {activeTab === 'pipeline' && <EstimatePipelineView />}
+      {activeTab === 'leads' && <LeadsSection />}
+      {activeTab === 'estimates' && <EstimatePipelineView />}
       {activeTab === 'new' && <EstimateToolView />}
       {activeTab === 'pricing' && <PricingLogicTab />}
     </div>

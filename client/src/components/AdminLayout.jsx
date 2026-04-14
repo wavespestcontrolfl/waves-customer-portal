@@ -9,8 +9,6 @@ const NAV_SECTIONS = [
   { section: 'Operations', items: [
     { path: '/admin/dashboard', icon: '📊', label: 'Dashboard' },
     { path: '/admin/customers', icon: '👥', label: 'Customers' },
-    { path: '/admin/health', icon: '❤️', label: 'Customer Health' },
-    { path: '/admin/leads', icon: '📈', label: 'Leads' },
     { path: '/admin/estimates', icon: '📋', label: 'Pipeline' },
     { path: '/admin/schedule', icon: '📅', label: 'Schedule' },
     { path: '/admin/timetracking', icon: '⏱️', label: 'Time Tracking' },
