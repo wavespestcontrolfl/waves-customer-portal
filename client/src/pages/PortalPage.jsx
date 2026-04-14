@@ -7637,12 +7637,12 @@ export default function PortalPage() {
           textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'🤖'} Chat</button>
-        <button onClick={() => { window.open('mailto:contact@wavespestcontrol.com', '_blank'); }} style={{
+        <a href="mailto:contact@wavespestcontrol.com" onClick={(e) => { e.preventDefault(); window.location.href = 'mailto:contact@wavespestcontrol.com'; }} style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
           background: B.red, color: '#fff', fontSize: 12,
           textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>{'✉️'} Email</button>
+        }}>{'✉️'} Email</a>
       </div>
 
       {/* AI Chat Widget */}

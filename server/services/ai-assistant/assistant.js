@@ -70,27 +70,38 @@ class WavesAssistant {
    */
   async processMessage({ message, channel, channelIdentifier, customerId, customerPhone }) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+      logger.warn('[ai-assistant] ANTHROPIC_API_KEY not configured');
       return { reply: "Thanks for reaching out! One of our team members will get back to you shortly. — Waves Pest Control", escalated: false };
     }
 
     // 1. Find or create conversation (respecting 30-min timeout)
-    const conversation = await this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone);
+    let conversation;
+    try {
+      conversation = await this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone);
+    } catch (convErr) {
+      logger.error(`[ai-assistant] getOrCreateConversation failed: ${convErr.message}`, { stack: convErr.stack });
+      return { reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false };
+    }
 
     // 2. Check for escalation triggers in the raw message
     const needsEscalation = this.checkEscalationTriggers(message);
 
     // 3. Save the user message
-    await db('ai_messages').insert({
-      conversation_id: conversation.id,
-      role: 'user',
-      content: message,
-      channel,
-    });
-    await db('ai_conversations').where('id', conversation.id).update({
-      message_count: conversation.message_count + 1,
-      last_activity_at: new Date(),
-      timeout_at: new Date(Date.now() + CONVERSATION_TIMEOUT_MS),
-    });
+    try {
+      await db('ai_messages').insert({
+        conversation_id: conversation.id,
+        role: 'user',
+        content: message,
+        channel,
+      });
+      await db('ai_conversations').where('id', conversation.id).update({
+        message_count: (conversation.message_count || 0) + 1,
+        last_activity_at: new Date(),
+        timeout_at: new Date(Date.now() + CONVERSATION_TIMEOUT_MS),
+      });
+    } catch (msgErr) {
+      logger.error(`[ai-assistant] Failed to save user message: ${msgErr.message}`);
+    }
 
     // 4. If escalation trigger detected, escalate immediately
     if (needsEscalation) {
@@ -100,7 +111,14 @@ class WavesAssistant {
     // 5. Build conversation history for Claude
     const history = await this.buildHistory(conversation.id);
 
-    // 6. Call Claude with tools
+    // 6. Build context string from snapshot
+    let contextStr = '';
+    if (conversation.context_snapshot) {
+      const snap = conversation.context_snapshot;
+      contextStr = typeof snap === 'object' ? (snap.summary || JSON.stringify(snap)) : String(snap);
+    }
+
+    // 7. Call Claude with tools
     try {
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -109,12 +127,14 @@ class WavesAssistant {
       let escalated = false;
       let escalationId = null;
 
+      const systemPrompt = SYSTEM_PROMPT + (contextStr ? `\n\nCUSTOMER CONTEXT:\n${contextStr}` : '');
+
       // Tool-use loop — Claude may call multiple tools before responding
       for (let turn = 0; turn < 5; turn++) {
         const response = await anthropic.messages.create({
           model: MODEL,
           max_tokens: 800,
-          system: SYSTEM_PROMPT + (conversation.context_snapshot ? `\n\nCUSTOMER CONTEXT:\n${typeof conversation.context_snapshot === 'object' ? (conversation.context_snapshot.summary || JSON.stringify(conversation.context_snapshot)) : conversation.context_snapshot}` : ''),
+          system: systemPrompt,
           tools: TOOLS,
           messages,
         });
@@ -148,7 +168,7 @@ class WavesAssistant {
             content: toolUse.name,
             tool_calls: JSON.stringify(toolUse.input),
             tool_results: JSON.stringify(result),
-          });
+          }).catch(e => logger.error(`[ai-assistant] Failed to log tool use: ${e.message}`));
         }
 
         // Continue the loop with tool results
@@ -166,13 +186,13 @@ class WavesAssistant {
         content: finalReply,
         channel,
         sent_to_customer: true,
-      });
+      }).catch(e => logger.error(`[ai-assistant] Failed to save reply: ${e.message}`));
 
       return { reply: finalReply, conversationId: conversation.id, escalated, escalationId };
 
     } catch (err) {
-      logger.error(`AI Assistant error: ${err.message}`);
-      return { reply: "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control", escalated: false };
+      logger.error(`[ai-assistant] Claude API error: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
+      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false };
     }
   }
 
@@ -204,9 +224,11 @@ class WavesAssistant {
         contextSnapshot = ctx.summary || '';
         if (!customerId && ctx.customer?.id) customerId = ctx.customer.id;
       }
-    } catch { /* context unavailable */ }
+    } catch (ctxErr) {
+      logger.warn(`[ai-assistant] Context aggregation failed (non-blocking): ${ctxErr.message}`);
+    }
 
-    // Create new conversation — context_snapshot is jsonb so wrap string in valid JSON
+    // Create new conversation — pass plain object for jsonb column (Knex serializes it)
     const [conv] = await db('ai_conversations').insert({
       customer_id: customerId || null,
       channel,
@@ -215,7 +237,7 @@ class WavesAssistant {
       last_activity_at: now,
       timeout_at: new Date(now.getTime() + CONVERSATION_TIMEOUT_MS),
       message_count: 0,
-      context_snapshot: contextSnapshot ? JSON.stringify({ summary: contextSnapshot }) : null,
+      context_snapshot: contextSnapshot ? JSON.stringify(contextSnapshot) : null,
     }).returning('*');
 
     return conv;
