@@ -109,13 +109,24 @@ async function syncJobsFromSchedule(date) {
       updated_at: new Date(),
     };
 
-    // Upsert by sheet_row_id
-    const existing = await knex('dispatch_jobs').where('sheet_row_id', svc.svc_id).first();
-    if (existing) {
-      await knex('dispatch_jobs').where('id', existing.id).update(jobData);
-    } else {
-      await knex('dispatch_jobs').insert(jobData);
-    }
+    // Upsert by sheet_row_id (atomic ON CONFLICT to avoid race conditions)
+    await knex.raw(`
+      INSERT INTO dispatch_jobs (sheet_row_id, customer_name, address, city, zip, lat, lng, service_type, job_category, waveguard_tier, assigned_tech_id, scheduled_date, scheduled_time, estimated_duration, estimated_revenue, route_position, status, notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (sheet_row_id) DO UPDATE SET
+        customer_name = EXCLUDED.customer_name, address = EXCLUDED.address, city = EXCLUDED.city,
+        zip = EXCLUDED.zip, lat = EXCLUDED.lat, lng = EXCLUDED.lng, service_type = EXCLUDED.service_type,
+        job_category = EXCLUDED.job_category, waveguard_tier = EXCLUDED.waveguard_tier,
+        assigned_tech_id = EXCLUDED.assigned_tech_id, scheduled_date = EXCLUDED.scheduled_date,
+        scheduled_time = EXCLUDED.scheduled_time, estimated_duration = EXCLUDED.estimated_duration,
+        estimated_revenue = EXCLUDED.estimated_revenue, route_position = EXCLUDED.route_position,
+        status = EXCLUDED.status, notes = EXCLUDED.notes, updated_at = EXCLUDED.updated_at
+    `, [
+      svc.svc_id, jobData.customer_name, jobData.address, jobData.city, jobData.zip,
+      jobData.lat, jobData.lng, jobData.service_type, jobData.job_category, jobData.waveguard_tier,
+      jobData.assigned_tech_id, jobData.scheduled_date, jobData.scheduled_time, jobData.estimated_duration,
+      jobData.estimated_revenue, jobData.route_position, jobData.status, jobData.notes, jobData.updated_at,
+    ]);
     synced++;
   }
 

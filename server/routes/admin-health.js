@@ -83,7 +83,7 @@ async function ensureHealthTables() {
     if (!(await db.schema.hasColumn('customer_health_scores', 'overall_score'))) {
       await db.schema.alterTable('customer_health_scores', t => { t.integer('overall_score').defaultTo(50); });
     }
-  } catch (e) { console.error('[health] Column check error:', e.message); }
+  } catch (e) { logger.error('[health] Column check error:', e.message); }
 }
 
 let _healthTablesChecked = false;
@@ -181,7 +181,7 @@ router.get('/dashboard', async (req, res) => {
     try {
       atRiskCustomers = await db('customer_health_scores')
         .join('customers', 'customer_health_scores.customer_id', 'customers.id')
-        .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customer_health_scores.overall_score')
+        .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customer_health_scores.overall_score', 'customer_health_scores.score_grade', 'customer_health_scores.churn_risk', 'customer_health_scores.days_until_predicted_churn')
         .orderBy('customer_health_scores.overall_score', 'asc')
         .limit(10);
     } catch { /* non-critical */ }

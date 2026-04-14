@@ -423,12 +423,15 @@ router.get('/campaigns', async (req, res, next) => {
 
     for (const c of campaigns) {
       if (c.lead_source_id && c.start_date) {
-        const q = db('leads').where('lead_source_id', c.lead_source_id);
-        if (c.start_date) q.where('first_contact_at', '>=', c.start_date);
+        const q = db('leads').where('lead_source_id', c.lead_source_id)
+          .where('first_contact_at', '>=', c.start_date);
         if (c.end_date) q.where('first_contact_at', '<=', c.end_date);
-        const leads = await q;
-        c.actual_leads = leads.length;
-        c.actual_conversions = leads.filter(l => l.status === 'won').length;
+        const counts = await q.clone().select(
+          db.raw('COUNT(*) as total'),
+          db.raw("SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) as won"),
+        ).first();
+        c.actual_leads = parseInt(counts?.total || 0);
+        c.actual_conversions = parseInt(counts?.won || 0);
       } else {
         c.actual_leads = 0;
         c.actual_conversions = 0;
@@ -850,7 +853,7 @@ router.post('/agent/test', async (req, res, next) => {
         leadId: lead.id,
         customerId: lead.customer_id,
         phone: lead.phone,
-        name: `${lead.first_name} ${lead.last_name}`,
+        name: `${lead.first_name || ''} ${lead.last_name || ''}`.trim(),
         message: lead.service_interest || '',
         address: lead.address || '',
         city: lead.city || customer?.city || '',
@@ -863,7 +866,7 @@ router.post('/agent/test', async (req, res, next) => {
       leadId: lead.id,
       customerId: lead.customer_id,
       phone: lead.phone,
-      name: `${lead.first_name} ${lead.last_name}`,
+      name: `${lead.first_name || ''} ${lead.last_name || ''}`.trim(),
       message: lead.service_interest || '',
       address: lead.address || '',
       city: lead.city || customer?.city || '',

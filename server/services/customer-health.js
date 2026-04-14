@@ -649,9 +649,9 @@ async function scoreCustomer(customerId) {
         if (!(await db.schema.hasColumn('customer_health_scores', 'overall_score'))) {
           await db.schema.alterTable('customer_health_scores', t => { t.integer('overall_score').defaultTo(50); });
         }
-        console.log('[health] Auto-added missing sub-score columns');
+        logger.info('[health] Auto-added missing sub-score columns');
       }
-    } catch (e) { console.error('[health] Column check error:', e.message); }
+    } catch (e) { logger.error('[health] Column check error:', e.message); }
 
     const existing = await db('customer_health_scores').where('customer_id', customerId).first();
     try {
@@ -662,10 +662,10 @@ async function scoreCustomer(customerId) {
       }
     } catch (e) {
       // Fallback: write only columns that exist
-      console.error('[health] Score write error, trying minimal:', e.message);
+      logger.error('[health] Score write error, trying minimal:', e.message);
       const minimal = { customer_id: customerId, overall_score: overall, updated_at: now };
-      if (existing) await db('customer_health_scores').where('customer_id', customerId).update(minimal).catch(() => {});
-      else await db('customer_health_scores').insert({ ...minimal, created_at: now }).catch(() => {});
+      if (existing) await db('customer_health_scores').where('customer_id', customerId).update(minimal).catch(err => logger.error(`[health] Minimal score write failed: ${err.message}`));
+      else await db('customer_health_scores').insert({ ...minimal, created_at: now }).catch(err => logger.error(`[health] Minimal score insert failed: ${err.message}`));
     }
 
     // Insert history snapshot

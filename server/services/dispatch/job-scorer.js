@@ -12,12 +12,12 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // Haversine — returns estimated drive minutes
 function driveMins(lat1, lng1, lat2, lng2) {
-  if (!lat1 || !lat2) return 12;
+  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return 12;
   const R = 3958.8;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
-  return Math.round(3958.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 2.5);
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 2.5);
 }
 
 function ruleBasedScore(job, driveMin = 12) {

@@ -222,6 +222,7 @@ app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
 app.use('/api/admin/knowledge-bridge', require('./routes/admin-knowledge-bridge'));
+app.use('/api/admin/assessment-analytics', require('./routes/admin-assessment-analytics'));
 app.use('/api/admin/equipment', require('./routes/admin-equipment'));
 app.use('/api/admin/wordpress', require('./routes/admin-wordpress-v2'));
 app.use('/api/admin/analytics', require('./routes/admin-analytics'));
@@ -445,6 +446,17 @@ const server = app.listen(PORT, () => {
       const m = process.memoryUsage();
       logger.info(`[mem] RSS: ${Math.round(m.rss/1024/1024)}MB | Heap: ${Math.round(m.heapUsed/1024/1024)}/${Math.round(m.heapTotal/1024/1024)}MB`);
     }, 5 * 60 * 1000);
+
+    // Weekly: recompute all assessment analytics (product efficacy, protocol performance, benchmarks, contradictions)
+    setInterval(async () => {
+      try {
+        const analytics = require('./services/assessment-analytics');
+        const results = await analytics.runAll();
+        logger.info(`[cron] Weekly assessment analytics complete: ${JSON.stringify(results)}`);
+      } catch (err) {
+        logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);
+      }
+    }, 7 * 24 * 60 * 60 * 1000); // 7 days
   })();
 });
 

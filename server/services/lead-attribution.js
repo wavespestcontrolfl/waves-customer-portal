@@ -64,7 +64,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
     if (type === 'sms' && messageSid) updates.twilio_message_sid = messageSid;
     if (callDuration) updates.call_duration_seconds = callDuration;
     if (recordingUrl) updates.call_recording_url = recordingUrl;
-    updates.follow_up_count = (existingLead.follow_up_count || 0) + 1;
+    updates.follow_up_count = (parseInt(existingLead.follow_up_count) || 0) + 1;
     updates.updated_at = new Date();
 
     if (Object.keys(updates).length > 1) {

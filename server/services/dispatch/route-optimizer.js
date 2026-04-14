@@ -58,7 +58,7 @@ async function optimizeTechRoute(tech, date, mode, zone) {
   for (const job of jobs) {
     const s = await scoreJob(job, prev?.lat, prev?.lng);
     scored.push(s);
-    prev = job;
+    prev = s;
   }
 
   const ordered = tspLite(scored);
@@ -91,11 +91,11 @@ async function optimizeTechRoute(tech, date, mode, zone) {
     revenue_per_hour: metrics.revenuePerHour,
     optimized_by: 'ai',
     optimization_notes: notes,
-  }).catch(() => {});
+  }).catch(err => logger.error(`[dispatch:route-optimizer] Failed to save route session: ${err.message}`));
 
   // Update route positions
   for (let i = 0; i < ordered.length; i++) {
-    await getDb()('dispatch_jobs').where('id', ordered[i].id).update({ route_position: i + 1 }).catch(() => {});
+    await getDb()('dispatch_jobs').where('id', ordered[i].id).update({ route_position: i + 1 }).catch(err => logger.error(`[dispatch:route-optimizer] Failed to update route position for job ${ordered[i].id}: ${err.message}`));
   }
 
   return { tech, jobs: ordered, metrics, notes };

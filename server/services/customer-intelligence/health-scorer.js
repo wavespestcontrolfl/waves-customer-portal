@@ -155,7 +155,7 @@ class HealthScorer {
       if (customer.waveguard_tier === 'Bronze' && svcCount >= 2) {
         opps.push({ service: 'tier_upgrade_silver', reason: `Has ${svcCount} services on Bronze — Silver saves 10%`, confidence: 0.8, monthly_value: parseFloat(customer.monthly_rate || 0) * 0.1, trigger: 'tier_upgrade' });
       } else if (customer.waveguard_tier === 'Silver' && svcCount >= 3) {
-        opps.push({ service: 'tier_upgrade_gold', reason: `Has ${svcCount} services on Silver — Gold saves 15%`, confidence: 0.8, monthly_value: parseFloat(customer.monthly_rate || 0) * 0.05, trigger: 'tier_upgrade' });
+        opps.push({ service: 'tier_upgrade_gold', reason: `Has ${svcCount} services on Silver — Gold saves 15%`, confidence: 0.8, monthly_value: parseFloat(customer.monthly_rate || 0) * 0.15, trigger: 'tier_upgrade' });
       }
 
       // Save to upsell_opportunities table

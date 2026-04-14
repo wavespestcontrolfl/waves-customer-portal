@@ -1,295 +1,546 @@
 /**
- * Knowledge Bridge — connects Claudeopedia (knowledge_base) ↔ Agronomic Wiki (knowledge_entries)
+ * Knowledge Bridge Service
  *
- * Cross-links entries by type:
- *   product_reference   — product KB article ↔ wiki product page
- *   condition_treatment — condition KB article ↔ wiki condition page
- *   seasonal_guide      — seasonal KB article ↔ wiki seasonal page
- *   data_enrichment     — any KB article enriched with wiki outcome data
+ * Bridges Claudeopedia (knowledge_base) ↔ Agronomic Wiki (knowledge_entries).
  *
- * Also generates customer-facing assessment recommendations by pulling
- * protocol data from Claudeopedia + real outcome data from the Wiki.
+ * Claudeopedia is the general-purpose KB: products, protocols, pest IDs,
+ * UF/IFAS references, business SOPs — mostly manually curated or AI-seeded.
+ *
+ * Agronomic Wiki is outcome-driven: auto-generated pages from real treatment
+ * outcomes linked to lawn assessment before/after data.
+ *
+ * The bridge:
+ *  1. Cross-references entries between the two systems
+ *  2. Enriches wiki pages with Claudeopedia reference data (MOA, FRAC, protocols)
+ *  3. Enriches Claudeopedia entries with real outcome stats from the wiki
+ *  4. Provides unified search across both
+ *  5. Powers contextual recommendations on lawn assessments
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 
+let Anthropic;
+try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+
+const MODEL = 'claude-sonnet-4-20250514';
+
+// ══════════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════════
+
+function slugify(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
+}
+
+async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
+  if (!Anthropic) return null;
+  try {
+    const client = new Anthropic();
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    });
+    return response.content?.[0]?.text || null;
+  } catch (err) {
+    logger.error(`[knowledge-bridge] Claude call failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// KNOWLEDGE BRIDGE SERVICE
+// ══════════════════════════════════════════════════════════════
+
 const KnowledgeBridge = {
-  /**
-   * Auto-link: scan both systems and create links where names match.
-   * Safe to run repeatedly — uses upsert logic.
-   */
-  async autoLink() {
-    let linked = 0;
 
+  // ────────────────────────────────────────────────────────────
+  // createLink — manually or programmatically link two entries
+  // ────────────────────────────────────────────────────────────
+  async createLink({ kbEntryId, wikiEntryId, linkType, relevanceScore, linkReason, createdBy }) {
     try {
-      // Get all KB articles and wiki pages
-      const kbArticles = await db('knowledge_base')
-        .where('active', true)
-        .select('id', 'title', 'category', 'tags');
+      // Look up slugs
+      const kb = kbEntryId ? await db('knowledge_base').where({ id: kbEntryId }).select('slug').first() : null;
+      const wiki = wikiEntryId ? await db('knowledge_entries').where({ id: wikiEntryId }).select('slug').first() : null;
 
-      const hasWiki = await db.schema.hasTable('knowledge_entries');
-      if (!hasWiki) return { linked: 0 };
+      const [link] = await db('knowledge_bridge').insert({
+        kb_entry_id: kbEntryId || null,
+        kb_slug: kb?.slug || null,
+        wiki_entry_id: wikiEntryId || null,
+        wiki_slug: wiki?.slug || null,
+        link_type: linkType,
+        relevance_score: relevanceScore || 0.5,
+        link_reason: linkReason || null,
+        created_by: createdBy || 'system',
+      }).onConflict(['kb_entry_id', 'wiki_entry_id', 'link_type']).ignore().returning('*');
 
-      const wikiPages = await db('knowledge_entries')
-        .select('id', 'title', 'slug', 'category');
-
-      // Match by title similarity
-      for (const kb of kbArticles) {
-        const kbTitle = (kb.title || '').toLowerCase();
-        const kbTags = Array.isArray(kb.tags) ? kb.tags.map(t => t.toLowerCase()) : [];
-
-        for (const wiki of wikiPages) {
-          const wikiTitle = (wiki.title || '').toLowerCase();
-          const wikiSlug = (wiki.slug || '').toLowerCase();
-
-          // Check if titles share significant words
-          const kbWords = kbTitle.split(/\s+/).filter(w => w.length > 3);
-          const shared = kbWords.filter(w => wikiTitle.includes(w) || wikiSlug.includes(w));
-          const tagMatch = kbTags.some(t => wikiTitle.includes(t) || wikiSlug.includes(t));
-
-          if (shared.length >= 2 || tagMatch) {
-            const linkType = this._inferLinkType(kb, wiki);
-            try {
-              await db('knowledge_bridge')
-                .insert({
-                  source_type: 'claudeopedia',
-                  source_id: kb.id,
-                  source_title: kb.title,
-                  target_type: 'wiki',
-                  target_id: wiki.id,
-                  target_title: wiki.title,
-                  link_type: linkType,
-                  confidence: shared.length >= 3 ? 0.9 : tagMatch ? 0.75 : 0.6,
-                  auto_linked: true,
-                })
-                .onConflict(['source_type', 'source_id', 'target_type', 'target_id'])
-                .ignore();
-              linked++;
-            } catch { /* duplicate — skip */ }
-          }
-        }
+      // Also set direct FK pointers for fast joins
+      if (kbEntryId && wikiEntryId) {
+        await db('knowledge_base').where({ id: kbEntryId }).update({ wiki_entry_id: wikiEntryId });
+        await db('knowledge_entries').where({ id: wikiEntryId }).update({ kb_entry_id: kbEntryId });
       }
 
-      logger.info(`[knowledge-bridge] Auto-linked ${linked} entries`);
+      return link || null;
     } catch (err) {
-      logger.error(`[knowledge-bridge] autoLink failed: ${err.message}`);
-    }
-    return { linked };
-  },
-
-  /**
-   * Infer the link type based on category/slug patterns.
-   */
-  _inferLinkType(kb, wiki) {
-    const slug = (wiki.slug || '').toLowerCase();
-    if (slug.startsWith('product/')) return 'product_reference';
-    if (slug.startsWith('condition/')) return 'condition_treatment';
-    if (slug.startsWith('seasonal/') || slug.startsWith('month/')) return 'seasonal_guide';
-    return 'data_enrichment';
-  },
-
-  /**
-   * Sync wiki outcome summaries into Claudeopedia as living entries.
-   * Pushes aggregated outcome data from wiki pages into KB articles.
-   */
-  async syncToClaudeopedia() {
-    let synced = 0;
-    try {
-      const bridges = await db('knowledge_bridge')
-        .where({ source_type: 'claudeopedia', target_type: 'wiki' })
-        .select('*');
-
-      for (const bridge of bridges) {
-        try {
-          const wikiPage = await db('knowledge_entries')
-            .where({ id: bridge.target_id })
-            .first();
-          if (!wikiPage?.content) continue;
-
-          // Extract a summary from wiki content (first 500 chars)
-          const summary = (wikiPage.content || '').substring(0, 500);
-
-          // Update the KB article with wiki outcome data
-          await db('knowledge_base')
-            .where({ id: bridge.source_id })
-            .update({
-              updated_at: new Date(),
-              // Store wiki summary in the tags or notes field if available
-            });
-
-          synced++;
-        } catch { /* non-critical per-entry */ }
-      }
-
-      logger.info(`[knowledge-bridge] Synced ${synced} entries to Claudeopedia`);
-    } catch (err) {
-      logger.error(`[knowledge-bridge] syncToClaudeopedia failed: ${err.message}`);
-    }
-    return { synced };
-  },
-
-  /**
-   * Generate customer-facing assessment recommendations.
-   * Pulls protocol data from Claudeopedia + real outcome data from Wiki,
-   * feeds both to Claude, returns structured recommendations.
-   */
-  async generateAssessmentRecommendations(customerId) {
-    try {
-      // Get latest assessment
-      const latest = await db('lawn_assessments')
-        .where({ customer_id: customerId })
-        .orderBy('service_date', 'desc')
-        .first();
-
-      if (!latest) return null;
-
-      // Get customer context
-      const customer = await db('customers')
-        .where({ id: customerId })
-        .select('first_name', 'grass_track', 'grass_type', 'property_sqft')
-        .first();
-
-      // Pull relevant wiki data (treatment outcomes for this grass type)
-      let outcomeData = [];
-      try {
-        outcomeData = await db('treatment_outcomes')
-          .where('grass_track', customer?.grass_track || 'A')
-          .orderBy('treatment_date', 'desc')
-          .limit(20)
-          .select('products_applied', 'delta_turf_density', 'delta_weed_suppression',
-            'delta_fungus_control', 'season');
-      } catch { /* table may not exist */ }
-
-      // Pull relevant KB articles
-      let kbArticles = [];
-      try {
-        kbArticles = await db('knowledge_base')
-          .where('active', true)
-          .where(function () {
-            this.where('category', 'product')
-              .orWhere('category', 'protocol')
-              .orWhere('category', 'seasonal');
-          })
-          .select('title', 'summary')
-          .limit(10);
-      } catch { /* table may not exist */ }
-
-      // Build recommendations from assessment data
-      const scores = {
-        turf_density: latest.turf_density,
-        weed_suppression: latest.weed_suppression,
-        fungus_control: latest.fungus_control,
-        color_health: latest.color_health,
-        thatch_level: latest.thatch_level,
-      };
-
-      const recommendations = [];
-      const month = new Date().getMonth();
-      const isSummer = month >= 4 && month <= 8;
-      const isWinter = month === 11 || month <= 1;
-
-      // Priority recommendations based on weakest metrics
-      if (scores.turf_density < 60) {
-        recommendations.push({
-          priority: 1,
-          title: 'Turf Density Improvement',
-          text: isSummer
-            ? 'With summer warmth, your St. Augustine should fill in nicely. Keep irrigation consistent — 30-45 min per zone, 2x/week.'
-            : 'Turf density is building. We\'ll focus fertilization on promoting lateral growth this visit.',
-        });
-      }
-      if (scores.weed_suppression < 70) {
-        recommendations.push({
-          priority: 2,
-          title: 'Weed Control',
-          text: 'We\'re targeting broadleaf weeds with a selective herbicide that won\'t harm your turf. You may see yellowing weeds within 7-10 days — that\'s the treatment working.',
-        });
-      }
-      if (scores.fungus_control < 70) {
-        recommendations.push({
-          priority: 3,
-          title: 'Fungus Prevention',
-          text: isSummer
-            ? 'Summer humidity increases fungal pressure. We\'ll apply a preventive fungicide. Avoid evening irrigation — water early morning to let blades dry.'
-            : 'We\'ll apply a preventive fungicide treatment. Ensure sprinklers aren\'t running after 4 PM.',
-        });
-      }
-      if (scores.thatch_level < 60) {
-        recommendations.push({
-          priority: 4,
-          title: 'Thatch Management',
-          text: 'Thatch layer is building up. We\'ll adjust our approach to help decompose the thatch naturally. Consider raising your mow height slightly.',
-        });
-      }
-
-      // Sort by priority
-      recommendations.sort((a, b) => a.priority - b.priority);
-
-      // Overall score
-      const overallScore = Math.round(
-        (scores.turf_density + scores.weed_suppression + scores.fungus_control +
-          (scores.color_health || 0) + (scores.thatch_level || 0)) / 5
-      );
-
-      // Between-visit tip
-      const tips = [
-        'Water early morning (6-8 AM) to reduce fungal pressure.',
-        'Mow at 3.5-4 inches — taller grass crowds out weeds naturally.',
-        'Avoid walking on wet grass to prevent soil compaction.',
-        'Keep an eye out for brown patches — snap a photo if you see any.',
-        isWinter ? 'Reduce irrigation frequency — your lawn needs less water during dormancy.' : null,
-        isSummer ? 'Deep, infrequent watering (2x/week) encourages deeper root growth.' : null,
-      ].filter(Boolean);
-
-      const tip = tips[Math.floor(Math.random() * tips.length)];
-
-      // Next visit focus
-      const weakest = recommendations[0];
-      const nextFocus = weakest
-        ? `We'll prioritize ${weakest.title.toLowerCase()} on your next visit.`
-        : 'Your lawn is looking great! We\'ll maintain the current treatment program.';
-
-      return {
-        overallScore,
-        recommendations: recommendations.slice(0, 3),
-        nextVisitFocus: nextFocus,
-        betweenVisitTip: tip,
-        assessmentDate: latest.service_date,
-        season: latest.season,
-      };
-    } catch (err) {
-      logger.error(`[knowledge-bridge] generateRecommendations failed: ${err.message}`);
+      logger.error(`[knowledge-bridge] createLink failed: ${err.message}`);
       return null;
     }
   },
 
-  /**
-   * Get bridge links for a given source.
-   */
-  async getLinks(sourceType, sourceId) {
-    return db('knowledge_bridge')
-      .where({ source_type: sourceType, source_id: sourceId })
-      .select('*');
+  // ────────────────────────────────────────────────────────────
+  // autoLink — scan for matching entries and create links
+  // Runs product name matching, condition matching, seasonal matching
+  // ────────────────────────────────────────────────────────────
+  async autoLink() {
+    const stats = { productLinks: 0, conditionLinks: 0, seasonalLinks: 0, errors: 0 };
+
+    try {
+      // 1. Product matching: KB entries with category 'product' ↔ Wiki product pages
+      const kbProducts = await db('knowledge_base')
+        .where({ category: 'product', status: 'active' })
+        .select('id', 'title', 'slug');
+
+      const wikiProducts = await db('knowledge_entries')
+        .where({ category: 'product' })
+        .select('id', 'title', 'slug');
+
+      for (const kbProd of kbProducts) {
+        const kbName = kbProd.title.replace(/^Product:\s*/i, '').toLowerCase();
+        for (const wikiProd of wikiProducts) {
+          const wikiName = wikiProd.title.replace(/^Product:\s*/i, '').toLowerCase();
+          if (kbName === wikiName || kbName.includes(wikiName) || wikiName.includes(kbName)) {
+            const link = await KnowledgeBridge.createLink({
+              kbEntryId: kbProd.id,
+              wikiEntryId: wikiProd.id,
+              linkType: 'product_reference',
+              relevanceScore: 0.95,
+              linkReason: `Product name match: "${kbProd.title}" ↔ "${wikiProd.title}"`,
+              createdBy: 'auto_link',
+            });
+            if (link) stats.productLinks++;
+          }
+        }
+      }
+
+      // 2. Condition matching: KB pest/disease entries ↔ Wiki condition pages
+      const kbConditions = await db('knowledge_base')
+        .whereIn('category', ['pest', 'disease', 'weed', 'condition', 'pest_control', 'lawn_care'])
+        .where({ status: 'active' })
+        .select('id', 'title', 'slug');
+
+      const wikiConditions = await db('knowledge_entries')
+        .where({ category: 'condition' })
+        .select('id', 'title', 'slug');
+
+      for (const kbCond of kbConditions) {
+        const kbName = kbCond.title.replace(/^Condition:\s*/i, '').toLowerCase();
+        for (const wikiCond of wikiConditions) {
+          const wikiName = wikiCond.title.replace(/^Condition:\s*/i, '').toLowerCase();
+          if (kbName === wikiName || kbName.includes(wikiName) || wikiName.includes(kbName)) {
+            const link = await KnowledgeBridge.createLink({
+              kbEntryId: kbCond.id,
+              wikiEntryId: wikiCond.id,
+              linkType: 'condition_treatment',
+              relevanceScore: 0.90,
+              linkReason: `Condition name match: "${kbCond.title}" ↔ "${wikiCond.title}"`,
+              createdBy: 'auto_link',
+            });
+            if (link) stats.conditionLinks++;
+          }
+        }
+      }
+
+      // 3. Seasonal matching: KB seasonal guides ↔ Wiki seasonal intelligence pages
+      const kbSeasonal = await db('knowledge_base')
+        .whereIn('category', ['seasonal', 'protocol', 'schedule'])
+        .where({ status: 'active' })
+        .select('id', 'title', 'slug', 'content');
+
+      const wikiSeasonal = await db('knowledge_entries')
+        .where({ category: 'seasonal' })
+        .select('id', 'title', 'slug');
+
+      const months = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+
+      for (const kbEntry of kbSeasonal) {
+        const kbLower = (kbEntry.title + ' ' + kbEntry.slug).toLowerCase();
+        for (const wikiEntry of wikiSeasonal) {
+          const wikiMonth = wikiEntry.slug.replace('seasonal/', '').toLowerCase();
+          if (months.includes(wikiMonth) && kbLower.includes(wikiMonth)) {
+            const link = await KnowledgeBridge.createLink({
+              kbEntryId: kbEntry.id,
+              wikiEntryId: wikiEntry.id,
+              linkType: 'seasonal_guide',
+              relevanceScore: 0.80,
+              linkReason: `Seasonal match: "${kbEntry.title}" ↔ "${wikiEntry.title}"`,
+              createdBy: 'auto_link',
+            });
+            if (link) stats.seasonalLinks++;
+          }
+        }
+      }
+
+      logger.info(`[knowledge-bridge] autoLink complete: ${JSON.stringify(stats)}`);
+      return stats;
+
+    } catch (err) {
+      logger.error(`[knowledge-bridge] autoLink failed: ${err.message}`);
+      stats.errors++;
+      return stats;
+    }
   },
 
-  /**
-   * Get bridge stats.
-   */
-  async getStats() {
+  // ────────────────────────────────────────────────────────────
+  // unifiedSearch — search both knowledge systems at once
+  // ────────────────────────────────────────────────────────────
+  async unifiedSearch(query, options = {}) {
+    if (!query?.trim()) return { claudeopedia: [], wiki: [], bridged: [] };
+
+    const term = `%${query.trim().toLowerCase()}%`;
+    const limit = Math.min(options.limit || 20, 50);
+
+    // Search Claudeopedia
+    const claudeopedia = await db('knowledge_base')
+      .where(function () {
+        this.where('title', 'ilike', term)
+          .orWhere('content', 'ilike', term);
+      })
+      .where({ status: 'active' })
+      .orderBy('updated_at', 'desc')
+      .limit(limit)
+      .select('id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id');
+
+    // Search Agronomic Wiki
+    const wiki = await db('knowledge_entries')
+      .where(function () {
+        this.where('title', 'ilike', term)
+          .orWhere('content', 'ilike', term)
+          .orWhere('summary', 'ilike', term);
+      })
+      .orderBy('data_point_count', 'desc')
+      .limit(limit)
+      .select('id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id');
+
+    // Find bridged pairs
+    const allKbIds = claudeopedia.map(e => e.id).filter(Boolean);
+    const allWikiIds = wiki.map(e => e.id).filter(Boolean);
+    const bridges = (allKbIds.length || allWikiIds.length) ? await db('knowledge_bridge')
+      .where(function () {
+        if (allKbIds.length) this.whereIn('kb_entry_id', allKbIds);
+        if (allWikiIds.length) this.orWhereIn('wiki_entry_id', allWikiIds);
+      })
+      .select('*') : [];
+
+    return {
+      claudeopedia: claudeopedia.map(e => ({ ...e, source: 'claudeopedia' })),
+      wiki: wiki.map(e => ({ ...e, source: 'agronomic_wiki' })),
+      bridged: bridges,
+      totalResults: claudeopedia.length + wiki.length,
+    };
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // getLinkedEntries — get all linked entries for a given entry
+  // ────────────────────────────────────────────────────────────
+  async getLinkedEntries(entryId, source = 'auto') {
     try {
-      const [counts] = await db('knowledge_bridge').select(
-        db.raw("COUNT(*) as total"),
-        db.raw("COUNT(*) FILTER (WHERE link_type = 'product_reference') as product_links"),
-        db.raw("COUNT(*) FILTER (WHERE link_type = 'condition_treatment') as condition_links"),
-        db.raw("COUNT(*) FILTER (WHERE link_type = 'seasonal_guide') as seasonal_links"),
-        db.raw("COUNT(*) FILTER (WHERE link_type = 'data_enrichment') as enrichment_links"),
-        db.raw("COUNT(*) FILTER (WHERE auto_linked = true) as auto_linked"),
-      );
-      return counts;
-    } catch {
-      return { total: 0 };
+      let bridges;
+      if (source === 'claudeopedia' || source === 'auto') {
+        bridges = await db('knowledge_bridge').where({ kb_entry_id: entryId });
+        if (!bridges.length && source === 'auto') {
+          bridges = await db('knowledge_bridge').where({ wiki_entry_id: entryId });
+        }
+      } else {
+        bridges = await db('knowledge_bridge').where({ wiki_entry_id: entryId });
+      }
+
+      if (!bridges.length) return { links: [], wikiEntries: [], kbEntries: [] };
+
+      const wikiIds = bridges.map(b => b.wiki_entry_id).filter(Boolean);
+      const kbIds = bridges.map(b => b.kb_entry_id).filter(Boolean);
+
+      const wikiEntries = wikiIds.length
+        ? await db('knowledge_entries').whereIn('id', wikiIds).select('id', 'slug', 'title', 'category', 'summary', 'data_point_count', 'confidence')
+        : [];
+
+      const kbEntries = kbIds.length
+        ? await db('knowledge_base').whereIn('id', kbIds).select('id', 'slug', 'title', 'category', 'confidence')
+        : [];
+
+      return { links: bridges, wikiEntries, kbEntries };
+    } catch (err) {
+      logger.error(`[knowledge-bridge] getLinkedEntries failed: ${err.message}`);
+      return { links: [], wikiEntries: [], kbEntries: [] };
     }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // enrichWikiPageWithKB — pull Claudeopedia data into a wiki page
+  // Called during wiki page generation/update
+  // ────────────────────────────────────────────────────────────
+  async enrichWikiPageWithKB(wikiEntryId) {
+    try {
+      const { kbEntries } = await KnowledgeBridge.getLinkedEntries(wikiEntryId, 'wiki');
+
+      if (!kbEntries.length) return null;
+
+      // Gather full content from linked KB entries
+      const fullEntries = await db('knowledge_base')
+        .whereIn('id', kbEntries.map(e => e.id))
+        .select('title', 'category', 'content', 'confidence');
+
+      return {
+        referenceCount: fullEntries.length,
+        references: fullEntries.map(e => ({
+          title: e.title,
+          category: e.category,
+          confidence: e.confidence,
+          excerpt: (e.content || '').substring(0, 500),
+        })),
+      };
+    } catch (err) {
+      logger.error(`[knowledge-bridge] enrichWikiPageWithKB failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // enrichKBEntryWithOutcomes — pull wiki outcome stats into a KB entry
+  // ────────────────────────────────────────────────────────────
+  async enrichKBEntryWithOutcomes(kbEntryId) {
+    try {
+      const { wikiEntries } = await KnowledgeBridge.getLinkedEntries(kbEntryId, 'claudeopedia');
+
+      if (!wikiEntries.length) return null;
+
+      return {
+        outcomePages: wikiEntries.length,
+        totalDataPoints: wikiEntries.reduce((sum, e) => sum + (e.data_point_count || 0), 0),
+        entries: wikiEntries.map(e => ({
+          title: e.title,
+          category: e.category,
+          dataPoints: e.data_point_count,
+          confidence: e.confidence,
+          summary: e.summary,
+        })),
+      };
+    } catch (err) {
+      logger.error(`[knowledge-bridge] enrichKBEntryWithOutcomes failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // generateAssessmentRecommendations — AI-powered recommendations
+  // Uses both Claudeopedia protocols + wiki outcome data
+  // Called after lawn assessment is confirmed
+  // ────────────────────────────────────────────────────────────
+  async generateAssessmentRecommendations(assessmentId) {
+    try {
+      const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
+      if (!assessment) return null;
+
+      const customer = await db('customers').where({ id: assessment.customer_id }).first();
+
+      // Get customer's grass type context
+      const grassTrack = customer?.grass_track || 'A'; // default St. Augustine Track A
+      const grassType = customer?.grass_type || 'St. Augustine';
+
+      // Pull relevant Claudeopedia entries (protocols, product info)
+      const protocolEntries = await db('knowledge_base')
+        .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
+        .where({ status: 'active' })
+        .where(function () {
+          this.where('content', 'ilike', `%${grassType}%`)
+            .orWhere('content', 'ilike', `%track ${grassTrack}%`)
+            .orWhere('category', 'seasonal');
+        })
+        .select('title', 'content', 'category')
+        .limit(10);
+
+      // Pull relevant wiki outcome data (what's actually worked)
+      const outcomeEntries = await db('knowledge_entries')
+        .where(function () {
+          this.where('category', 'track').where('slug', 'ilike', `%${slugify(grassTrack)}%`)
+            .orWhere('category', 'seasonal');
+        })
+        .select('title', 'summary', 'data_point_count', 'confidence')
+        .limit(5);
+
+      // Build scores context
+      const scores = {
+        turf_density: assessment.turf_density,
+        weed_suppression: assessment.weed_suppression,
+        color_health: assessment.color_health,
+        fungus_control: assessment.fungus_control,
+        thatch_level: assessment.thatch_level,
+        observations: assessment.observations,
+        season: assessment.season,
+      };
+
+      const month = new Date().getMonth() + 1;
+      const monthName = ['January','February','March','April','May','June','July','August','September','October','November','December'][month - 1];
+
+      const systemPrompt = `You are the agronomic intelligence engine for Waves Pest Control in Southwest Florida. You generate clear, actionable lawn care recommendations by combining protocol knowledge with real treatment outcome data. Write in a professional but warm tone suitable for both the tech and the customer. Be specific and SWFL-relevant.`;
+
+      const userPrompt = `Generate lawn care recommendations for this assessment:
+
+Customer: ${customer?.first_name} ${customer?.last_name}
+Grass Type: ${grassType} (Track ${grassTrack})
+Month: ${monthName} (Season: ${assessment.season})
+
+Current Scores:
+- Turf Density: ${scores.turf_density}%
+- Weed Suppression: ${scores.weed_suppression}%
+- Color Health: ${scores.color_health}%
+- Fungus Control: ${scores.fungus_control}%
+- Thatch Level: ${scores.thatch_level}%
+- Observations: ${scores.observations || 'None'}
+
+Protocol References (from Claudeopedia):
+${protocolEntries.map(e => `[${e.category}] ${e.title}: ${(e.content || '').substring(0, 300)}`).join('\n')}
+
+Real Outcome Data (from Agronomic Wiki):
+${outcomeEntries.map(e => `${e.title} (${e.data_point_count} data points, ${e.confidence} confidence): ${e.summary || 'No summary'}`).join('\n')}
+
+Return a JSON object with:
+{
+  "summary": "<one sentence customer-friendly lawn status summary>",
+  "recommendations": [
+    { "priority": 1, "action": "<specific action>", "reason": "<why based on data>", "timeframe": "<when>" }
+  ],
+  "nextVisitFocus": "<what to prioritize on the next visit>",
+  "customerTip": "<one simple thing the customer can do between visits>"
+}`;
+
+      const result = await callClaude(systemPrompt, userPrompt, 1500);
+      if (!result) return null;
+
+      try {
+        const parsed = JSON.parse(result.replace(/```json|```/g, '').trim());
+
+        // Save to assessment
+        await db('lawn_assessments').where({ id: assessmentId }).update({
+          ai_summary: parsed.summary,
+          recommendations: JSON.stringify(parsed),
+          updated_at: new Date(),
+        });
+
+        return parsed;
+      } catch (parseErr) {
+        logger.error(`[knowledge-bridge] Failed to parse recommendations: ${parseErr.message}`);
+        return null;
+      }
+
+    } catch (err) {
+      logger.error(`[knowledge-bridge] generateAssessmentRecommendations failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // syncToClaudeopedia — push wiki outcome summaries into Claudeopedia
+  // Creates/updates a "Living Outcomes" entry for each product/track
+  // ────────────────────────────────────────────────────────────
+  async syncToClaudeopedia() {
+    const stats = { created: 0, updated: 0, errors: 0 };
+
+    try {
+      const wikiEntries = await db('knowledge_entries')
+        .where('data_point_count', '>', 0)
+        .select('id', 'slug', 'title', 'category', 'summary', 'data_point_count', 'confidence', 'content');
+
+      for (const wiki of wikiEntries) {
+        try {
+          const kbSlug = `outcomes-${wiki.slug.replace(/\//g, '-')}`;
+
+          const existing = await db('knowledge_base').where({ slug: kbSlug }).first();
+
+          const kbData = {
+            title: `Outcome Data: ${wiki.title}`,
+            category: wiki.category === 'product' ? 'product' : wiki.category === 'track' ? 'protocol' : 'seasonal',
+            content: `## Real-World Outcome Data\n\n${wiki.summary || ''}\n\n**Data Points:** ${wiki.data_point_count}\n**Confidence:** ${wiki.confidence}\n\n---\n\n${(wiki.content || '').substring(0, 3000)}`,
+            source: 'wiki-sync',
+            confidence: wiki.confidence,
+            status: 'active',
+            metadata: JSON.stringify({ wiki_slug: wiki.slug, wiki_id: wiki.id, synced_at: new Date().toISOString() }),
+            wiki_entry_id: wiki.id,
+          };
+
+          if (existing) {
+            await db('knowledge_base').where({ id: existing.id }).update({ ...kbData, updated_at: new Date() });
+            stats.updated++;
+
+            // Ensure bridge link exists
+            await KnowledgeBridge.createLink({
+              kbEntryId: existing.id,
+              wikiEntryId: wiki.id,
+              linkType: 'data_enrichment',
+              relevanceScore: 1.0,
+              linkReason: 'Wiki-to-Claudeopedia sync',
+              createdBy: 'wiki_sync',
+            });
+          } else {
+            const [newEntry] = await db('knowledge_base').insert({
+              ...kbData,
+              slug: kbSlug,
+              path: `kb/${kbData.category}/${kbSlug}.md`,
+              last_verified_at: new Date(),
+              verified_by: 'wiki-sync',
+            }).returning('*');
+
+            if (newEntry) {
+              stats.created++;
+              await KnowledgeBridge.createLink({
+                kbEntryId: newEntry.id,
+                wikiEntryId: wiki.id,
+                linkType: 'data_enrichment',
+                relevanceScore: 1.0,
+                linkReason: 'Wiki-to-Claudeopedia initial sync',
+                createdBy: 'wiki_sync',
+              });
+            }
+          }
+        } catch (entryErr) {
+          logger.error(`[knowledge-bridge] syncToClaudeopedia entry error: ${entryErr.message}`);
+          stats.errors++;
+        }
+      }
+
+      logger.info(`[knowledge-bridge] syncToClaudeopedia complete: ${JSON.stringify(stats)}`);
+      return stats;
+    } catch (err) {
+      logger.error(`[knowledge-bridge] syncToClaudeopedia failed: ${err.message}`);
+      return stats;
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // getStats — bridge health dashboard
+  // ────────────────────────────────────────────────────────────
+  async getStats() {
+    const [bridgeCount] = await db('knowledge_bridge').count('id as count');
+    const [kbCount] = await db('knowledge_base').count('id as count');
+    const [wikiCount] = await db('knowledge_entries').count('id as count');
+
+    const [kbLinked] = await db('knowledge_base').whereNotNull('wiki_entry_id').count('id as count');
+    const [wikiLinked] = await db('knowledge_entries').whereNotNull('kb_entry_id').count('id as count');
+
+    const linkTypes = await db('knowledge_bridge')
+      .select('link_type')
+      .count('id as count')
+      .groupBy('link_type');
+
+    return {
+      totalBridgeLinks: parseInt(bridgeCount.count),
+      claudeopediaTotal: parseInt(kbCount.count),
+      wikiTotal: parseInt(wikiCount.count),
+      claudeopediaLinked: parseInt(kbLinked.count),
+      wikiLinked: parseInt(wikiLinked.count),
+      linkTypeDistribution: linkTypes.reduce((acc, r) => { acc[r.link_type] = parseInt(r.count); return acc; }, {}),
+    };
   },
 };
 

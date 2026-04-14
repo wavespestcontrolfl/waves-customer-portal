@@ -201,6 +201,10 @@ class ApiClient {
     return this.request(`/lawn-health/${customerId}/history`);
   }
 
+  getLawnHealthPhotos(customerId, assessmentId) {
+    return this.request(`/lawn-health/${customerId}/photos/${assessmentId}`);
+  }
+
   // ---- Feed / Weather ----
   getBlogPosts() {
     return this.request('/feed/blog');

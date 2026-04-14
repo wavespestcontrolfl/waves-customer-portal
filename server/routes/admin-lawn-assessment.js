@@ -11,6 +11,12 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
+const KnowledgeBridge = require('../services/knowledge-bridge');
+const LawnIntel = require('../services/lawn-intelligence');
+
+let PhotoService;
+try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
+const config = require('../config');
 
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
@@ -83,9 +89,33 @@ router.post('/assess', async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
+    // Photo quality gating — check each photo before running expensive AI analysis
+    const qualityResults = [];
+    for (const photo of photos) {
+      const quality = await LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg');
+      qualityResults.push(quality);
+    }
+
+    // Filter out photos that failed quality check
+    const passedPhotos = photos.filter((_, i) => qualityResults[i].passed);
+    const failedPhotos = photos.filter((_, i) => !qualityResults[i].passed);
+    const failedIssues = failedPhotos.map((_, i) => qualityResults.filter(q => !q.passed)[i]?.issues || []);
+
+    if (passedPhotos.length === 0 && failedPhotos.length > 0) {
+      return res.json({
+        success: false,
+        message: 'All photos failed quality check. Please retake with better lighting, closer to the lawn, avoiding shadows.',
+        qualityResults: qualityResults.map((q, i) => ({ photoIndex: i, ...q })),
+        photoCount: photos.length,
+      });
+    }
+
+    // Use only photos that passed quality (fall back to all if quality check wasn't available)
+    const photosToAnalyze = passedPhotos.length > 0 ? passedPhotos : photos;
+
     // Run AI analysis on each photo
     const photoResults = [];
-    for (const photo of photos) {
+    for (const photo of photosToAnalyze) {
       const result = await lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg');
       photoResults.push(result);
     }
@@ -135,11 +165,6 @@ router.post('/assess', async (req, res, next) => {
     const season = lawnAssessment.getSeason(month);
     const adjustedScores = lawnAssessment.applySeasonalAdjustment(displayScores, month);
 
-    if (!adjustedScores) {
-      logger.error('[lawn-assessment] adjustedScores is null after scoring pipeline');
-      return res.status(500).json({ error: 'Scoring pipeline produced no results' });
-    }
-
     // Check if this is the first assessment (baseline)
     const existingCount = await db('lawn_assessments')
       .where({ customer_id: customerId })
@@ -150,7 +175,16 @@ router.post('/assess', async (req, res, next) => {
     // Collect divergence flags from all photo analyses
     const allDivergences = validResults.flatMap(r => r.divergenceFlags || []);
 
-    // Build photo metadata (store base64 references — in production you'd upload to S3)
+    // Compute overall weighted score (turf density 30%, weed 25%, color 20%, fungus 15%, thatch 10%)
+    const overallScore = Math.round(
+      (adjustedScores.turf_density || 0) * 0.30 +
+      (adjustedScores.weed_suppression || 0) * 0.25 +
+      (adjustedScores.color_health || 0) * 0.20 +
+      (adjustedScores.fungus_control || 0) * 0.15 +
+      (adjustedScores.thatch_level || 0) * 0.10
+    );
+
+    // Build photo metadata (always stored even without S3 for backward compat)
     const photoMeta = photos.map((p, i) => ({
       filename: `lawn_${customerId}_${Date.now()}_${i}.${(p.mimeType || 'image/jpeg').split('/')[1]}`,
       uploadedAt: new Date().toISOString(),
@@ -174,35 +208,120 @@ router.post('/assess', async (req, res, next) => {
       fungus_control: adjustedScores.fungus_control,
       thatch_level: adjustedScores.thatch_level,
       observations: adjustedScores.observations,
+      overall_score: overallScore,
       is_baseline: isBaseline,
     }).returning('*');
 
-    // Build per-model display scores for Claude vs Gemini comparison
-    let claudeDisplay = null, geminiDisplay = null;
-    if (validResults.length > 0) {
-      const firstClaude = validResults.find(r => r.claude);
-      const firstGemini = validResults.find(r => r.gemini);
-      if (firstClaude?.claude) claudeDisplay = lawnAssessment.mapToDisplayScores(firstClaude.claude);
-      if (firstGemini?.gemini) geminiDisplay = lawnAssessment.mapToDisplayScores(firstGemini.gemini);
+    // ── Upload photos to S3 + create lawn_assessment_photos records ──
+    const photoRecords = [];
+    let bestPhotoId = null;
+    let bestQuality = -1;
+
+    for (let i = 0; i < photos.length; i++) {
+      const photo = photos[i];
+      const result = validResults[i] || null;
+      const mimeType = photo.mimeType || 'image/jpeg';
+      const ext = mimeType.split('/')[1] || 'jpg';
+
+      // Compute quality score for "best photo" selection
+      // Higher turf density + color health + lower weed coverage = better representative photo
+      let qualityScore = 50;
+      if (result?.composite) {
+        const c = result.composite;
+        qualityScore = Math.round(
+          ((c.turf_density || 50) * 0.4) +
+          ((100 - (c.weed_coverage || 50)) * 0.3) +
+          (((c.color_health || 5) / 10) * 100 * 0.3)
+        );
+      }
+
+      let s3Key = null;
+
+      // Upload to S3 if configured
+      if (PhotoService && config.s3?.bucket) {
+        try {
+          const uploadResult = await PhotoService.getUploadUrl(assessment.id, `lawn_${i}`, ext);
+          s3Key = uploadResult.key;
+
+          // Direct upload from server (base64 → S3)
+          const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+          const s3 = new S3Client({
+            region: config.s3.region,
+            credentials: { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey },
+          });
+          await s3.send(new PutObjectCommand({
+            Bucket: config.s3.bucket,
+            Key: s3Key,
+            Body: Buffer.from(photo.data, 'base64'),
+            ContentType: mimeType,
+            Metadata: {
+              assessmentId: assessment.id,
+              customerId,
+              photoIndex: String(i),
+            },
+          }));
+        } catch (s3Err) {
+          logger.error(`[lawn-assessment] S3 upload failed for photo ${i}: ${s3Err.message}`);
+          s3Key = null; // Fall back gracefully
+        }
+      }
+
+      // Create photo record (even without S3 — s3_key can be populated later)
+      try {
+        const [photoRecord] = await db('lawn_assessment_photos').insert({
+          assessment_id: assessment.id,
+          customer_id: customerId,
+          s3_key: s3Key || `pending/${assessment.id}/${photoMeta[i].filename}`,
+          filename: photoMeta[i].filename,
+          mime_type: mimeType,
+          file_size_bytes: Math.round((photo.data.length * 3) / 4), // approx base64 → bytes
+          photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot'),
+          photo_order: i,
+          turf_density: result?.composite?.turf_density ?? null,
+          weed_coverage: result?.composite?.weed_coverage ?? null,
+          color_health: result?.composite?.color_health ?? null,
+          fungal_activity: result?.composite?.fungal_activity ?? null,
+          thatch_visibility: result?.composite?.thatch_visibility ?? null,
+          observations: result?.composite?.observations ?? null,
+          quality_score: qualityScore,
+          customer_visible: true,
+          is_best_photo: false,
+          taken_at: new Date(),
+        }).returning('*');
+
+        photoRecords.push(photoRecord);
+
+        if (qualityScore > bestQuality) {
+          bestQuality = qualityScore;
+          bestPhotoId = photoRecord.id;
+        }
+      } catch (photoErr) {
+        logger.error(`[lawn-assessment] Photo record insert failed: ${photoErr.message}`);
+      }
+    }
+
+    // Mark best photo and update assessment
+    if (bestPhotoId) {
+      await db('lawn_assessment_photos').where({ id: bestPhotoId }).update({ is_best_photo: true });
+      await db('lawn_assessments').where({ id: assessment.id }).update({ best_photo_id: bestPhotoId });
     }
 
     res.json({
       success: true,
-      assessment,
+      assessment: { ...assessment, overall_score: overallScore, best_photo_id: bestPhotoId },
       rawComposite: mergedComposite,
       displayScores,
       adjustedScores,
-      claudeDisplay,
-      geminiDisplay,
-      observations: adjustedScores.observations || displayScores.observations || '',
+      overallScore,
       season,
       isBaseline,
       divergenceFlags: allDivergences,
       photoCount: photos.length,
       analyzedCount: validResults.length,
+      photosStored: photoRecords.length,
+      bestPhotoId,
     });
   } catch (err) {
-    logger.error(`[lawn-assessment] POST /assess failed: ${err.message}`, { stack: err.stack });
     next(err);
   }
 });
@@ -245,10 +364,73 @@ router.post('/confirm', async (req, res, next) => {
     // Agronomic Wiki: link treatment outcome after assessment confirmed
     try {
       const wiki = require('../services/agronomic-wiki');
-      await wiki.linkTreatmentOutcome(updated.service_record_id || updated.id);
+      const outcome = await wiki.linkTreatmentOutcome(updated.service_record_id || updated.id);
+
+      // Attach best photo keys to treatment outcome for before/after display
+      if (outcome) {
+        try {
+          const bestPhoto = await db('lawn_assessment_photos')
+            .where({ assessment_id: assessmentId, is_best_photo: true })
+            .first();
+
+          if (bestPhoto) {
+            await db('treatment_outcomes')
+              .where({ id: outcome.id })
+              .update({ post_best_photo_key: bestPhoto.s3_key });
+          }
+
+          // Find pre-assessment best photo too
+          if (outcome.pre_assessment_id) {
+            const preBestPhoto = await db('lawn_assessment_photos')
+              .where({ assessment_id: outcome.pre_assessment_id, is_best_photo: true })
+              .first();
+            if (preBestPhoto) {
+              await db('treatment_outcomes')
+                .where({ id: outcome.id })
+                .update({ pre_best_photo_key: preBestPhoto.s3_key });
+            }
+          }
+        } catch (photoRefErr) {
+          logger.error(`[lawn-assessment] Photo ref update on treatment_outcome failed: ${photoRefErr.message}`);
+        }
+      }
     } catch (wikiErr) {
       logger.error(`[lawn-assessment] Wiki linkTreatmentOutcome failed (non-blocking): ${wikiErr.message}`);
     }
+
+    // Knowledge Bridge + Lawn Intelligence: fire all async intelligence (non-blocking)
+    setImmediate(async () => {
+      try {
+        // 1. FAWN weather context
+        await LawnIntel.attachWeather(assessmentId);
+
+        // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
+        await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
+
+        // 3. Tech calibration — record AI vs tech score differences
+        if (adjustedScores) {
+          const aiScores = assessment.composite_scores
+            ? (typeof assessment.composite_scores === 'string' ? JSON.parse(assessment.composite_scores) : assessment.composite_scores)
+            : {};
+          await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
+        }
+
+        // 4. Lawn health → customer health signal
+        await LawnIntel.emitHealthSignal(updated.customer_id);
+
+        // 5. Send assessment notification (SMS/email with score + photo)
+        await LawnIntel.sendAssessmentNotification(assessmentId);
+
+        // 6. Auto-generate service report
+        await LawnIntel.generateServiceReport(assessmentId);
+
+        // 7. Track assessment completion
+        await LawnIntel.trackAssessmentCompletion(updated.service_date);
+
+      } catch (intelErr) {
+        logger.error(`[lawn-assessment] Intelligence pipeline failed (non-blocking): ${intelErr.message}`);
+      }
+    });
 
     res.json({ success: true, assessment: updated });
   } catch (err) {
@@ -291,6 +473,13 @@ router.post('/reset-baseline/:customerId', async (req, res, next) => {
 
     const adminName = req.technician?.name || req.technician?.email || 'Unknown';
     const result = await lawnAssessment.resetBaseline(req.params.customerId, adminName, reason);
+
+    // Flag that next visit needs fresh baseline photos
+    try {
+      await LawnIntel.flagBaselineRecapture(req.params.customerId, result.newBaselineId);
+    } catch (flagErr) {
+      logger.error(`[lawn-assessment] flagBaselineRecapture failed (non-blocking): ${flagErr.message}`);
+    }
 
     res.json({ success: true, ...result });
   } catch (err) {

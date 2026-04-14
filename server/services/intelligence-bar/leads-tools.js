@@ -348,7 +348,7 @@ async function getSourcePerformance(days) {
   const costMap = {};
   costs.forEach(c => { costMap[c.name] = parseFloat(c.monthly_cost || 0); });
 
-  const months = Math.max(1, days / 30);
+  const months = Math.max(1, Math.ceil(days / 30));
 
   return {
     period_days: days,
@@ -530,7 +530,7 @@ async function bulkUpdateLeads(input) {
     description: `Bulk update: ${current_status} → ${new_status}${lost_reason ? ` (${lost_reason})` : ''}`,
     performed_by: 'Intelligence Bar',
   }));
-  await db('lead_activities').insert(activities).catch(() => {});
+  await db('lead_activities').insert(activities).catch(err => logger.error(`[intelligence-bar:leads] Failed to log bulk activities: ${err.message}`));
 
   logger.info(`[intelligence-bar:leads] Bulk updated ${ids.length} leads: ${current_status} → ${new_status}`);
 

@@ -106,12 +106,14 @@ function ConfigCard({ config, onUpdate }) {
       return (
         <div key={key} style={{ marginBottom: 8, paddingLeft: 12, borderLeft: `2px solid ${D.border}` }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: D.teal, marginBottom: 4, textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</div>
-          {Object.entries(val).map(([k, v]) => (
-            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 0' }}>
-              <span style={{ fontSize: 12, color: D.muted, textTransform: 'capitalize' }}>{k.replace(/_/g, ' ')}</span>
-              <EditCell value={v} onSave={newV => { const nested = { ...val, [k]: newV }; handleFieldUpdate(key, nested); }} type={typeof v === 'number' ? 'number' : 'text'} />
-            </div>
-          ))}
+          {Object.entries(val).map(([k, v]) =>
+            (typeof v === 'object' && v !== null) ? renderValue(k, v) : (
+              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 0' }}>
+                <span style={{ fontSize: 12, color: D.muted, textTransform: 'capitalize' }}>{k.replace(/_/g, ' ')}</span>
+                <EditCell value={v} onSave={newV => { const nested = { ...val, [k]: newV }; handleFieldUpdate(key, nested); }} type={typeof v === 'number' ? 'number' : 'text'} />
+              </div>
+            )
+          )}
         </div>
       );
     }

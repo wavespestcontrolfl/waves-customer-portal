@@ -223,34 +223,39 @@ function SocialFooter({ compact }) {
 // =========================================================================
 function useLawnHealth(customerId) {
   const [data, setData] = useState({
-    scores: null, initialScores: null, hasLawnCare: false,
-    photos: null, beforeAfterPhotos: null, recommendations: null,
-    history: null, loading: true,
+    scores: null, initialScores: null, hasLawnCare: false, loading: true,
+    photos: [], beforeAfter: null, trend: [], recommendations: null,
+    assessmentCount: 0, nextMilestone: null,
+    seasonalContext: null, neighborBenchmark: null,
   });
 
   useEffect(() => {
     if (!customerId) return;
-    // Fetch main data + history in parallel
-    Promise.all([
-      api.getLawnHealth(customerId),
-      api.getLawnHealthHistory(customerId).catch(() => ({ history: [] })),
-    ]).then(([d, h]) => setData({
-      scores: d.scores, initialScores: d.initialScores, hasLawnCare: d.hasLawnCare,
-      photos: d.photos, beforeAfterPhotos: d.beforeAfterPhotos,
-      recommendations: d.recommendations,
-      history: h.history || [],
-      loading: false,
-    })).catch(() => setData(prev => ({ ...prev, loading: false })));
+    api.getLawnHealth(customerId)
+      .then(d => setData({
+        scores: d.scores,
+        initialScores: d.initialScores,
+        hasLawnCare: d.hasLawnCare,
+        loading: false,
+        photos: d.photos || [],
+        beforeAfter: d.beforeAfter || null,
+        trend: d.trend || [],
+        recommendations: d.recommendations || null,
+        assessmentCount: d.assessmentCount || 0,
+        nextMilestone: d.nextMilestone || null,
+        seasonalContext: d.seasonalContext || null,
+        neighborBenchmark: d.neighborBenchmark || null,
+      }))
+      .catch(() => setData(prev => ({ ...prev, loading: false })));
   }, [customerId]);
 
   return data;
 }
 
 // =========================================================================
-// BEFORE / AFTER PHOTO COMPARISON SLIDER
-// Uses real S3 photos when available, gradient fallback otherwise
+// BEFORE / AFTER PHOTO COMPARISON SLIDER — real S3 photos or gradient fallback
 // =========================================================================
-function BeforeAfterSlider({ beforeAfterPhotos, initialScores, scores }) {
+function BeforeAfterSlider({ beforeAfter }) {
   const [position, setPosition] = useState(50);
   const containerRef = useRef(null);
   const dragging = useRef(false);
@@ -276,23 +281,17 @@ function BeforeAfterSlider({ beforeAfterPhotos, initialScores, scores }) {
     dragging.current = false;
   }, []);
 
-  const hasPhotos = beforeAfterPhotos?.beforeUrl && beforeAfterPhotos?.afterUrl;
-  const beforeDate = beforeAfterPhotos?.beforeDate
-    ? new Date(beforeAfterPhotos.beforeDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    : initialScores?.assessmentDate
-      ? new Date(initialScores.assessmentDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      : 'Start';
-  const afterDate = beforeAfterPhotos?.afterDate
-    ? new Date(beforeAfterPhotos.afterDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    : scores?.assessmentDate
-      ? new Date(scores.assessmentDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      : 'Now';
+  const hasBeforePhoto = beforeAfter?.before?.photoUrl;
+  const hasAfterPhoto = beforeAfter?.after?.photoUrl;
+  const beforeDate = beforeAfter?.before?.date;
+  const afterDate = beforeAfter?.after?.date;
 
-  const beforeBg = hasPhotos
-    ? { backgroundImage: `url(${beforeAfterPhotos.beforeUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+  const beforeStyle = hasBeforePhoto
+    ? { backgroundImage: `url(${beforeAfter.before.photoUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
     : { background: 'linear-gradient(135deg, #8B6914 0%, #A0522D 40%, #CD853F 70%, #D2B48C 100%)' };
-  const afterBg = hasPhotos
-    ? { backgroundImage: `url(${beforeAfterPhotos.afterUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+
+  const afterStyle = hasAfterPhoto
+    ? { backgroundImage: `url(${beforeAfter.after.photoUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
     : { background: 'linear-gradient(135deg, #2E7D32 0%, #43A047 30%, #66BB6A 60%, #81C784 100%)' };
 
   return (
@@ -302,22 +301,28 @@ function BeforeAfterSlider({ beforeAfterPhotos, initialScores, scores }) {
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       style={{
-        position: 'relative', width: '100%', height: 200, borderRadius: 14,
+        position: 'relative', width: '100%', height: 220, borderRadius: 14,
         overflow: 'hidden', cursor: 'ew-resize', userSelect: 'none', touchAction: 'none',
       }}
     >
       {/* BEFORE layer */}
       <div style={{
-        position: 'absolute', inset: 0, ...beforeBg,
+        position: 'absolute', inset: 0, ...beforeStyle,
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end',
-        paddingBottom: 14,
+        paddingBottom: 16,
       }}>
         <div style={{
-          background: 'rgba(0,0,0,0.55)', borderRadius: 8, padding: '4px 12px',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
-          <div style={{ color: '#fff', fontWeight: 800, fontSize: 12, fontFamily: FONTS.heading, textAlign: 'center' }}>
-            BEFORE — {beforeDate}
+          <div style={{ color: '#fff', fontWeight: 800, fontSize: 13, fontFamily: FONTS.heading }}>
+            BEFORE {beforeDate ? `— ${fmtDate(beforeDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
+          {beforeAfter?.before?.overallScore != null && (
+            <div style={{ color: '#fbbf24', fontSize: 12, fontWeight: 700, marginTop: 2 }}>
+              Score: {beforeAfter.before.overallScore}%
+            </div>
+          )}
         </div>
       </div>
 
@@ -325,17 +330,23 @@ function BeforeAfterSlider({ beforeAfterPhotos, initialScores, scores }) {
       <div style={{
         position: 'absolute', inset: 0,
         clipPath: `inset(0 ${100 - position}% 0 0)`,
-        ...afterBg,
+        ...afterStyle,
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end',
-        paddingBottom: 14,
+        paddingBottom: 16,
         transition: dragging.current ? 'none' : 'clip-path 0.05s ease-out',
       }}>
         <div style={{
-          background: 'rgba(0,0,0,0.55)', borderRadius: 8, padding: '4px 12px',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
-          <div style={{ color: '#fff', fontWeight: 800, fontSize: 12, fontFamily: FONTS.heading, textAlign: 'center' }}>
-            AFTER — {afterDate}
+          <div style={{ color: '#fff', fontWeight: 800, fontSize: 13, fontFamily: FONTS.heading }}>
+            AFTER {afterDate ? `— ${fmtDate(afterDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
+          {beforeAfter?.after?.overallScore != null && (
+            <div style={{ color: '#34d399', fontSize: 12, fontWeight: 700, marginTop: 2 }}>
+              Score: {beforeAfter.after.overallScore}%
+            </div>
+          )}
         </div>
       </div>
 
@@ -359,158 +370,273 @@ function BeforeAfterSlider({ beforeAfterPhotos, initialScores, scores }) {
 }
 
 // =========================================================================
-// LAWN HEALTH CARD — score ring, progress bars, photos, trend, tips
+// OVERALL SCORE RING — circular progress indicator
 // =========================================================================
-function LawnHealthCard({ scores, initialScores, photos, beforeAfterPhotos, recommendations, history }) {
+function ScoreRing({ score, size = 90, stroke = 7, label }) {
+  const radius = (size - stroke) / 2;
+  const circumference = radius * 2 * Math.PI;
+  const [anim, setAnim] = useState(0);
+
+  useEffect(() => {
+    const t = setTimeout(() => setAnim(score || 0), 100);
+    return () => clearTimeout(t);
+  }, [score]);
+
+  const offset = circumference - (anim / 100) * circumference;
+  const color = score >= 75 ? B.green : score >= 50 ? '#f59e0b' : '#ef4444';
+
+  return (
+    <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
+      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
+        <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
+          stroke={B.grayLight} strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
+          stroke={color} strokeWidth={stroke}
+          strokeDasharray={circumference} strokeDashoffset={offset}
+          strokeLinecap="round"
+          style={{ transition: 'stroke-dashoffset 1.2s ease-out' }} />
+      </svg>
+      <div style={{
+        position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center',
+      }}>
+        <div style={{ fontSize: size * 0.28, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1 }}>
+          {score || 0}
+        </div>
+        {label && <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2, fontWeight: 600 }}>{label}</div>}
+      </div>
+    </div>
+  );
+}
+
+// =========================================================================
+// MINI TREND SPARKLINE — simple SVG line chart for trend data
+// =========================================================================
+function TrendSparkline({ trend, width = '100%', height = 60 }) {
+  if (!trend || trend.length < 2) return null;
+
+  const scores = trend.map(t => t.overallScore || 0);
+  const min = Math.min(...scores) - 5;
+  const max = Math.max(...scores) + 5;
+  const range = max - min || 1;
+  const w = 300;
+  const h = height;
+  const padding = 4;
+
+  const points = scores.map((s, i) => {
+    const x = padding + (i / (scores.length - 1)) * (w - padding * 2);
+    const y = h - padding - ((s - min) / range) * (h - padding * 2);
+    return `${x},${y}`;
+  }).join(' ');
+
+  const lastScore = scores[scores.length - 1];
+  const lastX = padding + ((scores.length - 1) / (scores.length - 1)) * (w - padding * 2);
+  const lastY = h - padding - ((lastScore - min) / range) * (h - padding * 2);
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width, height, display: 'block' }} preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={B.teal} stopOpacity="0.15" />
+          <stop offset="100%" stopColor={B.teal} stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      {/* Fill area */}
+      <polygon
+        points={`${padding},${h - padding} ${points} ${lastX},${h - padding}`}
+        fill="url(#trendFill)"
+      />
+      {/* Line */}
+      <polyline points={points} fill="none" stroke={B.teal} strokeWidth="2.5"
+        strokeLinecap="round" strokeLinejoin="round" />
+      {/* End dot */}
+      <circle cx={lastX} cy={lastY} r="4" fill={B.teal} />
+    </svg>
+  );
+}
+
+// =========================================================================
+// PHOTO GALLERY — latest visit photos with per-photo metrics
+// =========================================================================
+function PhotoGallery({ photos }) {
+  const [selected, setSelected] = useState(null);
+
+  if (!photos?.length) return null;
+
+  const visiblePhotos = photos.filter(p => p.url);
+  if (!visiblePhotos.length) return null;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', WebkitOverflowScrolling: 'touch', paddingBottom: 4 }}>
+        {visiblePhotos.map((p, i) => (
+          <div key={p.id || i} onClick={() => setSelected(selected === i ? null : i)} style={{
+            position: 'relative', flex: '0 0 auto', width: visiblePhotos.length === 1 ? '100%' : 140,
+            height: visiblePhotos.length === 1 ? 180 : 105,
+            borderRadius: 12, overflow: 'hidden', cursor: 'pointer',
+            border: p.isBest ? `2px solid ${B.teal}` : `1px solid ${B.grayLight}`,
+            boxShadow: selected === i ? `0 0 0 3px ${B.teal}44` : 'none',
+          }}>
+            <img src={p.url} alt={`Lawn ${p.type || ''}`} loading="lazy" style={{
+              width: '100%', height: '100%', objectFit: 'cover',
+            }} />
+            {p.isBest && (
+              <div style={{
+                position: 'absolute', top: 6, left: 6, background: B.teal, color: '#fff',
+                fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+              }}>BEST</div>
+            )}
+            {p.type && p.type !== 'general' && (
+              <div style={{
+                position: 'absolute', bottom: 0, left: 0, right: 0,
+                background: 'linear-gradient(transparent, rgba(0,0,0,0.6))',
+                color: '#fff', fontSize: 10, fontWeight: 600, padding: '12px 8px 6px',
+                textTransform: 'capitalize',
+              }}>
+                {p.type.replace(/_/g, ' ')}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Expanded photo detail */}
+      {selected != null && visiblePhotos[selected]?.scores && (
+        <div style={{
+          marginTop: 8, padding: '10px 14px', background: `${B.teal}08`,
+          borderRadius: 10, border: `1px solid ${B.teal}15`,
+          display: 'flex', gap: 16, fontSize: 12,
+        }}>
+          {visiblePhotos[selected].scores.turfDensity != null && (
+            <div><span style={{ color: B.grayMid }}>Density:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.turfDensity}%</span></div>
+          )}
+          {visiblePhotos[selected].scores.colorHealth != null && (
+            <div><span style={{ color: B.grayMid }}>Color:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.colorHealth}/10</span></div>
+          )}
+          {visiblePhotos[selected].scores.weedCoverage != null && (
+            <div><span style={{ color: B.grayMid }}>Weeds:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.weedCoverage}%</span></div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =========================================================================
+// LAWN HEALTH CARD — overall score, progress bars, photos, trend, recs
+// =========================================================================
+function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark }) {
   const [animated, setAnimated] = useState(false);
   const [showTrend, setShowTrend] = useState(false);
-  const [expandedPhoto, setExpandedPhoto] = useState(null);
 
   useEffect(() => {
     const timer = requestAnimationFrame(() => setAnimated(true));
     return () => cancelAnimationFrame(timer);
   }, []);
 
-  const overallScore = scores.overallScore || Math.round(
-    (scores.turfDensity + scores.weedSuppression + scores.fungusControl + (scores.thatchScore || 0)) / 4
-  );
-  const initialOverall = initialScores.overallScore || Math.round(
-    (initialScores.turfDensity + initialScores.weedSuppression + initialScores.fungusControl + (initialScores.thatchScore || 0)) / 4
-  );
-  const delta = overallScore - initialOverall;
-
   const metrics = [
     { label: 'Turf Density', key: 'turfDensity', initialKey: 'turfDensity' },
     { label: 'Weed Suppression', key: 'weedSuppression', initialKey: 'weedSuppression' },
+    { label: 'Color Health', key: 'colorHealth', initialKey: 'colorHealth' },
     { label: 'Fungus Control', key: 'fungusControl', initialKey: 'fungusControl' },
-    { label: 'Thatch Level', key: 'thatchScore', initialKey: 'thatchScore', thatchInches: true },
+    { label: 'Thatch Level', key: 'thatchScore', initialKey: 'thatchScore' },
   ];
 
-  // Score ring: SVG arc
-  const ringSize = 80;
-  const ringStroke = 7;
-  const ringRadius = (ringSize - ringStroke) / 2;
-  const ringCircumference = 2 * Math.PI * ringRadius;
-  const ringOffset = ringCircumference - (overallScore / 100) * ringCircumference;
-  const ringColor = overallScore >= 75 ? B.green : overallScore >= 50 ? '#f59e0b' : '#ef4444';
+  const overallScore = scores.overallScore || Math.round(
+    ((scores.turfDensity || 0) + (scores.weedSuppression || 0) +
+     (scores.fungusControl || 0) + (scores.colorHealth || 0) + (scores.thatchScore || 0)) / 5
+  );
+
+  const initialOverall = initialScores?.overallScore || Math.round(
+    ((initialScores?.turfDensity || 0) + (initialScores?.weedSuppression || 0) +
+     (initialScores?.fungusControl || 0) + (initialScores?.colorHealth || 0) + (initialScores?.thatchScore || 0)) / 5
+  );
+
+  const overallDelta = overallScore - initialOverall;
 
   return (
     <div style={{
       background: B.white, borderRadius: 16, padding: 20,
       border: `2px solid ${B.green}22`, boxShadow: '0 4px 20px rgba(0,0,0,0.04)',
     }}>
-      {/* ── Header with overall score ring ── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
-        {/* Score Ring */}
-        <div style={{ position: 'relative', width: ringSize, height: ringSize, flexShrink: 0 }}>
-          <svg width={ringSize} height={ringSize} style={{ transform: 'rotate(-90deg)' }}>
-            <circle cx={ringSize / 2} cy={ringSize / 2} r={ringRadius}
-              fill="none" stroke={B.grayLight} strokeWidth={ringStroke} />
-            <circle cx={ringSize / 2} cy={ringSize / 2} r={ringRadius}
-              fill="none" stroke={ringColor} strokeWidth={ringStroke}
-              strokeDasharray={ringCircumference}
-              strokeDashoffset={animated ? ringOffset : ringCircumference}
-              strokeLinecap="round"
-              style={{ transition: 'stroke-dashoffset 1.2s ease-out' }} />
-          </svg>
-          <div style={{
-            position: 'absolute', inset: 0,
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <span style={{ fontSize: 20, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui, lineHeight: 1 }}>{overallScore}</span>
-            <span style={{ fontSize: 9, color: B.grayMid, fontWeight: 600 }}>/ 100</span>
+      {/* Header with overall score ring */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+        <ScoreRing score={overallScore} size={80} label="OVERALL" />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
+            Lawn Health Progress
           </div>
-          {/* Delta badge */}
-          {delta !== 0 && (
-            <div style={{
-              position: 'absolute', top: -4, right: -4,
-              background: delta > 0 ? B.green : '#ef4444', color: '#fff',
-              fontSize: 10, fontWeight: 800, borderRadius: 10, padding: '2px 6px',
-              fontFamily: FONTS.ui, boxShadow: '0 1px 4px rgba(0,0,0,0.15)',
-            }}>
-              {delta > 0 ? '+' : ''}{delta}
+          {scores.aiSummary ? (
+            <div style={{ fontSize: 12, color: B.grayMid, lineHeight: 1.5, marginTop: 4 }}>
+              {scores.aiSummary}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 4 }}>
+              Your lawn's journey since starting the premium program.
             </div>
           )}
-        </div>
-
-        <div style={{ flex: 1 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 20 }}>🌱</span>
-            <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Lawn Health</div>
-          </div>
-          <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-            {delta > 0 ? `Up ${delta} points since your first visit!` : delta === 0 ? 'Maintaining steady progress.' : 'Building your lawn\'s foundation.'}
-          </div>
+          {overallDelta !== 0 && (
+            <div style={{
+              display: 'inline-block', marginTop: 6, fontSize: 11, fontWeight: 700,
+              color: overallDelta > 0 ? B.green : '#ef4444',
+              background: overallDelta > 0 ? `${B.green}12` : '#ef444412',
+              padding: '3px 8px', borderRadius: 6,
+            }}>
+              {overallDelta > 0 ? '↑' : '↓'} {Math.abs(overallDelta)} pts since first visit
+            </div>
+          )}
         </div>
       </div>
 
-      {/* ── Photo Gallery ── */}
-      {photos && photos.length > 0 && (
+      {/* Latest Visit Photos */}
+      {photos?.length > 0 && (
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.8 }}>
-            Latest Visit Photos
+          <div style={{
+            fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
+          }}>
+            Latest Visit — {scores.assessmentDate ? fmtDate(scores.assessmentDate, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'}
           </div>
-          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
-            {photos.map((p, i) => (
-              <div key={i} onClick={() => setExpandedPhoto(expandedPhoto === i ? null : i)} style={{
-                width: 90, height: 70, borderRadius: 10, overflow: 'hidden', flexShrink: 0, cursor: 'pointer',
-                border: p.isBest ? `2px solid ${B.green}` : `1px solid ${B.grayLight}`,
-                position: 'relative',
-              }}>
-                {p.url ? (
-                  <img src={p.url} alt={`Lawn photo ${i + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                ) : (
-                  <div style={{ width: '100%', height: '100%', background: `linear-gradient(135deg, ${B.green}20, ${B.teal}20)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24 }}>🌱</div>
-                )}
-                {p.isBest && (
-                  <div style={{ position: 'absolute', top: 3, right: 3, background: B.green, color: '#fff', fontSize: 8, fontWeight: 700, borderRadius: 4, padding: '1px 4px' }}>BEST</div>
-                )}
-              </div>
-            ))}
-          </div>
-          {/* Expanded photo metrics */}
-          {expandedPhoto !== null && photos[expandedPhoto] && (
-            <div style={{
-              marginTop: 6, padding: '8px 12px', borderRadius: 10,
-              background: B.grayLight, display: 'flex', gap: 16, fontSize: 11,
-            }}>
-              <span style={{ color: B.grayDark }}><b style={{ color: B.green }}>Density:</b> {photos[expandedPhoto].turfDensity || '—'}%</span>
-              <span style={{ color: B.grayDark }}><b style={{ color: '#f59e0b' }}>Weeds:</b> {photos[expandedPhoto].weedCoverage || '—'}%</span>
-              <span style={{ color: B.grayDark }}><b style={{ color: B.teal }}>Color:</b> {photos[expandedPhoto].colorHealth || '—'}/10</span>
-            </div>
-          )}
+          <PhotoGallery photos={photos} />
         </div>
       )}
 
-      {/* ── Progress Bars ── */}
+      {/* Progress Bars */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {metrics.map((m, i) => {
-          const current = scores[m.key];
-          const initial = initialScores[m.initialKey];
-          const thatchNote = m.thatchInches && scores.thatchInches
-            ? ` · ${scores.thatchInches}" monitoring` : '';
+          const current = scores[m.key] || 0;
+          const initial = initialScores?.[m.initialKey] || 0;
+          const delta = current - initial;
           return (
             <div key={m.key}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
                 <span style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.body }}>{m.label}</span>
                 <span style={{ fontSize: 12, fontFamily: FONTS.ui }}>
-                  <span style={{ fontWeight: 700, color: B.green }}>{current}%</span>
-                  <span style={{ color: B.grayMid, fontSize: 11, marginLeft: 4 }}>from {initial}%{thatchNote}</span>
+                  <span style={{ fontWeight: 700, color: current >= 75 ? B.green : current >= 50 ? '#f59e0b' : '#ef4444' }}>{current}%</span>
+                  {delta !== 0 && (
+                    <span style={{
+                      fontSize: 10, marginLeft: 6, fontWeight: 700,
+                      color: delta > 0 ? B.green : '#ef4444',
+                    }}>
+                      {delta > 0 ? '+' : ''}{delta}
+                    </span>
+                  )}
+                  <span style={{ color: B.grayMid, fontSize: 10, marginLeft: 4 }}>from {initial}%</span>
                 </span>
               </div>
               <div style={{
-                position: 'relative', height: 10, borderRadius: 5, background: B.grayLight, overflow: 'hidden',
+                position: 'relative', height: 8, borderRadius: 4, background: B.grayLight, overflow: 'hidden',
               }}>
                 <div style={{
-                  position: 'absolute', height: '100%', borderRadius: 5,
+                  position: 'absolute', height: '100%', borderRadius: 4,
                   background: `linear-gradient(90deg, ${B.teal}30, ${B.green}30)`,
                   width: `${initial}%`,
                 }} />
                 <div style={{
-                  position: 'absolute', height: '100%', borderRadius: 5,
+                  position: 'absolute', height: '100%', borderRadius: 4,
                   background: `linear-gradient(90deg, ${B.teal}, ${B.green})`,
                   width: animated ? `${current}%` : '0%',
-                  transition: `width 1s ease-out ${i * 0.15}s`,
+                  transition: `width 1s ease-out ${i * 0.12}s`,
                 }} />
               </div>
             </div>
@@ -518,90 +644,189 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfterPhotos, reco
         })}
       </div>
 
-      {/* ── Trend Sparkline (expandable) ── */}
-      {history && history.length >= 2 && (
-        <div style={{ marginTop: 14 }}>
+      {/* Trend Chart (expandable) */}
+      {trend && trend.length >= 2 && (
+        <div style={{ marginTop: 16 }}>
           <div
             onClick={() => setShowTrend(!showTrend)}
             style={{
-              display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
-              fontSize: 11, fontWeight: 700, color: B.teal,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              cursor: 'pointer', padding: '8px 0',
             }}
           >
-            <span style={{ transform: showTrend ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s', display: 'inline-block' }}>&#9654;</span>
-            {showTrend ? 'Hide' : 'Show'} Score Trend ({history.length} visits)
+            <div style={{ fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0.8 }}>
+              Progress Over Time ({trend.length} visits)
+            </div>
+            <span style={{ fontSize: 12, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
           </div>
           {showTrend && (
-            <div style={{ marginTop: 8, padding: '8px 0' }}>
-              <svg width="100%" height="60" viewBox={`0 0 ${Math.max(history.length * 40, 200)} 60`} style={{ overflow: 'visible' }}>
-                {/* Grid lines */}
-                {[0, 25, 50, 75, 100].map(v => (
-                  <line key={v} x1="0" x2={history.length * 40} y1={56 - v * 0.5} y2={56 - v * 0.5}
-                    stroke={B.grayLight} strokeWidth="0.5" />
-                ))}
-                {/* Sparkline */}
-                <polyline
-                  fill="none" stroke={B.green} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                  points={history.map((h, i) => `${i * 40 + 10},${56 - (h.overallScore || 0) * 0.5}`).join(' ')}
-                />
-                {/* Data points */}
-                {history.map((h, i) => (
-                  <g key={i}>
-                    <circle cx={i * 40 + 10} cy={56 - (h.overallScore || 0) * 0.5} r="3" fill={B.green} />
-                    <text x={i * 40 + 10} y={56 - (h.overallScore || 0) * 0.5 - 7}
-                      textAnchor="middle" fontSize="8" fill={B.grayDark} fontWeight="700">{h.overallScore}</text>
-                  </g>
-                ))}
-              </svg>
+            <div style={{
+              background: `${B.teal}06`, borderRadius: 10, padding: '12px 8px 8px',
+              border: `1px solid ${B.teal}12`,
+            }}>
+              <TrendSparkline trend={trend} height={70} />
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: B.grayMid }}>
+                <span>{fmtDate(trend[0].date, { month: 'short', year: '2-digit' })}</span>
+                <span>{fmtDate(trend[trend.length - 1].date, { month: 'short', year: '2-digit' })}</span>
+              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* ── Next Visit Focus (from Knowledge Bridge) ── */}
-      {recommendations?.nextVisitFocus && (
+      {/* AI Recommendations */}
+      {recommendations && (
+        <div style={{ marginTop: 16 }}>
+          {recommendations.customerTip && (
+            <div style={{
+              padding: '12px 16px', borderRadius: 12,
+              background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>
+                Between-Visit Tip
+              </div>
+              <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+                {recommendations.customerTip}
+              </div>
+            </div>
+          )}
+          {recommendations.nextVisitFocus && (
+            <div style={{
+              marginTop: 8, padding: '12px 16px', borderRadius: 12,
+              background: `${B.green}08`, border: `1px solid ${B.green}20`,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginBottom: 4 }}>
+                Next Visit Focus
+              </div>
+              <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+                {recommendations.nextVisitFocus}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Fallback "What's Next" if no AI recommendations */}
+      {!recommendations && (
         <div style={{
-          marginTop: 14, padding: '12px 16px', borderRadius: 12,
+          marginTop: 16, padding: '12px 16px', borderRadius: 12,
           background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
         }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>Next Visit Focus</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
           <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
-            {recommendations.nextVisitFocus}
+            Next visit we'll focus on strengthening turf density and applying preventive fungicide.
           </div>
         </div>
       )}
 
-      {/* ── Between-Visit Tip ── */}
-      {recommendations?.betweenVisitTip && (
+      {/* Before / After Slider */}
+      {beforeAfter && (
+        <div style={{ marginTop: 18 }}>
+          <div style={{
+            fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <span>Before &amp; After</span>
+            {beforeAfter.improvement?.overall != null && beforeAfter.improvement.overall > 0 && (
+              <span style={{
+                fontSize: 11, fontWeight: 700, color: B.green,
+                background: `${B.green}12`, padding: '2px 8px', borderRadius: 6,
+              }}>
+                +{beforeAfter.improvement.overall} pts improvement
+              </span>
+            )}
+          </div>
+          <BeforeAfterSlider beforeAfter={beforeAfter} />
+          {beforeAfter.improvement?.daysSinceStart > 0 && (
+            <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6, textAlign: 'center' }}>
+              {beforeAfter.improvement.daysSinceStart} days of progress
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Before/After fallback for single assessment */}
+      {!beforeAfter && (
+        <div style={{ marginTop: 18 }}>
+          <div style={{
+            fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
+          }}>
+            Before &amp; After
+          </div>
+          <BeforeAfterSlider beforeAfter={null} />
+        </div>
+      )}
+
+      {/* Neighbor comparison */}
+      {neighborBenchmark && neighborBenchmark.percentile && (
         <div style={{
-          marginTop: 8, padding: '10px 14px', borderRadius: 10,
-          background: `${B.green}08`, border: `1px solid ${B.green}18`,
+          marginTop: 12, padding: '10px 14px', borderRadius: 10,
+          background: neighborBenchmark.percentile.includes('top 25') ? `${B.green}10`
+            : neighborBenchmark.percentile.includes('top 50') ? `${B.teal}10`
+            : `${B.wavesBlue}08`,
+          border: `1px solid ${neighborBenchmark.percentile.includes('top 25') ? B.green : B.teal}20`,
+          display: 'flex', alignItems: 'center', gap: 12,
         }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: B.green, marginBottom: 3 }}>Your Tip</div>
-          <div style={{ fontSize: 12, color: B.grayDark, lineHeight: 1.5 }}>
-            {recommendations.betweenVisitTip}
+          <div style={{
+            width: 38, height: 38, borderRadius: '50%', flexShrink: 0,
+            background: neighborBenchmark.percentile.includes('top 25') ? `${B.green}20` : `${B.teal}15`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 16,
+          }}>
+            {neighborBenchmark.percentile.includes('top 25') ? '🏆' : neighborBenchmark.percentile.includes('top 50') ? '⭐' : '📊'}
+          </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: B.navy }}>
+              {neighborBenchmark.percentile === 'top 25%' ? 'Top 25% in your area!'
+                : neighborBenchmark.percentile === 'top 50%' ? 'Above average for your area'
+                : 'Growing toward the neighborhood average'}
+            </div>
+            <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2, lineHeight: 1.4 }}>
+              Your score of {neighborBenchmark.customerScore}% vs {neighborBenchmark.neighborhoodAvg}% neighborhood avg
+              {neighborBenchmark.customerCount > 5 && ` across ${neighborBenchmark.customerCount} properties`}
+            </div>
           </div>
         </div>
       )}
 
-      {/* ── Seasonal context ── */}
+      {/* Seasonal context — FAWN weather powered */}
       <div style={{
-        marginTop: 8, padding: '8px 12px', borderRadius: 8,
+        marginTop: 10, padding: '10px 12px', borderRadius: 8,
         background: `${B.wavesBlue}08`, fontSize: 11, color: B.grayMid, lineHeight: 1.5,
       }}>
-        Scores adjusted for {(() => {
-          const m = new Date().getMonth();
-          return m >= 2 && m <= 4 ? 'spring growing' : m >= 5 && m <= 8 ? 'summer peak' : m >= 9 && m <= 10 ? 'fall transition' : 'winter dormancy';
-        })()} season — typical for St. Augustine in SW Florida.
+        {seasonalContext ? (
+          <>
+            <div style={{ fontWeight: 600, color: B.grayDark, marginBottom: 3 }}>{seasonalContext.seasonName}</div>
+            <div>{seasonalContext.explanation}</div>
+            {seasonalContext.expectation && (
+              <div style={{ marginTop: 4, color: B.teal, fontWeight: 500 }}>{seasonalContext.expectation}</div>
+            )}
+          </>
+        ) : (
+          <>Scores adjusted for {(() => {
+            const m = new Date().getMonth();
+            return m >= 2 && m <= 4 ? 'spring growing' : m >= 5 && m <= 8 ? 'summer peak' : m >= 9 && m <= 10 ? 'fall transition' : 'winter dormancy';
+          })()} season — typical for St. Augustine in SW Florida.</>
+        )}
       </div>
 
-      {/* ── Before / After Slider ── */}
-      <div style={{ marginTop: 18 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8 }}>
-          Before &amp; After
+      {/* Pressure signals when relevant */}
+      {seasonalContext?.pressureSignals?.length > 0 && (
+        <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {seasonalContext.pressureSignals.filter(s => s.level === 'high' || s.level === 'regulatory').slice(0, 3).map((s, i) => (
+            <span key={i} style={{
+              fontSize: 10, padding: '3px 8px', borderRadius: 6,
+              background: s.level === 'regulatory' ? '#ef444415' : `${B.amber || '#f59e0b'}15`,
+              color: s.level === 'regulatory' ? '#ef4444' : '#f59e0b',
+              fontWeight: 600,
+            }}>
+              {s.type.replace(/_/g, ' ')}
+            </span>
+          ))}
         </div>
-        <BeforeAfterSlider beforeAfterPhotos={beforeAfterPhotos} initialScores={initialScores} scores={scores} />
-      </div>
+      )}
     </div>
   );
 }
@@ -1674,9 +1899,11 @@ function DashboardTab({ customer, onSwitchTab }) {
           scores={lawnHealth.scores}
           initialScores={lawnHealth.initialScores}
           photos={lawnHealth.photos}
-          beforeAfterPhotos={lawnHealth.beforeAfterPhotos}
+          beforeAfter={lawnHealth.beforeAfter}
+          trend={lawnHealth.trend}
           recommendations={lawnHealth.recommendations}
-          history={lawnHealth.history}
+          seasonalContext={lawnHealth.seasonalContext}
+          neighborBenchmark={lawnHealth.neighborBenchmark}
         />
       )}
       {!lawnHealth.loading && lawnHealth.hasLawnCare && !lawnHealth.scores && (
