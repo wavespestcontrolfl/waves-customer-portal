@@ -216,6 +216,12 @@ const CallRecordingProcessor = {
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) throw new Error(`Call not found: ${callSid}`);
 
+    // Dedup guard — skip if already fully processed (prevents duplicate SMS on webhook retries)
+    if (call.processing_status === 'processed') {
+      logger.info(`[call-proc] Already processed ${callSid} — skipping`);
+      return { success: true, skipped: true, reason: 'already_processed' };
+    }
+
     logger.info(`[call-proc] Processing recording for ${callSid}`);
 
     // Step 1: Get or create transcription
@@ -458,13 +464,31 @@ const CallRecordingProcessor = {
 
           // Use SMS template if available, fall back to inline
           let smsBody;
+          // Parse separate date/time from preferred_date_time for template compatibility
+          let parsedDate = '', parsedTime = '';
+          try {
+            const dt = new Date(extracted.preferred_date_time);
+            if (!isNaN(dt.getTime())) {
+              parsedDate = dt.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric' });
+              parsedTime = dt.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+            } else {
+              // Fallback: extract from string
+              const dateMatch = extracted.preferred_date_time.match(/(\w+day,?\s+\w+\s+\d+|\w+\s+\d+)/);
+              const timeMatch = extracted.preferred_date_time.match(/(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))/);
+              parsedDate = dateMatch ? dateMatch[1] : extracted.preferred_date_time;
+              parsedTime = timeMatch ? timeMatch[1] : '';
+            }
+          } catch { parsedDate = extracted.preferred_date_time; }
+
           try {
             const tpl = await db('sms_templates').where({ template_key: 'appointment_call_confirmed' }).first();
             if (tpl?.body) {
               smsBody = tpl.body
                 .replace(/\{first_name\}/g, firstName)
                 .replace(/\{service_type\}/g, serviceType)
-                .replace(/\{date_time\}/g, extracted.preferred_date_time);
+                .replace(/\{date_time\}/g, extracted.preferred_date_time)
+                .replace(/\{date\}/g, parsedDate)
+                .replace(/\{time\}/g, parsedTime);
             }
           } catch { /* template table may not exist */ }
 
@@ -475,7 +499,7 @@ const CallRecordingProcessor = {
               `— Waves Pest Control 🌊`;
           }
 
-          await TwilioService.sendSMS(customer.phone, smsBody);
+          await TwilioService.sendSMS(customer.phone, smsBody, { messageType: 'confirmation' });
           logger.info(`[call-proc] Appointment SMS sent to ${customer.phone}`);
 
           // Create the scheduled_services record so it appears on the schedule

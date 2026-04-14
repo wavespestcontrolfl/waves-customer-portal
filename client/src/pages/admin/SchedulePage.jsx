@@ -1169,9 +1169,8 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
       if (customerInteraction === 'concern' && customerConcern) {
         body.customerConcernText = customerConcern;
       }
-      if (servicePhotos.length > 0) {
-        body.photos = servicePhotos.map(p => p.data);
-      }
+      // Photos captured but not sent in JSON body — server doesn't process them yet
+      // TODO: upload photos to S3 separately when backend photo support is added
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
       }
