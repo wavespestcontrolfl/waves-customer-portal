@@ -14,6 +14,8 @@ const {
   priceGermanRoach, priceBedBug, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
+  calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
+  calculateExclusionPrice, calculateRodentGuaranteeCombo,
 } = require('./service-pricing');
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, validateEstimateDiscounts,
@@ -280,6 +282,50 @@ function generateEstimate(input) {
     if ((exc.simple || 0) + (exc.moderate || 0) + (exc.advanced || 0) > 0) {
       lineItems.push(priceRodentGuarantee());
     }
+  }
+
+  // ── Spec-version services (v2 missing-services spec, Apr 2026) ──
+  if (services.rodentPlugging) {
+    const result = calculatePluggingPrice(services.rodentPlugging);
+    result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
+  }
+  if (services.termiteFoam) {
+    const result = calculateFoamPrice(services.termiteFoam);
+    result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
+  }
+  if (services.stingingV2) {
+    const result = calculateStingingPrice(services.stingingV2);
+    result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
+  }
+  if (services.exclusionV2) {
+    const result = calculateExclusionPrice({
+      sqft: services.exclusionV2.sqft || property.footprint,
+      stories: services.exclusionV2.stories || property.stories,
+      roofType: services.exclusionV2.roofType || property.roofType,
+      entryPointsFound: services.exclusionV2.entryPointsFound,
+      includesScreening: services.exclusionV2.includesScreening,
+      constructionType: services.exclusionV2.constructionType || property.constructionMaterial,
+    });
+    result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
+  }
+  if (services.rodentGuaranteeCombo) {
+    const result = calculateRodentGuaranteeCombo({
+      sqft: services.rodentGuaranteeCombo.sqft || property.footprint,
+      stories: services.rodentGuaranteeCombo.stories || property.stories,
+      roofType: services.rodentGuaranteeCombo.roofType || property.roofType,
+      entryPointsFound: services.rodentGuaranteeCombo.entryPointsFound,
+      includesScreening: services.rodentGuaranteeCombo.includesScreening,
+      constructionType: services.rodentGuaranteeCombo.constructionType || property.constructionMaterial,
+      baitStationTier: services.rodentGuaranteeCombo.baitStationTier,
+      stationCount: services.rodentGuaranteeCombo.stationCount,
+      guaranteeTerm: services.rodentGuaranteeCombo.guaranteeTerm || 12,
+    });
+    result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
   }
 
   // ── 4. Determine WaveGuard tier ────────────────────────────

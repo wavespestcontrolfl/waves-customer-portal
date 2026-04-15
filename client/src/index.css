@@ -3,3 +3,7 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Hide scrollbar on HorizontalScroll component */
+.horizontal-scroll::-webkit-scrollbar { display: none; }
+.horizontal-scroll > * { flex-shrink: 0; white-space: nowrap; }

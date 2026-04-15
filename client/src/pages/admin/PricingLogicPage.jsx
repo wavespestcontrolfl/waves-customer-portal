@@ -143,6 +143,41 @@ export function MarginCalculator() {
   );
 }
 
+function SpecServicesPanel() {
+  const SPEC_SERVICES = [
+    { key: 'rodentPlugging',        fn: 'calculatePluggingPrice',         name: 'Rodent Plugging',          desc: 'Entry-point sealing tiered by 1–5 / 6–15 / 16+ pts. $95 standalone, $45 add-on. 65% margin target.' },
+    { key: 'termiteFoam',           fn: 'calculateFoamPrice',             name: 'Termite Foam',             desc: 'Termidor Foam spot treatment per app point + cans (~$30/can). $125 min. 15% bundle discount with liquid barrier.' },
+    { key: 'stingingV2',            fn: 'calculateStingingPrice',         name: 'Stinging Insect',          desc: 'Multiplier stack: nest type × location × urgency / after-hours. Mins: $95 / $125 / $175.' },
+    { key: 'exclusionV2',           fn: 'calculateExclusionPrice',        name: 'Exclusion (Full)',         desc: 'sqft tiers $395 / $595 / $895 / $1,295. Tile roof 1.4×, 2-story 1.3×. multiVisit flag at >4hr.' },
+    { key: 'rodentGuaranteeCombo',  fn: 'calculateRodentGuaranteeCombo',  name: 'Rodent Guarantee Combo',   desc: 'Exclusion + Bait Stations + 12/24-mo guarantee. 10% bundle discount, 15–25% guarantee premium. Min $695 / $995.' },
+  ];
+  return (
+    <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Missing-Services Pricing Spec</div>
+        <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 12, background: D.green + '22', color: D.green, border: `1px solid ${D.green}55` }}>
+          ✓ Linked to Estimator Engine
+        </span>
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 14 }}>
+        These five services are wired into <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>generateEstimate()</code> via the <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>services.&lt;key&gt;</code> input. Spec doc: <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>missing-services-pricing-spec.md</code>.
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
+        {SPEC_SERVICES.map(s => (
+          <div key={s.key} style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 14, padding: 12, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>{s.name}</div>
+              <div style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>services.{s.key}</div>
+              <div style={{ fontSize: 10, color: D.teal, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>{s.fn}()</div>
+            </div>
+            <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>{s.desc}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function PricingLogicPage() {
   return (
     <div style={{ padding: '24px 24px 60px' }}>
@@ -152,6 +187,7 @@ export default function PricingLogicPage() {
         </div>
 
         <MarginCalculator />
+        <SpecServicesPanel />
         <PricingLogicPanel />
       </div>
     </div>

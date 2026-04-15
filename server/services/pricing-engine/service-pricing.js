@@ -884,6 +884,216 @@ function priceRodentGuarantee() {
   };
 }
 
+// ============================================================
+// SPEC FUNCTIONS — Missing services pricing spec (April 2026)
+// Distinct from legacy pest/lawn pricers above. Spec doc:
+// ~/Downloads/missing-services-pricing-spec.md
+// ============================================================
+
+function _applyMargin(cost, targetMargin) {
+  return cost / (1 - targetMargin);
+}
+function _round5(price) {
+  return Math.round(price / 5) * 5;
+}
+
+// 1. Rodent Plugging (entry-point sealing)
+function calculatePluggingPrice(config = {}) {
+  const {
+    entryPoints = 0,
+    materialType = 'caulkSealant',
+    isStandalone = true,
+    accessDifficulty = 'standard',
+  } = config;
+  const MATERIAL_COSTS = { copperMesh: 0.85, steelWool: 0.40, xcluder: 1.50, caulkSealant: 0.30 };
+  const MINUTES_PER_POINT = { standard: 3, difficult: 5 };
+  const TRIP_CHARGE = isStandalone ? 45.00 : 0;
+  const materialCost = entryPoints * (MATERIAL_COSTS[materialType] ?? 1.00);
+  const laborMinutes = entryPoints * (MINUTES_PER_POINT[accessDifficulty] ?? 3);
+  const laborCost = (laborMinutes / 60) * GLOBAL.LABOR_RATE;
+  const MINIMUM_PRICE = isStandalone ? 95 : 45;
+  const totalCost = materialCost + laborCost + TRIP_CHARGE;
+  const price = Math.max(MINIMUM_PRICE, _applyMargin(totalCost, 0.65));
+  return {
+    service: 'rodent_plugging',
+    name: 'Rodent Entry-Point Plugging',
+    price: _round5(price),
+    detail: `${entryPoints} pt${entryPoints === 1 ? '' : 's'} | ${materialType}${isStandalone ? ' | standalone' : ' | add-on'}`,
+    materialCost: Math.round(materialCost * 100) / 100,
+    laborCost: Math.round(laborCost * 100) / 100,
+    tripCharge: TRIP_CHARGE,
+    upsellExclusion: entryPoints >= 16,
+  };
+}
+
+// 2. Termite Foam (Termidor Foam spot treatment)
+function calculateFoamPrice(config = {}) {
+  const {
+    applicationPoints = 0,
+    cansEstimated,
+    isAddOnToLiquid = false,
+    accessType = 'accessible',
+  } = config;
+  const FOAM_COST_PER_CAN = 30.00;
+  const cans = cansEstimated || Math.max(1, Math.ceil(applicationPoints / 10));
+  const materialCost = cans * FOAM_COST_PER_CAN;
+  const MINUTES_PER_POINT = { accessible: 2, drillRequired: 4 };
+  const laborMinutes = applicationPoints * (MINUTES_PER_POINT[accessType] ?? 2);
+  const laborCost = (laborMinutes / 60) * GLOBAL.LABOR_RATE;
+  const setupLabor = (10 / 60) * GLOBAL.LABOR_RATE;
+  const BUNDLE_DISCOUNT = isAddOnToLiquid ? 0.15 : 0;
+  const totalCost = materialCost + laborCost + setupLabor;
+  const preDiscountPrice = _applyMargin(totalCost, 0.62);
+  const price = preDiscountPrice * (1 - BUNDLE_DISCOUNT);
+  const MINIMUM_PRICE = 125;
+  return {
+    service: 'termite_foam',
+    name: 'Termidor Foam Spot Treatment',
+    price: Math.max(MINIMUM_PRICE, _round5(price)),
+    detail: `${applicationPoints} pt${applicationPoints === 1 ? '' : 's'} | ${cans} can${cans === 1 ? '' : 's'}${isAddOnToLiquid ? ' | bundled (-15%)' : ''}`,
+    materialCost: Math.round(materialCost * 100) / 100,
+    laborCost: Math.round((laborCost + setupLabor) * 100) / 100,
+    cansUsed: cans,
+    bundleDiscount: BUNDLE_DISCOUNT > 0,
+  };
+}
+
+// 3. Stinging Insect (multiplier-stack spec version)
+function calculateStingingPrice(config = {}) {
+  const {
+    nestCount = 1,
+    nestType = 'wasp',
+    location = 'eave',
+    isUrgent = false,
+    isAfterHours = false,
+  } = config;
+  const NEST_TYPE_MULTIPLIER = { mudDauber: 1.0, wasp: 1.2, hornet: 1.5, yellowJacket: 1.8 };
+  const LOCATION_MULTIPLIER = { ground: 1.0, eave: 1.1, tree: 1.2, wall: 1.4, attic: 1.5, high: 1.6 };
+  const BASE_MATERIAL_PER_NEST = 12.00;
+  const laborMinutes = 15 + (Math.max(0, nestCount - 1) * 8);
+  const laborCost = (laborMinutes / 60) * GLOBAL.LABOR_RATE;
+  const materialCost = nestCount * BASE_MATERIAL_PER_NEST;
+  const typeMult = NEST_TYPE_MULTIPLIER[nestType] ?? 1.2;
+  const locationMult = LOCATION_MULTIPLIER[location] ?? 1.0;
+  const URGENT_SURCHARGE = isUrgent ? 1.25 : 1.0;
+  const AFTER_HOURS_SURCHARGE = isAfterHours ? 1.50 : 1.0;
+  const baseCost = materialCost + laborCost;
+  const adjustedCost = baseCost * typeMult * locationMult;
+  const preMarginPrice = _applyMargin(adjustedCost, 0.68);
+  const price = preMarginPrice * URGENT_SURCHARGE * AFTER_HOURS_SURCHARGE;
+  const MIN = isAfterHours ? 175 : isUrgent ? 125 : 95;
+  return {
+    service: 'stinging_insect_v2',
+    name: `Stinging Insect — ${nestType}`,
+    price: Math.max(MIN, _round5(price)),
+    detail: `${nestCount} nest${nestCount === 1 ? '' : 's'} | ${nestType} | ${location}${isUrgent ? ' | urgent' : ''}${isAfterHours ? ' | after-hours' : ''}`,
+    materialCost: Math.round(materialCost * 100) / 100,
+    laborCost: Math.round(laborCost * 100) / 100,
+    nestCount, nestType,
+    surcharges: { urgent: isUrgent, afterHours: isAfterHours },
+    riskLevel: typeMult >= 1.5 ? 'high' : 'moderate',
+  };
+}
+
+// 4. Exclusion V2 (sqft-tiered, roof/construction-aware)
+function calculateExclusionPrice(config = {}) {
+  const {
+    sqft = 0,
+    stories = 1,
+    roofType = 'shingle',
+    entryPointsFound,
+    includesScreening = false,
+    constructionType = 'stucco',
+  } = config;
+  const estimatedPoints = entryPointsFound || (Math.ceil(sqft / 200) + (stories > 1 ? 8 : 0));
+  const BLENDED_MATERIAL_PER_POINT = 3.50;
+  const materialCost = estimatedPoints * BLENDED_MATERIAL_PER_POINT;
+  const screeningCost = includesScreening ? (sqft * 0.015) + 45 : 0;
+  const ROOF_MULTIPLIER = { shingle: 1.0, flat: 1.0, metal: 1.2, tile: 1.4 };
+  const baseMinutesPerPoint = 5;
+  const roofMult = ROOF_MULTIPLIER[roofType] ?? 1.0;
+  const storyMult = stories > 1 ? 1.3 : 1.0;
+  const laborMinutes = (estimatedPoints * baseMinutesPerPoint * roofMult * storyMult)
+    + 30 + (includesScreening ? 45 : 0);
+  const laborCost = (laborMinutes / 60) * GLOBAL.LABOR_RATE;
+  const CONSTRUCTION_MULT = { block: 1.0, stucco: 1.1, frame: 1.2 };
+  const constructionMult = CONSTRUCTION_MULT[constructionType] ?? 1.1;
+  const totalCost = (materialCost + screeningCost + laborCost) * constructionMult;
+  const price = _applyMargin(totalCost, 0.60);
+  const MIN_BY_TIER = { small: 395, medium: 595, large: 895, xlarge: 1295 };
+  const tier = sqft < 1500 ? 'small' : sqft < 2500 ? 'medium' : sqft < 4000 ? 'large' : 'xlarge';
+  return {
+    service: 'exclusion_v2',
+    name: 'Full Rodent Exclusion',
+    price: Math.max(MIN_BY_TIER[tier], _round5(price)),
+    detail: `${tier} (${sqft} sf) | ${estimatedPoints} pts | ${roofType} roof, ${stories}-story${includesScreening ? ' | +screening' : ''}`,
+    materialCost: Math.round((materialCost + screeningCost) * 100) / 100,
+    laborCost: Math.round(laborCost * 100) / 100,
+    estimatedPoints, tier,
+    estimatedHours: Math.round(laborMinutes / 60 * 10) / 10,
+    multiVisit: laborMinutes > 240,
+  };
+}
+
+// 5. Rodent Guarantee Combo (Exclusion + Bait Stations + guarantee premium)
+function calculateRodentGuaranteeCombo(config = {}) {
+  const {
+    sqft = 0, stories = 1, roofType = 'shingle', entryPointsFound,
+    includesScreening = false, constructionType = 'stucco',
+    baitStationTier = 'enhanced',
+    stationCount,
+    guaranteeTerm = 12,
+  } = config;
+
+  const exclusion = calculateExclusionPrice({
+    sqft, stories, roofType, entryPointsFound, includesScreening, constructionType,
+  });
+
+  // Reuse legacy bait-station pricer (monthly) → quarterly
+  const stations = stationCount || (Math.ceil(sqft / 500) + 2);
+  const bait = priceRodentBait({ footprint: sqft, lawnSqFt: 0, lotSqFt: sqft, features: {} }, {});
+  const baitQuarterly = (bait.monthly || 0) * 3;
+
+  const GUARANTEE_PREMIUM = { 12: 0.15, 24: 0.25 };
+  const term = GUARANTEE_PREMIUM[guaranteeTerm] ? guaranteeTerm : 12;
+  const guaranteePremiumRate = GUARANTEE_PREMIUM[term];
+  const BUNDLE_DISCOUNT = 0.10;
+
+  const baitTotal = baitQuarterly * (term === 24 ? 8 : 4);
+  const componentTotal = exclusion.price + baitTotal;
+  const discountedComponents = componentTotal * (1 - BUNDLE_DISCOUNT);
+  const guaranteeSurcharge = discountedComponents * guaranteePremiumRate;
+  const totalPackagePrice = discountedComponents + guaranteeSurcharge;
+
+  const MINIMUM_COMBO = { 12: 695, 24: 995 };
+  const finalPrice = Math.max(MINIMUM_COMBO[term], _round5(totalPackagePrice));
+  const upfrontRevenue = exclusion.price * (1 - BUNDLE_DISCOUNT) + guaranteeSurcharge;
+
+  return {
+    service: 'rodent_guarantee_combo',
+    name: `Rodent Guarantee Combo (${term} mo)`,
+    price: finalPrice,
+    detail: `Exclusion + ${stations} bait stations + ${term}-mo guarantee`,
+    breakdown: {
+      exclusionPrice: exclusion.price,
+      baitStationQuarterly: baitQuarterly,
+      baitStationTotal: baitTotal,
+      bundleDiscount: BUNDLE_DISCOUNT,
+      guaranteePremium: guaranteePremiumRate,
+      guaranteeSurcharge: _round5(guaranteeSurcharge),
+    },
+    guaranteeTerm: term,
+    stationCount: stations,
+    exclusionDetails: {
+      estimatedPoints: exclusion.estimatedPoints,
+      estimatedHours: exclusion.estimatedHours,
+      multiVisit: exclusion.multiVisit,
+    },
+    upfrontRevenue: _round5(upfrontRevenue),
+    recurringRevenue: baitQuarterly,
+  };
+}
+
 module.exports = {
   pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
@@ -892,5 +1102,8 @@ module.exports = {
   priceGermanRoach, priceBedBug, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
+  // Spec functions (Apr 2026)
+  calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
+  calculateExclusionPrice, calculateRodentGuaranteeCombo,
   interpolate, laborCost,
 };
