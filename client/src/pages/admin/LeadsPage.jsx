@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
+import HorizontalScroll from '../../components/HorizontalScroll';
+import useIsMobile from '../../hooks/useIsMobile';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -43,20 +45,24 @@ function Card({ children, style, onClick }) {
 }
 
 function MetricCard({ label, value, sub, color }) {
-  return <Card style={{ flex:'1 1 180px', minWidth:160 }}>
-    <div style={{ fontSize:12, color:C.muted, marginBottom:4 }}>{label}</div>
-    <div style={{ fontSize:26, fontWeight:700, color:color||C.heading, ...mono }}>{value}</div>
+  const displayValue = (value === null || value === undefined || value === '--') ? '—' : value;
+  const isEmpty = displayValue === '—';
+  return <Card style={{ flex:'1 1 180px', minWidth:0 }}>
+    <div style={{ fontSize:11, color:C.muted, marginBottom:4, textTransform:'uppercase', letterSpacing:0.5, fontWeight:600 }}>{label}</div>
+    <div style={{ fontSize:24, fontWeight:700, color: isEmpty ? C.muted : (color||C.heading), ...mono }}>{displayValue}</div>
     {sub && <div style={{ fontSize:11, color:C.muted, marginTop:2 }}>{sub}</div>}
   </Card>;
 }
 
 function TabBar({ tabs, active, onChange }) {
-  return <div style={{ display:'flex', gap:4, marginBottom:24, borderBottom:`1px solid ${C.border}`, flexWrap:'wrap' }}>
-    {tabs.map(t => <button key={t.key} onClick={()=>onChange(t.key)} style={{
-      padding:'10px 20px', background:'none', border:'none', color:active===t.key?C.teal:C.muted,
-      fontSize:14, fontWeight:600, cursor:'pointer', borderBottom:active===t.key?`2px solid ${C.teal}`:'2px solid transparent',
-      marginBottom:-1, transition:'all 0.2s',
-    }}>{t.label}</button>)}
+  return <div style={{ borderBottom:`1px solid ${C.border}`, marginBottom:24 }}>
+    <HorizontalScroll gap={4}>
+      {tabs.map(t => <button key={t.key} onClick={()=>onChange(t.key)} style={{
+        padding:'10px 18px', background:'none', border:'none', color:active===t.key?C.teal:C.muted,
+        fontSize:14, fontWeight:600, cursor:'pointer', borderBottom:active===t.key?`2px solid ${C.teal}`:'2px solid transparent',
+        marginBottom:-1, transition:'all 0.2s', whiteSpace:'nowrap',
+      }}>{t.label}</button>)}
+    </HorizontalScroll>
   </div>;
 }
 
@@ -193,6 +199,7 @@ const LOST_REASONS = [
 // ═══════════════════════════════════════════════════════════════════════════
 export default function LeadsPage() {
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const [tab, setTab] = useState('pipeline');
   const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
@@ -336,13 +343,19 @@ export default function LeadsPage() {
 
     return <>
       {/* Metric Cards */}
-      <div style={{ display:'flex', gap:16, flexWrap:'wrap', marginBottom:24 }}>
+      <div style={{
+        display: isMobile ? 'grid' : 'flex',
+        gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : undefined,
+        gap: isMobile ? 10 : 16,
+        flexWrap: isMobile ? undefined : 'wrap',
+        marginBottom: 24,
+      }}>
         <MetricCard label="New Leads (Month)" value={ov.total || 0} color={C.teal} />
         <MetricCard label="Conversion Rate" value={fmtPct(ov.conversionRate)} color={C.green} />
         <MetricCard label="Avg Response Time" value={fmtTime(ov.avgResponseTime)} color={C.amber} />
         <MetricCard label="Cost per Acquisition" value={fmtMoney(ov.cpa)} color={C.purple} />
         <MetricCard label="Avg Speed to Lead" value={fmtTime(ov.avgResponseTime)} sub={ov.avgResponseTime != null && ov.avgResponseTime < 5 ? 'Great!' : ov.avgResponseTime != null && ov.avgResponseTime < 15 ? 'Good' : ov.avgResponseTime != null ? 'Needs work' : null} color={ov.avgResponseTime != null ? (ov.avgResponseTime < 5 ? C.green : ov.avgResponseTime < 15 ? C.amber : C.red) : C.muted} />
-        <MetricCard label="Monthly ROI" value={ov.roi != null ? fmtPct(ov.roi) : '--'} color={roiColor(ov.roi||0)} />
+        <MetricCard label="Monthly ROI" value={ov.roi != null ? fmtPct(ov.roi) : null} color={roiColor(ov.roi||0)} />
       </div>
 
       {/* Funnel */}

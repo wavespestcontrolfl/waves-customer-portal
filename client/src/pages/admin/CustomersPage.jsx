@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Customer360Profile from '../../components/admin/Customer360Profile';
 import IntelligenceBar from '../../components/admin/IntelligenceBar';
+import HorizontalScroll from '../../components/HorizontalScroll';
+import useIsMobile from '../../hooks/useIsMobile';
 import { CustomerHealthSection } from './CustomerHealthTabs';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -854,6 +856,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
 }
 
 export default function CustomersPage() {
+  const isMobile = useIsMobile();
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1121,22 +1124,22 @@ export default function CustomersPage() {
       {view === 'directory' && (
         <>
           {/* Filter pills — City */}
-          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>City:</span>
+          <HorizontalScroll gap={6} style={{ marginBottom: 8 }}>
+            {!isMobile && <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>City:</span>}
             {['all', 'Lakewood Ranch', 'Parrish', 'Sarasota', 'Venice', 'Bradenton'].map(city => (
               <button key={city} onClick={() => setFilterCity(city)} style={{
-                padding: '4px 10px', borderRadius: 9999, border: `1px solid ${filterCity === city ? D.teal : D.border}`,
+                padding: '6px 12px', borderRadius: 9999, border: `1px solid ${filterCity === city ? D.teal : D.border}`,
                 background: filterCity === city ? `${D.teal}22` : 'transparent',
-                color: filterCity === city ? D.teal : D.muted, fontSize: 11, fontWeight: 600, cursor: 'pointer',
-              }}>{city === 'all' ? 'All' : city}</button>
+                color: filterCity === city ? D.teal : D.muted, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              }}>{city === 'all' ? 'All Cities' : city}</button>
             ))}
-          </div>
+          </HorizontalScroll>
 
           {/* Filter pills — Tier */}
-          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>Tier:</span>
+          <HorizontalScroll gap={6} style={{ marginBottom: 8 }}>
+            {!isMobile && <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>Tier:</span>}
             {[
-              { value: 'all', label: 'All' },
+              { value: 'all', label: 'All Tiers' },
               { value: 'Platinum', label: 'Platinum' },
               { value: 'Gold', label: 'Gold' },
               { value: 'Silver', label: 'Silver' },
@@ -1145,18 +1148,18 @@ export default function CustomersPage() {
               { value: 'none', label: 'No Plan' },
             ].map(t => (
               <button key={t.value} onClick={() => setFilterTier(t.value)} style={{
-                padding: '4px 10px', borderRadius: 9999,
+                padding: '6px 12px', borderRadius: 9999,
                 border: `1px solid ${filterTier === t.value ? (TIER_COLORS[t.value] || D.teal) : D.border}`,
                 background: filterTier === t.value ? `${TIER_COLORS[t.value] || D.teal}22` : 'transparent',
                 color: filterTier === t.value ? (TIER_COLORS[t.value] || D.teal) : D.muted,
-                fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                fontSize: 12, fontWeight: 600, cursor: 'pointer',
               }}>{t.label}</button>
             ))}
-          </div>
+          </HorizontalScroll>
 
           {/* Filter pills — Status */}
-          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>Status:</span>
+          <HorizontalScroll gap={6} style={{ marginBottom: 6 }}>
+            {!isMobile && <span style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, alignSelf: 'center', marginRight: 4 }}>Status:</span>}
             {[
               { value: 'all', label: 'All' },
               { value: 'active_customer', label: 'Active' },
@@ -1164,28 +1167,27 @@ export default function CustomersPage() {
               { value: 'at_risk', label: 'At Risk' },
             ].map(s => (
               <button key={s.value} onClick={() => setFilterStage(s.value)} style={{
-                padding: '4px 10px', borderRadius: 9999,
+                padding: '6px 12px', borderRadius: 9999,
                 border: `1px solid ${filterStage === s.value ? D.teal : D.border}`,
                 background: filterStage === s.value ? `${D.teal}22` : 'transparent',
                 color: filterStage === s.value ? D.teal : D.muted,
-                fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                fontSize: 12, fontWeight: 600, cursor: 'pointer',
               }}>{s.label}</button>
             ))}
             <button onClick={() => setFilterHasBalance(!filterHasBalance)} style={{
-              padding: '4px 10px', borderRadius: 9999,
+              padding: '6px 12px', borderRadius: 9999,
               border: `1px solid ${filterHasBalance ? D.red : D.border}`,
               background: filterHasBalance ? `${D.red}22` : 'transparent',
               color: filterHasBalance ? D.red : D.muted,
-              fontSize: 11, fontWeight: 600, cursor: 'pointer',
+              fontSize: 12, fontWeight: 600, cursor: 'pointer',
             }}>Has Balance</button>
-            <div style={{ flex: 1 }} />
-            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.muted, alignSelf: 'center' }}>
-              {filteredSorted.length} result{filteredSorted.length !== 1 ? 's' : ''}
-            </span>
+          </HorizontalScroll>
+          <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: D.muted, marginBottom: 14, textAlign: 'right' }}>
+            {filteredSorted.length} result{filteredSorted.length !== 1 ? 's' : ''}
           </div>
 
-          {/* Table header */}
-          <div className="customers-table-header" style={{
+          {/* Table header (desktop only) */}
+          {!isMobile && <div className="customers-table-header" style={{
             display: 'grid',
             gridTemplateColumns: '1.6fr 0.3fr 0.5fr 0.5fr 0.5fr 0.5fr 0.5fr 0.6fr 0.6fr 0.5fr 0.5fr',
             gap: 6, padding: '10px 16px', marginBottom: 4,
@@ -1201,7 +1203,7 @@ export default function CustomersPage() {
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Stage</div>
             <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Rating</div>
             <div />
-          </div>
+          </div>}
 
           {/* Rows */}
           {filteredSorted.length === 0 ? (
@@ -1218,8 +1220,67 @@ export default function CustomersPage() {
               const icons = serviceIcons(c);
               const computedTier = c.serviceCount != null ? tierFromServices(c.serviceCount) : null;
               const hsColor = c.healthScore != null ? (c.healthScore >= 70 ? D.green : c.healthScore >= 40 ? D.amber : D.red) : D.border;
+              const tier = detectTier(c);
+              const stageLabel = c.pipelineStage;
               return (
-              <div key={c.id} style={{ marginBottom: 6 }}>
+              <div key={c.id} style={{ marginBottom: 8 }}>
+                {isMobile ? (
+                <div
+                  onClick={() => expandCustomer(c.id)}
+                  style={{
+                    display: 'flex', flexDirection: 'column', gap: 6,
+                    padding: 14, background: D.card, border: `1px solid ${D.border}`,
+                    borderRadius: 12, cursor: 'pointer',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+                  }}
+                >
+                  {/* Row 1: status dot + name + tier badge */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: hsColor, flexShrink: 0 }} title={c.healthScore != null ? `Health: ${c.healthScore}` : 'No score'} />
+                    <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {c.firstName} {c.lastName}
+                    </div>
+                    {tier && <TierBadge tier={tier} />}
+                  </div>
+
+                  {/* Row 2: tappable phone */}
+                  {c.phone && (
+                    <a
+                      href={`tel:${c.phone}`}
+                      onClick={e => e.stopPropagation()}
+                      style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14, color: D.teal, textDecoration: 'underline', paddingLeft: 20 }}
+                    >{c.phone}</a>
+                  )}
+
+                  {/* Row 3: city + stage joined by · */}
+                  {(c.city || stageLabel) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 20, flexWrap: 'wrap' }}>
+                      {c.city && <span style={{ fontSize: 13, color: D.muted }}>{c.city}</span>}
+                      {c.city && stageLabel && <span style={{ color: D.muted }}>·</span>}
+                      {stageLabel && <StageBadge stage={stageLabel} />}
+                    </div>
+                  )}
+
+                  {/* Row 4: health score bar + chevron */}
+                  {c.healthScore != null && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 20, marginTop: 2 }}>
+                      <div style={{ fontSize: 11, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>Health</div>
+                      <div style={{ flex: 1, height: 6, background: D.border, borderRadius: 3, overflow: 'hidden' }}>
+                        <div style={{ width: `${Math.max(0, Math.min(100, c.healthScore))}%`, height: '100%', background: hsColor }} />
+                      </div>
+                      <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: hsColor, fontWeight: 700, minWidth: 24, textAlign: 'right' }}>{c.healthScore}</div>
+                      <span style={{ color: D.muted, fontSize: 16 }}>›</span>
+                    </div>
+                  )}
+
+                  {/* Balance alert (only if > 0) */}
+                  {(c.balanceOwed || 0) > 0 && (
+                    <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.red, paddingLeft: 20, fontWeight: 600 }}>
+                      Balance: ${parseFloat(c.balanceOwed).toFixed(0)}
+                    </div>
+                  )}
+                </div>
+                ) : (
                 <div
                   className="customers-row-grid"
                   onClick={() => expandCustomer(c.id)}
@@ -1299,6 +1360,7 @@ export default function CustomersPage() {
                     }}>x</button>
                   </div>
                 </div>
+                )}
 
                 {/* Inline edit modal */}
                 {editingId === c.id && (

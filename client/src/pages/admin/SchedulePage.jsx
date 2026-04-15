@@ -7,6 +7,8 @@ const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanel
 import { ViewModeSelector, WeekView, MonthView } from '../../components/schedule/CalendarViews';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import ScheduleIntelligenceBar from '../../components/admin/ScheduleIntelligenceBar';
+import HorizontalScroll from '../../components/HorizontalScroll';
+import useIsMobile from '../../hooks/useIsMobile';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -2210,6 +2212,7 @@ function ProtocolReferenceTab() {
 /* ── Main Schedule Page ───────────────────────────────── */
 
 export default function SchedulePage() {
+  const isMobile = useIsMobile();
   const [activeTab, setActiveTab] = useState('board');
   const [viewMode, setViewMode] = useState('day');
   const [date, setDate] = useState(formatDateISO(new Date()));
@@ -2432,24 +2435,26 @@ export default function SchedulePage() {
         <div>
           <div style={{ fontSize: 26, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Schedule & Dispatch</div>
           {/* Date nav */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-            <button onClick={() => shiftDate(-1)} style={navBtnStyle} title="Previous">&#9664;</button>
-            <span style={{ fontSize: 14, fontWeight: 600, color: D.text, minWidth: 220, textAlign: 'center' }}>
-              {viewMode === 'day' ? formatDateDisplay(date)
-                : viewMode === 'week' ? (() => {
-                    const d = new Date(date + 'T12:00:00');
-                    const end = new Date(d); end.setDate(end.getDate() + 6);
-                    return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
-                  })()
-                : new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-              }
-            </span>
-            <button onClick={() => shiftDate(1)} style={navBtnStyle} title="Next">&#9654;</button>
-            {!isToday(date) && (
-              <button onClick={() => setDate(formatDateISO(new Date()))} style={{
-                ...navBtnStyle, fontSize: 12, padding: '4px 12px', width: 'auto',
-              }}>Today</button>
-            )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <button onClick={() => shiftDate(-1)} style={navBtnStyle} title="Previous">&#9664;</button>
+              <span style={{ fontSize: 14, fontWeight: 600, color: D.text, minWidth: isMobile ? 0 : 220, textAlign: 'center', flex: isMobile ? 1 : undefined }}>
+                {viewMode === 'day' ? formatDateDisplay(date)
+                  : viewMode === 'week' ? (() => {
+                      const d = new Date(date + 'T12:00:00');
+                      const end = new Date(d); end.setDate(end.getDate() + 6);
+                      return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+                    })()
+                  : new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+                }
+              </span>
+              <button onClick={() => shiftDate(1)} style={navBtnStyle} title="Next">&#9654;</button>
+              {!isToday(date) && (
+                <button onClick={() => setDate(formatDateISO(new Date()))} style={{
+                  ...navBtnStyle, fontSize: 12, padding: '4px 12px', width: 'auto',
+                }}>Today</button>
+              )}
+            </div>
             <ViewModeSelector viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
           </div>
         </div>
@@ -2499,18 +2504,20 @@ export default function SchedulePage() {
       {viewMode === 'month' && <MonthView date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
 
       {/* Tabs — day view only */}
-      {viewMode === 'day' && <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
-        {SCHEDULE_TABS.map(t => (
-          <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
-            padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
-            background: activeTab === t.id ? D.teal : 'transparent',
-            color: activeTab === t.id ? D.white : D.muted,
-            transition: 'all 0.15s',
-          }}>
-            {t.label}
-          </button>
-        ))}
+      {viewMode === 'day' && <div style={{ marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+        <HorizontalScroll gap={4} edgeBleed={4} style={{ paddingBottom: 0 }}>
+          {SCHEDULE_TABS.map(t => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+              padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
+              background: activeTab === t.id ? D.teal : 'transparent',
+              color: activeTab === t.id ? D.white : D.muted,
+              transition: 'all 0.15s',
+            }}>
+              {t.label}
+            </button>
+          ))}
+        </HorizontalScroll>
       </div>}
 
       {/* Intelligence Bar — schedule context */}
