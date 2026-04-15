@@ -14,7 +14,9 @@ function interpolate(value, brackets, valueKey = 0, resultKey = 1) {
   for (let i = 0; i < brackets.length - 1; i++) {
     const lo = brackets[i], hi = brackets[i + 1];
     if (value >= lo[valueKey] && value <= hi[valueKey]) {
-      const ratio = (value - lo[valueKey]) / (hi[valueKey] - lo[valueKey]);
+      const span = hi[valueKey] - lo[valueKey];
+      if (span === 0) return lo[resultKey];
+      const ratio = (value - lo[valueKey]) / span;
       return lo[resultKey] + ratio * (hi[resultKey] - lo[resultKey]);
     }
   }

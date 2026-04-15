@@ -12,7 +12,21 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 // WaveGuard tier discounts
-const TIER_DISCOUNT = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+const TIER_DISCOUNT = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
+// Case-insensitive tier lookup — DB may store 'platinum' or 'Platinum'
+function tierDiscount(t) {
+  if (!t) return 0;
+  const key = String(t).trim();
+  if (TIER_DISCOUNT[key] != null) return TIER_DISCOUNT[key];
+  const capped = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+  return TIER_DISCOUNT[capped] || 0;
+}
+function normalizeTier(t) {
+  if (!t) return 'Bronze';
+  const key = String(t).trim();
+  const capped = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+  return ['Bronze', 'Silver', 'Gold', 'Platinum', 'One-Time'].includes(capped) ? capped : 'Bronze';
+}
 
 // Services Waves offers — used to find gaps for upsells
 const ALL_SERVICES = [
@@ -230,13 +244,13 @@ class PricingIntelligence {
 
     if (missingServices.length === 0) {
       // Already has everything — try tier upgrade
-      const currentTier = customer.waveguard_tier || 'Bronze';
+      const currentTier = normalizeTier(customer.waveguard_tier);
       const tiers = ['Bronze', 'Silver', 'Gold', 'Platinum'];
       const currentIdx = tiers.indexOf(currentTier);
 
       if (currentIdx < tiers.length - 1) {
         const nextTier = tiers[currentIdx + 1];
-        const discount = TIER_DISCOUNT[nextTier] - TIER_DISCOUNT[currentTier];
+        const discount = tierDiscount(nextTier) - tierDiscount(currentTier);
         return {
           type: 'tier_upgrade',
           service: `WaveGuard ${nextTier}`,
@@ -313,7 +327,7 @@ class PricingIntelligence {
     const monthlyRecurring = recurringCustomers.reduce((sum, c) => sum + parseFloat(c.monthly_rate || 0), 0);
     const tierBreakdown = {};
     for (const c of recurringCustomers) {
-      const tier = c.waveguard_tier || 'Bronze';
+      const tier = normalizeTier(c.waveguard_tier);
       if (!tierBreakdown[tier]) tierBreakdown[tier] = { count: 0, revenue: 0 };
       tierBreakdown[tier].count++;
       tierBreakdown[tier].revenue += parseFloat(c.monthly_rate || 0);

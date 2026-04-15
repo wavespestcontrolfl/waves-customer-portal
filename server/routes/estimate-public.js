@@ -236,13 +236,26 @@ router.put('/:token/select-tier', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (estimate.status === 'accepted') return res.status(400).json({ error: 'Estimate already accepted' });
 
-    const { selectedTier, estimateData, monthlyTotal, annualTotal } = req.body;
-    if (!selectedTier) return res.status(400).json({ error: 'selectedTier required' });
+    const { selectedTier } = req.body;
+    const ALLOWED_TIERS = ['Bronze', 'Silver', 'Gold', 'Platinum'];
+    if (!selectedTier || !ALLOWED_TIERS.includes(selectedTier)) {
+      return res.status(400).json({ error: 'selectedTier must be one of: ' + ALLOWED_TIERS.join(', ') });
+    }
 
     const previousTier = estimate.waveguard_tier || 'Bronze';
 
+    // Server-side pricing — never trust client totals
+    const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
+    let parsedData = {};
+    try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+    catch { parsedData = {}; }
+
+    const baseMonthly = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || estimate.monthly_total || 0);
+    const discount = TIER_DISCOUNTS[selectedTier] || 0;
+    const monthlyTotal = Math.round(baseMonthly * (1 - discount) * 100) / 100;
+    const annualTotal = Math.round(monthlyTotal * 12 * 100) / 100;
+
     await db('estimates').where({ id: estimate.id }).update({
-      estimate_data: JSON.stringify(estimateData),
       waveguard_tier: selectedTier,
       monthly_total: monthlyTotal,
       annual_total: annualTotal,
