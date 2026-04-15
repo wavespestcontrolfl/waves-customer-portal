@@ -1349,7 +1349,10 @@ function HeroSlider({ onSwitchTab }) {
   const touchDeltaX = useRef(0);
 
   const slides = [
-    { type: 'image', src: '/waves-van.jpg', alt: 'Waves Pest Control & Lawn Care van' },
+    { type: 'image', src: '/waves-ford-1.png', alt: 'Waves Pest Control & Lawn Care truck' },
+    { type: 'image', src: '/waves-ford-2.png', alt: 'Waves Pest Control & Lawn Care truck' },
+    { type: 'image', src: '/waves-ford-3.png', alt: 'Waves Pest Control & Lawn Care truck' },
+    { type: 'image', src: '/waves-ford-4.png', alt: 'Waves Pest Control & Lawn Care truck' },
     {
       type: 'promo',
       bg: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
@@ -1430,7 +1433,7 @@ function HeroSlider({ onSwitchTab }) {
               <div style={{
                 width: '100%', height: '100%', background: slide.bg,
                 display: 'flex', flexDirection: 'column', justifyContent: 'center',
-                padding: '24px 28px', boxSizing: 'border-box',
+                padding: '24px 28px 24px 44px', boxSizing: 'border-box',
                 ...(i === active ? { animation: 'heroFadeIn 0.6s ease' } : {}),
               }}>
                 <div style={{ fontSize: 32, marginBottom: 8 }}>{slide.icon}</div>
