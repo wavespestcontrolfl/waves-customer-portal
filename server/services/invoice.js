@@ -317,13 +317,10 @@ const InvoiceService = {
     const customer = await db('customers').where({ id: invoice.customer_id }).first();
     if (!customer?.phone) return;
 
-    const cardLine = (invoice.card_brand && invoice.card_last_four)
-      ? `\nPaid with: ${invoice.card_brand} ****${invoice.card_last_four}` : '';
     const amount = Number(invoice.total).toFixed(2);
     const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
     const receiptUrl = invoice.token ? `${domain}/pay/${invoice.token}` : '';
-    const receiptLine = receiptUrl ? `\n\nView receipt: ${receiptUrl}` : '';
-    const fallback = `Payment received — thank you, ${customer.first_name}!\n\nInvoice: ${invoice.invoice_number}\nAmount: $${amount}${cardLine}${receiptLine}\n\nYour property is protected. See you at your next service!\n\n— Waves Pest Control`;
+    const fallback = `Hello ${customer.first_name}! Thank you for your payment — we truly appreciate your business. You can view your receipt here: ${receiptUrl}.\n\nIf you have any questions or need assistance, simply reply to this message. Thanks again for choosing Waves!`;
     let body = fallback;
     try {
       const templates = require('../routes/admin-sms-templates');
@@ -331,7 +328,6 @@ const InvoiceService = {
         first_name: customer.first_name || '',
         invoice_number: invoice.invoice_number,
         amount,
-        card_line: cardLine,
         receipt_url: receiptUrl,
       });
       if (rendered && !rendered.includes('{first_name}')) body = rendered;

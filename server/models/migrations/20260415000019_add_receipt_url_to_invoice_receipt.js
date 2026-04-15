@@ -5,8 +5,8 @@
 exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
 
-  const body = 'Payment received — thank you, {first_name}!\n\nInvoice: {invoice_number}\nAmount: ${amount}{card_line}\n\nView receipt: {receipt_url}\n\nYour property is protected. See you at your next service!\n\n— Waves Pest Control';
-  const variables = JSON.stringify(['first_name', 'invoice_number', 'amount', 'card_line', 'receipt_url']);
+  const body = 'Hello {first_name}! Thank you for your payment — we truly appreciate your business. You can view your receipt here: {receipt_url}.\n\nIf you have any questions or need assistance, simply reply to this message. Thanks again for choosing Waves!';
+  const variables = JSON.stringify(['first_name', 'invoice_number', 'amount', 'receipt_url']);
 
   await knex('sms_templates')
     .where({ template_key: 'invoice_receipt' })
