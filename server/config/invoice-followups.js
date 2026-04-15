@@ -36,16 +36,6 @@ module.exports = {
   // The touches. Order matters; step_index maps to this array.
   steps: [
     {
-      id: 'due_today',
-      template_key: 'invoice_due_today',
-      daysAfterDue: 0,
-      label: 'Due-date reminder',
-      body:
-        `Hi {{name}}! Quick reminder from Waves — your invoice for {{invoiceTitle}} ` +
-        `(\${{amount}}) is due today. Pay here: {{payUrl}}\n\nAlready paid? Disregard — ` +
-        `takes a few hours to clear. Reply with any questions. — Waves`,
-    },
-    {
       id: 'd3_friendly',
       template_key: 'invoice_followup_3day',
       daysAfterDue: 3,
