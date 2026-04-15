@@ -3,9 +3,20 @@ const router = express.Router();
 const crypto = require('crypto');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
+const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
+
+async function renderTemplate(templateKey, vars, fallback) {
+  try {
+    if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      if (body) return body;
+    }
+  } catch { /* fall through */ }
+  return fallback;
+}
 
 // GET /api/estimates/:token — customer views estimate (no auth)
 router.get('/:token', async (req, res, next) => {
@@ -165,9 +176,18 @@ router.put('/:token/accept', async (req, res, next) => {
 
       // Notify office
       try {
-        await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
-          `🎉 Estimate accepted! ${estimate.customer_name} at ${estimate.address} — ${estimate.waveguard_tier || 'Bronze'} WaveGuard $${estimate.monthly_total}/mo. Onboarding link sent.`
+        const officeVars = {
+          customer_name: estimate.customer_name || '',
+          address: estimate.address || '',
+          waveguard_tier: estimate.waveguard_tier || 'Bronze',
+          monthly_total: estimate.monthly_total || 0,
+        };
+        const officeBody = await renderTemplate(
+          'estimate_accepted_office',
+          officeVars,
+          `🎉 Estimate accepted! ${officeVars.customer_name} at ${officeVars.address} — ${officeVars.waveguard_tier} WaveGuard $${officeVars.monthly_total}/mo. Onboarding link sent.`
         );
+        await TwilioService.sendSMS(WAVES_OFFICE_PHONE, officeBody);
       } catch (e) { logger.error(`Estimate accept SMS failed: ${e.message}`); }
     }
 
@@ -175,8 +195,12 @@ router.put('/:token/accept', async (req, res, next) => {
     if (estimate.customer_phone) {
       try {
         const obUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
-        await TwilioService.sendSMS(estimate.customer_phone,
-          `Hello ${firstName}! Thanks for approving your estimate. Complete your setup here so we can get you on the schedule: ${obUrl}`,
+        const customerBody = await renderTemplate(
+          'estimate_accepted_customer',
+          { first_name: firstName, onboarding_url: obUrl },
+          `Hello ${firstName}! Thanks for approving your estimate. Complete your setup here so we can get you on the schedule: ${obUrl}`
+        );
+        await TwilioService.sendSMS(estimate.customer_phone, customerBody,
           { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png' }
         );
         logger.info(`[estimate-accept] Acceptance SMS sent to ${firstName} (${estimate.customer_phone})`);

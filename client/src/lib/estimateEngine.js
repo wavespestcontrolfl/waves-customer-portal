@@ -340,10 +340,11 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── PEST — multi-frequency ──────────────────────────────── */
-  if (svcPest && footprint > 0) {
+  if (svcPest) {
     hasRec = true;
+    const fpEff = footprint > 0 ? footprint : 2500; // default SWFL home fallback when sqft unknown
     let adj = 0;
-    adj += interpolate(footprint, [
+    adj += interpolate(fpEff, [
       { at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 },
       { at: 2000, adj: 0 }, { at: 2500, adj: 8 }, { at: 3000, adj: 14 },
       { at: 4000, adj: 22 }, { at: 5500, adj: 32 },
@@ -493,10 +494,11 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── TERMITE BAIT ────────────────────────────────────────── */
-  if (svcTermiteBait && footprint > 0) {
+  if (svcTermiteBait) {
     hasRec = true;
+    const fpEff = footprint > 0 ? footprint : 2500;
     let pm = (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
-    const perim = Math.round(4 * Math.sqrt(footprint) * pm);
+    const perim = Math.round(4 * Math.sqrt(fpEff) * pm);
     const sta = Math.max(8, Math.ceil(perim / 10));
     const ai = Math.round((sta * 14 + sta * 5.25 + sta * 0.75) * 1.75);
     const ti = Math.round((sta * 24 + sta * 5.25 + sta * 0.75) * 1.75);
@@ -505,12 +507,13 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── RODENT BAIT ─────────────────────────────────────────── */
-  if (svcRodentBait && footprint > 0) {
+  if (svcRodentBait) {
     hasRec = true;
     // v1.5: matrix classification — both footprint AND lot matter for rodent pressure
     // A 2,600sf home on a 40,000sf lot has very different pressure than 2,600sf on 10,000sf
+    const fpEff = footprint > 0 ? footprint : 2500;
     let rodentScore = 0;
-    if (footprint >= 2500) rodentScore += 2; else if (footprint >= 1800) rodentScore += 1;
+    if (fpEff >= 2500) rodentScore += 2; else if (fpEff >= 1800) rodentScore += 1;
     if (lotSqFt >= 20000) rodentScore += 2; else if (lotSqFt >= 12000) rodentScore += 1;
     if (nearWater) rodentScore += 1;
     if (treeDensity === 'HEAVY') rodentScore += 1;
@@ -525,13 +528,14 @@ export function calculateEstimate(inputs) {
   let hasOT = false, otItems = [];
 
   /* ── One-Time Pest ───────────────────────────────────────── */
-  if (svcOnetimePest && footprint > 0) {
+  if (svcOnetimePest) {
     hasOT = true;
+    const fpEff = footprint > 0 ? footprint : 2500;
     const roachBackout = roachMod === 'GERMAN' ? 1.25 : roachMod === 'REGULAR' ? 1.10 : 1;
     let bpp = R.pest ? R.pest.pa / (R.pest.rOG > 0 ? roachBackout : 1) : 117;
     if (!R.pest) {
       let adj = 0;
-      adj += interpolate(footprint, [
+      adj += interpolate(fpEff, [
         { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
         { at: 2000, adj: 0 }, { at: 2500, adj: 12 }, { at: 3000, adj: 22 },
         { at: 4000, adj: 35 }, { at: 5500, adj: 50 },
