@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import JobFormSection from '../../components/admin/JobFormSection';
+import ExpenseCapture from '../../components/admin/ExpenseCapture';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
@@ -460,6 +462,8 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [elapsed, setElapsed] = useState('0:00');
+  const [formResponses, setFormResponses] = useState({});
+  const [formStartedAt] = useState(() => new Date().toISOString());
 
   const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
 
@@ -501,6 +505,8 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
         products: selectedProducts.map(p => ({ productId: p.productId, rate: p.rate, rateUnit: p.rateUnit })),
         sendCompletionSms: sendSms,
         requestReview,
+        formResponses,
+        formStartedAt,
       };
       if (isLawn) {
         if (soilTemp) body.soilTemp = parseFloat(soilTemp);
@@ -589,6 +595,13 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
             ))}
           </div>
 
+          {/* Service Checklist (template-driven) */}
+          <JobFormSection
+            serviceType={service.serviceType}
+            value={formResponses}
+            onChange={setFormResponses}
+          />
+
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           <input
@@ -672,6 +685,16 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
               </div>
             </>
           )}
+
+          {/* Expense / Receipt capture */}
+          <div style={{ marginBottom: 16 }}>
+            <label style={labelStyle}>Expenses (optional)</label>
+            <ExpenseCapture
+              scheduledServiceId={service.id}
+              customerId={service.customerId}
+              technicianId={service.technicianId}
+            />
+          </div>
 
           {/* Options */}
           <label style={labelStyle}>Options</label>

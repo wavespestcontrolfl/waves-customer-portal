@@ -146,7 +146,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
   try {
-    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview } = req.body;
+    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt } = req.body;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -241,6 +241,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       action: 'service_completed',
       description: `${svc.tech_name} completed ${svc.service_type} for ${svc.first_name} ${svc.last_name}`,
     });
+
+    // Job form submission (non-blocking)
+    if (formResponses) {
+      try {
+        const JobForm = require('../services/job-form');
+        await JobForm.saveSubmission({
+          scheduledServiceId: svc.id,
+          serviceRecordId: record.id,
+          technicianId: svc.technician_id,
+          customerId: svc.customer_id,
+          serviceType: svc.service_type,
+          responses: formResponses,
+          startedAt: formStartedAt || null,
+        });
+      } catch (e) { logger.error(`[dispatch] Job form save failed (non-blocking): ${e.message}`); }
+    }
+
+    // Job costing (non-blocking, fire-and-forget)
+    try {
+      const JobCosting = require('../services/job-costing');
+      JobCosting.calculateJobCost(svc.id).catch(e =>
+        logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
+      );
+    } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
     res.json({ success: true, serviceRecordId: record.id });
   } catch (err) { next(err); }
