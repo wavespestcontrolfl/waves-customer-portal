@@ -22,12 +22,18 @@ function sanitizeServiceType(serviceType) {
 // Returns a YYYY-MM-DD string.
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { nth, weekday, intervalDays } = opts;
-  const base = new Date(baseDateStr + 'T12:00:00');
-  if (pattern === 'monthly_nth_weekday' && nth != null && weekday != null) {
+  const safeBaseStr = baseDateStr ? String(baseDateStr).split('T')[0] : new Date().toISOString().split('T')[0];
+  const base = new Date(safeBaseStr + 'T12:00:00');
+  if (isNaN(base.getTime())) return new Date().toISOString().split('T')[0];
+  const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
+  const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
+  const intNum = (intervalDays != null && intervalDays !== '' && !isNaN(parseInt(intervalDays))) ? parseInt(intervalDays) : null;
+  if (pattern === 'monthly_nth_weekday' && nthNum != null && wdayNum != null) {
     const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
-    let firstW = d.getDay();
-    let offset = (Number(weekday) - firstW + 7) % 7;
-    d.setDate(1 + offset + (Number(nth) - 1) * 7);
+    const firstW = d.getDay();
+    const offset = (wdayNum - firstW + 7) % 7;
+    d.setDate(1 + offset + (nthNum - 1) * 7);
+    if (isNaN(d.getTime())) return safeBaseStr;
     return d.toISOString().split('T')[0];
   }
   const intervals = {
@@ -35,10 +41,11 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     quarterly: 91, triannual: 122,
   };
   let gap;
-  if (pattern === 'custom' && intervalDays) gap = Math.max(1, Number(intervalDays));
+  if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
   const d = new Date(base);
   d.setDate(d.getDate() + gap * i);
+  if (isNaN(d.getTime())) return safeBaseStr;
   return d.toISOString().split('T')[0];
 }
 
@@ -484,9 +491,9 @@ router.post('/', async (req, res, next) => {
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
       if (isRecurring) {
-        if (cols.recurring_nth && recurringNth != null) insertData.recurring_nth = parseInt(recurringNth);
-        if (cols.recurring_weekday && recurringWeekday != null) insertData.recurring_weekday = parseInt(recurringWeekday);
-        if (cols.recurring_interval_days && recurringIntervalDays != null) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
+        if (cols.recurring_nth && recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) insertData.recurring_nth = parseInt(recurringNth);
+        if (cols.recurring_weekday && recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) insertData.recurring_weekday = parseInt(recurringWeekday);
+        if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
       }
       if (cols.discount_type && discountType) insertData.discount_type = discountType;
       if (cols.discount_amount && discountAmount != null && discountAmount !== '') insertData.discount_amount = Number(discountAmount);
@@ -526,9 +533,9 @@ router.post('/', async (req, res, next) => {
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
-        if (cols.recurring_nth && recurringNth != null) childData.recurring_nth = parseInt(recurringNth);
-        if (cols.recurring_weekday && recurringWeekday != null) childData.recurring_weekday = parseInt(recurringWeekday);
-        if (cols.recurring_interval_days && recurringIntervalDays != null) childData.recurring_interval_days = parseInt(recurringIntervalDays);
+        if (cols.recurring_nth && recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) childData.recurring_nth = parseInt(recurringNth);
+        if (cols.recurring_weekday && recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) childData.recurring_weekday = parseInt(recurringWeekday);
+        if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.estimated_price && finalPrice != null) childData.estimated_price = finalPrice;
         if (cols.discount_type && discountType) childData.discount_type = discountType;
         if (cols.discount_amount && discountAmount != null && discountAmount !== '') childData.discount_amount = Number(discountAmount);
@@ -584,9 +591,9 @@ router.put('/:id/update-details', async (req, res, next) => {
       try {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.recurring_ongoing) updates.recurring_ongoing = !!recurringOngoing;
-        if (cols.recurring_nth) updates.recurring_nth = recurringNth != null ? parseInt(recurringNth) : null;
-        if (cols.recurring_weekday) updates.recurring_weekday = recurringWeekday != null ? parseInt(recurringWeekday) : null;
-        if (cols.recurring_interval_days) updates.recurring_interval_days = recurringIntervalDays != null ? parseInt(recurringIntervalDays) : null;
+        if (cols.recurring_nth) updates.recurring_nth = (recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) ? parseInt(recurringNth) : null;
+        if (cols.recurring_weekday) updates.recurring_weekday = (recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) ? parseInt(recurringWeekday) : null;
+        if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
         if (cols.discount_type) updates.discount_type = discountType || null;
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
         if (cols.create_invoice_on_complete && createInvoice !== undefined) updates.create_invoice_on_complete = !!createInvoice;
@@ -656,9 +663,9 @@ router.put('/:id/update-details', async (req, res, next) => {
             if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
             if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
             if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
-            if (cols.recurring_nth) childData.recurring_nth = rOpts.nth != null ? parseInt(rOpts.nth) : null;
-            if (cols.recurring_weekday) childData.recurring_weekday = rOpts.weekday != null ? parseInt(rOpts.weekday) : null;
-            if (cols.recurring_interval_days) childData.recurring_interval_days = rOpts.intervalDays != null ? parseInt(rOpts.intervalDays) : null;
+            if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
+            if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
+            if (cols.recurring_interval_days) childData.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
             const dType = discountType !== undefined ? discountType : parent.discount_type;
             const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
             // parent.estimated_price is already discounted at save time — copy as-is to children

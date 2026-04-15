@@ -109,21 +109,26 @@ const WEEKDAY_OPTIONS = [
 
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { nth, weekday, intervalDays } = opts;
-  const base = new Date(baseDateStr + 'T12:00:00');
-  if (pattern === 'monthly_nth_weekday' && nth != null && weekday != null) {
+  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : new Date().toISOString().split('T')[0];
+  const base = new Date(safe + 'T12:00:00');
+  if (isNaN(base.getTime())) return new Date();
+  const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
+  const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
+  const intNum = (intervalDays != null && intervalDays !== '' && !isNaN(parseInt(intervalDays))) ? parseInt(intervalDays) : null;
+  if (pattern === 'monthly_nth_weekday' && nthNum != null && wdayNum != null) {
     const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
     const firstW = d.getDay();
-    const offset = (Number(weekday) - firstW + 7) % 7;
-    d.setDate(1 + offset + (Number(nth) - 1) * 7);
-    return d;
+    const offset = (wdayNum - firstW + 7) % 7;
+    d.setDate(1 + offset + (nthNum - 1) * 7);
+    return isNaN(d.getTime()) ? base : d;
   }
   const intervals = { daily: 1, weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
   let gap;
-  if (pattern === 'custom' && intervalDays) gap = Math.max(1, Number(intervalDays));
+  if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
   const d = new Date(base);
   d.setDate(d.getDate() + gap * i);
-  return d;
+  return isNaN(d.getTime()) ? base : d;
 }
 
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid #CBD5E1`, borderRadius: 8, color: '#0F172A', fontSize: 14, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
