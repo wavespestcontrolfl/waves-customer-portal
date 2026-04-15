@@ -7,6 +7,13 @@ const logger = require('../services/logger');
 
 router.use(authenticate);
 
+// Safely parse a JSON column; tolerate already-parsed objects and bad data.
+function safeJsonParse(val, fallback = null) {
+  if (val === null || val === undefined) return fallback;
+  if (typeof val === 'object') return val;
+  try { return JSON.parse(val); } catch { return fallback; }
+}
+
 const STEP_NAMES = ['', 'Scheduled', 'Confirmed', 'En Route', 'On-Site', 'In Progress', 'Wrapping Up', 'Complete'];
 
 const OFFICES = {
@@ -31,8 +38,8 @@ function resolveOffice(customer) {
 }
 
 function formatTracker(row, service, tech, customer) {
-  const notes = typeof row.live_notes === 'string' ? JSON.parse(row.live_notes) : (row.live_notes || []);
-  const summary = typeof row.service_summary === 'string' ? JSON.parse(row.service_summary) : row.service_summary;
+  const notes = safeJsonParse(row.live_notes, []);
+  const summary = safeJsonParse(row.service_summary, null);
 
   return {
     id: row.id,
@@ -156,7 +163,7 @@ router.put('/:id/step', async (req, res, next) => {
 
     // Append note if provided
     if (note) {
-      const notes = typeof tracker.live_notes === 'string' ? JSON.parse(tracker.live_notes) : (tracker.live_notes || []);
+      const notes = safeJsonParse(tracker.live_notes, []);
       notes.push({ note, timestamp: new Date().toISOString() });
       updates.live_notes = JSON.stringify(notes);
     }
@@ -206,7 +213,7 @@ router.post('/:id/note', async (req, res, next) => {
       .first();
     if (!tracker) return res.status(404).json({ error: 'Tracker not found' });
 
-    const notes = typeof tracker.live_notes === 'string' ? JSON.parse(tracker.live_notes) : (tracker.live_notes || []);
+    const notes = safeJsonParse(tracker.live_notes, []);
     notes.push({ note, timestamp: new Date().toISOString() });
 
     await db('service_tracking')
@@ -267,7 +274,7 @@ router.post('/demo/advance', async (req, res, next) => {
     if (nextStep >= 4) updates.eta_minutes = 0;
 
     if (demoNotes[nextStep]) {
-      const notes = typeof tracker.live_notes === 'string' ? JSON.parse(tracker.live_notes) : (tracker.live_notes || []);
+      const notes = safeJsonParse(tracker.live_notes, []);
       notes.push({ note: demoNotes[nextStep], timestamp: new Date().toISOString() });
       updates.live_notes = JSON.stringify(notes);
     }

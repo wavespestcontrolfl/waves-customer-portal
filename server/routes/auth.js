@@ -1,15 +1,51 @@
 const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
+const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { generateToken, generateRefreshToken, authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 
 // =========================================================================
+// Rate limiters — protect OTP endpoints from brute force / enumeration
+// =========================================================================
+const sendCodeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.ip}:${req.body?.phone || ''}`,
+  message: { error: 'Too many requests. Please try again later.' },
+});
+
+const verifyCodeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.ip}:${req.body?.phone || ''}`,
+  message: { error: 'Too many verification attempts. Please request a new code.' },
+});
+
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many refresh attempts.' },
+});
+
+// Uniform response used to prevent customer enumeration via /send-code
+const UNIFORM_SEND_RESPONSE = {
+  success: true,
+  message: 'If an account exists for that number, a verification code has been sent.',
+};
+
+// =========================================================================
 // POST /api/auth/send-code — Send OTP to phone number
 // =========================================================================
-router.post('/send-code', async (req, res, next) => {
+router.post('/send-code', sendCodeLimiter, async (req, res, next) => {
   try {
     const schema = Joi.object({
       phone: Joi.string().pattern(/^\+1\d{10}$/).required()
@@ -18,20 +54,23 @@ router.post('/send-code', async (req, res, next) => {
 
     const { phone } = await schema.validateAsync(req.body);
 
-    // Check customer exists
+    // Check customer exists — but DO NOT leak existence in the response.
     const customer = await db('customers')
       .where({ phone, active: true })
       .first();
 
-    if (!customer) {
-      return res.status(404).json({
-        error: 'No account found with this phone number. Contact Waves Pest Control to get set up.',
-      });
+    if (customer) {
+      try {
+        await TwilioService.sendVerificationCode(phone);
+      } catch (smsErr) {
+        logger.error(`[auth] sendVerificationCode failed for customer ${customer.id}: ${smsErr.message}`);
+      }
+    } else {
+      logger.info(`[auth] send-code attempted for unknown phone (ip=${req.ip})`);
     }
 
-    await TwilioService.sendVerificationCode(phone);
-
-    res.json({ success: true, message: 'Verification code sent' });
+    // Always return the same response regardless of customer existence.
+    return res.json(UNIFORM_SEND_RESPONSE);
   } catch (err) {
     next(err);
   }
@@ -40,7 +79,7 @@ router.post('/send-code', async (req, res, next) => {
 // =========================================================================
 // POST /api/auth/verify-code — Verify OTP and return JWT
 // =========================================================================
-router.post('/verify-code', async (req, res, next) => {
+router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
   try {
     const schema = Joi.object({
       phone: Joi.string().pattern(/^\+1\d{10}$/).required(),
@@ -51,8 +90,11 @@ router.post('/verify-code', async (req, res, next) => {
 
     const result = await TwilioService.checkVerificationCode(phone, code);
 
+    // Uniform error for invalid code OR unknown customer to avoid enumeration.
+    const invalidResponse = { error: 'Invalid or expired verification code' };
+
     if (!result.success) {
-      return res.status(401).json({ error: 'Invalid or expired verification code' });
+      return res.status(401).json(invalidResponse);
     }
 
     const customer = await db('customers')
@@ -60,13 +102,13 @@ router.post('/verify-code', async (req, res, next) => {
       .first();
 
     if (!customer) {
-      return res.status(404).json({ error: 'Customer not found' });
+      return res.status(401).json(invalidResponse);
     }
 
     const token = generateToken(customer.id);
     const refreshToken = generateRefreshToken(customer.id);
 
-    logger.info(`Customer logged in: ${customer.first_name} ${customer.last_name} (${customer.id})`);
+    logger.info(`[auth] customer login success: id=${customer.id}`);
 
     res.json({
       token,
@@ -86,26 +128,34 @@ router.post('/verify-code', async (req, res, next) => {
 });
 
 // =========================================================================
-// POST /api/auth/refresh — Refresh an expired token
+// POST /api/auth/refresh — Refresh an expired token (rotates refresh token)
 // =========================================================================
-router.post('/refresh', async (req, res, next) => {
+router.post('/refresh', refreshLimiter, async (req, res, next) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken) return res.status(400).json({ error: 'Refresh token required' });
 
     const jwt = require('jsonwebtoken');
     const config = require('../config');
-    const decoded = jwt.verify(refreshToken, config.jwt.secret);
 
-    if (decoded.type !== 'refresh') {
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, config.jwt.secret);
+    } catch {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    if (decoded.type !== 'refresh' || !decoded.customerId) {
       return res.status(401).json({ error: 'Invalid refresh token' });
     }
 
     const customer = await db('customers').where({ id: decoded.customerId, active: true }).first();
-    if (!customer) return res.status(401).json({ error: 'Customer not found' });
+    if (!customer) return res.status(401).json({ error: 'Invalid refresh token' });
 
+    // Rotate: issue a new access AND refresh token tied to the same customer.
     const newToken = generateToken(customer.id);
-    res.json({ token: newToken });
+    const newRefreshToken = generateRefreshToken(customer.id);
+    res.json({ token: newToken, refreshToken: newRefreshToken });
   } catch (err) {
     return res.status(401).json({ error: 'Invalid refresh token' });
   }

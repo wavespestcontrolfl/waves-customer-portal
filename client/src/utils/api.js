@@ -62,7 +62,8 @@ class ApiClient {
       if (!res.ok) return false;
 
       const data = await res.json();
-      this.setTokens(data.token, this.refreshToken);
+      // Server now rotates refresh tokens — use the new one if provided.
+      this.setTokens(data.token, data.refreshToken || this.refreshToken);
       return true;
     } catch {
       return false;

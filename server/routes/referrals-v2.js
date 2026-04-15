@@ -170,7 +170,7 @@ router.post('/invite', async (req, res, next) => {
 
 function maskPhone(phone) {
   if (!phone || phone.length < 6) return phone;
-  return phone.slice(0, -4).replace(/\d/g, '*') + phone.slice(-4);
+  return phone.slice(0, -4).replace(/\d/g, '•') + phone.slice(-4);
 }
 
 module.exports = router;
