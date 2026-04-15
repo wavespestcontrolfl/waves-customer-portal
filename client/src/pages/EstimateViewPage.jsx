@@ -690,7 +690,13 @@ export default function EstimateViewPage() {
   };
 
   // ── Tier comparison logic ──────────────────────────────────
+  // Store original tier options so they don't recalculate after tier selection
+  const tierOptionsRef = useRef(null);
+
   const tierOptions = useMemo(() => {
+    // Once a tier has been selected, stop recalculating
+    if (selectedTier) return tierOptionsRef.current;
+
     if (!data?.estimate?.data) return null;
     const rawData = typeof data.estimate.data === 'string' ? JSON.parse(data.estimate.data) : data.estimate.data;
     const inputs = rawData.inputs;
@@ -708,7 +714,7 @@ export default function EstimateViewPage() {
       exclWaive: yesNo(inputs.exclWaive),
     };
 
-    // Tier-qualifying services in upgrade priority
+    // Suggestable services for tier upgrades (in priority order)
     const TIER_SVCS = [
       { key: 'svcPest', label: 'Pest Control' },
       { key: 'svcLawn', label: 'Lawn Care' },
@@ -716,24 +722,27 @@ export default function EstimateViewPage() {
       { key: 'svcTs', label: 'Tree & Shrub Care' },
     ];
 
-    const active = TIER_SVCS.filter(s => baseInputs[s.key]);
     const missing = TIER_SVCS.filter(s => !baseInputs[s.key]);
-    const serviceCount = active.length;
-
-    // Only show for 2-3 service estimates
-    if (serviceCount < 2 || serviceCount >= 4) return null;
 
     try {
-      const options = [];
-
-      // Current tier
+      // Calculate current tier from the engine (accounts for ALL services)
       const currentResult = calculateEstimate(baseInputs);
       if (currentResult.error) return null;
 
+      const currentTier = currentResult.recurring.waveGuardTier;
+      const currentServiceCount = currentResult.recurring.serviceCount;
+
+      // Already Platinum or no room to upgrade — don't show comparison
+      if (currentTier === 'Platinum' || currentServiceCount >= 4 || missing.length === 0) return null;
+      // Only show for multi-service estimates (2+ services from engine)
+      if (currentServiceCount < 2) return null;
+
+      const options = [];
+
       options.push({
-        tier: currentResult.recurring.waveGuardTier,
+        tier: currentTier,
         discount: currentResult.recurring.discount,
-        monthly: currentResult.recurring.monthlyTotal || (currentResult.recurring.grandTotal),
+        monthly: currentResult.recurring.monthlyTotal || currentResult.recurring.grandTotal,
         annual: currentResult.recurring.annualAfterDiscount,
         savings: currentResult.recurring.savings,
         services: currentResult.recurring.services,
@@ -742,29 +751,27 @@ export default function EstimateViewPage() {
         isCurrent: true,
       });
 
-      // Next tier up (add first missing service)
-      if (missing.length > 0) {
-        const nextInputs = { ...baseInputs, [missing[0].key]: true };
-        const nextResult = calculateEstimate(nextInputs);
-        if (!nextResult.error) {
-          options.push({
-            tier: nextResult.recurring.waveGuardTier,
-            discount: nextResult.recurring.discount,
-            monthly: nextResult.recurring.monthlyTotal || nextResult.recurring.grandTotal,
-            annual: nextResult.recurring.annualAfterDiscount,
-            savings: nextResult.recurring.savings,
-            services: nextResult.recurring.services,
-            additionalService: missing[0].label,
-            inputs: nextInputs,
-            result: nextResult,
-            isCurrent: false,
-            isRecommended: true,
-          });
-        }
+      // Next tier up (add first missing suggestable service)
+      const nextInputs = { ...baseInputs, [missing[0].key]: true };
+      const nextResult = calculateEstimate(nextInputs);
+      if (!nextResult.error && nextResult.recurring.waveGuardTier !== currentTier) {
+        options.push({
+          tier: nextResult.recurring.waveGuardTier,
+          discount: nextResult.recurring.discount,
+          monthly: nextResult.recurring.monthlyTotal || nextResult.recurring.grandTotal,
+          annual: nextResult.recurring.annualAfterDiscount,
+          savings: nextResult.recurring.savings,
+          services: nextResult.recurring.services,
+          additionalService: missing[0].label,
+          inputs: nextInputs,
+          result: nextResult,
+          isCurrent: false,
+          isRecommended: true,
+        });
       }
 
-      // Platinum (if still 2+ services away)
-      if (missing.length > 1) {
+      // Platinum (if 2+ suggestable services still missing and next tier isn't already Platinum)
+      if (missing.length > 1 && nextResult.recurring?.waveGuardTier !== 'Platinum') {
         const platInputs = { ...baseInputs };
         missing.forEach(s => platInputs[s.key] = true);
         const platResult = calculateEstimate(platInputs);
@@ -784,12 +791,14 @@ export default function EstimateViewPage() {
         }
       }
 
-      return options.length > 1 ? options : null;
+      const result = options.length > 1 ? options : null;
+      tierOptionsRef.current = result;
+      return result;
     } catch (e) {
       console.error('[tier-comparison] Calculation failed:', e);
       return null;
     }
-  }, [data]);
+  }, [data, selectedTier]);
 
   const handleSelectTier = async (option) => {
     if (option.isCurrent || tierSaving) return;
