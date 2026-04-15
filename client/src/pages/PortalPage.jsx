@@ -2324,7 +2324,7 @@ function ServicesTab() {
             { val: uniqueTechs, label: `technician${uniqueTechs !== 1 ? 's' : ''}` },
             ...(avgMinutes > 0 ? [{ val: `${avgMinutes} min`, label: 'avg visit' }] : []),
           ].map((stat, i, arr) => (
-            <span key={i} style={{ fontSize: 12, color: B.navy, fontFamily: FONTS.ui }}>
+            <span key={stat.label} style={{ fontSize: 12, color: B.navy, fontFamily: FONTS.ui }}>
               <strong style={{ fontWeight: 800, color: B.wavesBlue }}>{stat.val}</strong>{' '}{stat.label}
               {i < arr.length - 1 && <span style={{ margin: '0 4px', color: B.grayLight }}>·</span>}
             </span>
