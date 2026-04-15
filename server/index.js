@@ -256,6 +256,7 @@ app.use('/api/admin/review-requests', adminReviewRequestRoutes);
 app.use('/api/admin/wiki', require('./routes/admin-wiki'));
 app.use('/api/admin/health', require('./routes/admin-health'));
 app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
+app.use('/api/admin/timesheets', require('./routes/admin-timesheet-approval'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));

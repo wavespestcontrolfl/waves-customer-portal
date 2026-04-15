@@ -60,11 +60,15 @@ self.addEventListener('fetch', event => {
 
 self.addEventListener('push', event => {
   const data = event.data?.json() || {};
+  const requireInteraction = data.priority === 'urgent';
   event.waitUntil(
     self.registration.showNotification(data.title || 'Waves Pest Control', {
       body: data.body || '', icon: '/waves-logo.png', badge: '/waves-logo.png',
       tag: data.tag || 'waves', data: { url: data.url || '/' },
-      actions: data.actions || [], vibrate: [200, 100, 200],
+      actions: data.actions || [],
+      vibrate: data.vibrate || [200, 100, 200],
+      silent: !!data.silent,
+      requireInteraction,
     })
   );
 });

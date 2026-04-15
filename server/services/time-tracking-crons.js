@@ -47,15 +47,14 @@ function initTimeTrackingCrons() {
   }, { timezone: 'America/New_York' });
 
   // -------------------------------------------------------------------------
-  // 2. Monday 1 AM ET — compute weekly summaries for the previous week
+  // 2. Monday 5 AM ET — compute weekly summaries + SMS Virginia for approval
   // -------------------------------------------------------------------------
-  cron.schedule('0 1 * * 1', async () => {
-    logger.info('[time-tracking-cron] Running weekly summary computation');
+  cron.schedule('0 5 * * 1', async () => {
+    logger.info('[time-tracking-cron] Running weekly summary + approval SMS');
     try {
       // Previous week's Monday
       const lastMonday = new Date();
       lastMonday.setDate(lastMonday.getDate() - 7);
-      // Ensure we land on Monday
       const day = lastMonday.getDay();
       const diff = day === 0 ? -6 : 1 - day;
       lastMonday.setDate(lastMonday.getDate() + diff);
@@ -63,6 +62,7 @@ function initTimeTrackingCrons() {
 
       const techs = await db('technicians').where({ active: true }).select('id', 'name');
       let computed = 0;
+      let pendingCount = 0;
 
       for (const tech of techs) {
         try {
@@ -73,8 +73,9 @@ function initTimeTrackingCrons() {
             .first();
 
           if (hasDailies) {
-            await timeTracking.computeWeeklySummary(tech.id, weekStartStr);
+            const weekly = await timeTracking.computeWeeklySummary(tech.id, weekStartStr);
             computed++;
+            if (weekly && weekly.status !== 'approved') pendingCount++;
           }
         } catch (err) {
           logger.error(`[time-tracking-cron] Weekly summary failed for tech ${tech.name}`, { error: err.message });
@@ -82,6 +83,21 @@ function initTimeTrackingCrons() {
       }
 
       logger.info(`[time-tracking-cron] Weekly summaries computed: ${computed} techs for week of ${weekStartStr}`);
+
+      // SMS Virginia if there are weeks awaiting approval
+      if (pendingCount > 0) {
+        const WAVES_OFFICE_PHONE = process.env.WAVES_OFFICE_PHONE || '+19413187612';
+        const portalBase = process.env.PORTAL_BASE_URL || 'https://portal.wavespestcontrol.com';
+        const link = `${portalBase}/admin/timetracking?tab=approvals&weekStart=${weekStartStr}`;
+        try {
+          await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+            `📋 ${pendingCount} tech timesheet${pendingCount === 1 ? '' : 's'} ready to approve for week of ${weekStartStr}. Review: ${link}`
+          );
+          logger.info(`[time-tracking-cron] Approval SMS sent to Virginia (${pendingCount} pending)`);
+        } catch (smsErr) {
+          logger.error('[time-tracking-cron] Approval SMS failed', { error: smsErr.message });
+        }
+      }
     } catch (err) {
       logger.error('[time-tracking-cron] Weekly summary job failed', { error: err.message });
     }

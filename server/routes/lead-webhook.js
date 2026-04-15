@@ -162,6 +162,17 @@ router.post('/', async (req, res) => {
     await PipelineManager.onEvent(customer.id, 'lead_created');
     await LeadScorer.calculateScore(customer.id);
 
+    // Push + bell notification for admins
+    try {
+      const { triggerNotification } = require('../services/notification-triggers');
+      await triggerNotification('new_lead', {
+        name: `${firstName || ''} ${lastName || ''}`.trim() || phoneFormatted,
+        source: leadSource.detail || leadSource.source,
+        zip: customer.zip,
+        leadId: customer.id,
+      });
+    } catch (e) { logger.error(`[notifications] new_lead trigger failed: ${e.message}`); }
+
     // Notify Adam — during business hours (8AM-8PM ET) trigger a call, otherwise SMS
     const now = new Date();
     const etHour = parseInt(now.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/New_York' }));

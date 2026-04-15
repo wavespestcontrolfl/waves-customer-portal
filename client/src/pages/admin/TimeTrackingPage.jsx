@@ -57,6 +57,7 @@ export default function TimeTrackingPage() {
         {[
           { key: 'dashboard', label: 'Dashboard' },
           { key: 'timesheet', label: 'Timesheet' },
+          { key: 'approvals', label: 'Approvals' },
           { key: 'entries', label: 'Entries' },
           { key: 'analytics', label: 'Analytics' },
           { key: 'team', label: 'Team' },
@@ -72,6 +73,7 @@ export default function TimeTrackingPage() {
 
       {tab === 'dashboard' && <DashboardTab showToast={showToast} />}
       {tab === 'timesheet' && <TimesheetTab showToast={showToast} />}
+      {tab === 'approvals' && <ApprovalsTab showToast={showToast} />}
       {tab === 'entries' && <EntriesTab showToast={showToast} />}
       {tab === 'analytics' && <AnalyticsTab />}
       {tab === 'team' && <TeamTab showToast={showToast} />}
@@ -1249,6 +1251,295 @@ function DocumentsTab({ showToast }) {
           <button onClick={() => setShowUpload(true)} style={sBtn(D.teal, D.white)}>+ Upload First Document</button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// ApprovalsTab — weekly timesheet approval workflow
+// ===========================================================================
+function ApprovalsTab({ showToast }) {
+  const lastMonday = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return getMonday(d);
+  }, []);
+  const [weekStart, setWeekStart] = useState(lastMonday);
+  const [techs, setTechs] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [expanded, setExpanded] = useState(null);
+  const [detail, setDetail] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await adminFetch(`/admin/timesheets/pending?weekStart=${weekStart}`);
+      setTechs(data.techs || []);
+      setSelected(new Set());
+    } catch (e) {
+      showToast(`Load failed: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [weekStart, showToast]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const loadDetail = async (techId) => {
+    if (expanded === techId) { setExpanded(null); setDetail(null); return; }
+    setExpanded(techId);
+    setDetail(null);
+    try {
+      const d = await adminFetch(`/admin/timesheets/week-detail?technicianId=${techId}&weekStart=${weekStart}`);
+      setDetail(d);
+    } catch (e) {
+      showToast(`Detail load failed: ${e.message}`);
+    }
+  };
+
+  const toggleSelect = (id) => {
+    const next = new Set(selected);
+    next.has(id) ? next.delete(id) : next.add(id);
+    setSelected(next);
+  };
+
+  const selectAllPending = () => {
+    setSelected(new Set(techs.filter(t => t.status !== 'approved').map(t => t.technician_id)));
+  };
+
+  const approveOne = async (techId) => {
+    try {
+      await adminFetch('/admin/timesheets/approve', {
+        method: 'POST',
+        body: { technicianId: techId, weekStart },
+      });
+      showToast('Week approved');
+      load();
+    } catch (e) { showToast(`Approve failed: ${e.message}`); }
+  };
+
+  const bulkApprove = async () => {
+    if (!selected.size) return;
+    if (!confirm(`Approve ${selected.size} tech week${selected.size === 1 ? '' : 's'}?`)) return;
+    try {
+      const r = await adminFetch('/admin/timesheets/bulk-approve', {
+        method: 'POST',
+        body: { technicianIds: [...selected], weekStart },
+      });
+      showToast(`Approved ${r.approved}${r.failed?.length ? `, ${r.failed.length} failed` : ''}`);
+      load();
+    } catch (e) { showToast(`Bulk approve failed: ${e.message}`); }
+  };
+
+  const unlock = async (techId) => {
+    const reason = prompt('Reason for unlocking this week?');
+    if (!reason) return;
+    try {
+      await adminFetch('/admin/timesheets/unlock', {
+        method: 'POST',
+        body: { technicianId: techId, weekStart, reason },
+      });
+      showToast('Week unlocked');
+      load();
+    } catch (e) { showToast(`Unlock failed: ${e.message}`); }
+  };
+
+  const disputeEntry = async (entryId) => {
+    const reason = prompt('Reason for disputing this entry?');
+    if (!reason) return;
+    try {
+      await adminFetch('/admin/timesheets/dispute', {
+        method: 'POST',
+        body: { entryId, reason },
+      });
+      showToast('Entry disputed');
+      if (expanded) loadDetail(expanded);
+    } catch (e) { showToast(`Dispute failed: ${e.message}`); }
+  };
+
+  const exportCsv = () => {
+    const token = localStorage.getItem('waves_admin_token');
+    fetch(`${API_BASE}/admin/timesheets/export?weekStart=${weekStart}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.blob())
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `payroll_week_${weekStart}.csv`; a.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(e => showToast(`Export failed: ${e.message}`));
+  };
+
+  const totalOT = techs.reduce((s, t) => s + parseFloat(t.overtime_minutes || 0), 0) / 60;
+  const pendingCount = techs.filter(t => t.status !== 'approved').length;
+
+  return (
+    <div>
+      {/* Week nav + actions */}
+      <div style={{ ...sCard, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <button onClick={() => setWeekStart(addDays(weekStart, -7))} style={sBtn(D.card, D.text)}>← Prev</button>
+        <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, fontFamily: MONO }}>
+          Week of {weekStart}
+        </div>
+        <button onClick={() => setWeekStart(addDays(weekStart, 7))} style={sBtn(D.card, D.text)}>Next →</button>
+        <button onClick={() => setWeekStart(lastMonday)} style={sBtn(D.card, D.muted)}>Last Week</button>
+        <div style={{ flex: 1 }} />
+        <button onClick={exportCsv} style={sBtn(D.purple, D.white)}>Export Payroll CSV</button>
+      </div>
+
+      {/* Overtime banner */}
+      {totalOT > 0 && (
+        <div style={{ ...sCard, background: '#FEF3C7', border: `1px solid ${D.amber}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 18 }}>{'\u26A0\uFE0F'}</span>
+          <div style={{ fontSize: 13, color: '#78350F' }}>
+            <strong>{totalOT.toFixed(1)}h overtime</strong> across the team this week. Review before approving.
+          </div>
+        </div>
+      )}
+
+      {/* Summary + bulk bar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 13, color: D.muted }}>
+          {loading ? 'Loading…' : `${techs.length} tech${techs.length === 1 ? '' : 's'} · ${pendingCount} pending`}
+        </div>
+        <div style={{ flex: 1 }} />
+        {pendingCount > 0 && (
+          <button onClick={selectAllPending} style={sBtn(D.card, D.teal)}>Select all pending</button>
+        )}
+        {selected.size > 0 && (
+          <button onClick={bulkApprove} style={sBtn(D.green, D.white)}>
+            Approve {selected.size} selected
+          </button>
+        )}
+      </div>
+
+      {techs.length === 0 && !loading && (
+        <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>
+          No timesheets for week of {weekStart}.
+        </div>
+      )}
+
+      {techs.map(t => {
+        const approved = t.status === 'approved';
+        const otHrs = parseFloat(t.overtime_minutes || 0) / 60;
+        const totalHrs = parseFloat(t.total_shift_minutes || 0) / 60;
+        const isExpanded = expanded === t.technician_id;
+        return (
+          <div key={t.technician_id} style={sCard}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              {!approved && (
+                <input
+                  type="checkbox"
+                  checked={selected.has(t.technician_id)}
+                  onChange={() => toggleSelect(t.technician_id)}
+                  style={{ width: 18, height: 18, cursor: 'pointer' }}
+                />
+              )}
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{t.tech_name}</div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                  <span style={sBadge(approved ? '#DCFCE7' : '#FEF3C7', approved ? D.green : D.amber)}>
+                    {t.status || 'pending'}
+                  </span>
+                </div>
+              </div>
+              <Stat label="Hours" value={`${totalHrs.toFixed(1)}h`} />
+              <Stat label="OT" value={`${otHrs.toFixed(1)}h`} warn={otHrs > 0} />
+              <Stat label="Jobs" value={t.job_count || 0} />
+              <Stat label="Revenue" value={fmt(t.total_revenue)} />
+              <Stat label="RPMH" value={fmt(t.avg_rpmh)} />
+              <Stat label="Util %" value={fmtPct(t.utilization_pct)} />
+              <button onClick={() => loadDetail(t.technician_id)} style={sBtn(D.card, D.teal)}>
+                {isExpanded ? 'Hide' : 'Details'}
+              </button>
+              {approved ? (
+                <button onClick={() => unlock(t.technician_id)} style={sBtn(D.card, D.red)}>Unlock</button>
+              ) : (
+                <button onClick={() => approveOne(t.technician_id)} style={sBtn(D.green, D.white)}>Approve</button>
+              )}
+            </div>
+
+            {isExpanded && (
+              <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${D.border}` }}>
+                {!detail && <div style={{ color: D.muted, fontSize: 13 }}>Loading detail…</div>}
+                {detail && detail.dailies && (
+                  <>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 8 }}>Daily breakdown</div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                        <thead>
+                          <tr style={{ background: '#F1F5F9', textAlign: 'left' }}>
+                            <th style={{ padding: 8 }}>Date</th>
+                            <th style={{ padding: 8 }}>Shift</th>
+                            <th style={{ padding: 8 }}>Jobs</th>
+                            <th style={{ padding: 8 }}>OT</th>
+                            <th style={{ padding: 8 }}>Revenue</th>
+                            <th style={{ padding: 8 }}>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {detail.dailies.map(d => (
+                            <tr key={d.id} style={{ borderTop: `1px solid ${D.border}` }}>
+                              <td style={{ padding: 8, fontFamily: MONO }}>{d.work_date}</td>
+                              <td style={{ padding: 8 }}>{fmtHrs(d.total_shift_minutes)}</td>
+                              <td style={{ padding: 8 }}>{d.job_count || 0}</td>
+                              <td style={{ padding: 8, color: parseFloat(d.overtime_minutes) > 0 ? D.amber : D.muted }}>
+                                {fmtHrs(d.overtime_minutes)}
+                              </td>
+                              <td style={{ padding: 8 }}>{fmt(d.revenue_generated)}</td>
+                              <td style={{ padding: 8 }}>
+                                <span style={sBadge('#F1F5F9', D.text)}>{d.status || 'pending'}</span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {detail.entries && detail.entries.some(e => e.approval_status === 'disputed') && (
+                      <div style={{ marginTop: 16 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: D.red, marginBottom: 8 }}>Disputed entries</div>
+                        {detail.entries.filter(e => e.approval_status === 'disputed').map(e => (
+                          <div key={e.id} style={{ fontSize: 12, padding: 8, background: '#FEF2F2', borderRadius: 6, marginBottom: 4 }}>
+                            <div><strong>{e.entry_type}</strong> · {new Date(e.clock_in).toLocaleString()}</div>
+                            {e.approval_notes && <div style={{ color: D.muted, marginTop: 2 }}>{e.approval_notes}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {detail.entries && !approved && (
+                      <div style={{ marginTop: 12 }}>
+                        <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>Flag a specific entry:</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                          {detail.entries.filter(e => e.approval_status !== 'disputed').slice(0, 20).map(e => (
+                            <button key={e.id} onClick={() => disputeEntry(e.id)}
+                              style={{ ...sBtn(D.card, D.red), fontSize: 11, padding: '4px 8px' }}>
+                              Dispute {e.entry_type} {new Date(e.clock_in).toLocaleDateString()}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Stat({ label, value, warn }) {
+  return (
+    <div style={{ minWidth: 64 }}>
+      <div style={{ fontSize: 10, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: warn ? '#F0A500' : '#0F172A' }}>{value}</div>
     </div>
   );
 }
