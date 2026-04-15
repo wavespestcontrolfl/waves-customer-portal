@@ -98,7 +98,7 @@ function ConfigCard({ config, onUpdate }) {
       return (
         <div key={key} style={{ marginBottom: 8, paddingLeft: 12, borderLeft: `2px solid ${D.border}` }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: D.teal, marginBottom: 4, textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</div>
-          {renderArray(val)}
+          {renderArray(val, key)}
         </div>
       );
     }
@@ -126,27 +126,57 @@ function ConfigCard({ config, onUpdate }) {
   };
 
   // Handle array data (breakpoints, brackets)
-  const renderArray = (arr) => {
+  const renderArray = (arr, parentKey = null) => {
     if (arr.length === 0) return <div style={{ color: D.muted, fontSize: 12 }}>Empty</div>;
     const first = arr[0];
     if (typeof first === 'object' && !Array.isArray(first)) {
       const cols = Object.keys(first);
+      const updateCell = (rowIdx, col, newVal) => {
+        const next = arr.map((r, i) => i === rowIdx ? { ...r, [col]: newVal } : r);
+        if (parentKey) handleFieldUpdate(parentKey, next);
+      };
+      const deleteRow = (rowIdx) => {
+        const next = arr.filter((_, i) => i !== rowIdx);
+        if (parentKey) handleFieldUpdate(parentKey, next);
+      };
+      const addRow = () => {
+        const blank = Object.fromEntries(cols.map(c => [c, typeof first[c] === 'number' ? 0 : '']));
+        const next = [...arr, blank];
+        if (parentKey) handleFieldUpdate(parentKey, next);
+      };
       return (
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
             <thead>
-              <tr>{cols.map(c => <th key={c} style={{ padding: '4px 8px', textAlign: 'left', color: D.muted, borderBottom: `1px solid ${D.border}`, fontSize: 11, textTransform: 'capitalize' }}>{c.replace(/_/g, ' ')}</th>)}</tr>
+              <tr>
+                {cols.map(c => <th key={c} style={{ padding: '4px 8px', textAlign: 'left', color: D.muted, borderBottom: `1px solid ${D.border}`, fontSize: 11, textTransform: 'capitalize' }}>{c.replace(/_/g, ' ')}</th>)}
+                {parentKey && <th style={{ borderBottom: `1px solid ${D.border}`, width: 30 }} />}
+              </tr>
             </thead>
             <tbody>
               {arr.map((row, i) => (
                 <tr key={i}>
                   {cols.map(c => (
-                    <td key={c} style={{ padding: '3px 8px', color: '#0F172A', fontFamily: "'JetBrains Mono', monospace" }}>{typeof row[c] === 'number' ? row[c].toLocaleString() : String(row[c])}</td>
+                    <td key={c} style={{ padding: '3px 8px', color: '#0F172A', fontFamily: "'JetBrains Mono', monospace" }}>
+                      {parentKey ? (
+                        <EditCell value={row[c]} onSave={v => updateCell(i, c, v)} type={typeof row[c] === 'number' ? 'number' : 'text'} width={70} />
+                      ) : (
+                        typeof row[c] === 'number' ? row[c].toLocaleString() : String(row[c])
+                      )}
+                    </td>
                   ))}
+                  {parentKey && (
+                    <td style={{ padding: '3px 4px', textAlign: 'right' }}>
+                      <button onClick={() => deleteRow(i)} title="Delete row" style={{ background: 'transparent', border: 'none', color: D.red, cursor: 'pointer', fontSize: 14, padding: '0 4px' }}>×</button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
+          {parentKey && (
+            <button onClick={addRow} style={{ marginTop: 6, fontSize: 11, padding: '3px 10px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'transparent', color: D.teal, cursor: 'pointer' }}>+ Add row</button>
+          )}
         </div>
       );
     }
