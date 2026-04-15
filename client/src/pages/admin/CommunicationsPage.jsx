@@ -1295,7 +1295,6 @@ export default function CommunicationsPage() {
   // Conversation threading state
   const [smsView, setSmsView] = useState('threads'); // 'threads' | 'log' | 'conversation'
   const [activeThread, setActiveThread] = useState(null);
-  const [threadFilter, setThreadFilter] = useState('all'); // 'all' | 'unanswered'
   const [viewedThreads, setViewedThreads] = useState(new Set()); // tracks threads user has opened
 
   const loadData = useCallback(() => {
@@ -1423,10 +1422,7 @@ export default function CommunicationsPage() {
     return threadList;
   }, [messages]);
 
-  const unansweredCount = threads.filter(t => t.unanswered).length;
-
   const filteredThreads = threads.filter(t => {
-    if (threadFilter === 'unanswered' && !t.unanswered) return false;
     if (smsFilter === 'all') return true;
     if (smsFilter === 'sent') return t.messages.some(m => m.direction === 'outbound');
     if (smsFilter === 'received') return t.messages.some(m => m.direction === 'inbound');
@@ -1691,27 +1687,6 @@ export default function CommunicationsPage() {
           }}>Log View</button>
         </div>
 
-        {/* Unanswered badge/filter */}
-        {(smsView === 'threads') && (
-          <button
-            onClick={() => setThreadFilter(threadFilter === 'unanswered' ? 'all' : 'unanswered')}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              padding: '6px 14px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-              background: threadFilter === 'unanswered' ? D.red + '22' : D.card,
-              color: threadFilter === 'unanswered' ? D.red : (unansweredCount > 0 ? D.red : D.muted),
-              border: `1px solid ${threadFilter === 'unanswered' ? D.red + '44' : D.border}`,
-            }}
-          >
-            Unanswered
-            {unansweredCount > 0 && (
-              <span style={{
-                background: D.red, color: '#fff', fontSize: 10, fontWeight: 700,
-                padding: '1px 7px', borderRadius: 10, minWidth: 18, textAlign: 'center',
-              }}>{unansweredCount}</span>
-            )}
-          </button>
-        )}
       </div>
 
       {/* --- Conversation Thread View --- */}
@@ -1737,7 +1712,7 @@ export default function CommunicationsPage() {
           <div style={{ maxHeight: 600, overflowY: 'auto' }}>
             {filteredThreads.length === 0 ? (
               <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>
-                {threadFilter === 'unanswered' ? 'No unanswered conversations.' : 'No conversations found.'}
+                No conversations found.
               </div>
             ) : (
               filteredThreads.map((t, i) => {
