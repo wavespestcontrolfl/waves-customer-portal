@@ -132,7 +132,8 @@ router.post('/property-lookup', async (req, res) => {
             result.satellite._wideB64 || result.satellite._closeB64,
             result.rentcast,
             address,
-            result.satellite._superCloseB64
+            result.satellite._superCloseB64,
+            result.satellite._ultraCloseB64
           );
           console.log(`[CLAUDE DEBUG] Success! Confidence: ${claudeAnalysis?.confidenceScore || 'N/A'}%`);
           return claudeAnalysis;
@@ -377,7 +378,7 @@ async function fetchImageAsBase64(url) {
 // ─────────────────────────────────────────────
 // CLAUDE VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithClaude(closeB64, wideB64, rentcastData, address, superCloseB64) {
+async function analyzeWithClaude(closeB64, wideB64, rentcastData, address, superCloseB64, ultraCloseB64) {
   const rcContext = rentcastData ? `
 RentCast data for this property:
 - Address: ${rentcastData.formattedAddress}
@@ -491,9 +492,9 @@ Return a JSON object with exactly these fields:
       messages: [{
         role: 'user',
         content: [
-          ...(result.satellite?._ultraCloseB64 ? [{
+          ...(ultraCloseB64 ? [{
             type: 'image',
-            source: { type: 'base64', media_type: 'image/png', data: result.satellite._ultraCloseB64 }
+            source: { type: 'base64', media_type: 'image/png', data: ultraCloseB64 }
           }] : []),
           ...(superCloseB64 ? [{
             type: 'image',
