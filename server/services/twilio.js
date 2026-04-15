@@ -118,25 +118,6 @@ const TwilioService = {
         return { success: false, sid: null, error: 'Twilio not configured' };
       }
 
-      // SMS Preview Mode: send to admin phone first for all customer-facing messages
-      const ADMIN_PHONE = process.env.ADAM_PHONE || '+19415993489';
-      const isInternalAlert = options.messageType === 'internal_alert' || to === ADMIN_PHONE;
-      const previewMode = process.env.SMS_PREVIEW_MODE === 'true';
-
-      if (previewMode && !isInternalAlert) {
-        // Send preview to admin instead of customer
-        try {
-          const previewBody = `📋 SMS PREVIEW (to ${to}):\n\n${body}`;
-          await c.messages.create({ body: previewBody, from: fromNumber, to: ADMIN_PHONE });
-          logger.info(`[sms-preview] Preview sent to admin for message to ${to}`);
-        } catch (prevErr) {
-          logger.error(`[sms-preview] Preview failed: ${prevErr.message}`);
-        }
-        // In preview mode, still send to the actual customer too
-        // Remove this line if you want admin-only preview (no customer send):
-        // return { success: true, sid: 'preview-only', preview: true };
-      }
-
       const msgPayload = { body, from: fromNumber, to };
       // Include Waves logo for automated messages, not manual correspondence
       const isManual = options.messageType === 'manual' || options.skipLogo;

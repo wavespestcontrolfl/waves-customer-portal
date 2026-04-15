@@ -30,6 +30,7 @@ router.get('/', async (req, res, next) => {
         'technicians.name as technician_name'
       )
       .orderBy('service_records.service_date', 'desc')
+      .orderBy('service_records.id', 'desc')
       .limit(limit)
       .offset(offset);
 
@@ -50,25 +51,26 @@ router.get('/', async (req, res, next) => {
         .count('id as count')
         .first();
 
+      const photoCountNum = parseInt(photoCount?.count) || 0;
       return {
         id: svc.id,
         date: svc.service_date,
         type: svc.service_type,
-        status: svc.status,
-        technician: svc.technician_name,
-        notes: svc.technician_notes,
+        status: svc.status || null,
+        technician: svc.technician_name || null,
+        notes: svc.technician_notes || null,
         soilTemp: svc.soil_temp ? parseFloat(svc.soil_temp) : null,
         thatchMeasurement: svc.thatch_measurement ? parseFloat(svc.thatch_measurement) : null,
         soilPh: svc.soil_ph ? parseFloat(svc.soil_ph) : null,
-        soilMoisture: svc.soil_moisture,
-        fieldFlags: svc.field_flags,
-        products,
-        hasPhotos: parseInt(photoCount.count) > 0,
-        photoCount: parseInt(photoCount.count),
+        soilMoisture: svc.soil_moisture || null,
+        // field_flags are internal QA markers, not customer-facing.
+        products: products || [],
+        hasPhotos: photoCountNum > 0,
+        photoCount: photoCountNum,
         reportUrl: svc.report_view_token ? `/api/reports/${svc.report_view_token}` : null,
-        reportToken: svc.report_view_token,
-        reportGeneratedAt: svc.report_generated_at,
-        reportViewedAt: svc.report_viewed_at,
+        reportToken: svc.report_view_token || null,
+        reportGeneratedAt: svc.report_generated_at || null,
+        reportViewedAt: svc.report_viewed_at || null,
       };
     }));
 
@@ -132,7 +134,6 @@ router.get('/:id', async (req, res, next) => {
         soilPh: service.soil_ph ? parseFloat(service.soil_ph) : null,
         soilMoisture: service.soil_moisture,
       },
-      fieldFlags: service.field_flags,
       products,
       photos: photosWithUrls,
     });

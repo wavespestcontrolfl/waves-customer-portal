@@ -3,13 +3,33 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 
+// Rate-limit public report access to deter token brute-forcing.
+const reportLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
+router.use(reportLimiter);
+
+// Token format: 32-char lowercase hex. Reject anything else immediately.
+const TOKEN_RE = /^[a-f0-9]{32}$/;
+
 // GET /api/reports/:token — public PDF access (no auth)
 router.get('/:token', async (req, res, next) => {
+  if (!TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
   try {
+    // PDF includes a customer address header, so this query keeps address fields.
+    // The /data JSON endpoint below intentionally does NOT return address.
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
@@ -53,13 +73,19 @@ router.get('/:token', async (req, res, next) => {
 
 // GET /api/reports/:token/data — JSON report data (for the branded viewer page)
 router.get('/:token/data', async (req, res, next) => {
+  if (!TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
   try {
+    // No address fields here — the viewer page does not need them, and leaking
+    // a home address on a public (tokenized) URL widens the blast radius if the
+    // token is shared or leaked.
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        'customers.city', 'customers.state',
         'technicians.name as technician_name')
       .first();
 
@@ -72,7 +98,7 @@ router.get('/:token/data', async (req, res, next) => {
       serviceDate: service.service_date,
       technicianName: service.technician_name,
       customerName: `${service.first_name} ${service.last_name}`,
-      address: `${service.address_line1}, ${service.city}, ${service.state} ${service.zip}`,
+      cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
       notes: service.technician_notes,
       products: products.map(p => ({
         name: p.product_name, category: p.product_category,

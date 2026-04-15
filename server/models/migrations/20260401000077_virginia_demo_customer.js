@@ -45,8 +45,8 @@ exports.up = async function (knex) {
       pet_count: 1,
       pet_details: '1 dog — Golden Retriever, indoor/outdoor',
       pets_secured_plan: 'Dog will be inside during service',
-      preferred_service_day: 'Tuesday',
-      preferred_time_window: 'morning',
+      preferred_day: 'tuesday',
+      preferred_time: 'morning',
       access_notes: 'Gate code: 1234#. Back gate unlocked.',
     });
   }

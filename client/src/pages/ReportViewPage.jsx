@@ -63,7 +63,7 @@ export default function ReportViewPage() {
             {data.serviceDate && new Date(data.serviceDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
             {' · '}{data.technicianName}
           </div>
-          <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{data.address}</div>
+          <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{data.cityState || ''}</div>
 
           {/* Notes */}
           {data.notes && (

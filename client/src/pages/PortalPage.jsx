@@ -2274,26 +2274,19 @@ function ServicesTab() {
   });
   const sortedMonths = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
 
-  // --- Visit numbering ---
+  // --- Visit numbering --- single pass: assign visit number, then fill totals via map lookup.
   const visitCounts = {};
   const sortedAll = [...services].sort((a, b) => parseDate(a.date) - parseDate(b.date));
-  sortedAll.forEach(s => {
+  const visitKeys = new Array(sortedAll.length);
+  sortedAll.forEach((s, idx) => {
     const cat = classifyType(s.type);
     const yr = parseDate(s.date).getFullYear();
     const k = `${cat}-${yr}`;
+    visitKeys[idx] = k;
     visitCounts[k] = (visitCounts[k] || 0) + 1;
     s._visitNum = visitCounts[k];
-    s._visitTotal = null; // will fill after
   });
-  // fill totals
-  Object.keys(visitCounts).forEach(k => {
-    const total = visitCounts[k];
-    sortedAll.forEach(s => {
-      const cat = classifyType(s.type);
-      const yr = parseDate(s.date).getFullYear();
-      if (`${cat}-${yr}` === k) s._visitTotal = total;
-    });
-  });
+  sortedAll.forEach((s, idx) => { s._visitTotal = visitCounts[visitKeys[idx]]; });
 
   // --- Available years ---
   const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
@@ -2510,7 +2503,7 @@ function ServicesTab() {
                                 </thead>
                                 <tbody>
                                   {s.products.map((p, i) => (
-                                    <tr key={i}>
+                                    <tr key={`${s.id}-${p.product_name || ''}-${p.active_ingredient || ''}-${i}`}>
                                       <td style={{ ...tdSt, fontWeight: 600 }}>
                                         {p.product_name}
                                         {p.product_category && <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'capitalize', marginTop: 1 }}>{p.product_category}</div>}

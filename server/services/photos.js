@@ -35,7 +35,7 @@ const PhotoService = {
    * Generate a presigned URL for viewing a photo
    * Customer portal uses these to display before/after images
    */
-  async getViewUrl(s3Key, expiresIn = 3600) {
+  async getViewUrl(s3Key, expiresIn = 300) {
     const command = new GetObjectCommand({
       Bucket: config.s3.bucket,
       Key: s3Key,
