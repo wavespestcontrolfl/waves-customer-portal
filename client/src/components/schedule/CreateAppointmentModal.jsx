@@ -336,7 +336,28 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
         sendConfirmation: sendSms,
       };
       const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
-      setToast(`Appointment created${r.recurringCreated > 1 ? ` (${r.recurringCreated} total)` : ''}`);
+      let invoiceMsg = '';
+      if (createInvoice && price && parseFloat(price) > 0) {
+        try {
+          const inv = await adminFetch('/admin/invoices', {
+            method: 'POST',
+            body: JSON.stringify({
+              customerId: selectedCustomer.id,
+              title: selectedService.name,
+              lineItems: [{
+                description: selectedService.name,
+                quantity: 1,
+                unitPrice: parseFloat(price),
+              }],
+              notes: customerNotes || undefined,
+            }),
+          });
+          invoiceMsg = inv?.id ? ' + invoice' : '';
+        } catch (e) {
+          invoiceMsg = ' (invoice failed: ' + e.message + ')';
+        }
+      }
+      setToast(`Appointment created${r.recurringCreated > 1 ? ` (${r.recurringCreated} total)` : ''}${invoiceMsg}`);
       setTimeout(() => { onCreated?.({ id: r.id, scheduledDate: apptDate }); }, 1200);
     } catch (e) { alert('Failed: ' + e.message); }
     setSaving(false);
