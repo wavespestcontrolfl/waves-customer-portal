@@ -72,8 +72,8 @@ exports.up = async function (knex) {
       category: 'billing',
       body:
         '{first_name}, got it — thank you for the payment! Your account is all caught up. ' +
-        'See you at your next service. — Waves 🌊',
-      variables: JSON.stringify(['first_name']),
+        'View your receipt + service report: {receipt_url}\n\nSee you at your next service. — Waves 🌊',
+      variables: JSON.stringify(['first_name', 'receipt_url']),
       sort_order: 22,
     },
     {

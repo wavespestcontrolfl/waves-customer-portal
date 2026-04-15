@@ -27,6 +27,7 @@ async function resolveBody(step, ctx) {
       invoice_title: ctx.invoiceTitle || 'your service',
       amount: ctx.amount || '0.00',
       pay_url: ctx.payUrl || '',
+      receipt_url: ctx.payUrl || '',
       service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
     });
     if (fromTable) return fromTable;
@@ -261,8 +262,12 @@ async function stopOnPayment(invoiceId) {
   if (sentAReminder && config.thankYou.enabled) {
     try {
       const customer = await db('customers').where({ id: seq.customer_id }).first();
+      const invoice = await db('invoices').where({ id: invoiceId }).first();
       if (customer?.phone) {
-        const body = await resolveBody(config.thankYou, { name: customer.first_name });
+        const body = await resolveBody(config.thankYou, {
+          name: customer.first_name,
+          payUrl: invoice?.token ? `${DOMAIN}/pay/${invoice.token}` : '',
+        });
         await TwilioService.sendSMS(customer.phone, body, {
           customerId: customer.id,
           messageType: 'invoice_thank_you',

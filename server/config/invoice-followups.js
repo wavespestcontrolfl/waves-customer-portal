@@ -30,7 +30,7 @@ module.exports = {
     template_key: 'invoice_thank_you',
     body:
       `{{name}}, got it — thank you for the payment! Your account is all caught up. ` +
-      `See you at your next service. — Waves 🌊`,
+      `View your receipt + service report: {{payUrl}}\n\nSee you at your next service. — Waves 🌊`,
   },
 
   // The touches. Order matters; step_index maps to this array.
