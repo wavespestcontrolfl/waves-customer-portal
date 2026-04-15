@@ -1,11 +1,23 @@
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const { authenticate } = require('../middleware/auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { logAutopay, getRecent } = require('../services/autopay-log');
 
 router.use(authenticate);
+
+// Throttle autopay mutations per authenticated customer to prevent rapid toggling
+// or accidental DoS of the billing pipeline.
+const autopayWriteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customerId || req.ip,
+  message: { error: 'Too many autopay updates. Please wait a moment and try again.' },
+});
 
 /**
  * GET /api/billing/autopay — current autopay state for the authenticated customer.
@@ -63,7 +75,7 @@ router.get('/', async (req, res, next) => {
  * PUT /api/billing/autopay — update autopay settings.
  * Body: { autopay_enabled?, autopay_payment_method_id?, billing_day? }
  */
-router.put('/', async (req, res, next) => {
+router.put('/', autopayWriteLimiter, async (req, res, next) => {
   try {
     const { autopay_enabled, autopay_payment_method_id, billing_day } = req.body || {};
     const updates = {};
@@ -136,7 +148,7 @@ router.put('/', async (req, res, next) => {
  * POST /api/billing/autopay/pause — pause autopay until a date.
  * Body: { until: 'YYYY-MM-DD', reason?: string }
  */
-router.post('/pause', async (req, res, next) => {
+router.post('/pause', autopayWriteLimiter, async (req, res, next) => {
   try {
     const { until, reason } = req.body || {};
     if (!until) return res.status(400).json({ error: 'until date required (YYYY-MM-DD)' });
@@ -161,7 +173,7 @@ router.post('/pause', async (req, res, next) => {
 /**
  * POST /api/billing/autopay/resume — clear pause immediately.
  */
-router.post('/resume', async (req, res, next) => {
+router.post('/resume', autopayWriteLimiter, async (req, res, next) => {
   try {
     await db('customers').where({ id: req.customerId }).update({
       autopay_paused_until: null,

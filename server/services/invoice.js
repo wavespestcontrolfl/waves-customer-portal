@@ -7,15 +7,9 @@ const DiscountEngine = require('./discount-engine');
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
-function generateToken(customer, serviceDate) {
-  const first = (customer?.first_name || 'customer').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const last = (customer?.last_name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const d = serviceDate ? new Date(serviceDate) : new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const suffix = crypto.randomBytes(2).toString('hex'); // 4 random chars — enough given name+date scope
-  return `${first}-${last}-${year}${month}${day}-${suffix}`.replace(/--+/g, '-').replace(/^-|-$/g, '');
+function generateToken() {
+  // 32 random bytes → 64 hex chars. Unguessable. Legacy short tokens still resolve via DB lookup.
+  return crypto.randomBytes(32).toString('hex');
 }
 
 async function nextInvoiceNumber() {
@@ -122,7 +116,7 @@ const InvoiceService = {
     }
     const total = Math.round((afterDiscount + taxAmount) * 100) / 100;
 
-    const token = generateToken(customer, serviceData.service_date);
+    const token = generateToken();
     const invoiceNumber = await nextInvoiceNumber();
 
     const [invoice] = await db('invoices').insert({

@@ -8,14 +8,20 @@ const { normalizeServiceType, cleanSquareNotes } = require('../utils/service-nor
 
 router.use(authenticate);
 
+const listQuerySchema = Joi.object({
+  days: Joi.number().integer().min(1).max(365).default(90),
+});
+
 // =========================================================================
 // GET /api/schedule — Upcoming scheduled services
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
-    const { days = 90 } = req.query;
+    const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const { days } = value;
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() + parseInt(days));
+    cutoff.setDate(cutoff.getDate() + days);
 
     const upcoming = await db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId })
@@ -84,9 +90,15 @@ router.post('/:id/confirm', async (req, res, next) => {
 // =========================================================================
 router.post('/:id/reschedule', async (req, res, next) => {
   try {
+    // Floor "now" to start of current UTC day so a customer submitting today's
+    // date from an earlier-UTC timezone isn't incorrectly rejected as "past",
+    // but yesterday's date still fails validation.
+    const todayStartUtc = new Date();
+    todayStartUtc.setUTCHours(0, 0, 0, 0);
+
     const schema = Joi.object({
-      preferredDate: Joi.date().iso().min('now').optional(),
-      notes: Joi.string().max(500).optional(),
+      preferredDate: Joi.date().iso().min(todayStartUtc).optional(),
+      notes: Joi.string().trim().max(500).optional(),
     });
 
     const { preferredDate, notes } = await schema.validateAsync(req.body);

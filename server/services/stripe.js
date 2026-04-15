@@ -145,6 +145,14 @@ const StripeService = {
     const stripeCustomerId = await this.ensureStripeCustomer(customerId);
 
     try {
+      // Retrieve PM first to verify it's not already attached to a DIFFERENT customer
+      // (prevents an attacker from claiming someone else's saved payment method)
+      const existingPm = await stripe.paymentMethods.retrieve(paymentMethodId);
+      if (existingPm.customer && existingPm.customer !== stripeCustomerId) {
+        logger.warn(`[stripe] Refusing to attach PM ${paymentMethodId} — owned by different Stripe customer`);
+        throw new Error('Payment method does not belong to this customer');
+      }
+
       // Attach PM to the Stripe customer (may already be attached via SetupIntent)
       try {
         await stripe.paymentMethods.attach(paymentMethodId, {
@@ -157,7 +165,7 @@ const StripeService = {
         }
       }
 
-      // Retrieve full PM details
+      // Retrieve full PM details (post-attach)
       const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
 
       // Build DB record
@@ -495,7 +503,10 @@ const StripeService = {
     }
 
     try {
-      const paymentIntent = await stripe.paymentIntents.create(piParams);
+      // Idempotency key: ensures duplicate POSTs don't create duplicate PIs.
+      // Scoped per invoice + amount so amount changes (rare) still create a fresh PI.
+      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}`;
+      const paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
       // Store PI reference on invoice
       await db('invoices')
@@ -610,10 +621,29 @@ const StripeService = {
 
       return paymentRecord;
     } catch (err) {
-      logger.error(`[stripe] Confirm invoice payment failed: ${err.message}`);
-      throw new Error(`Invoice payment confirmation failed: ${err.message}`);
+      logger.error(`[stripe] Confirm invoice payment failed: ${err.message}`, { stack: err.stack });
+      // Map Stripe decline_codes to friendly customer-facing messages.
+      const friendly = friendlyStripeError(err);
+      throw new Error(friendly);
     }
   },
 };
+
+// Map Stripe error codes/decline_codes to friendly customer-facing messages.
+// Raw Stripe error messages are logged server-side, never returned to the customer.
+function friendlyStripeError(err) {
+  const declineCode = err?.decline_code || err?.raw?.decline_code;
+  const code = err?.code || err?.raw?.code;
+  const map = {
+    card_declined: 'Your card was declined. Please try another payment method.',
+    insufficient_funds: 'Insufficient funds. Please use a different card.',
+    expired_card: 'This card has expired. Please use a different card.',
+    incorrect_cvc: 'The security code (CVC) is incorrect.',
+    processing_error: 'A processing error occurred. Please try again.',
+    incorrect_number: 'The card number is incorrect.',
+    authentication_required: 'Your bank requires additional authentication. Please retry.',
+  };
+  return map[declineCode] || map[code] || 'We could not process your payment. Please try again or use a different payment method.';
+}
 
 module.exports = StripeService;

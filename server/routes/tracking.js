@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const Joi = require('joi');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
@@ -142,18 +143,30 @@ router.get('/today', async (req, res, next) => {
 // =========================================================================
 router.put('/:id/step', async (req, res, next) => {
   try {
-    const { step, note, etaMinutes } = req.body;
+    const stepSchema = Joi.object({
+      step: Joi.number().integer().min(1).max(7).required(),
+      note: Joi.string().trim().max(500).optional().allow(''),
+      etaMinutes: Joi.number().integer().min(0).max(720).optional(),
+    });
+    const { value: vStep, error: stepErr } = stepSchema.validate(req.body, { stripUnknown: true });
+    if (stepErr) return res.status(400).json({ error: stepErr.details[0].message });
+    const { step, note, etaMinutes } = vStep;
     const trackerId = req.params.id;
-
-    if (!step || step < 1 || step > 7) {
-      return res.status(400).json({ error: 'Step must be 1-7' });
-    }
 
     const tracker = await db('service_tracking')
       .where({ id: trackerId, customer_id: req.customerId })
       .first();
 
     if (!tracker) return res.status(404).json({ error: 'Tracker not found' });
+
+    // Monotonic progression only: may stay on current step or advance by one.
+    // Prevents rolling back a "Complete" tracker or skipping ahead silently.
+    const currentStep = tracker.current_step || 1;
+    if (step < currentStep || step > currentStep + 1) {
+      return res.status(400).json({
+        error: `Invalid step transition (current=${currentStep}, requested=${step})`,
+      });
+    }
 
     const updates = {
       current_step: step,
@@ -205,8 +218,12 @@ router.put('/:id/step', async (req, res, next) => {
 // =========================================================================
 router.post('/:id/note', async (req, res, next) => {
   try {
-    const { note } = req.body;
-    if (!note) return res.status(400).json({ error: 'Note required' });
+    const noteSchema = Joi.object({
+      note: Joi.string().trim().min(1).max(500).required(),
+    });
+    const { value: vNote, error: noteErr } = noteSchema.validate(req.body, { stripUnknown: true });
+    if (noteErr) return res.status(400).json({ error: noteErr.details[0].message });
+    const { note } = vNote;
 
     const tracker = await db('service_tracking')
       .where({ id: req.params.id, customer_id: req.customerId })
@@ -248,6 +265,9 @@ router.put('/:id/complete', async (req, res, next) => {
 // =========================================================================
 router.post('/demo/advance', async (req, res, next) => {
   try {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(404).json({ error: 'Not found' });
+    }
     const tracker = await db('service_tracking')
       .where({ customer_id: req.customerId })
       .where('current_step', '<', 7)

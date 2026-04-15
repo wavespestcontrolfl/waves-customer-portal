@@ -2638,6 +2638,8 @@ function ScheduleTab({ customer }) {
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
+  const [confirmingIds, setConfirmingIds] = useState({});
+  const [prefsLocked, setPrefsLocked] = useState({});
   const [showRequestForm, setShowRequestForm] = useState(false);
   const [requestType, setRequestType] = useState('');
   const [requestUrgency, setRequestUrgency] = useState('');
@@ -2657,19 +2659,39 @@ function ScheduleTab({ customer }) {
   }, []);
 
   const handleToggle = async (key) => {
+    if (prefsLocked[key]) return;
     const newVal = !prefs[key];
-    setPrefs({ ...prefs, [key]: newVal });
-    try { await api.updateNotificationPrefs({ [key]: newVal }); }
-    catch (err) { setPrefs({ ...prefs, [key]: !newVal }); console.error(err); }
+    setPrefsLocked(prev => ({ ...prev, [key]: true }));
+    setPrefs(prev => ({ ...prev, [key]: newVal }));
+    try {
+      await api.updateNotificationPrefs({ [key]: newVal });
+    } catch (err) {
+      setPrefs(prev => ({ ...prev, [key]: !newVal }));
+      alert('Could not update notification preferences. Please try again.');
+      console.error(err);
+    } finally {
+      setPrefsLocked(prev => ({ ...prev, [key]: false }));
+    }
   };
 
   const handleConfirm = async (id) => {
+    if (confirmingIds[id]) return;
+    setConfirmingIds(prev => ({ ...prev, [id]: true }));
     try {
       await api.confirmAppointment(id);
       const ts = new Date();
       setConfirmTimestamps(prev => ({ ...prev, [id]: ts }));
-      setUpcoming(upcoming.map(s => s.id === id ? { ...s, status: 'confirmed', customerConfirmed: true } : s));
-    } catch (err) { console.error(err); }
+      setUpcoming(prev => prev.map(s => s.id === id ? { ...s, status: 'confirmed', customerConfirmed: true } : s));
+    } catch (err) {
+      console.error(err);
+      alert('Could not confirm this appointment. Refreshing latest status...');
+      try {
+        const fresh = await api.getSchedule(90);
+        setUpcoming(fresh.upcoming || []);
+      } catch (e) { console.error(e); }
+    } finally {
+      setConfirmingIds(prev => ({ ...prev, [id]: false }));
+    }
   };
 
   const handleRequestSubmit = async () => {
@@ -2690,7 +2712,10 @@ function ScheduleTab({ customer }) {
         setRequestUrgency('');
         setRequestDesc('');
       }, 3000);
-    } catch (err) { console.error(err); }
+    } catch (err) {
+      console.error(err);
+      alert('Could not submit your request. Please try again or call us.');
+    }
     setRequestSubmitting(false);
   };
 
@@ -2726,8 +2751,9 @@ function ScheduleTab({ customer }) {
   // Split completed visits from upcoming
   const recentCompleted = (upcoming || [])
     .filter(s => s.status === 'completed')
-    .slice(-2)
-    .reverse();
+    .slice()
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 2);
   const upcomingOnly = enriched.filter(s => s.diffHrs > -24 && s.status !== 'completed');
 
   // Empty state season info
@@ -2769,11 +2795,13 @@ function ScheduleTab({ customer }) {
         </span>
       );
     }
+    const busy = !!confirmingIds[s.id];
     return (
-      <button onClick={() => handleConfirm(s.id)} style={{
+      <button onClick={() => handleConfirm(s.id)} disabled={busy} style={{
         ...BUTTON_BASE, padding: compact ? '6px 14px' : '9px 18px', flex: compact ? undefined : 1,
         background: B.red, color: '#fff', fontSize: 12,
-      }}>{'✓'} Confirm</button>
+        opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
+      }}>{busy ? 'Confirming…' : `${'✓'} Confirm`}</button>
     );
   };
 

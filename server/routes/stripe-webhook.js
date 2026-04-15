@@ -28,6 +28,11 @@ router.post(
       return res.status(500).send('Webhook secret not configured');
     }
 
+    if (!sig) {
+      logger.warn('[stripe-webhook] Missing stripe-signature header — rejecting');
+      return res.status(400).send('Missing stripe-signature header');
+    }
+
     // ── Verify signature ──────────────────────────────────────
     let event;
     try {
