@@ -868,7 +868,10 @@ export default function CustomersPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [filterCity, setFilterCity] = useState('all');
   const [filterHasBalance, setFilterHasBalance] = useState(false);
-  const [selected360Id, setSelected360Id] = useState(null);
+  const [selected360Id, setSelected360Id] = useState(() => {
+    const id = searchParams.get('customerId');
+    return id ? Number(id) : null;
+  });
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);

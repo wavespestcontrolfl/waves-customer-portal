@@ -34,6 +34,7 @@ function pricePestControl(property, options = {}) {
     frequency = 'quarterly',
     pricingVersion = 'v1',
     roachType = 'none',
+    modifiers = {},
   } = options;
 
   const footprint = property.footprint;
@@ -56,7 +57,9 @@ function pricePestControl(property, options = {}) {
   if (f.largeDriveway) additionalAdj += PEST.additionalAdjustments.largeDriveway;
 
   const propAdj = PROPERTY_TYPE_ADJ[property.propertyType] || 0;
-  let basePrice = Math.max(PEST.floor, PEST.base + Math.round(footprintAdj) + additionalAdj + propAdj);
+  const ageAdj = modifiers.pestAgeAdj || 0;
+  if (property.attachedGarage) additionalAdj += 5;
+  let basePrice = Math.max(PEST.floor, PEST.base + Math.round(footprintAdj) + additionalAdj + propAdj + ageAdj);
 
   const roachMod = PEST.roachModifier[roachType] || 0;
   const roachAddOn = Math.round(basePrice * roachMod);
@@ -267,6 +270,7 @@ function pricePalmInjection(property, options = {}) {
 function priceMosquito(property, options = {}) {
   const {
     tier = 'silver', // bronze, silver, gold, platinum
+    modifiers = {},
   } = options;
 
   const lotCategory = property.lotCategory;
@@ -289,6 +293,10 @@ function priceMosquito(property, options = {}) {
   if (f.irrigation) pressure += MOSQUITO.pressureFactors.irrigation;
   if (lotCategory === 'ACRE') pressure += MOSQUITO.pressureFactors.lot_acre;
   else if (lotCategory === 'HALF') pressure += MOSQUITO.pressureFactors.lot_half;
+  // v2 graduated water proximity replaces binary nearWater when provided
+  if (modifiers.mosquitoWaterMult && modifiers.mosquitoWaterMult !== 1.0) {
+    pressure *= modifiers.mosquitoWaterMult;
+  }
   pressure = Math.min(pressure, MOSQUITO.pressureCap);
 
   const perVisit = Math.round(basePrice * pressure);
@@ -320,6 +328,7 @@ function priceTermiteBait(property, options = {}) {
   const {
     system = 'trelona',
     monitoringTier = 'basic',
+    modifiers = {},
   } = options;
 
   const footprint = property.footprint;
@@ -331,10 +340,12 @@ function priceTermiteBait(property, options = {}) {
   const stations = Math.max(TERMITE.minStations, Math.ceil(perimeter / TERMITE.stationSpacing));
 
   const sys = TERMITE.systems[system];
+  const conMult = modifiers.termiteConstructionMult || 1.0;
+  const foundAdj = modifiers.termiteFoundationAdj || 0;
   const installMaterialCost = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
   const installLabor = stations * 0.25 * GLOBAL.LABOR_RATE; // ~15 min per station
   const installCost = installMaterialCost + installLabor;
-  const installPrice = Math.round(installMaterialCost * TERMITE.installMultiplier);
+  const installPrice = Math.round(installMaterialCost * TERMITE.installMultiplier * conMult + foundAdj);
   const installMargin = installPrice > 0 ? (installPrice - installCost) / installPrice : 0;
 
   const mon = TERMITE.monitoring[monitoringTier];
@@ -364,7 +375,8 @@ function priceTermiteBait(property, options = {}) {
 // ============================================================
 // RODENT BAIT STATIONS
 // ============================================================
-function priceRodentBait(property) {
+function priceRodentBait(property, options = {}) {
+  const { modifiers = {} } = options;
   const footprint = property.footprint;
   const lotSqFt = property.lotSqFt;
   const f = property.features || {};
@@ -376,13 +388,18 @@ function priceRodentBait(property) {
   else if (lotSqFt >= 12000) score += RODENT.baitScoreFactors.lot_12000plus;
   if (f.nearWater) score += RODENT.baitScoreFactors.nearWater;
   if (f.trees === 'heavy') score += RODENT.baitScoreFactors.trees_heavy;
+  // Tile roof (barrel-tile nesting harborage) bumps size tier
+  if ((property.roofType || '').toUpperCase() === 'TILE') score += 1;
 
   let size, monthly;
   if (score <= 1) { size = 'small'; monthly = RODENT.baitMonthly.small.monthly; }
   else if (score <= 2) { size = 'medium'; monthly = RODENT.baitMonthly.medium.monthly; }
   else { size = 'large'; monthly = RODENT.baitMonthly.large.monthly; }
 
-  const annual = monthly * 12;
+  // Add roof-type adjustment (annual) for additional stations on tile/metal roofs
+  const roofAnnualAdj = (modifiers.rodentRoofAdj || 0);
+  const annual = monthly * 12 + roofAnnualAdj;
+  monthly = Math.round(annual / 12 * 100) / 100;
 
   // Cost estimate: 12 visits/year
   const onSiteMin = size === 'small' ? 15 : size === 'medium' ? 20 : 25;

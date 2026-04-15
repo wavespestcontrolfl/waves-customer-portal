@@ -85,6 +85,21 @@ function calculatePropertyProfile(input) {
     stories: input.stories || 1,
     propertyType: input.propertyType || 'single_family',
     features: input.features || {},
+    // v2 enriched fields — consumed by modifiers.deriveModifiers()
+    yearBuilt: input.yearBuilt || null,
+    constructionMaterial: input.constructionMaterial || null,
+    foundationType: input.foundationType || null,
+    roofType: input.roofType || null,
+    nearWater: input.nearWater || (input.features?.nearWater ? 'CLOSE' : 'NONE'),
+    waterDistance: input.waterDistance || null,
+    serviceZone: input.serviceZone || input.zone || 'A',
+    isHOA: !!input.isHOA,
+    hoaFee: input.hoaFee || null,
+    isRental: !!input.isRental,
+    isNewHomeowner: !!input.isNewHomeowner,
+    fenceType: input.fenceType || null,
+    outbuildingCount: input.outbuildingCount || 0,
+    attachedGarage: !!input.attachedGarage,
   };
 }
 

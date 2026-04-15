@@ -536,6 +536,16 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
             ✅ Lawn Assessed
           </span>
         )}
+        {service.customerId && (
+          <button
+            onClick={() => { window.location.href = `/admin/customers?customerId=${service.customerId}`; }}
+            style={{
+              ...btnBase, background: 'transparent', color: D.teal, border: `1px solid ${D.teal}44`,
+            }}
+          >
+            ✏️ Edit
+          </button>
+        )}
         {status !== 'completed' && status !== 'skipped' && (
           <>
             <button onClick={() => onReschedule?.(service)} style={{

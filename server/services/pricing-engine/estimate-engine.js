@@ -5,6 +5,7 @@
 // ============================================================
 const { GLOBAL, WAVEGUARD, ZONES, URGENCY } = require('./constants');
 const { calculatePropertyProfile } = require('./property-calculator');
+const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
   pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
@@ -28,11 +29,31 @@ function generateEstimate(input) {
     bedArea: input.bedArea,
     propertyType: input.propertyType,
     features: input.features || {},
+    // v2 enriched fields (optional — null-safe)
+    yearBuilt: input.yearBuilt,
+    constructionMaterial: input.constructionMaterial,
+    foundationType: input.foundationType,
+    roofType: input.roofType,
+    nearWater: input.nearWater,
+    waterDistance: input.waterDistance,
+    serviceZone: input.serviceZone || input.zone,
+    isHOA: input.isHOA,
+    hoaFee: input.hoaFee,
+    isRental: input.isRental,
+    isNewHomeowner: input.isNewHomeowner,
+    fenceType: input.fenceType,
+    outbuildingCount: input.outbuildingCount,
+    attachedGarage: input.attachedGarage,
   });
 
-  // ── 2. Zone multiplier ────────────────────────────────────
+  // ── 2. Derive property-driven pricing modifiers (v2 port) ─
+  const modifiers = deriveModifiers(property);
+  const structuralNotes = deriveNotes(property);
+
+  // ── 3. Zone multiplier ────────────────────────────────────
+  // Prefer derived zone multiplier (supports A/B/C/D) with legacy ZONES fallback
   const zone = ZONES[input.zone] || ZONES.UNKNOWN;
-  const zoneMult = zone.multiplier;
+  const zoneMult = modifiers.zoneMult || zone.multiplier;
 
   // ── 3. Price each requested service ────────────────────────
   const services = input.services || {};
@@ -45,6 +66,7 @@ function generateEstimate(input) {
       frequency: services.pest.frequency || 'quarterly',
       pricingVersion: services.pest.version || 'v1',
       roachType: services.pest.roachType || 'none',
+      modifiers,
     });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -96,6 +118,7 @@ function generateEstimate(input) {
   if (services.mosquito) {
     const result = priceMosquito(property, {
       tier: services.mosquito.tier || 'silver',
+      modifiers,
     });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -108,6 +131,7 @@ function generateEstimate(input) {
     const result = priceTermiteBait(property, {
       system: services.termite.system || 'trelona',
       monitoringTier: services.termite.monitoringTier || 'basic',
+      modifiers,
     });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -117,7 +141,7 @@ function generateEstimate(input) {
 
   // Rodent Bait
   if (services.rodentBait) {
-    const result = priceRodentBait(property);
+    const result = priceRodentBait(property, { modifiers });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     lineItems.push(result);
