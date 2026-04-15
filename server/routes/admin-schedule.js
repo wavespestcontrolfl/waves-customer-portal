@@ -503,6 +503,7 @@ router.put('/:id/update-details', async (req, res, next) => {
     const {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
+      isRecurring, recurringPattern, recurringCount,
     } = req.body;
     const updates = {};
     if (serviceType !== undefined) updates.service_type = serviceType;
@@ -514,10 +515,52 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (notes !== undefined) updates.notes = notes;
     if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
     if (zone !== undefined) updates.zone = zone;
+    if (isRecurring) {
+      updates.is_recurring = true;
+      if (recurringPattern) updates.recurring_pattern = recurringPattern;
+    }
     if (Object.keys(updates).length) {
       await db('scheduled_services').where({ id: req.params.id }).update(updates);
     }
-    res.json({ success: true });
+
+    // Spawn recurring children if requested
+    let recurringCreated = 0;
+    if (isRecurring && recurringPattern && recurringCount > 1) {
+      const parent = await db('scheduled_services').where({ id: req.params.id }).first();
+      if (parent) {
+        const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+        const interval = intervals[recurringPattern] || 91;
+        const baseDate = parent.scheduled_date ? new Date(String(parent.scheduled_date).split('T')[0] + 'T12:00:00') : new Date();
+        for (let i = 1; i < (recurringCount || 4); i++) {
+          const nextDate = new Date(baseDate);
+          nextDate.setDate(nextDate.getDate() + interval * i);
+          const childData = {
+            customer_id: parent.customer_id,
+            technician_id: parent.technician_id,
+            scheduled_date: nextDate.toISOString().split('T')[0],
+            window_start: parent.window_start,
+            window_end: parent.window_end,
+            service_type: parent.service_type,
+            status: 'pending',
+            time_window: parent.time_window,
+            zone: parent.zone,
+            estimated_duration_minutes: parent.estimated_duration_minutes,
+            is_recurring: true,
+            recurring_pattern: recurringPattern,
+          };
+          try {
+            const cols = await db('scheduled_services').columnInfo();
+            if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
+            if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
+            if (cols.estimated_price && parent.estimated_price != null) childData.estimated_price = parent.estimated_price;
+          } catch { /* non-blocking */ }
+          await db('scheduled_services').insert(childData);
+          recurringCreated++;
+        }
+      }
+    }
+
+    res.json({ success: true, recurringCreated });
   } catch (err) { next(err); }
 });
 

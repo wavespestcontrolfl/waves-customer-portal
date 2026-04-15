@@ -734,6 +734,40 @@ function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete,
 
 /* ── Edit Service Modal ───────────────────────────────── */
 
+const EDIT_CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
+const EDIT_CATEGORY_EMOJI = { recurring: '🔄', one_time: '🎯', assessment: '📋', pest_control: '🐛', lawn_care: '🌿', mosquito: '🦟', termite: '🪵', rodent: '🐀', tree_shrub: '🌳', inspection: '🔍', specialty: '⚡', other: '📦' };
+const EDIT_FREQUENCIES = [
+  { value: 'weekly', label: 'Weekly' }, { value: 'biweekly', label: 'Every 2 Weeks' },
+  { value: 'monthly', label: 'Monthly' }, { value: 'bimonthly', label: 'Every 2 Months' },
+  { value: 'quarterly', label: 'Quarterly' }, { value: 'triannual', label: 'Every 4 Months' },
+];
+const EDIT_FALLBACK_SERVICES = [
+  { category: 'pest_control', items: [
+    { name: 'Pest Control Service' }, { name: 'Mosquito Control Service' },
+    { name: 'Tick Control Service' }, { name: 'Wasp Control Service' },
+    { name: 'Quarterly Pest Control Service' }, { name: 'Bi-Monthly Pest Control Service' },
+    { name: 'Monthly Pest Control Service' },
+  ]},
+  { category: 'rodent', items: [
+    { name: 'Rodent Control Service' }, { name: 'Rodent Trapping Service' },
+    { name: 'Rodent Exclusion Service' }, { name: 'Rodent Bait Station Service' },
+  ]},
+  { category: 'termite', items: [
+    { name: 'Termite Monitoring Service' }, { name: 'Termite Active Bait Station Service' },
+    { name: 'Termite Spot Treatment Service' }, { name: 'Termite Trenching Service' },
+  ]},
+  { category: 'lawn_care', items: [
+    { name: 'Lawn Care Service' }, { name: 'Lawn Fertilization Service' },
+    { name: 'Lawn Fungicide Treatment Service' }, { name: 'Lawn Insect Control Service' },
+  ]},
+  { category: 'tree_shrub', items: [
+    { name: 'Every 6 Weeks Tree & Shrub Care Service' }, { name: 'Bi-Monthly Tree & Shrub Care Service' },
+  ]},
+  { category: 'specialty', items: [
+    { name: 'WaveGuard Membership' }, { name: 'Waves Pest Control Appointment' },
+  ]},
+];
+
 function EditServiceModal({ service, technicians, onClose, onSaved }) {
   const [form, setForm] = useState({
     scheduledDate: service.scheduledDate ? String(service.scheduledDate).split('T')[0] : '',
@@ -746,15 +780,48 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
     notes: service.notes || '',
   });
   const [saving, setSaving] = useState(false);
+  const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
+  const [expandedCategory, setExpandedCategory] = useState(null);
+  const [editingServiceType, setEditingServiceType] = useState(false);
+  const [isRecurring, setIsRecurring] = useState(false);
+  const [recurringFreq, setRecurringFreq] = useState(service.recurringPattern || 'quarterly');
+  const [recurringCount, setRecurringCount] = useState(4);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await adminFetch('/admin/schedule/services-dropdown');
+        if (r.groups?.length) setServiceGroups(r.groups);
+      } catch { /* keep fallback */ }
+    })();
+  }, []);
 
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const recurringPreview = () => {
+    if (!isRecurring || !form.scheduledDate) return null;
+    const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+    const gap = intervals[recurringFreq] || 91;
+    const dates = [];
+    for (let i = 0; i < Math.min(recurringCount, 6); i++) {
+      const d = new Date(form.scheduledDate + 'T12:00:00');
+      d.setDate(d.getDate() + gap * i);
+      dates.push(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+    }
+    return dates;
+  };
 
   const handleSave = async () => {
     setSaving(true);
     try {
       await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: 'PUT',
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          ...form,
+          isRecurring,
+          recurringPattern: isRecurring ? recurringFreq : undefined,
+          recurringCount: isRecurring ? recurringCount : undefined,
+        }),
       });
       onSaved?.();
     } catch (e) {
@@ -804,7 +871,53 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
 
         <div style={{ marginBottom: 12 }}>
           <label style={labelStyle}>Service Type</label>
-          <input type="text" value={form.serviceType} onChange={e => update('serviceType', e.target.value)} style={inputStyle} />
+          {!editingServiceType ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#F8FAFC', borderRadius: 8, padding: '10px 12px', border: `1px solid ${D.inputBorder}` }}>
+              <div style={{ flex: 1, fontSize: 14, color: D.heading, fontWeight: 600 }}>
+                {form.serviceType || <span style={{ color: D.muted, fontWeight: 400 }}>— Select service —</span>}
+              </div>
+              <button type="button" onClick={() => setEditingServiceType(true)} style={{
+                padding: '6px 12px', borderRadius: 6, background: `${D.teal}15`, color: D.teal,
+                border: `1px solid ${D.teal}55`, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              }}>Change</button>
+            </div>
+          ) : (
+            <div style={{ maxHeight: 260, overflowY: 'auto', border: `1px solid ${D.inputBorder}`, borderRadius: 8, padding: 6, background: '#F8FAFC' }}>
+              {serviceGroups.map((group) => {
+                const isOpen = expandedCategory === group.category;
+                return (
+                  <div key={group.category} style={{ marginBottom: 4 }}>
+                    <button type="button" onClick={() => setExpandedCategory(isOpen ? null : group.category)} style={{
+                      width: '100%', textAlign: 'left', padding: '8px 10px', borderRadius: 6,
+                      background: isOpen ? `${D.teal}15` : D.card, border: `1px solid ${D.border}`,
+                      color: D.heading, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    }}>
+                      <span>{EDIT_CATEGORY_EMOJI[group.category] || '📦'} {EDIT_CATEGORY_LABELS[group.category] || group.category} <span style={{ color: D.muted, fontWeight: 400, marginLeft: 4 }}>({group.items.length})</span></span>
+                      <span style={{ color: D.muted, fontSize: 11 }}>{isOpen ? '▾' : '▸'}</span>
+                    </button>
+                    {isOpen && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: 6 }}>
+                        {group.items.map((svc, si) => (
+                          <button key={si} type="button" onClick={() => {
+                            update('serviceType', svc.name);
+                            if (svc.duration || svc.default_duration_minutes) {
+                              update('estimatedDuration', svc.duration || svc.default_duration_minutes);
+                            }
+                            setEditingServiceType(false);
+                            setExpandedCategory(null);
+                          }} style={{
+                            padding: '8px 10px', background: D.card, border: `1px solid ${D.border}`,
+                            borderRadius: 6, color: D.text, fontSize: 13, cursor: 'pointer', textAlign: 'left',
+                          }}>{svc.name}</button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginBottom: 12 }}>
@@ -821,6 +934,39 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
             <label style={labelStyle}>Route #</label>
             <input type="number" value={form.routeOrder} onChange={e => update('routeOrder', e.target.value)} style={inputStyle} />
           </div>
+        </div>
+
+        {/* Recurring toggle (same pattern as New Appointment) */}
+        <div style={{ marginBottom: 12, padding: 12, background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: isRecurring ? 10 : 0 }}>
+            <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.teal }} />
+            <span style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>Make Recurring</span>
+            <span style={{ fontSize: 11, color: D.muted }}>— creates future appointments from this date</span>
+          </label>
+          {isRecurring && (
+            <div>
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 8, marginBottom: 8 }}>
+                <div>
+                  <label style={labelStyle}>Frequency</label>
+                  <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)} style={inputStyle}>
+                    {EDIT_FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={labelStyle}>Count</label>
+                  <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} style={inputStyle} />
+                </div>
+              </div>
+              {recurringPreview() && (
+                <div style={{ fontSize: 11, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {recurringPreview().map((d, i) => (
+                    <span key={i} style={{ padding: '2px 6px', background: `${D.teal}15`, borderRadius: 4, color: D.teal, fontWeight: 600 }}>{d}</span>
+                  ))}
+                  {recurringCount > 6 && <span style={{ padding: '2px 6px', color: D.muted }}>+{recurringCount - 6} more</span>}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div style={{ marginBottom: 18 }}>
