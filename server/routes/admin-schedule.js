@@ -16,6 +16,42 @@ function sanitizeServiceType(serviceType) {
   return normalizeServiceType(serviceType);
 }
 
+// Generate the Nth recurring occurrence date given a base date + pattern config.
+// Supports: daily, weekly, biweekly, monthly, bimonthly, quarterly, triannual,
+// monthly_nth_weekday (needs nth 1-4 + weekday 0-6 where 0=Sun), custom (needs intervalDays).
+// Returns a YYYY-MM-DD string.
+function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
+  const { nth, weekday, intervalDays } = opts;
+  const base = new Date(baseDateStr + 'T12:00:00');
+  if (pattern === 'monthly_nth_weekday' && nth != null && weekday != null) {
+    const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
+    let firstW = d.getDay();
+    let offset = (Number(weekday) - firstW + 7) % 7;
+    d.setDate(1 + offset + (Number(nth) - 1) * 7);
+    return d.toISOString().split('T')[0];
+  }
+  const intervals = {
+    daily: 1, weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60,
+    quarterly: 91, triannual: 122,
+  };
+  let gap;
+  if (pattern === 'custom' && intervalDays) gap = Math.max(1, Number(intervalDays));
+  else gap = intervals[pattern] || 91;
+  const d = new Date(base);
+  d.setDate(d.getDate() + gap * i);
+  return d.toISOString().split('T')[0];
+}
+
+// Apply a discount to a price. Returns the discounted price (>= 0).
+function applyDiscount(price, type, amount) {
+  if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
+  const p = Number(price);
+  const a = Number(amount);
+  if (type === 'percentage') return Math.max(0, +(p * (1 - a / 100)).toFixed(2));
+  if (type === 'fixed_amount') return Math.max(0, +(p - a).toFixed(2));
+  return price;
+}
+
 function getZone(city, zip) {
   const c = (city || '').toLowerCase();
   const z = zip || '';
@@ -373,6 +409,8 @@ router.post('/', async (req, res, next) => {
     const {
       customerId, technicianId, scheduledDate, windowStart, windowEnd,
       serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
+      recurringNth, recurringWeekday, recurringIntervalDays,
+      discountType, discountAmount,
       sendConfirmation, serviceId, serviceAddons, assignmentMode,
       estimatedPrice, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification,
@@ -418,6 +456,10 @@ router.post('/', async (req, res, next) => {
     if (isCallback && customer?.waveguard_tier) {
       finalPrice = 0;
     }
+    // Apply recurring discount (if any)
+    if (finalPrice != null && discountType && discountAmount != null && discountAmount !== '') {
+      finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
+    }
 
     // Merge notes
     const combinedNotes = [notes, customerNotes].filter(Boolean).join('\n') || null;
@@ -440,6 +482,13 @@ router.post('/', async (req, res, next) => {
       if (cols.is_callback) insertData.is_callback = isCallback || false;
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
+      if (isRecurring) {
+        if (cols.recurring_nth && recurringNth != null) insertData.recurring_nth = parseInt(recurringNth);
+        if (cols.recurring_weekday && recurringWeekday != null) insertData.recurring_weekday = parseInt(recurringWeekday);
+        if (cols.recurring_interval_days && recurringIntervalDays != null) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
+      }
+      if (cols.discount_type && discountType) insertData.discount_type = discountType;
+      if (cols.discount_amount && discountAmount != null && discountAmount !== '') insertData.discount_amount = Number(discountAmount);
     } catch (e) { logger.warn(`[schedule] Column check failed (non-blocking): ${e.message}`); }
 
     const [svc] = await db('scheduled_services').insert(insertData).returning('*');
@@ -461,25 +510,26 @@ router.post('/', async (req, res, next) => {
     // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
     const plannedCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 4)) : 0;
     if (isRecurring && recurringPattern && plannedCount > 1) {
-      const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
-      const interval = intervals[recurringPattern] || 91;
-
+      const cols = await db('scheduled_services').columnInfo();
+      const rOpts = { nth: recurringNth, weekday: recurringWeekday, intervalDays: recurringIntervalDays };
       for (let i = 1; i < plannedCount; i++) {
-        const nextDate = new Date(scheduledDate + 'T12:00:00');
-        nextDate.setDate(nextDate.getDate() + interval * i);
+        const nextDateStr = nextRecurringDate(scheduledDate, recurringPattern, i, rOpts);
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
-          scheduled_date: nextDate.toISOString().split('T')[0],
+          scheduled_date: nextDateStr,
           window_start: windowStart, window_end: computedEnd,
           service_type: serviceType, status: 'pending',
           time_window: timeWindow, zone, estimated_duration_minutes: duration,
           is_recurring: true, recurring_pattern: recurringPattern,
           recurring_parent_id: svc.id,
         };
-        try {
-          const cols = await db('scheduled_services').columnInfo();
-          if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
-        } catch {}
+        if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
+        if (cols.recurring_nth && recurringNth != null) childData.recurring_nth = parseInt(recurringNth);
+        if (cols.recurring_weekday && recurringWeekday != null) childData.recurring_weekday = parseInt(recurringWeekday);
+        if (cols.recurring_interval_days && recurringIntervalDays != null) childData.recurring_interval_days = parseInt(recurringIntervalDays);
+        if (cols.estimated_price && finalPrice != null) childData.estimated_price = finalPrice;
+        if (cols.discount_type && discountType) childData.discount_type = discountType;
+        if (cols.discount_amount && discountAmount != null && discountAmount !== '') childData.discount_amount = Number(discountAmount);
         await db('scheduled_services').insert(childData);
       }
     }
@@ -511,6 +561,8 @@ router.put('/:id/update-details', async (req, res, next) => {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       isRecurring, recurringPattern, recurringCount, recurringOngoing,
+      recurringNth, recurringWeekday, recurringIntervalDays,
+      discountType, discountAmount,
     } = req.body;
     const updates = {};
     if (serviceType !== undefined) updates.service_type = serviceType;
@@ -528,6 +580,11 @@ router.put('/:id/update-details', async (req, res, next) => {
       try {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.recurring_ongoing) updates.recurring_ongoing = !!recurringOngoing;
+        if (cols.recurring_nth) updates.recurring_nth = recurringNth != null ? parseInt(recurringNth) : null;
+        if (cols.recurring_weekday) updates.recurring_weekday = recurringWeekday != null ? parseInt(recurringWeekday) : null;
+        if (cols.recurring_interval_days) updates.recurring_interval_days = recurringIntervalDays != null ? parseInt(recurringIntervalDays) : null;
+        if (cols.discount_type) updates.discount_type = discountType || null;
+        if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
       } catch {}
     }
     if (Object.keys(updates).length) {
@@ -540,16 +597,20 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (isRecurring && recurringPattern && spawnCount > 1) {
       const parent = await db('scheduled_services').where({ id: req.params.id }).first();
       if (parent) {
-        const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
-        const interval = intervals[recurringPattern] || 91;
-        const baseDate = parent.scheduled_date ? new Date(String(parent.scheduled_date).split('T')[0] + 'T12:00:00') : new Date();
+        const baseDateStr = parent.scheduled_date
+          ? String(parent.scheduled_date).split('T')[0]
+          : new Date().toISOString().split('T')[0];
+        const rOpts = {
+          nth: recurringNth != null ? recurringNth : parent.recurring_nth,
+          weekday: recurringWeekday != null ? recurringWeekday : parent.recurring_weekday,
+          intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+        };
         for (let i = 1; i < spawnCount; i++) {
-          const nextDate = new Date(baseDate);
-          nextDate.setDate(nextDate.getDate() + interval * i);
+          const nextDateStr = nextRecurringDate(baseDateStr, recurringPattern, i, rOpts);
           const childData = {
             customer_id: parent.customer_id,
             technician_id: parent.technician_id,
-            scheduled_date: nextDate.toISOString().split('T')[0],
+            scheduled_date: nextDateStr,
             window_start: parent.window_start,
             window_end: parent.window_end,
             service_type: parent.service_type,
@@ -564,8 +625,19 @@ router.put('/:id/update-details', async (req, res, next) => {
             const cols = await db('scheduled_services').columnInfo();
             if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
             if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
-            if (cols.estimated_price && parent.estimated_price != null) childData.estimated_price = parent.estimated_price;
             if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
+            if (cols.recurring_nth) childData.recurring_nth = rOpts.nth != null ? parseInt(rOpts.nth) : null;
+            if (cols.recurring_weekday) childData.recurring_weekday = rOpts.weekday != null ? parseInt(rOpts.weekday) : null;
+            if (cols.recurring_interval_days) childData.recurring_interval_days = rOpts.intervalDays != null ? parseInt(rOpts.intervalDays) : null;
+            const dType = discountType !== undefined ? discountType : parent.discount_type;
+            const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
+            let childPrice = parent.estimated_price;
+            if (childPrice != null && dType && dAmt != null && dAmt !== '') {
+              childPrice = applyDiscount(childPrice, dType, dAmt);
+            }
+            if (cols.estimated_price && childPrice != null) childData.estimated_price = childPrice;
+            if (cols.discount_type && dType) childData.discount_type = dType;
+            if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
           } catch { /* non-blocking */ }
           await db('scheduled_services').insert(childData);
           recurringCreated++;
@@ -733,8 +805,6 @@ router.put('/:id/status', async (req, res, next) => {
             .where('status', 'pending')
             .count('* as c').first())?.c || 0);
 
-          const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
-          const interval = intervals[parent.recurring_pattern] || 91;
           const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
 
           if (isOngoing && pendingCount < 2) {
@@ -743,12 +813,13 @@ router.put('/:id/status', async (req, res, next) => {
               .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
               .orderBy('scheduled_date', 'desc').first();
             if (latest) {
-              const base = new Date(String(latest.scheduled_date).split('T')[0] + 'T12:00:00');
-              base.setDate(base.getDate() + interval);
+              const latestStr = String(latest.scheduled_date).split('T')[0];
+              const rOpts = { nth: parent.recurring_nth, weekday: parent.recurring_weekday, intervalDays: parent.recurring_interval_days };
+              const nextStr = nextRecurringDate(latestStr, parent.recurring_pattern, 1, rOpts);
               const nextData = {
                 customer_id: parent.customer_id,
                 technician_id: parent.technician_id,
-                scheduled_date: base.toISOString().split('T')[0],
+                scheduled_date: nextStr,
                 window_start: parent.window_start, window_end: parent.window_end,
                 service_type: parent.service_type, status: 'pending',
                 time_window: parent.time_window, zone: parent.zone,
@@ -1653,26 +1724,24 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     if (!parent) return res.status(404).json({ error: 'parent service not found' });
 
     const cols = await db('scheduled_services').columnInfo();
-    const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
-    const interval = intervals[parent.recurring_pattern] || 91;
+    const rOpts = { nth: parent.recurring_nth, weekday: parent.recurring_weekday, intervalDays: parent.recurring_interval_days };
 
     const latest = await db('scheduled_services')
       .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
       .orderBy('scheduled_date', 'desc').first();
-    const baseDate = latest?.scheduled_date
-      ? new Date(String(latest.scheduled_date).split('T')[0] + 'T12:00:00')
-      : new Date();
+    const baseDateStr = latest?.scheduled_date
+      ? String(latest.scheduled_date).split('T')[0]
+      : new Date().toISOString().split('T')[0];
 
     let created = 0;
     if (action === 'extend') {
       const n = Math.min(Math.max(parseInt(count) || 4, 1), 12);
       for (let i = 1; i <= n; i++) {
-        const nd = new Date(baseDate);
-        nd.setDate(nd.getDate() + interval * i);
+        const nd = nextRecurringDate(baseDateStr, parent.recurring_pattern, i, rOpts);
         const data = {
           customer_id: parent.customer_id,
           technician_id: parent.technician_id,
-          scheduled_date: nd.toISOString().split('T')[0],
+          scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: parent.service_type, status: 'pending',
           time_window: parent.time_window, zone: parent.zone,
@@ -1697,12 +1766,11 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         .where('status', 'pending').count('* as c').first())?.c || 0);
       const need = Math.max(0, 3 - pendingCount);
       for (let i = 1; i <= need; i++) {
-        const nd = new Date(baseDate);
-        nd.setDate(nd.getDate() + interval * i);
+        const nd = nextRecurringDate(baseDateStr, parent.recurring_pattern, i, rOpts);
         const data = {
           customer_id: parent.customer_id,
           technician_id: parent.technician_id,
-          scheduled_date: nd.toISOString().split('T')[0],
+          scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: parent.service_type, status: 'pending',
           time_window: parent.time_window, zone: parent.zone,

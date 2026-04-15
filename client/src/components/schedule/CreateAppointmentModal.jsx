@@ -86,10 +86,45 @@ const CATEGORY_EMOJI = { recurring: '🔄', one_time: '🎯', assessment: '📋'
 
 
 const FREQUENCIES = [
-  { value: 'weekly', label: 'Weekly' }, { value: 'biweekly', label: 'Every 2 Weeks' },
-  { value: 'monthly', label: 'Monthly' }, { value: 'bimonthly', label: 'Every 2 Months' },
-  { value: 'quarterly', label: 'Quarterly' }, { value: 'triannual', label: 'Every 4 Months' },
+  { value: 'daily', label: 'Every day' },
+  { value: 'weekly', label: 'Every week' },
+  { value: 'biweekly', label: 'Every 2 weeks' },
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'bimonthly', label: 'Every 2 months' },
+  { value: 'quarterly', label: 'Quarterly' },
+  { value: 'triannual', label: 'Every 4 months' },
+  { value: 'monthly_nth_weekday', label: 'Every month on the Nth weekday' },
+  { value: 'custom', label: 'Custom (every N days)' },
 ];
+const NTH_OPTIONS = [
+  { value: 1, label: '1st' }, { value: 2, label: '2nd' },
+  { value: 3, label: '3rd' }, { value: 4, label: '4th' },
+];
+const WEEKDAY_OPTIONS = [
+  { value: 0, label: 'Sunday' }, { value: 1, label: 'Monday' },
+  { value: 2, label: 'Tuesday' }, { value: 3, label: 'Wednesday' },
+  { value: 4, label: 'Thursday' }, { value: 5, label: 'Friday' },
+  { value: 6, label: 'Saturday' },
+];
+
+function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
+  const { nth, weekday, intervalDays } = opts;
+  const base = new Date(baseDateStr + 'T12:00:00');
+  if (pattern === 'monthly_nth_weekday' && nth != null && weekday != null) {
+    const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
+    const firstW = d.getDay();
+    const offset = (Number(weekday) - firstW + 7) % 7;
+    d.setDate(1 + offset + (Number(nth) - 1) * 7);
+    return d;
+  }
+  const intervals = { daily: 1, weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+  let gap;
+  if (pattern === 'custom' && intervalDays) gap = Math.max(1, Number(intervalDays));
+  else gap = intervals[pattern] || 91;
+  const d = new Date(base);
+  d.setDate(d.getDate() + gap * i);
+  return d;
+}
 
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid #CBD5E1`, borderRadius: 8, color: '#0F172A', fontSize: 14, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
 const labelStyle = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 };
@@ -137,6 +172,11 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
   const [recurringFreq, setRecurringFreq] = useState('quarterly');
   const [recurringCount, setRecurringCount] = useState(4);
   const [recurringOngoing, setRecurringOngoing] = useState(true);
+  const [recurringNth, setRecurringNth] = useState(3);
+  const [recurringWeekday, setRecurringWeekday] = useState(3);
+  const [recurringIntervalDays, setRecurringIntervalDays] = useState(30);
+  const [discountType, setDiscountType] = useState('');
+  const [discountAmount, setDiscountAmount] = useState('');
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
@@ -288,6 +328,11 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
         recurringPattern: isRecurring ? recurringFreq : undefined,
         recurringCount: isRecurring ? (recurringOngoing ? 4 : recurringCount) : undefined,
         recurringOngoing: isRecurring ? recurringOngoing : undefined,
+        recurringNth: isRecurring && recurringFreq === 'monthly_nth_weekday' ? recurringNth : undefined,
+        recurringWeekday: isRecurring && recurringFreq === 'monthly_nth_weekday' ? recurringWeekday : undefined,
+        recurringIntervalDays: isRecurring && recurringFreq === 'custom' ? recurringIntervalDays : undefined,
+        discountType: isRecurring && discountType ? discountType : undefined,
+        discountAmount: isRecurring && discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
         sendConfirmation: sendSms,
       };
       const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
@@ -300,12 +345,11 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
   // Recurring preview
   const recurringPreview = () => {
     if (!isRecurring) return null;
-    const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
-    const gap = intervals[recurringFreq] || 91;
+    const opts = { nth: recurringNth, weekday: recurringWeekday, intervalDays: recurringIntervalDays };
+    const limit = Math.min(recurringOngoing ? 4 : recurringCount, 6);
     const dates = [];
-    for (let i = 0; i < Math.min(recurringCount, 6); i++) {
-      const d = new Date(apptDate + 'T12:00:00');
-      d.setDate(d.getDate() + gap * i);
+    for (let i = 0; i < limit; i++) {
+      const d = nextRecurringDate(apptDate, recurringFreq, i, opts);
       dates.push(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
     }
     return dates;
@@ -566,6 +610,44 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
                   <div>
                     <label style={labelStyle}>Count</label>
                     <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} style={inputStyle} />
+                  </div>
+                )}
+              </div>
+              {recurringFreq === 'monthly_nth_weekday' && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+                  <div>
+                    <label style={labelStyle}>Nth</label>
+                    <select value={recurringNth} onChange={e => setRecurringNth(parseInt(e.target.value))} style={inputStyle}>
+                      {NTH_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Weekday</label>
+                    <select value={recurringWeekday} onChange={e => setRecurringWeekday(parseInt(e.target.value))} style={inputStyle}>
+                      {WEEKDAY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+              {recurringFreq === 'custom' && (
+                <div style={{ marginBottom: 8 }}>
+                  <label style={labelStyle}>Every N days</label>
+                  <input type="number" min={1} max={365} value={recurringIntervalDays} onChange={e => setRecurringIntervalDays(parseInt(e.target.value) || 30)} style={inputStyle} />
+                </div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+                <div>
+                  <label style={labelStyle}>Discount</label>
+                  <select value={discountType} onChange={e => setDiscountType(e.target.value)} style={inputStyle}>
+                    <option value="">None</option>
+                    <option value="percentage">Percentage (%)</option>
+                    <option value="fixed_amount">Amount ($)</option>
+                  </select>
+                </div>
+                {discountType && (
+                  <div>
+                    <label style={labelStyle}>{discountType === 'percentage' ? 'Amount (%)' : 'Amount ($)'}</label>
+                    <input type="number" min={0} step={discountType === 'percentage' ? 1 : 0.01} value={discountAmount} onChange={e => setDiscountAmount(e.target.value)} style={inputStyle} />
                   </div>
                 )}
               </div>
