@@ -197,6 +197,7 @@ app.use('/api/admin/estimator', propertyLookupV2Routes);
 app.use('/api/admin/referrals', adminReferralRoutes);
 app.use('/api/reviews', reviewsPublicRoutes);
 app.use('/api/admin/dispatch', adminDispatchRoutes);
+app.use('/api/stripe/terminal', require('./routes/stripe-terminal'));
 app.use('/api/admin/communications', adminCommsRoutes);
 // twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
 // /recording-status, /transcription, /outbound-admin-prompt — no path conflicts under same mount.

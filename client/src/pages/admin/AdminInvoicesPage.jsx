@@ -206,6 +206,13 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
               {inv.status !== 'paid' && inv.status !== 'void' && (
                 <button onClick={() => { navigator.clipboard.writeText(`${domain}/pay/${inv.token}`); showToast('Pay link copied'); }} style={sBtn(D.border, D.muted)}>Copy Link</button>
               )}
+              {inv.status !== 'paid' && inv.status !== 'void' && (
+                <button
+                  onClick={() => { window.location.href = `waves-tap://charge?invoice_id=${inv.id}&amount=${Math.round(Number(inv.total) * 100)}`; }}
+                  style={sBtn(D.purple, D.white)}
+                  title="Open Waves Tech app to tap customer's card/phone"
+                >Charge in person</button>
+              )}
               {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red)}>Void</button>}
               {inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft' && (
                 <button onClick={() => setExpanded(expanded === inv.id ? null : inv.id)} style={sBtn(D.border, D.muted)}>
