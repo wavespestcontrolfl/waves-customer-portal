@@ -668,7 +668,7 @@ exports.up = async function (knex) {
       name: 'Waves Pest Control Appointment',
       short_name: 'Appointment',
       description: 'General appointment placeholder for bookings that do not yet have a specific service type assigned.',
-      category: 'other',
+      category: 'specialty',
       billing_type: 'one_time',
       default_duration_minutes: 60,
       min_duration_minutes: 30,

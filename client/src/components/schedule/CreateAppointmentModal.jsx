@@ -339,7 +339,10 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
           <div style={{ fontSize: 13, fontWeight: 700, color: D.white, marginBottom: 10 }}>Service</div>
           {!selectedService ? (
             <div>
-              {serviceGroups.map((group, gi) => {
+              {[...serviceGroups]
+                .sort((a, b) => (CATEGORY_LABELS[a.category] || a.category)
+                  .localeCompare(CATEGORY_LABELS[b.category] || b.category))
+                .map((group, gi) => {
                 const isOpen = expandedCategory === group.category;
                 return (
                   <div key={gi} style={{ marginBottom: 6, border: `1px solid ${D.border}`, borderRadius: 8, overflow: 'hidden' }}>
