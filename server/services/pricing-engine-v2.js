@@ -698,6 +698,19 @@ function calcPestBase(footprint, p, mods, cfg = null) {
     adjItems.push({ name: `Property type (${p.propertyType})`, value: propTypeAdj });
   }
 
+  // ── Home value modifier (RentCast AVM) ──
+  // Higher-value homes get a small premium — larger contents, higher callback
+  // expectations, longer service times. Pest control only.
+  const hv = Number(p.estimatedValue) || 0;
+  let hvAdj = 0;
+  if (hv >= 1_000_000) hvAdj = 10;
+  else if (hv >= 750_000) hvAdj = 7.5;
+  else if (hv >= 500_000) hvAdj = 5;
+  if (hvAdj > 0) {
+    adj += hvAdj;
+    adjItems.push({ name: `Home value ($${Math.round(hv).toLocaleString()})`, value: hvAdj });
+  }
+
   const base = C.pestBase != null ? Number(C.pestBase) : 121;
   const floor = C.pestFloor != null ? Number(C.pestFloor) : 92;
   const basePrice = Math.max(floor, base + adj);
