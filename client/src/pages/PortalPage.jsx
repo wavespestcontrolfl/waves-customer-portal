@@ -4365,19 +4365,22 @@ function NumberStepper({ value, onChange, min = 0, max = 99 }) {
 function PropertyTab({ customer }) {
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved'
+  const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved' | 'error'
   const debounceRef = useRef(null);
   const pendingRef = useRef({});
+  const lastSavedRef = useRef(null);
 
   useEffect(() => {
     api.getPropertyPreferences()
-      .then(d => { setPrefs(d.preferences); setLoading(false); })
+      .then(d => { setPrefs(d.preferences); lastSavedRef.current = d.preferences; setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
   const updateField = useCallback((field, value) => {
     setPrefs(prev => ({ ...prev, [field]: value }));
-    pendingRef.current[field] = value;
+    // Merge into pending so earlier-edited fields aren't lost when the
+    // debounce timer resets for a later field.
+    pendingRef.current = { ...pendingRef.current, [field]: value };
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
@@ -4385,12 +4388,21 @@ function PropertyTab({ customer }) {
       pendingRef.current = {};
       setSaveStatus('saving');
       try {
-        await api.updatePropertyPreferences(toSave);
+        const result = await api.updatePropertyPreferences(toSave);
+        if (result && result.preferences) {
+          lastSavedRef.current = result.preferences;
+        }
         setSaveStatus('saved');
-        setTimeout(() => setSaveStatus(null), 2000);
+        setTimeout(() => setSaveStatus(prev => (prev === 'saved' ? null : prev)), 2000);
       } catch (err) {
-        console.error(err);
-        setSaveStatus(null);
+        console.error('[PropertyTab] save failed', err);
+        // Revert optimistic UI to last confirmed server state so the user
+        // isn't misled into thinking gate codes / pet info persisted.
+        if (lastSavedRef.current) {
+          setPrefs(lastSavedRef.current);
+        }
+        setSaveStatus('error');
+        alert('Could not save your property details. Please check your connection and try again.');
       }
     }, 1000);
   }, []);
@@ -4448,13 +4460,13 @@ function PropertyTab({ customer }) {
         <div style={{
           position: 'fixed', top: 70, left: '50%', transform: 'translateX(-50%)',
           padding: '8px 20px', borderRadius: 20, zIndex: 200,
-          background: saveStatus === 'saved' ? B.green : B.wavesBlue,
+          background: saveStatus === 'saved' ? B.green : saveStatus === 'error' ? B.red : B.wavesBlue,
           color: '#fff', fontSize: 13, fontWeight: 600,
           boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
           transition: 'opacity 0.3s',
           opacity: saveStatus ? 1 : 0,
         }}>
-          {saveStatus === 'saving' ? 'Saving...' : 'Saved ✓'}
+          {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'error' ? 'Save failed — try again' : 'Saved ✓'}
         </div>
       )}
 

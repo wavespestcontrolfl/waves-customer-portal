@@ -1,9 +1,62 @@
 const express = require('express');
 const router = express.Router();
+const Joi = require('joi');
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const logger = require('../services/logger');
 
+// Cap the JSON body for this route family. The global limit is generous;
+// property preferences never need more than a few KB.
+router.use(express.json({ limit: '64kb' }));
 router.use(authenticate);
+
+const shortText = Joi.string().trim().allow('', null).max(200);
+const longText = Joi.string().trim().allow('', null).max(2000);
+const petSchema = Joi.object({
+  name: Joi.string().trim().allow('', null).max(60),
+  species: Joi.string().trim().allow('', null).max(40),
+  breed: Joi.string().trim().allow('', null).max(60),
+  friendly: Joi.boolean(),
+  secured: Joi.boolean(),
+  notes: Joi.string().trim().allow('', null).max(300),
+}).unknown(true);
+
+const prefsSchema = Joi.object({
+  neighborhoodGateCode: shortText,
+  propertyGateCode: shortText,
+  garageCode: shortText,
+  lockboxCode: shortText,
+  parkingNotes: longText,
+  sideGateAccess: shortText,
+  petCount: Joi.number().integer().min(0).max(20),
+  petDetails: longText,
+  petsSecuredPlan: longText,
+  petsStructured: Joi.array().items(petSchema).max(20),
+  preferredDay: shortText,
+  preferredTime: shortText,
+  contactPreference: shortText,
+  blackoutStart: Joi.date().allow(null, ''),
+  blackoutEnd: Joi.date().allow(null, ''),
+  irrigationSystem: Joi.boolean(),
+  irrigationControllerLocation: shortText,
+  irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
+  irrigationScheduleNotes: longText,
+  wateringDays: Joi.array().items(Joi.string().max(20)).max(7),
+  irrigationSystemType: shortText,
+  rainSensor: Joi.boolean(),
+  irrigationIssues: longText,
+  hoaName: shortText,
+  hoaRestrictions: longText,
+  hoaCompany: shortText,
+  hoaPhone: shortText,
+  hoaEmail: Joi.string().trim().allow('', null).email().max(254),
+  hoaLawnHeight: shortText,
+  hoaSignageRules: longText,
+  hoaTimingRestrictions: longText,
+  hoaInspectionPeriod: shortText,
+  accessNotes: longText,
+  specialInstructions: longText,
+}).unknown(false);
 
 const ALLOWED_FIELDS = [
   'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
@@ -72,7 +125,12 @@ router.get('/preferences', async (req, res, next) => {
     const JSON_COLS = ['watering_days', 'pets_structured'];
     for (const jc of JSON_COLS) {
       if (fields[jc] && typeof fields[jc] === 'string') {
-        try { fields[jc] = JSON.parse(fields[jc]); } catch (e) { fields[jc] = []; }
+        try {
+          fields[jc] = JSON.parse(fields[jc]);
+        } catch (e) {
+          logger.warn(`[property] Invalid JSON in ${jc} for customer ${req.customerId}: ${e.message}`);
+          fields[jc] = [];
+        }
       }
       if (!fields[jc]) fields[jc] = [];
     }
@@ -89,8 +147,13 @@ router.get('/preferences', async (req, res, next) => {
 // =========================================================================
 router.put('/preferences', async (req, res, next) => {
   try {
+    const { value, error } = prefsSchema.validate(req.body, { stripUnknown: true, abortEarly: false });
+    if (error) {
+      return res.status(400).json({ error: error.details.map(d => d.message).join('; ') });
+    }
+
     // Convert camelCase input to snake_case, filter to allowed fields only
-    const snakeBody = transformKeys(req.body, camelToSnake);
+    const snakeBody = transformKeys(value, camelToSnake);
     const updates = {};
     for (const field of ALLOWED_FIELDS) {
       if (field in snakeBody) {
