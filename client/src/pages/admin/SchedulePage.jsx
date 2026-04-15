@@ -322,10 +322,32 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
         {service.address}
       </a>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <a href={`tel:${service.customerPhone}`} style={{ fontSize: 13, color: D.teal, textDecoration: 'none' }}>
+        <span style={{ fontSize: 13, color: D.text, fontFamily: "'JetBrains Mono', monospace" }}>
           {service.customerPhone}
-        </a>
-        <a href={`sms:${service.customerPhone}`} style={{ fontSize: 14, textDecoration: 'none', cursor: 'pointer' }}>
+        </span>
+        <button
+          type="button"
+          title="Call via Waves number"
+          onClick={async () => {
+            if (!service.customerPhone) return;
+            if (!window.confirm(`Call ${service.customerName || 'customer'} at ${service.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+            try {
+              const r = await adminFetch('/admin/communications/call', {
+                method: 'POST',
+                body: JSON.stringify({ to: service.customerPhone }),
+              });
+              if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
+            } catch (e) { alert('Call failed: ' + e.message); }
+          }}
+          style={{ fontSize: 14, background: 'transparent', border: 'none', cursor: 'pointer', padding: 2 }}
+        >
+          📞
+        </button>
+        <a
+          href={`/admin/communications?phone=${encodeURIComponent(service.customerPhone || '')}`}
+          title="Open internal messenger"
+          style={{ fontSize: 14, textDecoration: 'none', cursor: 'pointer' }}
+        >
           💬
         </a>
       </div>

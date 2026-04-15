@@ -1,20 +1,21 @@
 /**
  * WAVES PEST CONTROL — Pricing Engine v2.0
- * 
- * Takes an enriched property profile (from propertyLookup.js) and computes
- * pricing for all services. All pricing logic lives here — the frontend
- * just renders the results.
  *
- * Changes from v1.3 estimator:
- * - yearBuilt modifier on pest and termite pricing
- * - Construction material modifier on pest, termite, WDO
- * - Foundation type modifier on termite trenching and bait stations
- * - Graduated mosquito water proximity (replaces binary near-water)
- * - Impervious surface from AI replaces flat 20% hardscape guess
- * - Roof type modifier on rodent pricing
- * - Attached garage modifier on pest pricing
- * - HOA flag on output for tech awareness
- * - Service zone pricing adjustment
+ * @deprecated Since 2026-04-15. The modular engine at
+ *   server/services/pricing-engine/ is now the single source of truth:
+ *   - DB-driven constants (edited via 📐 Pricing Logic)
+ *   - Property modifiers ported from this file (see modifiers.js)
+ *   - Called by client through POST /admin/pricing-config/estimate
+ *
+ * This file remains ONLY because property-lookup-v2.js /calculate-estimate
+ * consumes v2's tiered output shape (rec.lawn.tiers[], rec.pest.tiers[])
+ * which the modular engine doesn't emit yet. Migration blocker:
+ *   - Add tier-array emission to pricing-engine/service-pricing.js for
+ *     lawn/pest/treeShrub/mosquito/rodentBait (basic/standard/enhanced/premium).
+ *   - Then swap property-lookup-v2 require() and delete this file.
+ *
+ * DO NOT add new features here. Add them to pricing-engine/modifiers.js
+ * or pricing-engine/service-pricing.js.
  */
 
 const LABOR_RATE = 35;    // $/hr loaded rate

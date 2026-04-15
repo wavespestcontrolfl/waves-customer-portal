@@ -1,4 +1,18 @@
 /**
+ * @deprecated Since 2026-04-15. Use `pricingEngineClient.js` for new code.
+ *   It calls POST /admin/pricing-config/estimate which runs the modular
+ *   server engine (pricing-engine/) with live DB-synced constants edited
+ *   via 📐 Pricing Logic.
+ *
+ * This file remains ONLY because EstimatePage.jsx + EstimateViewPage.jsx
+ * consume its synchronous flat-return shape. Migration blocker:
+ *   - Convert both pages to async (server roundtrip).
+ *   - Or add a result-shape adapter in pricingEngineClient to emit the
+ *     same fields (monthly, annual, perVisit, etc. per service block).
+ *
+ * DO NOT add new pricing features here. Add them to
+ * server/services/pricing-engine/ and let the shim surface them.
+ *
  * Waves Pest Control — Estimate Calculation Engine v1.5
  * Ported from waves-estimator.html weCalculate() function.
  * Pure calculation — no DOM, no side effects.
