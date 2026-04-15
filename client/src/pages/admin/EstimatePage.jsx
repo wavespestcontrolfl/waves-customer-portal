@@ -227,7 +227,7 @@ function EstimateToolView() {
     nearWater: 'NO', urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
     bedArea: '', palmCount: '', treeCount: '',
     roachModifier: 'NONE', lawnFreq: '9', pestFreq: '4', plugArea: '', plugSpacing: '12',
-    manualDiscountType: 'NONE', manualDiscountValue: '', manualDiscountLabel: '',
+    manualDiscountPreset: '', manualDiscountType: 'NONE', manualDiscountValue: '', manualDiscountLabel: '',
     grassType: 'st_augustine',
     otLawnType: 'FERT',
     exclSimple: '0', exclModerate: '0', exclAdvanced: '0', exclWaive: 'NO',
@@ -356,6 +356,36 @@ function EstimateToolView() {
   /* ── v2 Property Lookup — RentCast + Satellite + Claude AI in one call ── */
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
+
+  /* ── Manual discount presets (pulled from /admin/discounts) ── */
+  const [discountPresets, setDiscountPresets] = useState([]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await adminFetch('/admin/discounts');
+        if (!r.ok) return;
+        const rows = await r.json();
+        const manual = (rows || []).filter(d => d.is_active && !d.is_auto_apply);
+        setDiscountPresets(manual);
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
+  function applyDiscountPreset(key) {
+    if (key === '__custom__' || !key) {
+      setForm(f => ({ ...f, manualDiscountPreset: key || '' }));
+      return;
+    }
+    const d = discountPresets.find(x => x.discount_key === key);
+    if (!d) return;
+    setForm(f => ({
+      ...f,
+      manualDiscountPreset: key,
+      manualDiscountType: d.discount_type === 'percentage' ? 'PERCENT' : 'FIXED',
+      manualDiscountValue: String(d.amount || 0),
+      manualDiscountLabel: `${d.icon || ''} ${d.name}`.trim(),
+    }));
+  }
 
   async function doLookup() {
     const address = form.address.trim();
@@ -1063,6 +1093,22 @@ function EstimateToolView() {
           {/* Manual discount (stacks on top of WaveGuard bundle discount) */}
           <div style={{ ...sPanel, borderColor: C.border, marginBottom: 14 }}>
             <div style={sPanelTitle}>Manual Discount (optional)</div>
+            <div style={{ marginBottom: 10 }}>
+              <Field label="Preset">
+                <select
+                  value={form.manualDiscountPreset || ''}
+                  onChange={e => applyDiscountPreset(e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 14 }}
+                >
+                  <option value="">— None —</option>
+                  {discountPresets.map(d => {
+                    const amt = d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(0)}%` : `$${Number(d.amount).toFixed(2)}`;
+                    return <option key={d.id} value={d.discount_key}>{d.icon ? `${d.icon} ` : ''}{d.name} — {amt}</option>;
+                  })}
+                  <option value="__custom__">✏️ Custom…</option>
+                </select>
+              </Field>
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: '140px 120px 1fr', gap: 10 }}>
               <Field label="Type">
                 <Select k="manualDiscountType" options={[
