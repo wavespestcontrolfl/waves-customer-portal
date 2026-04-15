@@ -215,10 +215,52 @@ router.get('/daily', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// Helpers — audit + SMS for approval actions
+// ---------------------------------------------------------------------------
+async function recordApprovalAudit(summary, action, adminId, reason) {
+  try {
+    await db('timesheet_approvals').insert({
+      daily_summary_id: summary.id,
+      technician_id: summary.technician_id,
+      work_date: summary.work_date,
+      action,
+      admin_id: adminId || null,
+      reason: reason || null,
+      prior_status: summary.status || null,
+    });
+  } catch (e) {
+    logger.error(`[timetracking] approval audit failed: ${e.message}`);
+  }
+}
+
+async function notifyTechOfApproval(summary, action, reason) {
+  try {
+    const tech = await db('technicians').where({ id: summary.technician_id }).first();
+    if (!tech?.phone) return;
+    const dateStr = new Date(summary.work_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const hrs = ((summary.total_shift_minutes || 0) / 60).toFixed(2);
+    const TwilioService = require('../services/twilio');
+    let body;
+    if (action === 'approved') {
+      body = `Waves: Your timesheet for ${dateStr} (${hrs} hrs) has been approved.`;
+    } else if (action === 'rejected') {
+      body = `Waves: Your timesheet for ${dateStr} needs a correction${reason ? ` — ${reason}` : ''}. Open the tech app to review and resubmit.`;
+    } else {
+      body = `Waves: Your timesheet for ${dateStr} has been reopened.`;
+    }
+    await TwilioService.sendSMS(tech.phone, body);
+  } catch (e) {
+    logger.error(`[timetracking] tech SMS failed: ${e.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PUT /daily/:id/approve — approve a daily summary
 // ---------------------------------------------------------------------------
 router.put('/daily/:id/approve', async (req, res, next) => {
   try {
+    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
+    if (!prior) return res.status(404).json({ error: 'Summary not found' });
     const [updated] = await db('time_entry_daily_summary')
       .where({ id: req.params.id })
       .update({
@@ -228,8 +270,85 @@ router.put('/daily/:id/approve', async (req, res, next) => {
         updated_at: new Date(),
       })
       .returning('*');
-    if (!updated) return res.status(404).json({ error: 'Summary not found' });
+    await recordApprovalAudit(prior, 'approved', req.technicianId, null);
+    notifyTechOfApproval(updated, 'approved');
     res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUT /daily/:id/reject — reject a daily summary with reason
+// ---------------------------------------------------------------------------
+router.put('/daily/:id/reject', async (req, res, next) => {
+  try {
+    const { reason } = req.body || {};
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ error: 'reason required' });
+    }
+    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
+    if (!prior) return res.status(404).json({ error: 'Summary not found' });
+    const [updated] = await db('time_entry_daily_summary')
+      .where({ id: req.params.id })
+      .update({
+        status: 'rejected',
+        approved_by: req.technicianId,
+        approved_at: new Date(),
+        notes: reason,
+        updated_at: new Date(),
+      })
+      .returning('*');
+    await recordApprovalAudit(prior, 'rejected', req.technicianId, reason);
+    notifyTechOfApproval(updated, 'rejected', reason);
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUT /daily/:id/reopen — return an approved/rejected summary to pending
+// ---------------------------------------------------------------------------
+router.put('/daily/:id/reopen', async (req, res, next) => {
+  try {
+    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
+    if (!prior) return res.status(404).json({ error: 'Summary not found' });
+    const [updated] = await db('time_entry_daily_summary')
+      .where({ id: req.params.id })
+      .update({
+        status: 'pending',
+        approved_by: null,
+        approved_at: null,
+        updated_at: new Date(),
+      })
+      .returning('*');
+    await recordApprovalAudit(prior, 'reopened', req.technicianId, req.body?.reason || null);
+    notifyTechOfApproval(updated, 'reopened');
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /daily/:id/history — approval audit trail for a summary
+// ---------------------------------------------------------------------------
+router.get('/daily/:id/history', async (req, res, next) => {
+  try {
+    const rows = await db('timesheet_approvals')
+      .where({ daily_summary_id: req.params.id })
+      .leftJoin('technicians', 'technicians.id', 'timesheet_approvals.admin_id')
+      .select(
+        'timesheet_approvals.id',
+        'timesheet_approvals.action',
+        'timesheet_approvals.reason',
+        'timesheet_approvals.prior_status',
+        'timesheet_approvals.created_at',
+        'technicians.name as admin_name',
+      )
+      .orderBy('timesheet_approvals.created_at', 'desc');
+    res.json({ history: rows });
   } catch (err) {
     next(err);
   }
@@ -244,6 +363,8 @@ router.post('/daily/bulk-approve', async (req, res, next) => {
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: 'ids array required' });
     }
+    const priors = await db('time_entry_daily_summary')
+      .whereIn('id', ids).where('status', 'pending').select('*');
     const count = await db('time_entry_daily_summary')
       .whereIn('id', ids)
       .where('status', 'pending')
@@ -253,6 +374,11 @@ router.post('/daily/bulk-approve', async (req, res, next) => {
         approved_at: new Date(),
         updated_at: new Date(),
       });
+    // Audit + notify each
+    for (const prior of priors) {
+      await recordApprovalAudit(prior, 'approved', req.technicianId, null);
+      notifyTechOfApproval({ ...prior, status: 'approved' }, 'approved');
+    }
     res.json({ approved: count });
   } catch (err) {
     next(err);

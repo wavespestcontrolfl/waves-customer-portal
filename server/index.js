@@ -231,6 +231,9 @@ app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 app.use('/api/admin/call-recordings', require('./routes/admin-call-recordings'));
 
 app.use('/api/admin/invoices', require('./routes/admin-invoices'));
+app.use('/api/admin/job-forms', require('./routes/admin-job-forms'));
+app.use('/api/admin/job-costs', require('./routes/admin-job-costs'));
+app.use('/api/admin/job-expenses', require('./routes/admin-job-expenses'));
 app.use('/api/pay', require('./routes/pay-v2'));
 app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
@@ -247,6 +250,7 @@ app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 app.use('/api/billing/autopay', require('./routes/customer-autopay'));
 app.use('/api/admin', require('./routes/admin-billing-health'));
+app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
 app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
 app.use('/api/admin/wiki', require('./routes/admin-wiki'));

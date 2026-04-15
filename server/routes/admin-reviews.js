@@ -616,6 +616,91 @@ router.get('/qr/:locationId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─────────────────────────────────────────────────────────────
+// Competitor Review Tracking
+// ─────────────────────────────────────────────────────────────
+const CompetitorTracker = require('../services/competitor-tracker');
+
+// GET /competitors — list tracked competitors
+router.get('/competitors', async (req, res, next) => {
+  try {
+    const rows = await db('competitor_businesses')
+      .where({ active: true })
+      .orderBy('name', 'asc');
+    res.json({ competitors: rows });
+  } catch (err) { next(err); }
+});
+
+// POST /competitors — add a competitor to track
+// Body: { name, googlePlaceId, market?, category?, notes? }
+router.post('/competitors', async (req, res, next) => {
+  try {
+    const { name, googlePlaceId, market, category, notes } = req.body || {};
+    if (!name || !googlePlaceId) return res.status(400).json({ error: 'name and googlePlaceId required' });
+
+    const [row] = await db('competitor_businesses').insert({
+      name, google_place_id: googlePlaceId, market: market || null,
+      category: category || null, notes: notes || null,
+    }).returning('*');
+
+    // Do an initial sync immediately
+    try { await CompetitorTracker.syncOne(row.id); } catch (e) {
+      logger.error(`[admin-reviews] initial competitor sync failed: ${e.message}`);
+    }
+    const refreshed = await db('competitor_businesses').where({ id: row.id }).first();
+    res.status(201).json(refreshed);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Competitor already tracked' });
+    next(err);
+  }
+});
+
+// DELETE /competitors/:id — soft-remove (sets active=false)
+router.delete('/competitors/:id', async (req, res, next) => {
+  try {
+    await db('competitor_businesses').where({ id: req.params.id }).update({ active: false, updated_at: db.fn.now() });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /competitors/:id/sync — refresh a single competitor from Places API
+router.post('/competitors/:id/sync', async (req, res, next) => {
+  try {
+    const details = await CompetitorTracker.syncOne(req.params.id);
+    res.json({ success: true, details });
+  } catch (err) { next(err); }
+});
+
+// POST /competitors/sync-all — refresh every active competitor
+router.post('/competitors/sync-all', async (req, res, next) => {
+  try {
+    const result = await CompetitorTracker.syncAll();
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /competitors/market-position — Waves vs competitor aggregate
+router.get('/competitors/market-position', async (req, res, next) => {
+  try {
+    const pos = await CompetitorTracker.getMarketPosition();
+    res.json(pos);
+  } catch (err) { next(err); }
+});
+
+// GET /competitors/:id/history — trend of rating/review_count over time
+router.get('/competitors/:id/history', async (req, res, next) => {
+  try {
+    const { days = 90 } = req.query;
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - parseInt(days));
+    const rows = await db('competitor_review_cache')
+      .where({ competitor_id: req.params.id })
+      .where('snapshot_date', '>=', cutoff.toISOString().split('T')[0])
+      .orderBy('snapshot_date', 'asc')
+      .select('snapshot_date', 'rating', 'review_count');
+    res.json({ history: rows });
+  } catch (err) { next(err); }
+});
+
 // Export createReviewRequest for use by other modules (e.g., admin-schedule auto-send)
 router.createReviewRequest = createReviewRequest;
 

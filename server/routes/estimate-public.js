@@ -17,15 +17,28 @@ router.get('/:token', async (req, res, next) => {
       return res.json({ expired: true, estimate: { address: estimate.address, customerName: estimate.customer_name } });
     }
 
-    // Mark as viewed on first access
+    // Track every view (count + last_viewed_at)
+    try {
+      await db('estimates').where({ id: estimate.id }).update({
+        view_count: db.raw('COALESCE(view_count, 0) + 1'),
+        last_viewed_at: db.fn.now(),
+      });
+    } catch (e) { logger.error(`[estimate-view] view tracking failed: ${e.message}`); }
+
+    // First-view actions: set viewed_at/status, notify admin + SMS office
     if (!estimate.viewed_at) {
       await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
 
-      // Notify admin that estimate was viewed for the first time
       try {
         const NotificationService = require('../services/notification-service');
         await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
+
+      try {
+        await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+          `\u{1F440} ${estimate.customer_name} just opened their estimate ($${estimate.monthly_total || 0}/mo ${estimate.waveguard_tier || ''}). Great time to follow up! ${estimate.customer_phone || ''}`
+        );
+      } catch (e) { logger.error(`[estimate-view] office SMS failed: ${e.message}`); }
     }
 
     const data = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;

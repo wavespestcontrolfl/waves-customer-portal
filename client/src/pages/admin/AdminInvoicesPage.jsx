@@ -91,12 +91,15 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
   const [invoices, setInvoices] = useState([]);
   const [filter, setFilter] = useState('');
   const [expanded, setExpanded] = useState(null);
+  const [selected, setSelected] = useState(new Set());
+  const [batchSending, setBatchSending] = useState(false);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ limit: '50' });
     if (filter) params.set('status', filter);
     const data = await adminFetch(`/admin/invoices?${params}`).catch(() => ({ invoices: [] }));
     setInvoices(data.invoices || []);
+    setSelected(new Set());
   }, [filter]);
   useEffect(() => { load(); }, [load]);
 
@@ -113,11 +116,35 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
     load(); onRefresh();
   };
 
+  const toggleSelect = (id) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setSelected(next);
+  };
+  const sendableInvoices = invoices.filter(i => i.status === 'draft' || i.status === 'sent' || i.status === 'viewed');
+  const selectAllSendable = () => setSelected(new Set(sendableInvoices.map(i => i.id)));
+  const clearSelection = () => setSelected(new Set());
+  const handleBatchSend = async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+    if (!confirm(`Send ${ids.length} invoice${ids.length === 1 ? '' : 's'} via SMS?`)) return;
+    setBatchSending(true);
+    try {
+      const result = await adminFetch('/admin/invoices/batch/send', {
+        method: 'POST', body: JSON.stringify({ invoiceIds: ids }),
+      });
+      showToast(`Sent ${result.sent_count} of ${result.total}${result.failed_count ? ` (${result.failed_count} failed)` : ''}`);
+      clearSelection(); load(); onRefresh();
+    } catch (err) {
+      showToast(`Batch send failed: ${err.message}`);
+    } finally { setBatchSending(false); }
+  };
+
   const domain = typeof window !== 'undefined' ? window.location.origin : '';
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <select value={filter} onChange={e => setFilter(e.target.value)} style={{ ...sInput, width: 160 }}>
           <option value="">All Status</option>
           <option value="draft">Draft</option>
@@ -126,16 +153,32 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
           <option value="paid">Paid</option>
           <option value="overdue">Overdue</option>
         </select>
+        {sendableInvoices.length > 0 && (
+          <button onClick={selectAllSendable} style={sBtn(D.border, D.text)}>
+            Select all sendable ({sendableInvoices.length})
+          </button>
+        )}
       </div>
 
       {invoices.length === 0 ? (
         <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No invoices yet</div>
       ) : invoices.map(inv => {
         const lineItems = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
+        const canSelect = inv.status === 'draft' || inv.status === 'sent' || inv.status === 'viewed';
+        const isSelected = selected.has(inv.id);
         return (
-          <div key={inv.id} style={{ ...sCard, marginBottom: 8 }}>
+          <div key={inv.id} style={{ ...sCard, marginBottom: 8, borderColor: isSelected ? D.teal : D.border }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'flex-start', marginBottom: 8, flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 8 : 0 }}>
-              <div>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flex: 1 }}>
+                {canSelect && (
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => toggleSelect(inv.id)}
+                    style={{ marginTop: 4, width: 18, height: 18, cursor: 'pointer', accentColor: D.teal }}
+                  />
+                )}
+                <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{inv.invoice_number}</span>
                   <span style={sBadge(`${STATUS_COLORS[inv.status]}22`, STATUS_COLORS[inv.status])}>
@@ -145,6 +188,7 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
                 </div>
                 <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
                   {inv.first_name} {inv.last_name} -- {inv.title || lineItems[0]?.description || 'Service'}
+                </div>
                 </div>
               </div>
               <div style={{ textAlign: isMobile ? 'left' : 'right' }}>
@@ -179,6 +223,20 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
           </div>
         );
       })}
+
+      {selected.size > 0 && (
+        <div style={{
+          position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+          background: D.heading, color: D.white, borderRadius: 10, padding: '12px 20px',
+          display: 'flex', alignItems: 'center', gap: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', zIndex: 50,
+        }}>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{selected.size} selected</span>
+          <button onClick={handleBatchSend} disabled={batchSending} style={{ ...sBtn(D.teal, D.white), opacity: batchSending ? 0.6 : 1 }}>
+            {batchSending ? 'Sending…' : `Send ${selected.size} via SMS`}
+          </button>
+          <button onClick={clearSelection} style={sBtn('transparent', D.white)}>Clear</button>
+        </div>
+      )}
     </div>
   );
 }

@@ -106,6 +106,89 @@ router.post('/from-service', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /batch — create identical invoice for multiple customers
+// Body: { customerIds: string[], title, lineItems, notes?, dueDate?, taxRate?, sendImmediately?: boolean }
+router.post('/batch', async (req, res, next) => {
+  try {
+    const { customerIds, title, lineItems, notes, dueDate, taxRate, sendImmediately } = req.body || {};
+    if (!Array.isArray(customerIds) || customerIds.length === 0) {
+      return res.status(400).json({ error: 'customerIds[] required' });
+    }
+    if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
+
+    const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const created = [];
+    const failed = [];
+
+    for (const customerId of customerIds) {
+      try {
+        const invoice = await InvoiceService.create({
+          customerId, title, lineItems, notes, dueDate, taxRate,
+        });
+        let sendResult = null;
+        if (sendImmediately) {
+          try { sendResult = await InvoiceService.sendViaSMS(invoice.id); }
+          catch (sendErr) {
+            logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
+            sendResult = { sent: false, error: sendErr.message };
+          }
+        }
+        created.push({
+          customerId,
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.invoice_number,
+          total: invoice.total,
+          payUrl: `${domain}/pay/${invoice.token}`,
+          sent: sendResult,
+        });
+      } catch (err) {
+        logger.error(`[admin-invoices:batch] create failed for ${customerId}: ${err.message}`);
+        failed.push({ customerId, error: err.message });
+      }
+    }
+
+    res.json({
+      total: customerIds.length,
+      created_count: created.length,
+      failed_count: failed.length,
+      created,
+      failed,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /batch/send — send multiple existing invoices via SMS
+// Body: { invoiceIds: string[] }
+router.post('/batch/send', async (req, res, next) => {
+  try {
+    const { invoiceIds } = req.body || {};
+    if (!Array.isArray(invoiceIds) || invoiceIds.length === 0) {
+      return res.status(400).json({ error: 'invoiceIds[] required' });
+    }
+
+    const sent = [];
+    const failed = [];
+
+    for (const invoiceId of invoiceIds) {
+      try {
+        const result = await InvoiceService.sendViaSMS(invoiceId);
+        sent.push({ invoiceId, result });
+      } catch (err) {
+        logger.error(`[admin-invoices:batch-send] failed for ${invoiceId}: ${err.message}`);
+        failed.push({ invoiceId, error: err.message });
+      }
+    }
+
+    res.json({
+      total: invoiceIds.length,
+      sent_count: sent.length,
+      failed_count: failed.length,
+      sent,
+      failed,
+    });
+  } catch (err) { next(err); }
+});
+
 // PUT /:id — update invoice
 router.put('/:id', async (req, res, next) => {
   try {
