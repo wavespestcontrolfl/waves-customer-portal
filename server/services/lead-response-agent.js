@@ -43,6 +43,8 @@ function isToolFailure(result) {
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const LEAD_AGENT_ID = process.env.LEAD_AGENT_ID;
+// Managed Agents now require an environment_id when opening a session.
+const LEAD_AGENT_ENVIRONMENT_ID = process.env.LEAD_AGENT_ENVIRONMENT_ID || process.env.ANTHROPIC_ENVIRONMENT_ID;
 const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
 
@@ -126,6 +128,10 @@ const LeadResponseAgent = {
       logger.warn('[lead-agent] Missing ANTHROPIC_API_KEY or LEAD_AGENT_ID — skipping agent processing');
       return null;
     }
+    if (!LEAD_AGENT_ENVIRONMENT_ID) {
+      logger.warn('[lead-agent] Missing LEAD_AGENT_ENVIRONMENT_ID (or ANTHROPIC_ENVIRONMENT_ID) — skipping agent processing');
+      return null;
+    }
 
     const startTime = Date.now();
 
@@ -147,6 +153,7 @@ const LeadResponseAgent = {
     try {
       const session = await apiCall('POST', '/sessions', {
         agent: LEAD_AGENT_ID,
+        environment_id: LEAD_AGENT_ENVIRONMENT_ID,
       });
 
       const sessionId = session.id;

@@ -30,18 +30,22 @@ class UpsellTrigger {
 
     if (recentUpsell) return null;
 
-    // Count one-time services and total spend in last 12 months
-    const stats = await db('service_records')
+    // Count one-time services and total spend in last 12 months.
+    // service_records has no amount column — pull totals from paid invoices.
+    const serviceStats = await db('service_records')
       .where({ customer_id: customerId })
       .where('service_date', '>', db.raw("NOW() - INTERVAL '12 months'"))
-      .select(
-        db.raw('COUNT(*) as service_count'),
-        db.raw('COALESCE(SUM(total_amount), 0) as total_spent')
-      )
+      .count('* as c')
+      .first();
+    const spendStats = await db('invoices')
+      .where({ customer_id: customerId })
+      .whereIn('status', ['paid', 'viewed', 'sent'])
+      .where('service_date', '>', db.raw("NOW() - INTERVAL '12 months'"))
+      .select(db.raw('COALESCE(SUM(total), 0) as total_spent'))
       .first();
 
-    const serviceCount = parseInt(stats.service_count, 10);
-    const totalSpent = parseFloat(stats.total_spent);
+    const serviceCount = parseInt(serviceStats?.c || 0, 10);
+    const totalSpent = parseFloat(spendStats?.total_spent || 0);
 
     // Trigger thresholds: 2+ services AND $200+ spent
     if (serviceCount < 2 || totalSpent < 200) return null;
