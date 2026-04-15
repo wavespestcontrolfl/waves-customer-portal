@@ -3948,6 +3948,8 @@ function RequestTab({ customer, onSwitchTab }) {
       setTimeout(() => setSubmitted(false), 4000);
     } catch (err) {
       console.error(err);
+      const msg = err?.response?.data?.error || err?.message || 'Could not submit your request. Please try again or call our office at (941) 318-7612.';
+      alert(msg);
     }
     setSubmitting(false);
   };
