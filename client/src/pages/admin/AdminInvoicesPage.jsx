@@ -213,10 +213,12 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   };
 
   const subtotal = lineItems.reduce((sum, i) => sum + (i.quantity * i.unit_price), 0);
-  const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 }[selectedCustomer?.waveguard_tier] || 0;
+  const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 }[selectedCustomer?.waveguard_tier] || 0;
   const discountAmt = subtotal * tierDiscount;
   const afterDiscount = subtotal - discountAmt;
-  const tax = afterDiscount * 0.07;
+  const isCommercial = selectedCustomer?.property_type === 'commercial' || selectedCustomer?.property_type === 'business';
+  const taxRate = isCommercial ? 0.07 : 0;
+  const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
 
   const handleCreate = async () => {
@@ -367,9 +369,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 <span>{selectedCustomer?.waveguard_tier} -{Math.round(tierDiscount * 100)}%</span><span>-${discountAmt.toFixed(2)}</span>
               </div>
             )}
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.muted, marginBottom: 4 }}>
-              <span>Tax (7%)</span><span>${tax.toFixed(2)}</span>
-            </div>
+            {tax > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.muted, marginBottom: 4 }}>
+                <span>Tax ({Math.round(taxRate * 100)}%)</span><span>${tax.toFixed(2)}</span>
+              </div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: D.heading, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
               <span>Total</span><span>${total.toFixed(2)}</span>
             </div>

@@ -72,6 +72,7 @@ const ServiceLibraryPage = lazy(() => import('./pages/admin/ServiceLibraryPage')
 const DiscountsPage = lazy(() => import('./pages/admin/DiscountsPage'));
 const CompliancePage = lazy(() => import('./pages/admin/CompliancePage'));
 const BadgesPage = lazy(() => import('./pages/admin/BadgesPage'));
+const PricingLogicPage = lazy(() => import('./pages/admin/PricingLogicPage'));
 const AdminEmailPage = lazy(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazy(() => import('./pages/admin/BankingPage'));
 import BookingPage from './pages/BookingPage';
@@ -168,6 +169,7 @@ export default function App() {
             <Route path="badges" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading badges...</div>}><BadgesPage /></Suspense>} />
             <Route path="email" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading email...</div>}><AdminEmailPage /></Suspense>} />
             <Route path="banking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading banking...</div>}><AdminBankingPage /></Suspense>} />
+            <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingLogicPage /></Suspense>} />
           </Route>
           <Route
             path="/*"

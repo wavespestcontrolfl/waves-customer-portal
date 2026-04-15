@@ -41,6 +41,7 @@ const ROUTE_CONTEXT_MAP = {
   '/admin/communications': 'comms',
   '/admin/email': 'email',
   '/admin/banking': 'banking',
+  '/admin/pricing-logic': 'revenue',
 };
 
 const CONTEXT_LABELS = {

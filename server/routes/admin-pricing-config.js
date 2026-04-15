@@ -18,12 +18,12 @@ async function ensureTable() {
       t.timestamps(true, true);
     });
     const configs = [
-      { config_key: 'pest_base', name: 'Pest Control Base Price', category: 'pest', sort_order: 1, data: JSON.stringify({ base: 117, floor: 89 }) },
-      { config_key: 'pest_footprint', name: 'Pest Footprint Modifiers', category: 'pest', sort_order: 2, data: JSON.stringify({ breakpoints: [{sqft:800,adj:-20},{sqft:1200,adj:-12},{sqft:1500,adj:-6},{sqft:2000,adj:0},{sqft:2500,adj:6},{sqft:3000,adj:12},{sqft:4000,adj:20},{sqft:5500,adj:28}] }) },
-      { config_key: 'pest_features', name: 'Pest Feature Modifiers', category: 'pest', sort_order: 3, data: JSON.stringify({ pool_cage:10,pool_no_cage:5,shrubs_heavy:10,shrubs_moderate:5,shrubs_light:-5,trees_heavy:10,trees_moderate:5,trees_light:-5,landscape_complex:5,near_water:2.5,large_driveway:2.5,indoor:10 }) },
-      { config_key: 'pest_property_type', name: 'Pest Property Type', category: 'pest', sort_order: 4, data: JSON.stringify({ single_family:0,townhome_end:-8,townhome_interior:-15,duplex:-10,condo_ground:-20,condo_upper:-25 }) },
-      { config_key: 'pest_service_costs', name: 'Pest Service Cost Breakdown', category: 'pest', sort_order: 5, data: JSON.stringify({ chemicals:{ taurus_sc:{ bottle_price:95.00, bottle_oz:78, oz_per_service:4, cost_per_service:4.87 }, talak:{ bottle_price:41.57, bottle_oz:128, oz_per_service:4, cost_per_service:1.30 }}, labor:{ spray_minutes:10, sweep_minutes:10, total_minutes:20, rate_per_hour:35, cost_per_service:11.67 }, total_cost_per_service:17.84 }), description: 'Per-service chemical cost + labor time breakdown' },
-      { config_key: 'waveguard_tiers', name: 'WaveGuard Bundle Discounts', category: 'waveguard', sort_order: 10, data: JSON.stringify({ bronze:{min_services:1,discount:0},silver:{min_services:2,discount:0.10},gold:{min_services:3,discount:0.15},platinum:{min_services:4,discount:0.20} }) },
+      { config_key: 'pest_base', name: 'Pest Control Base Price', category: 'pest', sort_order: 1, data: JSON.stringify({ base: 117, floor: 89, note: 'Pre-r() values. Customer sees r(117)=121, r(89)=92' }) },
+      { config_key: 'pest_footprint', name: 'Pest Footprint Modifiers', category: 'pest', sort_order: 2, data: JSON.stringify({ breakpoints: [{sqft:800,adj:-15},{sqft:1200,adj:-10},{sqft:1500,adj:-5},{sqft:2000,adj:0},{sqft:2500,adj:8},{sqft:3000,adj:14},{sqft:4000,adj:21},{sqft:5500,adj:31}] }) },
+      { config_key: 'pest_features', name: 'Pest Feature Modifiers', category: 'pest', sort_order: 3, data: JSON.stringify({ indoor:15,pool_cage:10,pool_no_cage:5,shrubs_heavy:12,shrubs_moderate:5,trees_heavy:12,trees_moderate:5,landscape_complex:8,near_water:5,large_driveway:5 }) },
+      { config_key: 'pest_property_type', name: 'Pest Property Type', category: 'pest', sort_order: 4, data: JSON.stringify({ single_family:0,townhome_end:-8,townhome_interior:-12,duplex:-10,condo_ground:-18,condo_upper:-22 }) },
+      { config_key: 'pest_service_costs', name: 'Pest Service Cost Breakdown', category: 'pest', sort_order: 5, data: JSON.stringify({ chemicals:{ taurus_sc:{ bottle_price:95.00, bottle_oz:78, oz_per_service:4, cost_per_service:4.87 }, talak:{ bottle_price:41.57, bottle_oz:128, oz_per_service:4, cost_per_service:1.30 }, surfactant:{ cost:0.50 }}, labor:{ spray_minutes:10, sweep_minutes:10, total_on_site_minutes:20, rate_per_hour:35, on_site_labor_cost:11.67, drive_minutes:20, drive_labor_cost:11.67 }, direct_service_cost:17.84, fully_allocated_cost:30.01 }), description: 'Per-service cost breakdown including drive time' },
+      { config_key: 'waveguard_tiers', name: 'WaveGuard Bundle Discounts', category: 'waveguard', sort_order: 10, data: JSON.stringify({ bronze:{min_services:1,discount:0},silver:{min_services:2,discount:0.10},gold:{min_services:3,discount:0.15},platinum:{min_services:4,discount:0.18} }) },
       { config_key: 'waveguard_membership', name: 'WaveGuard Membership Fee', category: 'waveguard', sort_order: 11, data: JSON.stringify({ fee:99, waived_with_prepay:true }) },
       { config_key: 'lawn_st_augustine', name: 'St. Augustine', category: 'lawn', sort_order: 20, data: JSON.stringify([[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]]) },
       // Zone multipliers
@@ -38,30 +38,38 @@ async function ensureTable() {
       { config_key: 'global_conditional_ceiling', name: 'Conditional Material Ceiling', category: 'global', sort_order: 6, data: JSON.stringify({ value: 60, unit: '$/property/yr', description: 'Max conditional material spend before reprice flag' }) },
 
       // Tree & Shrub
-      { config_key: 'ts_material_rates', name: 'T&S Material Rates per SqFt', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ '6x_standard': 0.110, '9x_enhanced': 0.190, '12x_premium': 0.220 }) },
-      { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ standard: 50, enhanced: 65, premium: 80 }) },
+      { config_key: 'ts_material_rates', name: 'T&S Material Rates per SqFt', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ '6x_standard': 0.110, '9x_enhanced': 0.190, '12x_premium': 0.220, note: 'Updated Apr 2026 vendor cost audit — old rates underestimated by ~2x' }) },
+      { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ standard: 52, enhanced: 67, premium: 82, note: 'After 3% processing adjustment' }) },
 
       // Palm
-      { config_key: 'palm_pricing', name: 'Palm Injection Tiered Pricing', category: 'palm', sort_order: 1, data: JSON.stringify({ nutrition: 35, preventive_insecticide: 45, combo: 55, fungal: 40, lethal_bronzing_floor: 125, tree_age_floor: 65 }) },
+      { config_key: 'palm_pricing', name: 'Palm Injection Tiered Pricing', category: 'palm', sort_order: 1, data: JSON.stringify({ nutrition: 35, preventive_insecticide: 45, combo: 55, fungal: 40, lethal_bronzing_floor: 125, tree_age_floor: 65, min_per_visit: 75, apps_per_year: 2, tier_qualifier: false, flat_credit_per_palm: 10, flat_credit_min_tier: 'gold' }) },
 
       // Mosquito
-      { config_key: 'mosquito_lot_sizes', name: 'Mosquito Lot Size Categories', category: 'mosquito', sort_order: 1, data: JSON.stringify({ SMALL: { max_sqft: 5000 }, QUARTER: { max_sqft: 10890 }, THIRD: { max_sqft: 14520 }, HALF: { max_sqft: 21780 }, ACRE: { max_sqft: 43560 } }) },
+      { config_key: 'mosquito_lot_sizes', name: 'Mosquito Lot Size Categories', category: 'mosquito', sort_order: 1, data: JSON.stringify({ SMALL: { max_sqft: 10889 }, QUARTER: { max_sqft: 14519 }, THIRD: { max_sqft: 21779 }, HALF: { max_sqft: 43559 }, ACRE: { max_sqft: 999999 } }) },
+      { config_key: 'mosquito_tiers', name: 'Mosquito Tier Visits & Pressure', category: 'mosquito', sort_order: 2, data: JSON.stringify({ visits: { bronze: 12, silver: 12, gold: 15, platinum: 18 }, pressure_cap: 1.80 }) },
 
       // Termite
       { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.75, advance_bait: 14, trelona_bait: 24, labor_per_station: 5.25, misc_per_station: 0.75 }) },
-      { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 35, premier: 65 }) },
+      { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 36, premier: 67, note: 'After 3% processing adjustment' }) },
 
       // Rodent
-      { config_key: 'rodent_monthly', name: 'Rodent Monthly Tiers', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: 75, medium: 89, large: 109 }) },
-      { config_key: 'rodent_trapping', name: 'Rodent Trapping Base', category: 'rodent', sort_order: 2, data: JSON.stringify({ base: 350 }) },
+      { config_key: 'rodent_monthly', name: 'Rodent Monthly Tiers', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: 77, medium: 92, large: 112, note: 'After 3% processing adjustment' }) },
+      { config_key: 'rodent_trapping', name: 'Rodent Trapping Base', category: 'rodent', sort_order: 2, data: JSON.stringify({ base: 361, floor: 361 }) },
+      { config_key: 'rodent_waveguard', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 3, data: JSON.stringify({ tier_qualifier: false, exclude_from_pct_discount: true, setup_credit: 50 }) },
 
       // One-time
       { config_key: 'onetime_urgency', name: 'Urgency Multipliers', category: 'one_time', sort_order: 1, data: JSON.stringify({ routine: 1.0, soon: 1.25, soon_after_hours: 1.50, urgent: 1.50, urgent_after_hours: 2.0 }) },
-      { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ multiplier: 0.85 }) },
-      { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 3, data: JSON.stringify({ per_lf_dirt: 10, per_lf_concrete: 14, floor: 600 }) },
-      { config_key: 'onetime_boracare', name: 'Bora-Care Constants', category: 'one_time', sort_order: 4, data: JSON.stringify({ bc_gal: 91.98, bc_cov: 275, bc_equip: 17.50 }) },
-      { config_key: 'onetime_preslab', name: 'Pre-Slab Termidor', category: 'one_time', sort_order: 5, data: JSON.stringify({ ps_btl: 174.72, ps_cov: 1250, ps_equip: 15 }) },
-      { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing', category: 'one_time', sort_order: 6, data: JSON.stringify({ simple: 37.50, moderate: 75, advanced: 150 }) },
+      { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
+      { config_key: 'onetime_pest', name: 'One-Time Pest Floor', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 155, multiplier: 1.30 }) },
+      { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 88, fungicide_floor: 98, weed_mult: 1.15, fungicide_mult: 1.45 }) },
+      { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 5, data: JSON.stringify({ per_lf_dirt: 10, per_lf_concrete: 14, floor: 618, renewal: 335 }) },
+      { config_key: 'onetime_boracare', name: 'Bora-Care Constants', category: 'one_time', sort_order: 6, data: JSON.stringify({ bc_gal: 91.98, bc_cov: 275, bc_equip: 17.50 }) },
+      { config_key: 'onetime_preslab', name: 'Pre-Slab Termidor', category: 'one_time', sort_order: 7, data: JSON.stringify({ ps_btl: 174.72, ps_cov: 1250, ps_equip: 15, warranty_extended: 206 }) },
+      { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing', category: 'one_time', sort_order: 8, data: JSON.stringify({ simple: 39, moderate: 77, advanced: 155, floor: 155, inspection: 88 }) },
+
+      // WaveGuard discount caps & ACH
+      { config_key: 'waveguard_discount_caps', name: 'Service Discount Caps', category: 'waveguard', sort_order: 12, data: JSON.stringify({ lawn_care_enhanced: 0.15, lawn_care_premium: 0.15, rodent_bait: 0, palm_injection: 0, bed_bug_chemical: 0, bed_bug_heat: 0, bora_care: 0, pre_slab_termidor: 0, composite_cap: 0.25 }) },
+      { config_key: 'ach_discount', name: 'ACH Payment Discount', category: 'waveguard', sort_order: 13, data: JSON.stringify({ percentage: 0.03, exempt_from_composite_cap: true, payment_method: 'us_bank_account' }) },
     ];
     for (const c of configs) { await db('pricing_config').insert(c).onConflict('config_key').ignore(); }
   }
@@ -142,6 +150,74 @@ router.get('/audit-log', async (req, res, next) => {
     res.json({ logs });
   } catch (err) {
     res.json({ logs: [] });
+  }
+});
+
+// POST /margin-check — calculate margins for a sample property across all services
+router.post('/margin-check', async (req, res) => {
+  try {
+    const { lotSqFt = 10000, homeSqFt = 2000, lawnSqFt = 5000, bedArea = 1500, waveguardTier = 'gold' } = req.body;
+
+    // Try to use the pricing engine
+    let pricingEngine;
+    try { pricingEngine = require('../services/pricing-engine'); } catch { /* not available */ }
+
+    if (!pricingEngine?.generateEstimate) {
+      return res.json({ error: 'Pricing engine not available', services: [] });
+    }
+
+    const GLOBAL = pricingEngine.constants?.GLOBAL || { LABOR_RATE: 35, DRIVE_TIME: 20 };
+    const laborRate = GLOBAL.LABOR_RATE || 35;
+    const driveMin = GLOBAL.DRIVE_TIME || 20;
+    const driveCost = laborRate * driveMin / 60;
+
+    // Build service request to get all recurring services priced
+    const estimate = pricingEngine.generateEstimate({
+      homeSqFt, lotSqFt, lawnSqFt, bedArea,
+      stories: 1,
+      propertyType: 'single_family',
+      features: {},
+      zone: 'A',
+      paymentMethod: 'card',
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', tier: 'enhanced' },
+        treeShrub: { tier: 'enhanced' },
+        mosquito: { tier: waveguardTier },
+      },
+    });
+
+    // Estimated costs per service
+    const costEstimates = {
+      pest_control: { laborMin: 20, materialPerVisit: 6.67, visitsPerYear: 4 },
+      lawn_care: { laborMin: 30, materialPerVisit: 25, visitsPerYear: 9 },
+      tree_shrub: { laborMin: 25, materialPerVisit: 20, visitsPerYear: 9 },
+      mosquito: { laborMin: 15, materialPerVisit: 8, visitsPerYear: 15 },
+    };
+
+    const services = [];
+    for (const item of estimate.lineItems) {
+      if (!item.annual) continue;
+      const ce = costEstimates[item.service] || { laborMin: 20, materialPerVisit: 10, visitsPerYear: 6 };
+      const laborPerVisit = laborRate * ce.laborMin / 60;
+      const costPerVisit = laborPerVisit + ce.materialPerVisit + driveCost;
+      const annualCost = costPerVisit * ce.visitsPerYear;
+      const afterDiscount = item.annualAfterDiscount || item.annual;
+      const margin = afterDiscount > 0 ? (afterDiscount - annualCost) / afterDiscount : 0;
+
+      services.push({
+        service: item.service,
+        annual: item.annual,
+        estimatedCost: Math.round(annualCost),
+        afterDiscount: Math.round(afterDiscount),
+        discount: item.discount?.effectiveDiscount || 0,
+        margin: Math.round(margin * 1000) / 1000,
+      });
+    }
+
+    res.json({ services, property: estimate.property, waveGuard: estimate.waveGuard });
+  } catch (err) {
+    res.json({ error: err.message, services: [] });
   }
 });
 

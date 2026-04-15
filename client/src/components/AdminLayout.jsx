@@ -43,6 +43,7 @@ const NAV_SECTIONS = [
     { path: '/admin/invoices', icon: '🧾', label: 'Invoices' },
     { path: '/admin/banking', icon: '🏦', label: 'Banking' },
     { path: '/admin/tax', icon: '💰', label: 'Tax Center' },
+    { path: '/admin/pricing-logic', icon: '📐', label: 'Pricing Logic' },
   ]},
   { section: 'System', items: [
     { path: '/admin/badges', icon: '🏅', label: 'Badges' },
