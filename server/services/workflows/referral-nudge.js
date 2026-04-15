@@ -47,16 +47,20 @@ class ReferralNudge {
 
     setTimeout(async () => {
       try {
-        const shareText = referralLink
-          ? `Share your link: ${referralLink}`
-          : `Share your code ${referralCode}`;
-
-        const body = `Hi ${customer.first_name}! Thanks for the amazing ${rating}-star review! ` +
-          `Know someone who could use pest-free living? ${shareText} — ` +
-          `they get $25 off their first service, and you get a $25 credit! ` +
-          `Also, if you have a moment, a Google review helps us a ton: ` +
-          `https://g.page/r/wavespestcontrol/review\n` +
-          `- Waves Pest Control`;
+        // Pull editable body from sms_templates (referral_nudge). Fall back to
+        // a minimal inline string if the template row is missing.
+        let body = null;
+        try {
+          const tpl = require('../../routes/admin-sms-templates');
+          body = await tpl.getTemplate('referral_nudge', {
+            first_name: customer.first_name || '',
+            referral_link: referralLink || `Use code ${referralCode}`,
+          });
+        } catch { /* fall through to inline */ }
+        if (!body) {
+          const shareText = referralLink ? referralLink : `Use code ${referralCode}`;
+          body = `Hello ${customer.first_name}! Share your link — they get $25 off, you get $25: ${shareText}`;
+        }
 
         await TwilioService.sendSMS(customer.phone, body, {
           customerId,

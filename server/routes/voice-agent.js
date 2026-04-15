@@ -70,10 +70,15 @@ async function sendMissedCallSMS(callerPhone, callerName, callSid) {
       } catch { /* no customer match */ }
     }
 
-    const greeting = firstName
-      ? `Hey ${firstName}, this is Waves Pest Control.`
-      : `Hey, this is Waves Pest Control.`;
-    const msg = `${greeting} Sorry we missed your call — we're currently on the other line. How can we help you? Just reply to this text or call us back at (941) 318-7612.`;
+    // Pull editable body from sms_templates.missed_call. Fall back to inline.
+    let msg = null;
+    try {
+      const tpl = require('./admin-sms-templates');
+      msg = await tpl.getTemplate('missed_call', { first_name: firstName || 'there' });
+    } catch { /* fall through */ }
+    if (!msg) {
+      msg = `Hello ${firstName || 'there'}, this is Waves. Sorry we missed your call. How can we help?`;
+    }
     await TwilioService.sendSMS(callerPhone, msg, {
       messageType: 'missed_call_followup',
     });

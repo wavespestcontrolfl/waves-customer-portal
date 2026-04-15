@@ -123,13 +123,21 @@ router.put('/:serviceId/status', async (req, res, next) => {
     }
     await db('scheduled_services').where({ id: svc.id }).update(updates);
 
-    // Send en_route SMS
+    // Send en_route SMS — pulls editable body from sms_templates.tech_en_route.
     if (status === 'en_route' && svc.cust_phone) {
-      const loc = resolveLocation(svc.city);
       try {
-        await TwilioService.sendSMS(svc.cust_phone,
-          `🌊 Waves Pest Control\n\nHi ${svc.first_name}! ${svc.tech_name} is on the way to your property.\n\nPlease ensure gates are unlocked and pets are secured.\n\nQuestions? Reply or call ${loc.phone}.`
-        );
+        let body = null;
+        try {
+          const tpl = require('./admin-sms-templates');
+          body = await tpl.getTemplate('tech_en_route', {
+            first_name: svc.first_name || '',
+            eta_minutes: svc.eta_minutes || '30',
+          });
+        } catch { /* fall through */ }
+        if (!body) {
+          body = `Hello ${svc.first_name}! Your Waves technician is on the way. Log into the Waves Customer Portal at portal.wavespestcontrol.com to track your technician live.`;
+        }
+        await TwilioService.sendSMS(svc.cust_phone, body);
       } catch (e) { logger.error(`En route SMS failed: ${e.message}`); }
     }
 

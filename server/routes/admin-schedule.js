@@ -562,8 +562,17 @@ router.put('/:id/status', async (req, res, next) => {
 
         if (svc.cust_phone) {
           const custFirstName = svc.first_name || 'there';
-          await TwilioService.sendSMS(svc.cust_phone,
-            `Hello ${custFirstName}! Your Waves technician is on the way. ETA: ~${etaMinutes} minutes.`,
+          let body = null;
+          try {
+            const tpl = require('./admin-sms-templates');
+            body = await tpl.getTemplate('tech_en_route', {
+              first_name: custFirstName, eta_minutes: String(etaMinutes),
+            });
+          } catch { /* fall through */ }
+          if (!body) {
+            body = `Hello ${custFirstName}! Your Waves technician is on the way. ETA: ~${etaMinutes} minutes.`;
+          }
+          await TwilioService.sendSMS(svc.cust_phone, body,
             { customerId: svc.customer_id, messageType: 'en_route' }
           );
         }

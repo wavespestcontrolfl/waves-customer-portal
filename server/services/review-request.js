@@ -198,11 +198,18 @@ const ReviewService = {
     const reviewUrl = `${domain}/review/${request.token}`;
     const techName = request.tech_name || 'Our team';
 
-    // Personalized message from tech's name — triggers reciprocity
-    const body = `Hey ${customer.first_name} — ${techName} here from Waves. ` +
-      `Thanks for trusting us with your home today. ` +
-      `If you have 30 seconds, it'd mean the world to our small team if you shared your experience → ${reviewUrl}\n\n` +
-      `We also texted you the review link in case you want to do it later. 🌊`;
+    // Pull editable body from sms_templates.review_request. Fall back to inline.
+    let body = null;
+    try {
+      const tpl = require('../routes/admin-sms-templates');
+      body = await tpl.getTemplate('review_request', {
+        first_name: customer.first_name || '',
+        review_url: reviewUrl,
+      });
+    } catch { /* fall through */ }
+    if (!body) {
+      body = `Hello ${customer.first_name}! How was your service with ${techName}? We'd love your feedback: ${reviewUrl}`;
+    }
 
     try {
       const TwilioService = require('./twilio');
