@@ -21,7 +21,7 @@ const SERVICE_DETAILS = {
       { title: 'Soil Conditioning & pH Balancing', text: "Soil chemistry is annually tested to monitor CEC, pH, and nutrient levels. Based on results, pH is adjusted with lime, sulfur, or other amendments, and micronutrients like iron, manganese, and zinc are applied to maintain optimal root-zone conditions." },
       { title: 'Disease Prevention (Fungicides)', text: "Preventive fungicide applications are integrated into the management program based on disease forecasting models, environmental data (temperature, humidity, leaf wetness), and turf species susceptibility. These treatments protect against major turf pathogens such as Rhizoctonia, Pythium, and Dollar Spot, prioritizing proactive suppression rather than reactive control." },
       { title: 'Lawn Insect & Turf Pest Control', text: "Pest control applications are timed to pest life cycles and environmental cues, targeting chinch bugs, sod webworms, mole crickets, armyworms, and fire ants. An IPM approach blends biological, chemical, and cultural controls, with product rotation to prevent resistance." },
-      { title: 'Core/Liquid Aeration & Dethatching', text: "Performed once annually — typically in spring or fall — using mechanical coring, liquid aeration technologies, or dethatching equipment to relieve soil compaction, remove thatch buildup, enhance oxygen exchange, and stimulate microbial activity. This improves root penetration, nutrient mobility, and water infiltration." },
+      { title: 'Core/Liquid Aeration/Dethatching', text: "Performed once annually — typically in spring or fall — using mechanical coring, liquid aeration technologies, or dethatching equipment to relieve soil compaction, remove thatch buildup, enhance oxygen exchange, and stimulate microbial activity. This improves root penetration, nutrient mobility, and water infiltration." },
       { title: 'Lawn Nutrition & Disease Control', text: "We deliver the right nutrients at the right time and treat fungal threats like brown patch and dollar spot before they spread. Preventive and curative applications are timed to seasonal disease pressure and turf health data." },
       { title: 'Weed-Free Landscape Bed Perimeter', text: "Selective spot applications of contact or systemic herbicides along turf and hardscape interfaces to maintain a clean, defined perimeter. Treatments are calibrated for ornamental safety." },
       { title: 'Iron / Greening Touch-Up', text: "Applied during nitrogen blackout or restriction periods, this chelated iron and micronutrient blend supports chlorophyll production, color uniformity, and turf vigor without promoting excessive top growth." },
@@ -930,6 +930,9 @@ export default function EstimateViewPage() {
   const hasTermite = svcNames.some(n => n.includes('termite'));
   const hasRodent = svcNames.some(n => n.includes('rodent'));
 
+  const hasOneTimeLawn = (oneTime.items || []).length > 0;
+  const hasOneTimePest = (oneTime.specItems || []).length > 0;
+
   const includedKeys = [];
   if (hasLawn) includedKeys.push('lawn');
   if (hasPest) includedKeys.push('pest');
@@ -1276,7 +1279,6 @@ export default function EstimateViewPage() {
 
           {hasLawn && (
             <ServiceDropdown title="🌿 Lawn Care Program" defaultOpen={firstOpenService === 'lawn'}>
-              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.lawn.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 14 }}>{SERVICE_DETAILS.lawn.subheader}</div>
               {SERVICE_DETAILS.lawn.sections.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
               <div style={{ borderTop: `1px solid ${SAND_DARK}`, marginTop: 10, paddingTop: 10 }}>
@@ -1288,7 +1290,6 @@ export default function EstimateViewPage() {
 
           {hasPest && (
             <ServiceDropdown title="🐛 Pest Control" defaultOpen={firstOpenService === 'pest'}>
-              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.pest.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pest.subheader}</div>
               <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pest.intro}</div>
               {SERVICE_DETAILS.pest.sections.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
@@ -1398,7 +1399,7 @@ export default function EstimateViewPage() {
             </ServiceDropdown>
           )}
 
-          {hasLawn && (
+          {hasOneTimeLawn && (
             <ServiceDropdown title="🌱 One-Time Lawn Services">
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.lawnOneTime.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.lawnOneTime.subheader}</div>
@@ -1450,7 +1451,7 @@ export default function EstimateViewPage() {
             </ServiceDropdown>
           )}
 
-          {hasPest && (
+          {hasOneTimePest && (
             <ServiceDropdown title="🐛 One-Time Pest Treatments">
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.pestOneTime.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pestOneTime.subheader}</div>
@@ -1613,32 +1614,7 @@ export default function EstimateViewPage() {
           <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.65, marginTop: 6, fontFamily: FONTS.body, maxWidth: 420, margin: '6px auto 0' }}>
             Waves is a family-owned lawn and pest company serving Southwest Florida. We combine modern technology with old-school accountability — every customer gets a dedicated tech, transparent pricing, and real results.
           </div>
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', marginTop: 16 }}>
-            {['✅ 100% Guaranteed', '📋 No Contracts', '⭐ 5-Star Rated'].map((badge, i) => (
-              <div key={i} style={{
-                padding: '8px 14px', borderRadius: 20, background: '#fff',
-                border: `1px solid ${SAND_DARK}`, fontSize: 12, fontWeight: 700,
-                color: B.navy, fontFamily: FONTS.heading,
-              }}>
-                {badge}
-              </div>
-            ))}
-          </div>
         </div>
-
-        {/* Accept CTA — before Local Expertise */}
-        {e.status !== 'accepted' && (
-          <div style={{ marginTop: 24 }}>
-            <button onClick={handleAccept} disabled={accepting} style={{
-              ...BUTTON_BASE, width: '100%', padding: 18, fontSize: 17,
-              background: B.red, color: '#fff', opacity: accepting ? 0.7 : 1,
-              boxShadow: `0 4px 15px ${B.red}40`,
-              animation: 'wavesPulse 2s ease-in-out infinite',
-            }}>
-              {accepting ? 'Processing...' : 'Accept Estimate'}
-            </button>
-          </div>
-        )}
 
         {/* ============================================================= */}
         {/* 9. LOCATIONS GRID                                              */}
@@ -1751,12 +1727,13 @@ export default function EstimateViewPage() {
         {/* 12. FOOTER                                                     */}
         {/* ============================================================= */}
         <div style={{ textAlign: 'center', marginTop: 32, paddingTop: 20, borderTop: `1px solid ${SAND_DARK}` }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6 }}>🌊 Stay in the loop</div>
+          <div style={{ fontSize: 15, color: B.wavesBlue, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 10 }}>Wave Goodbye to Pests! 🌊</div>
           <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: 0.6, marginBottom: 6 }} />
-          <div style={{ fontSize: 12, color: B.grayMid }}>Family-owned, SWFL-based</div>
-          <div style={{ fontSize: 13, color: B.wavesBlue, fontWeight: 600, marginTop: 4 }}>Wave Goodbye to Pests! 🌊</div>
-          <div style={{ fontSize: 12, color: B.grayMid, marginTop: 8 }}>
-            <a href="tel:+19413187612" style={{ color: B.wavesBlue, fontWeight: 600, textDecoration: 'none' }}>(941) 318-7612</a>
-          </div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Waves Pest Control, LLC</div>
+          <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>Family-owned pest control &amp; lawn care · Southwest Florida</div>
+          <div style={{ fontSize: 12, color: B.grayDark, marginTop: 6, lineHeight: 1.6 }}>Lakewood Ranch · Parrish · Sarasota · Venice</div>
+          <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>© {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved</div>
         </div>
       </div>
 
