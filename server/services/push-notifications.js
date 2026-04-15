@@ -4,8 +4,23 @@ const logger = require('./logger');
 let webpush;
 try {
   webpush = require('web-push');
-  if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
-    webpush.setVapidDetails('mailto:contact@wavespestcontrol.com', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+  // Trim env values — Railway sometimes preserves trailing whitespace/quotes
+  // when values are pasted. Also normalize the VAPID subject (must be a clean
+  // mailto: with no angle brackets or spaces, per RFC 8292).
+  const pubKey = (process.env.VAPID_PUBLIC_KEY || '').trim();
+  const privKey = (process.env.VAPID_PRIVATE_KEY || '').trim();
+  let subject = (process.env.VAPID_SUBJECT || 'mailto:contact@wavespestcontrol.com').trim();
+  // Strip "mailto: <email>" → "mailto:email" (web-push rejects malformed subjects)
+  subject = subject.replace(/^mailto:\s*<?/, 'mailto:').replace(/>$/, '').replace(/\s+/g, '');
+  if (pubKey && privKey) {
+    try {
+      webpush.setVapidDetails(subject, pubKey, privKey);
+      logger.info(`[push] VAPID configured (subject=${subject}, pubkey ${pubKey.length} chars)`);
+    } catch (e) {
+      logger.error(`[push] VAPID setup failed: ${e.message}`);
+    }
+  } else {
+    logger.warn('[push] VAPID keys not set — push notifications disabled');
   }
 } catch { webpush = null; }
 

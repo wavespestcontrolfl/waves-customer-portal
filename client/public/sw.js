@@ -1,4 +1,4 @@
-const CACHE_NAME = 'waves-v3';
+const CACHE_NAME = 'waves-v4';
 
 self.addEventListener('install', event => {
   self.skipWaiting(); // Activate immediately, don't wait for old tabs to close

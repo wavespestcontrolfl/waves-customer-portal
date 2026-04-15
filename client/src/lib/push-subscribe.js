@@ -85,7 +85,7 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
     throw new Error(`Could not fetch VAPID key from server: ${e.message}`);
   }
   if (!publicKey) {
-    throw new Error('Server has no VAPID keys configured. Set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in Railway env vars (run `npx web-push generate-vapid-keys` to create a pair), then redeploy.');
+    throw new Error('Server returned no VAPID public key. Visit /api/admin/push/diagnostics in your browser (while logged in) to see what env vars the server is actually reading.');
   }
 
   let sub = await reg.pushManager.getSubscription();

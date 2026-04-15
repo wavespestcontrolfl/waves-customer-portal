@@ -19,11 +19,34 @@ const logger = require('../services/logger');
 const { triggerNotification, listTriggers } = require('../services/notification-triggers');
 const { requireAdmin } = require('../middleware/admin-auth');
 
-router.use(requireAdmin);
-
+// VAPID public key is public by design (browsers need it to subscribe).
+// Keep this endpoint UNAUTHENTICATED so an expired admin token can't
+// silently break "Enable push" with a 401 that looks like a missing key.
 router.get('/vapid-key', (req, res) => {
-  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || null });
+  const key = (process.env.VAPID_PUBLIC_KEY || '').trim();
+  res.json({
+    publicKey: key || null,
+    configured: !!key && !!(process.env.VAPID_PRIVATE_KEY || '').trim(),
+  });
 });
+
+// Admin-only diagnostic — reveals whether the server sees the env vars,
+// without leaking the private key. Hit this from the browser console
+// when push fails to confirm what's actually loaded.
+router.get('/diagnostics', requireAdmin, (req, res) => {
+  res.json({
+    vapid_public_key_set: !!(process.env.VAPID_PUBLIC_KEY || '').trim(),
+    vapid_public_key_length: (process.env.VAPID_PUBLIC_KEY || '').trim().length,
+    vapid_private_key_set: !!(process.env.VAPID_PRIVATE_KEY || '').trim(),
+    vapid_private_key_length: (process.env.VAPID_PRIVATE_KEY || '').trim().length,
+    vapid_subject: (process.env.VAPID_SUBJECT || '').trim() || 'mailto:contact@wavespestcontrol.com (default)',
+    web_push_loaded: (() => { try { require('web-push'); return true; } catch { return false; } })(),
+    node_env: process.env.NODE_ENV || 'unset',
+  });
+});
+
+// All write operations + preferences still require admin
+router.use(requireAdmin);
 
 router.post('/subscribe', async (req, res, next) => {
   try {
