@@ -5,7 +5,8 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Auto-create table if missing
+// Auto-create table if missing + seed any new default templates that don't exist yet
+let _seededThisProcess = false;
 async function ensureTable() {
   if (!(await db.schema.hasTable('sms_templates'))) {
     await db.schema.createTable('sms_templates', t => {
@@ -21,8 +22,12 @@ async function ensureTable() {
       t.integer('sort_order').defaultTo(100);
       t.timestamps(true, true);
     });
-    // Seed default templates
-    const templates = [
+  }
+  if (_seededThisProcess) return;
+  _seededThisProcess = true;
+  // Upsert default templates — onConflict.ignore means existing rows are untouched,
+  // new template_keys (like newly-added seeds) get inserted on deploy.
+  const templates = [
       { template_key: 'appointment_confirmation', name: 'Appointment Confirmation', category: 'service', body: 'Hi {first_name}! Your {service_type} with Waves is confirmed for {date} between {time}. Reply to reschedule.\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!', variables: JSON.stringify(['first_name','service_type','date','time']), sort_order: 1 },
       { template_key: 'reminder_72h', name: '72-Hour Reminder', category: 'service', body: 'Hello {first_name}! This is a reminder from Waves that your {service_type} appointment is scheduled for {day} at {time}. Expect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com. If you have any questions or need assistance, simply reply to this message. — Waves', variables: JSON.stringify(['first_name','service_type','day','time']), sort_order: 2 },
       { template_key: 'reminder_24h', name: '24-Hour Reminder', category: 'service', body: 'Hello {first_name}! This is a reminder from Waves that your {service_type} appointment is scheduled for tomorrow at {time}. Expect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out. If you have any questions or need assistance, simply reply to this message. — Waves', variables: JSON.stringify(['first_name','service_type','time']), sort_order: 3 },
@@ -44,8 +49,10 @@ async function ensureTable() {
       { template_key: 'referral_nudge', name: 'Referral Nudge', category: 'referrals', body: 'Hi {first_name}! Share your link — they get $25 off, you get $50: {referral_link}', variables: JSON.stringify(['first_name','referral_link']), sort_order: 31 },
       { template_key: 'churn_save_step1', name: 'Churn Save — Step 1', category: 'retention', body: 'Hey {first_name}, this is Adam from Waves. Just checking in — anything we can do better? Reply here.', variables: JSON.stringify(['first_name']), sort_order: 40 },
       { template_key: 'admin_new_lead', name: 'New Lead Alert', category: 'internal', body: '🔔 New lead! {name} 📞 {phone} 📍 {address} 🌐 {source}', variables: JSON.stringify(['name','phone','address','source']), is_internal: true, sort_order: 60 },
-    ];
-    for (const t of templates) { await db('sms_templates').insert(t).onConflict('template_key').ignore(); }
+  ];
+  for (const t of templates) {
+    try { await db('sms_templates').insert(t).onConflict('template_key').ignore(); }
+    catch (_) { /* best-effort */ }
   }
 }
 
