@@ -1,10 +1,90 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const Availability = require('../services/availability');
 const logger = require('../services/logger');
+const { findAvailableSlots } = require('../services/scheduling/find-time');
 
-// GET /api/booking/availability?city=Bradenton&estimate_id=123
+// Shared geocoder (same approach as admin-schedule-find-time.js)
+async function geocodeAddress(address) {
+  const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!key) throw new Error('No Google Maps API key configured');
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${key}`;
+  const resp = await fetch(url);
+  const data = await resp.json();
+  if (data.status !== 'OK' || !data.results?.length) {
+    throw new Error(`Geocode failed: ${data.status}`);
+  }
+  const loc = data.results[0].geometry.location;
+  return { lat: loc.lat, lng: loc.lng };
+}
+
+function timeToMin(t) {
+  if (!t) return 0;
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + (m || 0);
+}
+
+function minToTime12(min) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
+}
+
+function proximityReason(detourMin) {
+  if (detourMin <= 2) return 'We have a tech right around the corner';
+  if (detourMin <= 7) return 'A tech will be working nearby';
+  if (detourMin <= 15) return 'A tech will be in your area';
+  return 'Available time slot';
+}
+
+function fallbackZoneCenter(city) {
+  // Used only when no address/coords provided. Resolves via service_zones table.
+  return db('service_zones').first().then(async () => {
+    const zones = await db('service_zones').select('*');
+    const match = zones.find(z => (z.cities || []).some(c => c.toLowerCase() === (city || '').toLowerCase()));
+    if (match && match.center_lat && match.center_lng) {
+      return { lat: parseFloat(match.center_lat), lng: parseFloat(match.center_lng), zone: match };
+    }
+    return null;
+  });
+}
+
+// GET /api/booking/customer-lookup?phone=9415551234 — returns existing customer if phone matches
+router.get('/customer-lookup', async (req, res, next) => {
+  try {
+    const { phone } = req.query;
+    if (!phone) return res.json({ customer: null });
+    const digits = String(phone).replace(/\D/g, '');
+    if (digits.length !== 10) return res.json({ customer: null });
+
+    const customer = await db('customers')
+      .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [digits])
+      .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip')
+      .first();
+
+    res.json({ customer: customer || null });
+  } catch (err) { next(err); }
+});
+
+// GET /api/booking/config — public booking config so the UI can gate properly
+router.get('/config', async (req, res, next) => {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    const config = (await db('booking_config').first()) || {};
+    res.json({
+      enabled: isEnabled('selfBooking') && config.enabled !== false,
+      advance_days_min: config.advance_days_min ?? 1,
+      advance_days_max: config.advance_days_max ?? 14,
+      slot_duration_minutes: config.slot_duration_minutes ?? 60,
+      day_start: config.day_start || '08:00',
+      day_end: config.day_end || '17:00',
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/booking/availability
+//   query: lat, lng, address, city, service_type, duration_minutes, date_from, date_to
 router.get('/availability', async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
@@ -12,12 +92,153 @@ router.get('/availability', async (req, res, next) => {
       return res.status(503).json({ error: 'Self-scheduling coming soon' });
     }
 
-    const { city, estimate_id } = req.query;
-    if (!city) return res.status(400).json({ error: 'City required' });
+    const {
+      lat, lng, address, city, estimate_id,
+      service_type, duration_minutes,
+      date_from, date_to,
+    } = req.query;
 
-    const result = await Availability.getAvailableSlots(city, estimate_id);
-    res.json(result);
-  } catch (err) { next(err); }
+    const config = (await db('booking_config').first()) || {
+      advance_days_min: 1, advance_days_max: 14,
+      slot_duration_minutes: 60,
+      day_start: '08:00', day_end: '17:00',
+      max_self_books_per_day: 3,
+    };
+
+    // Resolve coordinates
+    let resolvedLat = lat ? parseFloat(lat) : null;
+    let resolvedLng = lng ? parseFloat(lng) : null;
+
+    if ((!resolvedLat || !resolvedLng) && estimate_id) {
+      const est = await db('estimates').where('id', estimate_id).first();
+      if (est?.customer_id) {
+        const c = await db('customers').where('id', est.customer_id)
+          .select('lat', 'lng', 'address_line1', 'city', 'state', 'zip').first();
+        if (c?.lat && c?.lng) {
+          resolvedLat = parseFloat(c.lat);
+          resolvedLng = parseFloat(c.lng);
+        } else if (c) {
+          const addr = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
+          if (addr) {
+            const geo = await geocodeAddress(addr);
+            resolvedLat = geo.lat; resolvedLng = geo.lng;
+          }
+        }
+      }
+    }
+
+    if ((!resolvedLat || !resolvedLng) && address) {
+      const geo = await geocodeAddress(address);
+      resolvedLat = geo.lat; resolvedLng = geo.lng;
+    }
+
+    if ((!resolvedLat || !resolvedLng) && city) {
+      const zone = await fallbackZoneCenter(city);
+      if (zone) { resolvedLat = zone.lat; resolvedLng = zone.lng; }
+    }
+
+    if (!resolvedLat || !resolvedLng) {
+      return res.status(400).json({ error: 'address, lat/lng, or city required' });
+    }
+
+    // Default date window from config
+    const today = new Date();
+    const defaultFrom = new Date(today);
+    defaultFrom.setDate(defaultFrom.getDate() + (config.advance_days_min ?? 1));
+    const defaultTo = new Date(today);
+    defaultTo.setDate(defaultTo.getDate() + (config.advance_days_max ?? 14));
+
+    const duration = duration_minutes
+      ? parseInt(duration_minutes)
+      : (config.slot_duration_minutes || 60);
+
+    const result = await findAvailableSlots({
+      lat: resolvedLat,
+      lng: resolvedLng,
+      durationMinutes: duration,
+      dateFrom: date_from || defaultFrom.toISOString().split('T')[0],
+      dateTo: date_to || defaultTo.toISOString().split('T')[0],
+      dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
+      dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
+      topN: 200,
+    });
+
+    // Enforce max_self_books_per_day — filter out dates already at cap
+    const maxPerDay = config.max_self_books_per_day ?? 3;
+    const bookingCounts = await db('self_booked_appointments')
+      .whereNot('status', 'cancelled')
+      .whereBetween('date', [
+        date_from || defaultFrom.toISOString().split('T')[0],
+        date_to || defaultTo.toISOString().split('T')[0],
+      ])
+      .select('date')
+      .count('* as count')
+      .groupBy('date');
+    const fullDays = new Set(
+      bookingCounts.filter(r => parseInt(r.count) >= maxPerDay)
+        .map(r => (typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0]))
+    );
+
+    // Group slots by date, anonymize tech, add reason + best_fit flag, dedupe (one slot per day+start)
+    const byDate = new Map();
+    for (const slot of (result.slots || [])) {
+      if (fullDays.has(slot.date)) continue;
+      const key = slot.date;
+      if (!byDate.has(key)) byDate.set(key, []);
+      const bucket = byDate.get(key);
+      // Deduplicate: if we already have a slot at this start_time with a better score, skip
+      const existing = bucket.find(s => s.start_time === slot.start_time);
+      if (existing) continue;
+      bucket.push({
+        start_time: slot.start_time,
+        end_time: slot.end_time,
+        start_label: minToTime12(timeToMin(slot.start_time)),
+        end_label: minToTime12(timeToMin(slot.end_time)),
+        detour_minutes: slot.detour_minutes,
+        reason: proximityReason(slot.detour_minutes),
+        // Opaque identifiers the confirm step will replay
+        technician_id: slot.technician.id,
+        rank: slot.rank,
+        // Legacy aliases (existing BookingPage reads these)
+        startTime24: slot.start_time,
+        endTime24: slot.end_time,
+        start: minToTime12(timeToMin(slot.start_time)),
+        end: minToTime12(timeToMin(slot.end_time)),
+      });
+    }
+
+    // Sort each day's slots chronologically; mark best_fit on the single globally-top-ranked slot per day
+    const days = [];
+    for (const [date, slots] of byDate.entries()) {
+      slots.sort((a, b) => a.start_time.localeCompare(b.start_time));
+      const best = slots.reduce((acc, s) => (acc == null || s.rank < acc.rank ? s : acc), null);
+      const d = new Date(date + 'T12:00:00');
+      days.push({
+        date,
+        dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short' }),
+        dayNum: d.getDate(),
+        month: d.toLocaleDateString('en-US', { month: 'short' }),
+        fullDate: d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }),
+        slots: slots.map(s => ({
+          ...s,
+          is_best_fit: s === best,
+        })).slice(0, 4), // max 4 slots per day
+      });
+    }
+    days.sort((a, b) => a.date.localeCompare(b.date));
+
+    res.json({
+      days,
+      lat: resolvedLat,
+      lng: resolvedLng,
+      duration_minutes: duration,
+      service_type: service_type || null,
+      total_feasible: result.total_feasible || 0,
+    });
+  } catch (err) {
+    logger.error('[booking:availability] failed:', err);
+    next(err);
+  }
 });
 
 // POST /api/booking/confirm
@@ -28,19 +249,208 @@ router.post('/confirm', async (req, res, next) => {
       return res.status(503).json({ error: 'Self-scheduling coming soon' });
     }
 
-    const { estimate_id, customer_id, slot_date, slot_start, customer_notes } = req.body;
-    if (!slot_date || !slot_start) return res.status(400).json({ error: 'Date and time required' });
+    const {
+      estimate_id, customer_id,
+      slot_date, slot_start, slot_end,
+      technician_id,
+      service_type,
+      duration_minutes,
+      customer_notes,
+      source,
+      referrer_url,
+      new_customer,
+    } = req.body;
 
-    // Resolve customer_id from estimate if not provided
-    let custId = customer_id;
-    if (!custId && estimate_id) {
-      const est = await db('estimates').where('id', estimate_id).first();
-      custId = est?.customer_id;
+    if (!slot_date || !slot_start) {
+      return res.status(400).json({ error: 'slot_date and slot_start required' });
     }
-    if (!custId) return res.status(400).json({ error: 'Customer not found' });
 
-    const result = await Availability.confirmBooking(estimate_id, custId, slot_date, slot_start, customer_notes);
-    res.json(result);
+    // Resolve customer
+    let custId = customer_id;
+    let estimate = null;
+    if (estimate_id) {
+      estimate = await db('estimates').where('id', estimate_id).first();
+      if (!custId) custId = estimate?.customer_id;
+    }
+
+    // Create customer from new_customer payload if none resolved
+    if (!custId && new_customer && new_customer.phone && new_customer.first_name) {
+      const phoneDigits = String(new_customer.phone).replace(/\D/g, '');
+      // Double-check no existing match (race-safe)
+      const existing = await db('customers')
+        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [phoneDigits])
+        .first();
+      if (existing) {
+        custId = existing.id;
+      } else {
+        const [created] = await db('customers').insert({
+          first_name: new_customer.first_name,
+          last_name: new_customer.last_name || '',
+          phone: phoneDigits,
+          email: new_customer.email || null,
+          address_line1: new_customer.address_line1 || null,
+          city: new_customer.city || null,
+          state: new_customer.state || 'FL',
+          zip: new_customer.zip || null,
+          lat: new_customer.lat || null,
+          lng: new_customer.lng || null,
+        }).returning('id');
+        custId = created.id || created;
+      }
+    }
+
+    if (!custId) return res.status(400).json({ error: 'customer_id, estimate_id, or new_customer required' });
+
+    const customer = await db('customers').where('id', custId).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const config = (await db('booking_config').first()) || {};
+    const duration = duration_minutes || config.slot_duration_minutes || 60;
+
+    // Compute end time if not provided
+    const endMin = slot_end ? timeToMin(slot_end) : (timeToMin(slot_start) + duration);
+    const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+
+    // Re-verify the slot is still available (race condition guard)
+    const conflict = await db('scheduled_services')
+      .where('scheduled_date', slot_date)
+      .where('technician_id', technician_id || null)
+      .whereNotIn('status', ['cancelled'])
+      .where(function () {
+        this.where(function () {
+          this.where('window_start', '<', endTime).andWhere('window_end', '>', slot_start);
+        });
+      })
+      .first();
+    if (conflict && technician_id) {
+      return res.status(409).json({ error: 'That time slot was just taken. Please pick another.' });
+    }
+
+    const confCode = 'WPC-' + Array.from({ length: 4 }, () =>
+      'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]
+    ).join('');
+
+    // Resolve zone from city (best-effort, for reporting)
+    const zones = await db('service_zones').select('*');
+    const zone = zones.find(z => (z.cities || []).some(c =>
+      c.toLowerCase() === (customer.city || '').toLowerCase()
+    )) || null;
+
+    const resolvedServiceType = service_type
+      || estimate?.services?.[0]
+      || estimate?.service_type
+      || 'General Pest Control';
+
+    const [booking] = await db('self_booked_appointments').insert({
+      customer_id: custId,
+      estimate_id: estimate_id || null,
+      technician_id: technician_id || null,
+      service_zone_id: zone?.id || null,
+      date: slot_date,
+      start_time: slot_start,
+      end_time: endTime,
+      duration_minutes: duration,
+      customer_notes: customer_notes || null,
+      confirmation_code: confCode,
+      source: source || 'direct',
+      referrer_url: referrer_url || req.get('referer') || null,
+      service_type: resolvedServiceType,
+    }).returning('*');
+
+    await db('scheduled_services').insert({
+      customer_id: custId,
+      technician_id: technician_id || null,
+      scheduled_date: slot_date,
+      window_start: slot_start,
+      window_end: endTime,
+      service_type: resolvedServiceType,
+      status: 'confirmed',
+      customer_confirmed: true,
+      confirmed_at: new Date(),
+      notes: customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
+      source: source || 'self_booked',
+      self_booking_id: booking.id,
+      estimated_duration_minutes: duration,
+      zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
+    });
+
+    // Sync to dispatch board (best-effort)
+    try {
+      const { syncJobsFromSchedule } = require('../services/dispatch/schedule-bridge');
+      await syncJobsFromSchedule(slot_date);
+    } catch { /* dispatch sync is best-effort */ }
+
+    // SMS notifications (best-effort)
+    try {
+      const TwilioService = require('../services/twilio');
+      const dateLabel = new Date(slot_date + 'T12:00:00').toLocaleDateString('en-US', {
+        weekday: 'long', month: 'long', day: 'numeric',
+      });
+      const startLabel = minToTime12(timeToMin(slot_start));
+      const endLabel = minToTime12(endMin);
+
+      await TwilioService.sendSMS(customer.phone,
+        `Your Waves appointment is confirmed!\n\n📅 ${dateLabel}\n⏰ ${startLabel} – ${endLabel}\n📍 ${customer.address_line1}, ${customer.city}\n\nConfirmation: ${confCode}\n\nReply RESCHEDULE if you need to change. 🌊`,
+        { customerId: custId, messageType: 'booking_confirmation' }
+      );
+
+      if (process.env.ADAM_PHONE) {
+        await TwilioService.sendSMS(process.env.ADAM_PHONE,
+          `📱 New self-booked appointment:\n${customer.first_name} ${customer.last_name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city}\nSource: ${source || 'portal'}\nCode: ${confCode}`,
+          { messageType: 'internal_alert' }
+        );
+      }
+    } catch (err) {
+      logger.error(`[booking:confirm] SMS failed: ${err.message}`);
+    }
+
+    res.json({ booking, confirmationCode: confCode });
+  } catch (err) {
+    logger.error('[booking:confirm] failed:', err);
+    next(err);
+  }
+});
+
+// GET /api/booking/embed-snippet?source=xyz — returns copy-paste HTML for WordPress
+router.get('/embed-snippet', (req, res) => {
+  const source = (req.query.source || 'wp-site').replace(/[^a-z0-9_-]/gi, '');
+  const baseUrl = process.env.PUBLIC_URL || 'https://portal.wavespestcontrol.com';
+  const iframeSrc = `${baseUrl}/book?source=${encodeURIComponent(source)}`;
+  const snippet = `<!-- Waves Pest Control — Online Booking Embed -->
+<iframe
+  src="${iframeSrc}"
+  title="Book Waves Pest Control"
+  style="width:100%; min-height:760px; border:0; border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,0.08);"
+  loading="lazy"
+  referrerpolicy="no-referrer-when-downgrade"
+  allow="clipboard-write"
+></iframe>
+<script>
+  // Auto-resize the iframe to its content (optional)
+  window.addEventListener('message', function (e) {
+    if (e.data && e.data.type === 'waves-book-resize' && typeof e.data.height === 'number') {
+      var f = document.querySelector('iframe[src*="' + ${JSON.stringify(baseUrl)} + '"]');
+      if (f) f.style.height = e.data.height + 'px';
+    }
+  });
+</script>`;
+  res.json({ source, url: iframeSrc, snippet });
+});
+
+// GET /api/booking/sources — aggregate by source (for admin dashboard / intelligence bar)
+router.get('/sources', async (req, res, next) => {
+  try {
+    const { days = 30 } = req.query;
+    const since = new Date();
+    since.setDate(since.getDate() - parseInt(days));
+    const rows = await db('self_booked_appointments')
+      .where('created_at', '>=', since)
+      .whereNot('status', 'cancelled')
+      .select('source')
+      .count('* as count')
+      .groupBy('source')
+      .orderBy('count', 'desc');
+    res.json({ since: since.toISOString().split('T')[0], sources: rows });
   } catch (err) { next(err); }
 });
 
@@ -50,7 +460,11 @@ router.get('/status/:code', async (req, res, next) => {
     const booking = await db('self_booked_appointments')
       .where('confirmation_code', req.params.code)
       .leftJoin('customers', 'self_booked_appointments.customer_id', 'customers.id')
-      .select('self_booked_appointments.*', 'customers.first_name', 'customers.last_name', 'customers.address_line1', 'customers.city')
+      .select(
+        'self_booked_appointments.*',
+        'customers.first_name', 'customers.last_name',
+        'customers.address_line1', 'customers.city'
+      )
       .first();
 
     if (!booking) return res.status(404).json({ error: 'Booking not found' });

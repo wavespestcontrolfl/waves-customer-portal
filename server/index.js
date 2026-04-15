@@ -84,21 +84,37 @@ const app = express();
 // MIDDLEWARE
 // =========================================================================
 
-// Security headers — CSP allows Google Fonts, APIs, and inline styles
-app.use(helmet({
+// Security headers — CSP allows Google Fonts, APIs, and inline styles.
+// The /book public booking page is iframe-embeddable on the WordPress fleet,
+// so it gets permissive frame-ancestors via a scoped middleware.
+const cspDirectives = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com"],
+  styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+  fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
+  imgSrc: ["'self'", "https:", "data:", "blob:"],
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://api.rentcast.io", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com"],
+  frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com"],
+  mediaSrc: ["'self'", "https:"],
+};
+
+const strictHelmet = helmet({ contentSecurityPolicy: { directives: cspDirectives } });
+const embedHelmet = helmet({
   contentSecurityPolicy: {
     directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
-      imgSrc: ["'self'", "https:", "data:", "blob:"],
-      connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://api.rentcast.io", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com"],
-      frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com"],
-      mediaSrc: ["'self'", "https:"],
+      ...cspDirectives,
+      frameAncestors: ["'self'", "https:", "http://localhost:*"],
     },
   },
-}));
+  frameguard: false, // disable X-Frame-Options so frame-ancestors governs embedding
+});
+
+app.use((req, res, next) => {
+  // Only the /book HTML document needs frame-ancestors loosened
+  // (query string is not part of req.path; handle trailing slash too)
+  if (req.path === '/book' || req.path === '/book/') return embedHelmet(req, res, next);
+  return strictHelmet(req, res, next);
+});
 
 // CORS — allow frontend dev server and production domain
 app.use(cors({

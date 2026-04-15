@@ -76,6 +76,7 @@ const PricingLogicPage = lazy(() => import('./pages/admin/PricingLogicPage'));
 const AdminEmailPage = lazy(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazy(() => import('./pages/admin/BankingPage'));
 import BookingPage from './pages/BookingPage';
+const PublicBookingPage = lazy(() => import('./pages/PublicBookingPage'));
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
@@ -124,6 +125,7 @@ export default function App() {
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
+          <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookingPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />
           <Route path="/tech" element={<TechLayout />}>
