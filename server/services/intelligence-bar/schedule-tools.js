@@ -108,6 +108,25 @@ const SCHEDULE_TOOLS = [
     },
   },
   {
+    name: 'find_available_slots',
+    description: `Find the best time slots to insert a new job based on tech calendars and drive-time detour cost. Returns a ranked list — the top slot adds the LEAST extra driving. Use when the operator says "when can we fit in the Smith job?" or "find me a time for a Bradenton pest control next week" or "what's the best slot for a customer at 123 Oak St?".
+Use for: "find time for", "when can we schedule", "best slot for", "fit in a new job".`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_id: { type: 'string', description: 'Existing customer UUID (preferred when available)' },
+        address: { type: 'string', description: 'Full street address to geocode (e.g. "123 Oak St, Bradenton FL 34202")' },
+        lat: { type: 'number', description: 'Latitude if already known' },
+        lng: { type: 'number', description: 'Longitude if already known' },
+        duration_minutes: { type: 'number', description: 'How long the service takes (default 60)' },
+        date_from: { type: 'string', description: 'YYYY-MM-DD start of search range (default: today)' },
+        date_to: { type: 'string', description: 'YYYY-MM-DD end of search range (default: today + 7 days)' },
+        technician_name: { type: 'string', description: 'Optional: restrict to one tech (Adam, Jose, Jacob)' },
+        top_n: { type: 'number', description: 'How many slots to return (default 10)' },
+      },
+    },
+  },
+  {
     name: 'cancel_and_reschedule_far_out',
     description: `Find appointments scheduled more than N days from now and propose rescheduling them sooner. Use when operator says "cancel anything more than 30 days out and move them up."`,
     input_schema: {
@@ -133,6 +152,7 @@ async function executeScheduleTool(toolName, input) {
       case 'move_stops_to_day': return await moveStopsToDay(input.service_ids, input.new_date, input.reason);
       case 'swap_tech_assignments': return await swapTechAssignments(input.date, input.tech_a_name, input.tech_b_name);
       case 'find_schedule_gaps': return await findScheduleGaps(input);
+      case 'find_available_slots': return await findAvailableSlotsTool(input);
       case 'get_day_summary': return await getDaySummary(input.date);
       case 'get_zone_density': return await getZoneDensity(input.date);
       case 'cancel_and_reschedule_far_out': return await cancelAndRescheduleFarOut(input);
@@ -555,6 +575,52 @@ async function getZoneDensity(date) {
     zones: analysis,
     consolidation_candidates: analysis.filter(z => z.consolidation_opportunity),
   };
+}
+
+
+async function findAvailableSlotsTool(input) {
+  const { findAvailableSlots } = require('../scheduling/find-time');
+  let { customer_id, address, lat, lng, duration_minutes, date_from, date_to, technician_name, top_n } = input;
+
+  // Resolve customer → lat/lng if provided
+  if (customer_id && (!lat || !lng)) {
+    const c = await db('customers').where('id', customer_id).select('lat', 'lng', 'address_line1', 'city', 'state', 'zip').first();
+    if (c?.lat && c?.lng) { lat = parseFloat(c.lat); lng = parseFloat(c.lng); }
+    else if (c && !address) address = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
+  }
+
+  // Geocode if still needed
+  if ((!lat || !lng) && address) {
+    const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!key) return { error: 'No Google Maps API key configured for geocoding' };
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${key}`;
+    const r = await fetch(url);
+    const data = await r.json();
+    if (data.status !== 'OK' || !data.results?.length) return { error: `Geocode failed: ${data.status}` };
+    lat = data.results[0].geometry.location.lat;
+    lng = data.results[0].geometry.location.lng;
+  }
+
+  if (!lat || !lng) return { error: 'Need a customer_id, address, or lat/lng to find slots' };
+
+  let technician_id;
+  if (technician_name) {
+    const tech = await db('technicians').whereILike('name', `%${technician_name}%`).first();
+    if (!tech) return { error: `Technician "${technician_name}" not found` };
+    technician_id = tech.id;
+  }
+
+  const today = new Date().toISOString().split('T')[0];
+  const weekOut = (() => { const d = new Date(); d.setDate(d.getDate() + 7); return d.toISOString().split('T')[0]; })();
+
+  return await findAvailableSlots({
+    lat, lng,
+    durationMinutes: duration_minutes || 60,
+    dateFrom: date_from || today,
+    dateTo: date_to || weekOut,
+    technicianId: technician_id,
+    topN: top_n || 10,
+  });
 }
 
 

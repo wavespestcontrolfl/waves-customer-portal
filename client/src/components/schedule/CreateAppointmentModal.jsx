@@ -112,6 +112,11 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
   const [isCallback, setIsCallback] = useState(false);
   const [expandedCategory, setExpandedCategory] = useState(null);
 
+  // Find-a-Time state
+  const [findingTimes, setFindingTimes] = useState(false);
+  const [timeSlots, setTimeSlots] = useState(null); // null = hidden, [] = searched but none, [...] = results
+  const [slotError, setSlotError] = useState('');
+
   // Date/Time/Tech state — default to today + next 15-min boundary in local time
   const _now = new Date();
   const _ymd = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}-${String(_now.getDate()).padStart(2, '0')}`;
@@ -206,6 +211,49 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
     const [h, m] = windowStart.split(':').map(Number);
     const endMin = h * 60 + m + dur;
     return `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+  };
+
+  // Find best times — calls /api/admin/schedule/find-time
+  const handleFindTimes = async () => {
+    if (!selectedCustomer || !selectedService) return;
+    setFindingTimes(true);
+    setSlotError('');
+    setTimeSlots(null);
+    try {
+      const dur = selectedService.duration || selectedService.default_duration_minutes || 60;
+      const today = new Date();
+      const from = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      const endD = new Date(today); endD.setDate(endD.getDate() + 7);
+      const to = `${endD.getFullYear()}-${String(endD.getMonth() + 1).padStart(2, '0')}-${String(endD.getDate()).padStart(2, '0')}`;
+      const r = await adminFetch('/admin/schedule/find-time', {
+        method: 'POST',
+        body: JSON.stringify({
+          customerId: selectedCustomer.id,
+          durationMinutes: dur,
+          dateFrom: from,
+          dateTo: to,
+          topN: 8,
+        }),
+      });
+      setTimeSlots(r.slots || []);
+    } catch (e) {
+      setSlotError(e.message || 'Failed to find times');
+      setTimeSlots([]);
+    }
+    setFindingTimes(false);
+  };
+
+  const applySlot = (slot) => {
+    setApptDate(slot.date);
+    setWindowStart(slot.start_time);
+    setTechMode('choose');
+    setTechId(slot.technician.id);
+    setTimeSlots(null);
+  };
+
+  const fmtSlotDay = (d) => {
+    const dt = new Date(d + 'T12:00:00');
+    return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   };
 
   const fmtTime = (t) => {
@@ -388,7 +436,71 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
 
         {/* Section 3: Date, Time & Tech */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Date, Time & Tech</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Date, Time & Tech</div>
+            {selectedCustomer && selectedService && (
+              <button
+                onClick={handleFindTimes}
+                disabled={findingTimes}
+                style={{
+                  padding: '6px 12px', background: findingTimes ? '#CBD5E1' : `${D.teal}15`,
+                  color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
+                  fontSize: 12, fontWeight: 600, cursor: findingTimes ? 'default' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
+                title="Rank the best slots by drive-time detour"
+              >
+                ✨ {findingTimes ? 'Finding...' : 'Find best times'}
+              </button>
+            )}
+          </div>
+
+          {slotError && (
+            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
+              {slotError}
+            </div>
+          )}
+
+          {timeSlots !== null && (
+            <div style={{ marginBottom: 12, background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : 'No feasible slots in next 7 days'}
+                </div>
+                <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
+              </div>
+              {timeSlots.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
+                  {timeSlots.map((slot) => (
+                    <button
+                      key={`${slot.date}-${slot.technician.id}-${slot.start_time}`}
+                      onClick={() => applySlot(slot)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                        background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
+                        cursor: 'pointer', textAlign: 'left', minHeight: 52,
+                      }}
+                    >
+                      <div style={{
+                        fontSize: 11, fontWeight: 700, color: D.teal, background: `${D.teal}15`,
+                        borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
+                      }}>#{slot.rank}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>
+                          {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
+                        </div>
+                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: D.teal, fontWeight: 600 }}>Use →</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
             <div>
               <label style={labelStyle}>Date</label>

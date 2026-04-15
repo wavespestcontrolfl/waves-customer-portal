@@ -69,6 +69,7 @@ SCHEDULE-SPECIFIC CAPABILITIES:
 - Get a full day briefing with zone density analysis
 - Cancel far-out appointments and reschedule sooner
 - Analyze zone consolidation opportunities
+- Find best time slots for a new job — use find_available_slots when asked "when can we fit X?" or "find a time for this customer". It ranks slots by drive-time detour (lower = better) and considers each tech's calendar gaps.
 
 ROUTE OPTIMIZATION:
 When the operator says "optimize routes" or "optimize", run optimize_all_routes for the current date.
@@ -683,6 +684,7 @@ router.get('/quick-actions', async (req, res) => {
     { id: 'zone_density', label: 'Zone Density', prompt: 'Analyze zone density for today — any consolidation opportunities?', icon: '📍' },
     { id: 'gaps_this_week', label: 'Gaps This Week', prompt: 'Where do we have open capacity this week?', icon: '📅' },
     { id: 'far_out', label: 'Far-Out Appointments', prompt: 'Find appointments scheduled more than 30 days out that we could move sooner', icon: '⏩' },
+    { id: 'find_time', label: 'Find a Time', prompt: 'Find the best time slot for a new customer — ask me for the address and service type', icon: '✨' },
     { id: 'overdue_no_appt', label: 'Overdue + No Appt', prompt: 'Which overdue customers have no upcoming appointment at all?', icon: '🚨' },
     { id: 'pest_overdue_sched', label: 'Pest Overdue', prompt: 'Quarterly pest customers overdue — schedule them into open slots this week', icon: '🐛' },
   ];
