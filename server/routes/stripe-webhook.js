@@ -71,6 +71,18 @@ router.post(
           await handlePaymentIntentSucceeded(event.data.object);
           break;
 
+        case 'payment_intent.processing':
+          await handlePaymentIntentProcessing(event.data.object);
+          break;
+
+        case 'payment_intent.requires_action':
+          await handlePaymentIntentRequiresAction(event.data.object);
+          break;
+
+        case 'payment_intent.canceled':
+          await handlePaymentIntentCanceled(event.data.object);
+          break;
+
         case 'payment_intent.payment_failed':
           await handlePaymentIntentFailed(event.data.object);
           break;
@@ -79,12 +91,33 @@ router.post(
           await handleChargeRefunded(event.data.object);
           break;
 
+        case 'charge.dispute.created':
+          await handleDisputeCreated(event.data.object);
+          break;
+
+        case 'charge.dispute.closed':
+          await handleDisputeClosed(event.data.object);
+          break;
+
+        case 'charge.dispute.funds_withdrawn':
+        case 'charge.dispute.funds_reinstated':
+          await handleDisputeFunds(event.data.object, event.type);
+          break;
+
+        case 'mandate.updated':
+          await handleMandateUpdated(event.data.object);
+          break;
+
         case 'payment_method.detached':
           await handlePaymentMethodDetached(event.data.object);
           break;
 
         case 'setup_intent.succeeded':
           await handleSetupIntentSucceeded(event.data.object);
+          break;
+
+        case 'setup_intent.setup_failed':
+          await handleSetupIntentFailed(event.data.object);
           break;
 
         case 'payout.paid':
@@ -425,6 +458,199 @@ async function handleAchFailure(paymentIntent, failureReason) {
   } catch (err) {
     logger.error(`[stripe-webhook] ACH failure handler error: ${err.message}`);
   }
+}
+
+/**
+ * payment_intent.processing — ACH money in flight (3–5 business days to clear).
+ * Mark payment/invoice as processing so admin sees "pending bank transfer"
+ * instead of "unpaid". Do NOT mark invoice paid until succeeded fires.
+ */
+async function handlePaymentIntentProcessing(paymentIntent) {
+  const piId = paymentIntent.id;
+  logger.info(`[stripe-webhook] PaymentIntent processing (ACH in flight): ${piId}`);
+
+  await db('payments')
+    .where({ stripe_payment_intent_id: piId })
+    .update({ status: 'processing' })
+    .catch(() => {});
+
+  await db('invoices')
+    .where({ stripe_payment_intent_id: piId })
+    .whereNot({ status: 'paid' })
+    .update({ status: 'processing' })
+    .catch(() => {});
+}
+
+/**
+ * payment_intent.requires_action — Customer must complete a step (e.g. micro-
+ * deposit verification for ACH). Notify customer to finish setup.
+ */
+async function handlePaymentIntentRequiresAction(paymentIntent) {
+  const piId = paymentIntent.id;
+  const nextAction = paymentIntent.next_action?.type || 'unknown';
+  logger.warn(`[stripe-webhook] PaymentIntent requires action: ${piId} (${nextAction})`);
+
+  try {
+    const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+    if (payment?.customer_id) {
+      const customer = await db('customers').where({ id: payment.customer_id }).first();
+      if (customer?.phone) {
+        const twilio = require('../services/twilio');
+        await twilio.sendSMS(customer.phone,
+          `Hi ${customer.first_name}, your bank account verification is incomplete. Please finish setup at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to complete your payment. — Waves`
+        );
+      }
+    }
+  } catch (err) {
+    logger.error(`[stripe-webhook] requires_action handler failed: ${err.message}`);
+  }
+}
+
+/**
+ * payment_intent.canceled — Stale or admin-cancelled PI. Mark payment cancelled.
+ */
+async function handlePaymentIntentCanceled(paymentIntent) {
+  const piId = paymentIntent.id;
+  logger.info(`[stripe-webhook] PaymentIntent canceled: ${piId}`);
+
+  await db('payments')
+    .where({ stripe_payment_intent_id: piId })
+    .whereNotIn('status', ['paid', 'refunded'])
+    .update({ status: 'canceled' })
+    .catch(() => {});
+}
+
+/**
+ * charge.dispute.created — ACH return or chargeback. ~60 days to respond.
+ * Flip invoice back to unpaid, log dispute, alert admin.
+ */
+async function handleDisputeCreated(dispute) {
+  const chargeId = dispute.charge;
+  const reason = dispute.reason || 'unknown';
+  const amount = (dispute.amount / 100).toFixed(2);
+  logger.warn(`[stripe-webhook] Dispute created: ${dispute.id} on charge ${chargeId} — $${amount} (${reason})`);
+
+  // Revert payment + invoice
+  const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+  if (payment) {
+    await db('payments').where({ id: payment.id }).update({
+      status: 'disputed',
+      failure_reason: `Dispute: ${reason}`,
+    }).catch(() => {});
+
+    if (payment.invoice_id) {
+      await db('invoices').where({ id: payment.invoice_id }).update({
+        status: 'unpaid',
+        paid_at: null,
+      }).catch(() => {});
+    }
+  }
+
+  // Admin notification
+  try {
+    await db('notifications').insert({
+      recipient_type: 'admin',
+      category: 'dispute',
+      title: `\u26A0\uFE0F Dispute opened: $${amount}`,
+      body: `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString() : 'soon'}. Charge: ${chargeId}`,
+      icon: '\u26A0\uFE0F',
+      link: '/admin/invoices',
+    });
+  } catch (err) {
+    logger.error(`[stripe-webhook] Dispute notification failed: ${err.message}`);
+  }
+}
+
+/**
+ * charge.dispute.closed — Dispute resolved (won, lost, or warning closed).
+ */
+async function handleDisputeClosed(dispute) {
+  const chargeId = dispute.charge;
+  const status = dispute.status;
+  const amount = (dispute.amount / 100).toFixed(2);
+  logger.info(`[stripe-webhook] Dispute closed: ${dispute.id} status=${status}`);
+
+  const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+  if (payment) {
+    if (status === 'won' || status === 'warning_closed') {
+      // Funds reinstated — restore paid status
+      await db('payments').where({ id: payment.id }).update({ status: 'paid' }).catch(() => {});
+      if (payment.invoice_id) {
+        await db('invoices').where({ id: payment.invoice_id }).update({
+          status: 'paid',
+          paid_at: new Date().toISOString(),
+        }).catch(() => {});
+      }
+    } else if (status === 'lost') {
+      await db('payments').where({ id: payment.id }).update({ status: 'failed' }).catch(() => {});
+    }
+  }
+
+  try {
+    await db('notifications').insert({
+      recipient_type: 'admin',
+      category: 'dispute',
+      title: `Dispute ${status}: $${amount}`,
+      body: `Dispute on charge ${chargeId} closed as ${status}.`,
+      icon: status === 'won' ? '\u2705' : '\u274C',
+      link: '/admin/invoices',
+    });
+  } catch { /* non-critical */ }
+}
+
+/**
+ * charge.dispute.funds_withdrawn / funds_reinstated — Cash flow visibility only.
+ */
+async function handleDisputeFunds(dispute, eventType) {
+  const direction = eventType.endsWith('withdrawn') ? 'withdrawn' : 'reinstated';
+  const amount = (dispute.amount / 100).toFixed(2);
+  logger.info(`[stripe-webhook] Dispute funds ${direction}: $${amount} on ${dispute.id}`);
+}
+
+/**
+ * mandate.updated — Customer revoked ACH authorization, or status changed.
+ * If revoked/inactive, suspend autopay and flag the customer.
+ */
+async function handleMandateUpdated(mandate) {
+  const status = mandate.status;
+  const pmId = mandate.payment_method;
+  logger.info(`[stripe-webhook] Mandate updated: ${mandate.id} status=${status} pm=${pmId}`);
+
+  if (status === 'inactive') {
+    try {
+      const pm = await db('payment_methods').where({ stripe_payment_method_id: pmId }).first();
+      if (pm?.customer_id) {
+        await db('customers').where({ id: pm.customer_id }).update({
+          ach_status: 'revoked',
+          autopay_enabled: false,
+        }).catch(() => {});
+        logger.warn(`[stripe-webhook] ACH mandate revoked for customer ${pm.customer_id} — autopay disabled`);
+      }
+    } catch (err) {
+      logger.error(`[stripe-webhook] Mandate update handler failed: ${err.message}`);
+    }
+  }
+}
+
+/**
+ * setup_intent.setup_failed — Bank verification failed (wrong micro-deposits, etc.)
+ */
+async function handleSetupIntentFailed(setupIntent) {
+  const reason = setupIntent.last_setup_error?.message || 'Unknown';
+  logger.warn(`[stripe-webhook] SetupIntent failed: ${setupIntent.id} — ${reason}`);
+
+  try {
+    const customerId = setupIntent.metadata?.waves_customer_id;
+    if (customerId) {
+      const customer = await db('customers').where({ id: customerId }).first();
+      if (customer?.phone) {
+        const twilio = require('../services/twilio');
+        await twilio.sendSMS(customer.phone,
+          `Hi ${customer.first_name}, we couldn't verify your bank account. Please try again at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing or use a card. — Waves`
+        );
+      }
+    }
+  } catch { /* non-critical */ }
 }
 
 module.exports = router;
