@@ -487,7 +487,7 @@ Return a JSON object with exactly these fields:
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
+      max_tokens: 4096,
       messages: [{
         role: 'user',
         content: [
@@ -520,6 +520,7 @@ Return a JSON object with exactly these fields:
   }
 
   const data = await resp.json();
+  console.log(`[CLAUDE VISION DEBUG] stop_reason: ${data.stop_reason}, usage: ${JSON.stringify(data.usage || {})}`);
   const text = data.content
     .filter(b => b.type === 'text')
     .map(b => b.text)
@@ -527,7 +528,12 @@ Return a JSON object with exactly these fields:
 
   // Parse JSON — strip any markdown fences if present
   const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-  return JSON.parse(clean);
+  try {
+    return JSON.parse(clean);
+  } catch (e) {
+    console.error(`[CLAUDE VISION DEBUG] JSON.parse failed: ${e.message}. Response tail: ${clean.slice(-200)}`);
+    throw e;
+  }
 }
 
 
@@ -1252,7 +1258,12 @@ Respond ONLY with valid JSON. No markdown, no explanation.`;
           { text: prompt },
         ],
       }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 2000, responseMimeType: 'application/json' },
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 4096,
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingBudget: 0 },
+      },
     }),
   });
 
@@ -1262,6 +1273,7 @@ Respond ONLY with valid JSON. No markdown, no explanation.`;
   }
 
   const data = await resp.json();
+  console.log(`[GEMINI DEBUG] finishReason: ${data.candidates?.[0]?.finishReason}, usage: ${JSON.stringify(data.usageMetadata || {})}`);
   // Gemini 2.5+ may return multiple parts (thinking + response)
   const parts = data.candidates?.[0]?.content?.parts || [];
   let text = '';
