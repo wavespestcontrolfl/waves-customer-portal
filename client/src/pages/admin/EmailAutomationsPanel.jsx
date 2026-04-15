@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -20,7 +20,7 @@ function timeAgo(d) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600 });
 const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -56,7 +56,7 @@ export default function EmailAutomationsPanel() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 20, fontWeight: 700, color: D.white }}>Email Automations</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: D.heading }}>Email Automations</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
             Beehiiv + SMS — manual triggers
             {beehiivConfigured
@@ -71,7 +71,7 @@ export default function EmailAutomationsPanel() {
       {stats && (
         <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
           {[
-            { label: 'Total Sent', value: stats.total, color: D.white },
+            { label: 'Total Sent', value: stats.total, color: D.heading },
             { label: 'Last 24h', value: stats.last24h, color: D.teal },
             { label: 'Last 7d', value: stats.last7d, color: D.teal },
             { label: 'Success', value: stats.success, color: D.green },
@@ -149,7 +149,7 @@ function SendTab({ automations, showToast, onSent }) {
       {/* Left: Customer search + selection */}
       <div>
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>1. Select Customer</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>1. Select Customer</div>
           <input
             value={search} onChange={e => doSearch(e.target.value)}
             placeholder="Search by name, phone, or email..."
@@ -164,7 +164,7 @@ function SendTab({ automations, showToast, onSent }) {
                   background: selectedCustomer?.id === c.id ? `${D.teal}15` : D.input,
                   border: `1px solid ${selectedCustomer?.id === c.id ? D.teal : 'transparent'}`,
                 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{c.firstName} {c.lastName}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{c.firstName} {c.lastName}</div>
                 <div style={{ fontSize: 11, color: D.muted }}>
                   {c.phone && <span>{c.phone} </span>}
                   {c.email && <span>· {c.email} </span>}
@@ -189,7 +189,7 @@ function SendTab({ automations, showToast, onSent }) {
       {/* Right: Pick automation + send */}
       <div>
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>2. Pick Automation & Send</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>2. Pick Automation & Send</div>
 
           <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
             {automations.filter(a => a.enabled).map(a => (
@@ -251,7 +251,7 @@ function AutomationsTab({ automations, showToast, onUpdate }) {
         <div key={a.key} style={{ ...sCard, marginBottom: 0, display: 'flex', alignItems: 'flex-start', gap: 16, opacity: a.enabled ? 1 : 0.5 }}>
           <div style={{ flex: 1 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{a.name}</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{a.name}</div>
               <label style={{ position: 'relative', display: 'inline-block', width: 40, height: 22, cursor: 'pointer' }}>
                 <input type="checkbox" checked={a.enabled} onChange={e => toggleAuto(a.key, e.target.checked)} style={{ opacity: 0, width: 0, height: 0, position: 'absolute' }} />
                 <span style={{ position: 'absolute', inset: 0, background: a.enabled ? D.green : D.border, borderRadius: 22, transition: '.2s' }} />
@@ -265,7 +265,7 @@ function AutomationsTab({ automations, showToast, onUpdate }) {
               {a.smsTemplate && <span style={sBadge(`${D.green}22`, D.green)}>+ SMS</span>}
             </div>
             <div style={{ display: 'flex', gap: 16, fontSize: 12, color: D.muted }}>
-              <span>Total: <strong style={{ color: D.white }}>{a.totalRuns}</strong></span>
+              <span>Total: <strong style={{ color: D.heading }}>{a.totalRuns}</strong></span>
               <span>Success: <strong style={{ color: D.green }}>{a.successCount}</strong></span>
               <span>Last 7d: <strong style={{ color: D.teal }}>{a.last7Days}</strong></span>
             </div>
@@ -283,7 +283,7 @@ function LogTab({ log, onRefresh }) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>Recent Sends</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Recent Sends</div>
         <button onClick={onRefresh} style={sBtn(D.teal, D.white)}>Refresh</button>
       </div>
       {log.length === 0 ? (
@@ -302,7 +302,7 @@ function LogTab({ log, onRefresh }) {
               return (
                 <tr key={l.id}>
                   <td style={{ padding: 10, fontSize: 13 }}>
-                    <div style={{ fontWeight: 600, color: D.white }}>{l.first_name} {l.last_name}</div>
+                    <div style={{ fontWeight: 600, color: D.heading }}>{l.first_name} {l.last_name}</div>
                     <div style={{ fontSize: 11, color: D.muted }}>{l.customer_email}</div>
                   </td>
                   <td style={{ padding: 10, fontSize: 13, color: D.teal }}>{l.automation_name || l.automation_key}</td>

@@ -14,15 +14,17 @@ function adminFetch(path, options = {}) {
 
 // ── Colors (matched to admin panel theme) ──
 const C = {
-  bg: '#0f1923', raised: '#1a2937', surface: '#1e293b', hover: '#253347', input: '#0f172a',
-  bdr: 'rgba(14,165,233,0.08)', bdrA: 'rgba(14,165,233,0.25)',
-  acc: '#0ea5e9', accG: 'rgba(14,165,233,0.15)', accD: '#0284c7',
-  grn: '#10b981', grnG: 'rgba(16,185,129,0.12)',
-  org: '#f59e0b', orgG: 'rgba(245,158,11,0.12)',
-  red: '#ef4444', redG: 'rgba(239,68,68,0.12)',
+  bg: '#F1F5F9', raised: '#FFFFFF', surface: '#FFFFFF', hover: '#F0F7FC', input: '#FFFFFF',
+  bdr: 'rgba(10,126,194,0.08)', bdrA: 'rgba(10,126,194,0.25)',
+  acc: '#0A7EC2', accG: 'rgba(10,126,194,0.15)', accD: '#065A8C',
+  grn: '#16A34A', grnG: 'rgba(22,163,74,0.12)',
+  org: '#F0A500', orgG: 'rgba(240,165,0,0.12)',
+  red: '#C0392B', redG: 'rgba(192,57,43,0.12)',
   blu: '#3b82f6', bluG: 'rgba(59,130,246,0.12)',
-  pur: '#8b5cf6', purG: 'rgba(139,92,246,0.12)',
-  t1: '#e2e8f0', t2: '#94a3b8', t3: '#64748b',
+  pur: '#7C3AED', purG: 'rgba(124,58,237,0.12)',
+  t1: '#334155', t2: '#64748B', t3: '#64748b',
+  heading: '#0F172A',
+  inputBorder: '#CBD5E1',
   sans: "'DM Sans', sans-serif",
 };
 
@@ -238,8 +240,8 @@ function Tag({ type, children }) {
 function Btn({ variant = 'ghost', onClick, disabled, children, style: extra }) {
   const base = { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 8, fontFamily: C.sans, fontSize: 11, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', border: 'none', transition: 'all .15s', whiteSpace: 'nowrap', opacity: disabled ? 0.5 : 1 };
   const variants = {
-    primary: { background: C.acc, color: C.bg },
-    success: { background: C.grn, color: C.bg },
+    primary: { background: C.acc, color: '#fff' },
+    success: { background: C.grn, color: '#fff' },
     ghost: { background: 'transparent', border: `1px solid ${C.bdr}`, color: C.t2 },
     danger: { background: C.redG, color: C.red, border: '1px solid transparent' },
     warn: { background: C.orgG, color: C.org, border: '1px solid transparent' },
@@ -467,7 +469,7 @@ export default function ReviewVelocityEngine() {
       <div style={{
         position: 'fixed', bottom: 20, right: 20, background: C.surface, border: `1px solid ${C.grn}`,
         borderRadius: 8, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8,
-        boxShadow: '0 8px 32px rgba(0,0,0,.4)', zIndex: 300, fontSize: 12, fontWeight: 500,
+        boxShadow: '0 8px 32px rgba(0,0,0,.12)', zIndex: 300, fontSize: 12, fontWeight: 500,
         transform: toast ? 'translateY(0)' : 'translateY(80px)', opacity: toast ? 1 : 0, transition: 'all .3s',
         pointerEvents: 'none',
       }}>
@@ -955,12 +957,12 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
     <div style={{
       position: 'fixed', top: 0, right: 0, width: 520, height: '100vh', background: C.surface,
       borderLeft: `1px solid ${C.bdrA}`, zIndex: 150, overflowY: 'auto',
-      boxShadow: '-8px 0 32px rgba(0,0,0,.3)',
+      boxShadow: '-8px 0 32px rgba(0,0,0,.1)',
     }}>
       {/* Header */}
       <div style={{ padding: '16px 20px', borderBottom: `1px solid ${C.bdr}`, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', position: 'sticky', top: 0, background: C.surface, zIndex: 1 }}>
         <div>
-          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4, margin: 0 }}>{c.name}</h2>
+          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4, margin: 0, color: C.heading }}>{c.name}</h2>
           <div style={{ fontSize: 11, color: C.t2 }}>{c.addr} · {c.lastSvc} · {c.daysAgo} days ago</div>
           <div style={{ fontSize: 11, color: C.acc, marginTop: 2 }}>{c.phoneF || 'No phone'}</div>
         </div>
@@ -1098,8 +1100,8 @@ function BatchModal({ selectedIds, customers, onClose, updateCustomer, addLog, s
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.65)', zIndex: 200, display: 'grid', placeItems: 'center', backdropFilter: 'blur(6px)' }} onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.bdrA}`, borderRadius: 16, padding: 24, minWidth: 440, maxWidth: 560, boxShadow: '0 24px 64px rgba(0,0,0,.4)' }}>
-        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 6, margin: 0 }}>📤 Batch Send Review Requests</h3>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.bdrA}`, borderRadius: 16, padding: 24, minWidth: 440, maxWidth: 560, boxShadow: '0 24px 64px rgba(0,0,0,.12)' }}>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 6, margin: 0, color: C.heading }}>📤 Batch Send Review Requests</h3>
         <p style={{ fontSize: 12, color: C.t2, lineHeight: 1.6, marginBottom: 14 }}>
           You're about to send personalized review request SMS to <strong>{selectedIds.size}</strong> customers.
           Each message will be personalized with their name and routed to the correct GBP link.

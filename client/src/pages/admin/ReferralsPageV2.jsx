@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', purple: '#7C3AED', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function af(path, opts = {}) {
@@ -45,9 +45,9 @@ const thSt = { padding: '10px 14px', textAlign: 'left', fontSize: 11, fontWeight
 const thR = { ...thSt, textAlign: 'right' };
 const tdSt = { padding: '10px 14px', fontSize: 13, color: D.text, borderBottom: `1px solid ${D.border}` };
 const tdR = { ...tdSt, textAlign: 'right', fontFamily: MONO };
-const inputSt = { width: '100%', padding: '8px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
-const btnPrimary = { padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer' };
-const btnSmall = (color) => ({ padding: '3px 10px', borderRadius: 4, border: 'none', background: color, color: D.white, fontSize: 10, fontWeight: 600, cursor: 'pointer' });
+const inputSt = { width: '100%', padding: '8px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.heading, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
+const btnPrimary = { padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' };
+const btnSmall = (color) => ({ padding: '3px 10px', borderRadius: 4, border: 'none', background: color, color: D.heading, fontSize: 10, fontWeight: 600, cursor: 'pointer' });
 
 export default function ReferralsPageV2() {
   const [tab, setTab] = useState('dashboard');
@@ -183,7 +183,7 @@ export default function ReferralsPageV2() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>Referral Program</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Referral Program</div>
         {msg && <div style={{ padding: '6px 16px', borderRadius: 8, background: msg.includes('Error') ? `${D.red}33` : `${D.green}33`, color: msg.includes('Error') ? D.red : D.green, fontSize: 13 }}>{msg}</div>}
       </div>
 
@@ -211,11 +211,11 @@ export default function ReferralsPageV2() {
           </div>
           <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
             <div style={{ flex: 1, minWidth: 300, background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Recent Activity</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Recent Activity</div>
               {queue.length === 0 ? <div style={{ color: D.muted, padding: 20, textAlign: 'center', fontSize: 13 }}>No referrals yet</div> : queue.slice(0, 8).map(r => (
                 <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}33` }}>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{r.referee_name || `${r.referral_first_name || ''} ${r.referral_last_name || ''}`.trim()}</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{r.referee_name || `${r.referral_first_name || ''} ${r.referral_last_name || ''}`.trim()}</div>
                     <div style={{ fontSize: 11, color: D.muted }}>from {r.promoter_first ? `${r.promoter_first} ${r.promoter_last}` : '--'} / {r.source || 'portal'}</div>
                   </div>
                   <Badge status={r.status} />
@@ -223,12 +223,12 @@ export default function ReferralsPageV2() {
               ))}
             </div>
             <div style={{ flex: 1, minWidth: 300, background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Top Promoters</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Top Promoters</div>
               {promoters.filter(p => p.total_referrals_converted > 0).slice(0, 8).map(p => (
                 <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}33` }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{p.first_name} {p.last_name}</div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{p.first_name} {p.last_name}</div>
                       <div style={{ fontSize: 11, color: D.muted }}>{p.total_referrals_converted} converted / {p.total_referrals_sent} sent</div>
                     </div>
                     <MilestoneBadge level={p.milestone_level || 'none'} />
@@ -246,7 +246,7 @@ export default function ReferralsPageV2() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* Submit form */}
           <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Submit Referral</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Submit Referral</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 8, marginBottom: 8 }}>
               <input placeholder="Friend's name *" value={refForm.name} onChange={e => setRefForm(f => ({ ...f, name: e.target.value }))} style={inputSt} />
               <input placeholder="Phone *" value={refForm.phone} onChange={e => setRefForm(f => ({ ...f, phone: e.target.value }))} style={inputSt} />
@@ -261,7 +261,7 @@ export default function ReferralsPageV2() {
           </div>
           {/* Queue table */}
           <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Referral Queue ({queue.length})</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Referral Queue ({queue.length})</div>
             {queue.length === 0 ? <div style={{ color: D.muted, padding: 20, textAlign: 'center', fontSize: 13 }}>No pending referrals</div> : (
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -323,7 +323,7 @@ export default function ReferralsPageV2() {
       {/* PAYOUTS */}
       {tab === 'payouts' && (
         <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Payouts</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Payouts</div>
           {payouts.length === 0 ? <div style={{ color: D.muted, padding: 20, textAlign: 'center', fontSize: 13 }}>No payout requests</div> : (
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -390,7 +390,7 @@ export default function ReferralsPageV2() {
             </div>
             {fields.map(section => (
               <div key={section.section} style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>{section.section}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>{section.section}</div>
                 <div style={{ display: 'grid', gridTemplateColumns: section.items[0]?.type === 'textarea' ? '1fr' : 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
                   {section.items.map(f => (
                     <div key={f.key}>
@@ -417,7 +417,7 @@ export default function ReferralsPageV2() {
           {!analytics ? <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading analytics...</div> : (<>
             {/* Funnel */}
             <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Conversion Funnel</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Conversion Funnel</div>
               <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
                 <Stat label="Clicks" value={analytics.funnel.clicks} sub={`${analytics.funnel.uniqueClicks} unique`} color={D.purple} />
                 <Stat label="Referrals" value={analytics.funnel.referrals} sub={`${analytics.funnel.clickToReferralRate}% click-to-ref`} color={D.teal} />
@@ -428,7 +428,7 @@ export default function ReferralsPageV2() {
             </div>
             {/* Financial */}
             <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Financial / ROI</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Financial / ROI</div>
               <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
                 <Stat label="Rewards Issued" value={fd(analytics.financial.totalRewardsDollars)} color={D.amber} />
                 <Stat label="Paid Out" value={fc(analytics.financial.totalPaidOutCents)} />
@@ -439,7 +439,7 @@ export default function ReferralsPageV2() {
             </div>
             {/* Top promoters bar chart */}
             <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Top Promoters</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Top Promoters</div>
               {analytics.topPromoters.length === 0 ? <div style={{ color: D.muted, fontSize: 13 }}>No conversions yet</div> : analytics.topPromoters.map((p, i) => {
                 const maxConv = analytics.topPromoters[0].conversions || 1;
                 const pct = Math.round((p.conversions / maxConv) * 100);
@@ -464,7 +464,7 @@ export default function ReferralsPageV2() {
       {convertModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999 }} onClick={() => setConvertModal(null)}>
           <div style={{ background: D.card, borderRadius: 16, padding: 28, width: 420, border: `1px solid ${D.border}` }} onClick={e => e.stopPropagation()}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.white, marginBottom: 16 }}>Convert Referral</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 16 }}>Convert Referral</div>
             <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>Converting: {convertModal.name}</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div>
@@ -509,7 +509,7 @@ export default function ReferralsPageV2() {
       {enrollModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999 }} onClick={() => setEnrollModal(false)}>
           <div style={{ background: D.card, borderRadius: 16, padding: 28, width: 400, border: `1px solid ${D.border}` }} onClick={e => e.stopPropagation()}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.white, marginBottom: 16 }}>Enroll Customer as Promoter</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 16 }}>Enroll Customer as Promoter</div>
             <input placeholder="Search customer name or phone..." value={custSearch} onChange={e => searchCustomers(e.target.value)} style={{ ...inputSt, marginBottom: 8 }} />
             {custResults.length > 0 && (
               <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 200, overflow: 'auto' }}>

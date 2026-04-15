@@ -3,7 +3,7 @@ const BlogPage = lazy(() => import('./BlogPage'));
 const SEODashboardPage = lazy(() => import('./SEODashboardPage'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', orange: '#f97316', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', orange: '#EA580C', text: '#334155', muted: '#64748B', white: '#FFFFFF', purple: '#7C3AED', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path) {
@@ -102,7 +102,7 @@ function DashboardTab({ domain }) {
       </div>
       <Card>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>Top Queries</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Top Queries</div>
           <div style={{ display: 'flex', gap: 4 }}>
             {[['all', 'All'], ['nonbrand', 'Non-Brand'], ['branded', 'Branded']].map(([k, l]) => (
               <button key={k} onClick={() => setQueryFilter(k)} style={{ padding: '4px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 11, background: queryFilter === k ? D.teal : D.bg, color: queryFilter === k ? D.white : D.muted }}>{l}</button>
@@ -152,7 +152,7 @@ function AdvisorTab() {
   if (!report) return (
     <Card style={{ padding: 40, textAlign: 'center' }}>
       <div style={{ color: D.muted, marginBottom: 16 }}>No SEO reports yet.</div>
-      <button onClick={generate} disabled={generating} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, opacity: generating ? 0.7 : 1 }}>
+      <button onClick={generate} disabled={generating} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, opacity: generating ? 0.7 : 1 }}>
         {generating ? 'Syncing & generating...' : 'Sync GSC & Generate Report'}
       </button>
     </Card>
@@ -165,17 +165,17 @@ function AdvisorTab() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
           <div style={{ width: 72, height: 72, borderRadius: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, fontFamily: MONO, background: gradeColor(data.grade) + '22', color: gradeColor(data.grade), border: `2px solid ${gradeColor(data.grade)}44` }}>{data.grade || '?'}</div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>SEO Grade</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>SEO Grade</div>
             <div style={{ fontSize: 14, color: D.text, lineHeight: 1.5 }}>{data.overall_assessment}</div>
           </div>
         </div>
       </Card>
       {(data.recommendations || []).length > 0 && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Recommendations</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Recommendations</div>
           {data.recommendations.map((rec, i) => (
             <div key={i} style={{ padding: '12px 14px', background: D.bg, borderRadius: 8, marginBottom: 6, borderLeft: `3px solid ${rec.priority === 'high' ? D.red : rec.priority === 'medium' ? D.amber : D.muted}` }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{rec.action}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{rec.action}</div>
               {rec.reasoning && <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{rec.reasoning}</div>}
             </div>
           ))}
@@ -198,7 +198,7 @@ function SimpleTableTab({ endpoint, title, columns, emptyMsg }) {
           {Object.entries(data.summary).map(([k, v]) => <KpiCard key={k} label={k.replace(/([A-Z])/g, ' $1').trim()} value={typeof v === 'number' ? v.toLocaleString() : v} />)}
         </div>
       )}
-      <Card><div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 4 }}>{title}</div><div style={{ fontSize: 13, color: D.muted }}>Data loaded from {endpoint}</div></Card>
+      <Card><div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 4 }}>{title}</div><div style={{ fontSize: 13, color: D.muted }}>Data loaded from {endpoint}</div></Card>
     </div>
   );
 }
@@ -283,7 +283,7 @@ function BacklinksTab() {
         <>
           {data.anchorDistribution && (
             <Card>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Anchor Text Distribution</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Anchor Text Distribution</div>
               {Object.entries(data.anchorDistribution).map(([type, count]) => (
                 <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
                   <div style={{ width: 100, fontSize: 12, color: D.text, textAlign: 'right', textTransform: 'capitalize' }}>{type.replace('_', ' ')}</div>
@@ -300,7 +300,7 @@ function BacklinksTab() {
               <div style={{ fontSize: 14, fontWeight: 600, color: D.red, marginBottom: 12 }}>Toxic Links</div>
               {data.recentToxic.map((l, i) => (
                 <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, borderLeft: `3px solid ${sevColor[l.severity]}` }}>
-                  <div style={{ fontSize: 12, color: D.white }}>{l.source_domain}</div>
+                  <div style={{ fontSize: 12, color: D.heading }}>{l.source_domain}</div>
                   <div style={{ fontSize: 11, color: D.muted }}>Anchor: "{l.anchor_text}" · Toxicity: {l.toxicity_score}/100</div>
                 </div>
               ))}
@@ -309,7 +309,7 @@ function BacklinksTab() {
           {/* Trend */}
           {(data.snapshots || []).length > 1 && (
             <Card>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Backlink Trend</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Backlink Trend</div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', height: 60 }}>
                 {(data.snapshots || []).reverse().map((s, i) => (
                   <div key={i} style={{ flex: 1, textAlign: 'center' }}>
@@ -327,11 +327,11 @@ function BacklinksTab() {
       {/* Citations sub-tab */}
       {subTab === 'citations' && (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Directory Citations ({data.citationStats?.total || 0})</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Directory Citations ({data.citationStats?.total || 0})</div>
           {(data.citations || []).map((c, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${D.border}` }}>
               <div style={{ width: 8, height: 8, borderRadius: 4, background: statusColor[c.status] || D.muted, flexShrink: 0 }} />
-              <div style={{ flex: 1, fontSize: 13, color: D.white }}>{c.directory_name}</div>
+              <div style={{ flex: 1, fontSize: 13, color: D.heading }}>{c.directory_name}</div>
               {c.listing_url && <a href={c.listing_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, textDecoration: 'none' }}>View</a>}
               <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: (statusColor[c.status] || D.muted) + '22', color: statusColor[c.status] || D.muted, textTransform: 'uppercase', fontWeight: 700 }}>{c.status}</span>
             </div>
@@ -349,7 +349,7 @@ function BacklinksTab() {
           ) : (data.competitorGaps || []).map((g, i) => (
             <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontSize: 12, color: D.white, fontWeight: 500 }}>{g.source_domain}</div>
+                <div style={{ fontSize: 12, color: D.heading, fontWeight: 500 }}>{g.source_domain}</div>
                 <span style={{ fontSize: 10, color: D.muted }}>DR: {g.source_domain_rating || '?'}</span>
               </div>
               <div style={{ fontSize: 11, color: D.muted }}>Links to: {g.competitor_domain} · Anchor: "{(g.anchor_text || '').substring(0, 40)}"</div>
@@ -362,14 +362,14 @@ function BacklinksTab() {
       {subTab === 'llm' && (
         <Card>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>LLM Mentions ({data.llmStats?.wavesMentioned || 0}/{data.llmStats?.total || 0} mentioning Waves)</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>LLM Mentions ({data.llmStats?.wavesMentioned || 0}/{data.llmStats?.total || 0} mentioning Waves)</div>
             <button onClick={() => adminPost('/admin/seo/backlinks/llm-mentions', {})} style={{ padding: '4px 10px', borderRadius: 4, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 11, cursor: 'pointer' }}>Check Now</button>
           </div>
           {(data.llmMentions || []).length === 0 ? (
             <div style={{ fontSize: 13, color: D.muted, padding: 20, textAlign: 'center' }}>Click "Check Now" to scan LLM responses for Waves mentions</div>
           ) : (data.llmMentions || []).map((m, i) => (
             <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, borderLeft: `3px solid ${m.waves_mentioned ? D.green : D.muted}` }}>
-              <div style={{ fontSize: 12, color: D.white }}>"{m.query}"</div>
+              <div style={{ fontSize: 12, color: D.heading }}>"{m.query}"</div>
               <div style={{ fontSize: 11, color: m.waves_mentioned ? D.green : D.muted }}>{m.waves_mentioned ? '✅ Waves mentioned' : '— Not mentioned'} · {m.llm_platform} · {m.check_date}</div>
             </div>
           ))}
@@ -476,7 +476,7 @@ function BacklinkAgentPanel() {
 
       {/* Controls */}
       <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={handleProcess} disabled={processing || (stats?.pending || 0) === 0} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: processing || !(stats?.pending) ? 0.5 : 1 }}>
+        <button onClick={handleProcess} disabled={processing || (stats?.pending || 0) === 0} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: processing || !(stats?.pending) ? 0.5 : 1 }}>
           {processing ? 'Processing...' : `Process Queue (${stats?.pending || 0})`}
         </button>
         <button onClick={loadData} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Refresh</button>
@@ -485,7 +485,7 @@ function BacklinkAgentPanel() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* Manual URL Input */}
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Add URLs</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Add URLs</div>
             <textarea
               value={urlInput}
               onChange={e => setUrlInput(e.target.value)}
@@ -495,7 +495,7 @@ function BacklinkAgentPanel() {
             />
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: 12, color: D.muted }}>{urlInput.split('\n').filter(u => u.trim()).length} URLs detected</span>
-              <button onClick={handleAddUrls} style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Add to Queue</button>
+              <button onClick={handleAddUrls} style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Add to Queue</button>
             </div>
             {addResult && (
               <div style={{ marginTop: 8, fontSize: 12, color: D.green }}>
@@ -506,7 +506,7 @@ function BacklinkAgentPanel() {
 
           {/* Queue Table */}
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Queue ({queue.length})</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Queue ({queue.length})</div>
             <div style={{ maxHeight: 400, overflowY: 'auto' }}>
               {queue.length === 0 ? (
                 <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No URLs in queue. Add some above or poll X feeds.</div>
@@ -544,7 +544,7 @@ function BacklinkAgentPanel() {
           {/* Profiles */}
           {profiles.length > 0 && (
             <Card>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Completed Profiles ({profiles.length})</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Completed Profiles ({profiles.length})</div>
               <div style={{ maxHeight: 300, overflowY: 'auto' }}>
                 {profiles.map(p => (
                   <div key={p.id} style={{ padding: '8px 0', borderBottom: `1px solid ${D.border}33`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -634,7 +634,7 @@ function CitationsTab() {
         {(data.citations || []).map((c, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${D.border}` }}>
             <div style={{ width: 8, height: 8, borderRadius: 4, background: sc[c.status] || D.muted }} />
-            <div style={{ flex: 1, fontSize: 13, color: D.white }}>{c.directory_name}</div>
+            <div style={{ flex: 1, fontSize: 13, color: D.heading }}>{c.directory_name}</div>
             <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: (sc[c.status] || D.muted) + '22', color: sc[c.status] || D.muted, textTransform: 'uppercase', fontWeight: 700 }}>{c.status}</span>
           </div>
         ))}
@@ -667,7 +667,7 @@ function AnalyticsTab() {
   if (overview?.configured === false) return (
     <Card style={{ textAlign: 'center', padding: 60 }}>
       <div style={{ fontSize: 48, marginBottom: 16 }}>📉</div>
-      <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>Google Analytics Not Connected</div>
+      <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>Google Analytics Not Connected</div>
       <div style={{ fontSize: 13, color: D.muted }}>Set GOOGLE_SERVICE_ACCOUNT_JSON and GA4_PROPERTY_ID in Railway, then grant the service account Viewer access in GA4.</div>
     </Card>
   );
@@ -710,7 +710,7 @@ function AnalyticsTab() {
       {/* Traffic Sources */}
       {sources.length > 0 && (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Traffic Sources</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Traffic Sources</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {sources.map((s, i) => {
               const totalSessions = sources.reduce((sum, x) => sum + (parseInt(x.sessions) || 0), 0);
@@ -720,9 +720,9 @@ function AnalyticsTab() {
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: D.bg, borderRadius: 8 }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: srcColor, flexShrink: 0 }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, color: D.white, fontWeight: 500 }}>{s.source || 'unknown'}{s.medium ? ` / ${s.medium}` : ''}</div>
+                    <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{s.source || 'unknown'}{s.medium ? ` / ${s.medium}` : ''}</div>
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: D.white, fontFamily: MONO }}>{fmt(s.sessions)}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, fontFamily: MONO }}>{fmt(s.sessions)}</div>
                   <div style={{ fontSize: 11, color: D.muted, fontFamily: MONO, width: 50, textAlign: 'right' }}>{pctOfTotal}%</div>
                 </div>
               );
@@ -734,7 +734,7 @@ function AnalyticsTab() {
       {/* Top Pages */}
       {topPages.length > 0 && (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Top Landing Pages</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Top Landing Pages</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <div className="seo-top-pages-header" style={{ display: 'flex', padding: '0 12px 8px', fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               <div style={{ flex: 1 }}>Page</div>
@@ -745,7 +745,7 @@ function AnalyticsTab() {
             {topPages.slice(0, 20).map((p, i) => (
               <div key={i} className="seo-top-pages-row" style={{ display: 'flex', alignItems: 'center', padding: '8px 12px', background: i % 2 === 0 ? D.bg : 'transparent', borderRadius: 6 }}>
                 <div style={{ flex: 1, fontSize: 12, color: D.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', wordBreak: 'break-all' }}>{p.page || p.pagePath}</div>
-                <div style={{ width: 70, textAlign: 'right', fontSize: 12, fontWeight: 600, color: D.white, fontFamily: MONO, flexShrink: 0 }}>{fmt(p.sessions)}</div>
+                <div style={{ width: 70, textAlign: 'right', fontSize: 12, fontWeight: 600, color: D.heading, fontFamily: MONO, flexShrink: 0 }}>{fmt(p.sessions)}</div>
                 <div style={{ width: 70, textAlign: 'right', fontSize: 12, color: p.bounceRate > 0.6 ? D.red : D.muted, fontFamily: MONO, flexShrink: 0 }}>{pct(p.bounceRate)}</div>
                 <div style={{ width: 70, textAlign: 'right', fontSize: 12, color: D.muted, fontFamily: MONO, flexShrink: 0 }}>{dur(p.avgSessionDuration)}</div>
               </div>
@@ -780,8 +780,8 @@ function SiteAuditTab() {
   if (!data?.hasData) return (
     <Card style={{ textAlign: 'center', padding: 60 }}>
       <div style={{ fontSize: 48, marginBottom: 16 }}>{'🩺'}</div>
-      <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No Audit Data Yet</div>
-      <button onClick={runAudit} disabled={running} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Auditing...' : 'Run Site Audit'}</button>
+      <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>No Audit Data Yet</div>
+      <button onClick={runAudit} disabled={running} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Auditing...' : 'Run Site Audit'}</button>
     </Card>
   );
 
@@ -832,13 +832,13 @@ function SiteAuditTab() {
         <div style={{ fontSize: 12, color: D.muted }}>
           Last audit: {run.run_date ? new Date(run.run_date).toLocaleString() : 'N/A'}
         </div>
-        <button onClick={runAudit} disabled={running} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Running...' : 'Re-run Audit'}</button>
+        <button onClick={runAudit} disabled={running} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Running...' : 'Re-run Audit'}</button>
       </div>
 
       {/* Top Issues Summary */}
       {issues.length > 0 && (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Top Issues</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Top Issues</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {issues.slice(0, 15).map((iss, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: D.bg, borderRadius: 8, border: `1px solid ${D.border}` }}>
@@ -847,7 +847,7 @@ function SiteAuditTab() {
                   background: severityColor[iss.severity] || D.muted,
                 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, color: D.white, fontWeight: 500 }}>{iss.issue_type?.replace(/_/g, ' ')}</div>
+                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{iss.issue_type?.replace(/_/g, ' ')}</div>
                   {iss.details && <div style={{ fontSize: 11, color: D.muted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iss.details}</div>}
                 </div>
                 <div style={{ fontSize: 12, fontWeight: 700, color: severityColor[iss.severity] || D.muted, fontFamily: MONO, flexShrink: 0 }}>
@@ -862,7 +862,7 @@ function SiteAuditTab() {
       {/* Page-by-Page Breakdown */}
       <Card>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
             Pages {filter !== 'all' ? `(${filter})` : ''} — {filteredPages.length}
           </div>
           {filter !== 'all' && <button onClick={() => setFilter('all')} style={{ fontSize: 11, color: D.teal, background: 'none', border: 'none', cursor: 'pointer' }}>Show all</button>}
@@ -885,7 +885,7 @@ function SiteAuditTab() {
                   }}>{Math.round(p.technical_health_score || 0)}</div>
                   {/* URL + meta */}
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, color: D.white, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shortUrl(p.url)}</div>
+                    <div style={{ fontSize: 13, color: D.heading, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shortUrl(p.url)}</div>
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
                       {p.status_code && <span style={{ marginRight: 8 }}>{p.status_code}</span>}
                       {p.response_time_ms != null && <span style={{ marginRight: 8 }}>{p.response_time_ms}ms</span>}
@@ -959,7 +959,7 @@ function SiteAuditTab() {
       {/* Audit History */}
       {history.length > 1 && (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Audit History</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Audit History</div>
           <div className="seo-audit-history-grid" style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(history.length, 6)}, 1fr)`, gap: 8 }}>
             {history.slice(0, 6).map((h, i) => (
               <div key={i} style={{ textAlign: 'center', padding: 12, background: D.bg, borderRadius: 8, border: i === 0 ? `2px solid ${D.teal}` : `1px solid ${D.border}` }}>
@@ -1005,7 +1005,7 @@ export default function SEOPage() {
         }
       `}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>SEO</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>SEO</div>
         <div className="seo-domain-picker" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 12, color: D.muted }}>Domain:</span>
           <select

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#1e293b', card: '#0f172a', border: '#334155', teal: '#0ea5e9', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#FFFFFF', card: '#F8FAFC', border: '#E2E8F0', teal: '#0A7EC2', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#fff' };
 
 function timeAgo(dateStr) {
   const diff = (Date.now() - new Date(dateStr).getTime()) / 1000;
@@ -119,8 +119,8 @@ export default function SmsInboxWidget() {
                     onKeyDown={e => e.key === 'Enter' && handleReply(msg.id)}
                     placeholder="Quick reply..."
                     style={{
-                      flex: 1, padding: '8px 12px', borderRadius: 8, border: `1px solid ${D.border}`,
-                      background: D.bg, color: D.text, fontSize: 13, outline: 'none',
+                      flex: 1, padding: '8px 12px', borderRadius: 8, border: '1px solid #CBD5E1',
+                      background: '#FFFFFF', color: '#0F172A', fontSize: 13, outline: 'none',
                     }}
                   />
                   <button

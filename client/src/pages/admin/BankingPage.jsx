@@ -3,7 +3,7 @@ import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#a855f7', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
@@ -26,7 +26,7 @@ function adminFetchRaw(path) {
 const fmtM = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '$0.00';
 const fmtD = (d) => d ? new Date(d).toLocaleDateString() : '--';
 
-const STATUS_COLORS = { paid: D.green, pending: D.amber, in_transit: '#3b82f6', failed: D.red };
+const STATUS_COLORS = { paid: D.green, pending: D.amber, in_transit: '#0A7EC2', failed: D.red };
 
 function Badge({ children, color }) {
   return <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 9999, fontSize: 11, fontWeight: 600, background: `${color || D.muted}22`, color: color || D.muted, textTransform: 'capitalize', letterSpacing: 0.5 }}>{children}</span>;
@@ -40,7 +40,7 @@ function TabBtn({ active, label, onClick }) {
   );
 }
 
-const inputStyle = { background: '#0f1923', border: `1px solid ${D.border}`, borderRadius: 6, padding: '8px 12px', color: D.text, fontSize: 13, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' };
+const inputStyle = { background: '#FFFFFF', border: `1px solid ${D.inputBorder}`, borderRadius: 6, padding: '8px 12px', color: D.text, fontSize: 13, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' };
 const thStyle = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${D.border}` };
 const tdStyle = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13, color: D.text };
 
@@ -313,7 +313,7 @@ function ReconciliationTab() {
           <div key={item.id} style={{ background: D.card, border: `1px solid ${item.reconciled ? D.green + '44' : D.border}`, borderRadius: 10, padding: '14px 18px', marginBottom: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
               <div style={{ flex: 1, minWidth: 150 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{fmtD(item.date || item.created)}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{fmtD(item.date || item.created)}</div>
                 <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>Expected: <span style={{ fontFamily: MONO, color: D.text }}>{fmtM(item.expected_amount || item.amount)}</span></div>
               </div>
 
@@ -354,7 +354,7 @@ function ReconciliationTab() {
                   <button
                     onClick={() => handleReconcile(item.id)}
                     disabled={reconciling === item.id || !actuals[item.id]}
-                    style={{ background: D.green, border: 'none', borderRadius: 6, padding: '8px 14px', color: D.white, fontSize: 12, fontWeight: 600, cursor: reconciling === item.id || !actuals[item.id] ? 'not-allowed' : 'pointer', opacity: reconciling === item.id || !actuals[item.id] ? 0.5 : 1, alignSelf: 'flex-end' }}
+                    style={{ background: D.green, border: 'none', borderRadius: 6, padding: '8px 14px', color: '#fff', fontSize: 12, fontWeight: 600, cursor: reconciling === item.id || !actuals[item.id] ? 'not-allowed' : 'pointer', opacity: reconciling === item.id || !actuals[item.id] ? 0.5 : 1, alignSelf: 'flex-end' }}
                   >
                     {reconciling === item.id ? 'Saving...' : 'Reconcile'}
                   </button>
@@ -438,7 +438,7 @@ function ExportsTab() {
   return (
     <div>
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 16 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 14 }}>Export Settings</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Export Settings</div>
 
         {/* Date range */}
         <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -480,7 +480,7 @@ function ExportsTab() {
           </div>
         </div>
 
-        <button onClick={handleDownload} disabled={downloading} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '10px 24px', color: D.white, fontSize: 14, fontWeight: 700, cursor: downloading ? 'not-allowed' : 'pointer', opacity: downloading ? 0.6 : 1 }}>
+        <button onClick={handleDownload} disabled={downloading} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '10px 24px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: downloading ? 'not-allowed' : 'pointer', opacity: downloading ? 0.6 : 1 }}>
           {downloading ? 'Generating...' : 'Generate & Download'}
         </button>
       </div>
@@ -488,7 +488,7 @@ function ExportsTab() {
       {/* Preview */}
       {preview.length > 0 && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 10 }}>Preview (first 5 payouts in range)</div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 10 }}>Preview (first 5 payouts in range)</div>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
@@ -543,7 +543,7 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 16, padding: 28, width: '100%', maxWidth: 400 }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: D.white, marginBottom: 4 }}>Instant Payout</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Instant Payout</div>
         <div style={{ fontSize: 12, color: D.muted, marginBottom: 20 }}>Funds sent immediately to your bank. 1% fee applies.</div>
 
         <div style={{ marginBottom: 16 }}>
@@ -567,14 +567,14 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
             <span style={{ fontFamily: MONO, fontSize: 13, color: D.amber }}>{fmtM(fee)}</span>
           </div>
           <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 6, display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>Net Payout</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>Net Payout</span>
             <span style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700, color: D.green }}>{fmtM(net)}</span>
           </div>
         </div>
 
         <div style={{ display: 'flex', gap: 10 }}>
           <button onClick={onClose} style={{ flex: 1, background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 8, padding: '10px 16px', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
-          <button onClick={handleSubmit} disabled={submitting || !amount || parseFloat(amount) <= 0} style={{ flex: 1, background: D.green, border: 'none', borderRadius: 8, padding: '10px 16px', color: D.white, fontSize: 13, fontWeight: 700, cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.6 : 1 }}>
+          <button onClick={handleSubmit} disabled={submitting || !amount || parseFloat(amount) <= 0} style={{ flex: 1, background: D.green, border: 'none', borderRadius: 8, padding: '10px 16px', color: '#fff', fontSize: 13, fontWeight: 700, cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.6 : 1 }}>
             {submitting ? 'Processing...' : 'Confirm Payout'}
           </button>
         </div>
@@ -635,7 +635,7 @@ export default function BankingPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>Banking & Cash Flow</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Banking & Cash Flow</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>Stripe payouts, reconciliation & cash flow analysis</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -644,7 +644,7 @@ export default function BankingPage() {
               Last sync: {new Date(lastSync).toLocaleString()}
             </span>
           )}
-          <button onClick={handleSync} disabled={syncing} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '8px 18px', color: D.white, fontSize: 13, fontWeight: 600, cursor: syncing ? 'not-allowed' : 'pointer', opacity: syncing ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button onClick={handleSync} disabled={syncing} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '8px 18px', color: '#fff', fontSize: 13, fontWeight: 600, cursor: syncing ? 'not-allowed' : 'pointer', opacity: syncing ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>
             {syncing ? 'Syncing...' : 'Sync Stripe'}
           </button>
         </div>

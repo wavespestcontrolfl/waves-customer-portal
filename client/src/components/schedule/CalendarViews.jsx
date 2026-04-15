@@ -20,16 +20,16 @@ import { useState, useEffect, useCallback } from 'react';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155', input: '#0f172a',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444',
-  blue: '#3b82f6', purple: '#a855f7', gray: '#64748b',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
+  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', input: '#FFFFFF',
+  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B',
+  blue: '#3b82f6', purple: '#7C3AED', gray: '#64748b',
+  text: '#334155', muted: '#64748B', white: '#fff',
 };
 
 const CATEGORY_COLORS = {
-  pest: '#0ea5e9', lawn: '#10b981', mosquito: '#a855f7',
-  termite: '#f59e0b', tree_shrub: '#22c55e', rodent: '#ef4444',
-  callback: '#64748b', general: '#94a3b8',
+  pest: '#0A7EC2', lawn: '#16A34A', mosquito: '#7C3AED',
+  termite: '#F0A500', tree_shrub: '#16A34A', rodent: '#C0392B',
+  callback: '#64748b', general: '#64748B',
 };
 
 const CATEGORY_ICONS = {
@@ -185,7 +185,7 @@ export function WeekView({ startDate, onDateClick }) {
                   </div>
                   <div style={{
                     fontSize: 22, fontWeight: 800, fontFamily: MONO,
-                    color: isToday ? D.teal : D.white,
+                    color: isToday ? D.teal : '#0F172A',
                   }}>
                     {day.dayNum}
                   </div>
@@ -243,7 +243,7 @@ export function WeekView({ startDate, onDateClick }) {
         background: D.card, borderRadius: 10, border: `1px solid ${D.border}`,
         fontSize: 12, color: D.muted,
       }}>
-        <span><strong style={{ color: D.white, fontFamily: MONO }}>{data.days.reduce((sum, d) => sum + d.count, 0)}</strong> services this week</span>
+        <span><strong style={{ color: '#0F172A', fontFamily: MONO }}>{data.days.reduce((sum, d) => sum + d.count, 0)}</strong> services this week</span>
         <span><strong style={{ color: D.green, fontFamily: MONO }}>{data.days.reduce((sum, d) => sum + d.services.filter(s => s.status === 'completed').length, 0)}</strong> completed</span>
       </div>
     </div>
@@ -349,13 +349,13 @@ export function MonthView({ date, onDateClick }) {
                   background: day.isToday
                     ? D.teal + '0a'
                     : day.isWeekend
-                      ? D.bg + '40'
+                      ? '#F8FAFC'
                       : 'transparent',
                   opacity: day.isCurrentMonth ? 1 : 0.35,
                   transition: 'background 0.1s',
                 }}
-                onMouseEnter={e => { if (!day.isToday) e.currentTarget.style.background = D.card + '80'; }}
-                onMouseLeave={e => { if (!day.isToday) e.currentTarget.style.background = day.isWeekend ? D.bg + '40' : 'transparent'; }}
+                onMouseEnter={e => { if (!day.isToday) e.currentTarget.style.background = '#EEF2FF'; }}
+                onMouseLeave={e => { if (!day.isToday) e.currentTarget.style.background = day.isWeekend ? '#F8FAFC' : 'transparent'; }}
               >
                 {/* Day number */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
@@ -433,7 +433,7 @@ export function MonthView({ date, onDateClick }) {
                   flex: '1 1 150px', padding: '10px 14px',
                   background: D.bg, borderRadius: 8, border: `1px solid ${D.border}`,
                 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: D.white }}>{tech}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{tech}</div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                     <div style={{
                       flex: 1, height: 6, background: D.border, borderRadius: 3, overflow: 'hidden',
@@ -460,8 +460,8 @@ export function MonthView({ date, onDateClick }) {
 // ─── STYLES ──────────────────────────────────────────────────────
 
 const navBtn = {
-  width: 34, height: 34, borderRadius: 8, border: `1px solid ${D.border}`,
-  background: D.card, color: D.text, fontSize: 12, cursor: 'pointer',
+  width: 34, height: 34, borderRadius: 8, border: '1px solid #E2E8F0',
+  background: '#FFFFFF', color: '#334155', fontSize: 12, cursor: 'pointer',
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
   transition: 'all 0.15s',
 };

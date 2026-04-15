@@ -11,27 +11,28 @@ import ScheduleIntelligenceBar from '../../components/admin/ScheduleIntelligence
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155', input: '#0f172a',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444',
-  blue: '#3b82f6', purple: '#a855f7', gray: '#64748b',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
+  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', input: '#FFFFFF',
+  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B',
+  blue: '#0A7EC2', purple: '#7C3AED', gray: '#64748B',
+  text: '#334155', muted: '#64748B', white: '#FFFFFF',
+  heading: '#0F172A', inputBorder: '#CBD5E1',
 };
 
 const STATUS_CONFIG = {
   pending:   { label: 'Pending',   bg: 'transparent', color: D.amber, border: D.amber },
   confirmed: { label: 'Confirmed', bg: 'transparent', color: D.green, border: D.green },
-  en_route:  { label: 'En Route',  bg: D.teal,        color: D.white, border: D.teal, pulse: true },
-  on_site:   { label: 'On Site',   bg: D.blue,        color: D.white, border: D.blue },
-  completed: { label: 'Completed', bg: D.green,       color: D.white, border: D.green },
-  skipped:   { label: 'Skipped',   bg: D.gray,        color: D.white, border: D.gray, strike: true },
+  en_route:  { label: 'En Route',  bg: D.teal,        color: '#fff', border: D.teal, pulse: true },
+  on_site:   { label: 'On Site',   bg: D.blue,        color: '#fff', border: D.blue },
+  completed: { label: 'Completed', bg: D.green,       color: '#fff', border: D.green },
+  skipped:   { label: 'Skipped',   bg: D.gray,        color: '#fff', border: D.gray, strike: true },
 };
 
 const TIER_COLORS = {
-  Platinum: { bg: '#E5E4E2', text: '#0f1923' },
-  Gold:     { bg: '#FDD835', text: '#0f1923' },
-  Silver:   { bg: '#90CAF9', text: '#0f1923' },
+  Platinum: { bg: '#E5E4E2', text: '#0F172A' },
+  Gold:     { bg: '#FDD835', text: '#0F172A' },
+  Silver:   { bg: '#90CAF9', text: '#0F172A' },
   Bronze:   { bg: '#CD7F32', text: '#fff' },
-  'One-Time': { bg: '#0ea5e9', text: '#fff' },
+  'One-Time': { bg: '#0A7EC2', text: '#fff' },
 };
 
 const CHIP_ACTIONS = [
@@ -307,7 +308,7 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
 
       {/* Customer name + tier + lead score */}
       <div style={{ marginBottom: 6 }}>
-        <span style={{ fontSize: 16, fontWeight: 700, color: D.white }}>
+        <span style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
           {service.customerName}
         </span>
         <TierBadge tier={service.waveguardTier} />
@@ -353,7 +354,7 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
                 service._editing = false;
                 setUpdating(u => !u);
               } catch (e) { alert('Save failed: ' + e.message); }
-            }} style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: 'none', background: D.green, color: D.white, cursor: 'pointer' }}>Save</button>
+            }} style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: 'none', background: D.green, color: '#fff', cursor: 'pointer' }}>Save</button>
             <button onClick={() => { service._editing = false; setUpdating(u => !u); }} style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: 'none', background: 'transparent', color: D.muted, cursor: 'pointer' }}>Cancel</button>
           </>
         ) : (
@@ -444,20 +445,20 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
           <>
             {status !== 'en_route' && status !== 'on_site' && (
               <button onClick={() => changeStatus('en_route')} disabled={updating} style={{
-                ...btnBase, background: D.teal, color: D.white,
+                ...btnBase, background: D.teal, color: '#fff',
               }}>
                 En Route
               </button>
             )}
             {status === 'en_route' && (
               <button onClick={() => changeStatus('on_site')} disabled={updating} style={{
-                ...btnBase, background: D.blue, color: D.white,
+                ...btnBase, background: D.blue, color: '#fff',
               }}>
                 On Site
               </button>
             )}
             <button onClick={() => onComplete(service)} style={{
-              ...btnBase, background: D.green, color: D.white,
+              ...btnBase, background: D.green, color: '#fff',
             }}>
               Complete
             </button>
@@ -611,14 +612,14 @@ function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete,
         <div style={{
           width: 40, height: 40, borderRadius: 10, background: D.teal,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontWeight: 800, fontSize: 15, color: D.white, flexShrink: 0,
+          fontWeight: 800, fontSize: 15, color: D.heading, flexShrink: 0,
         }}>
           {tech.initials || tech.technicianName?.split(' ').map(w => w[0]).join('').toUpperCase() || '?'}
         </div>
 
         {/* Name + stats */}
         <div style={{ flex: 1, minWidth: 140 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
             {tech.technicianName}
             <span style={{ fontSize: 13, fontWeight: 400, color: D.muted, marginLeft: 10 }}>
               {completedCount}/{tech.totalServices || tech.services.length} done · ~{totalHrs}h
@@ -751,7 +752,7 @@ function ProtocolPanel({ service, onClose }) {
       {/* Header */}
       <div style={{ padding: '16px 20px', borderBottom: `1px solid ${D.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>📋 Service Protocol</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>📋 Service Protocol</div>
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{service.serviceType} — {service.customerName}</div>
         </div>
         <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 20, cursor: 'pointer' }}>✕</button>
@@ -778,9 +779,9 @@ function ProtocolPanel({ service, onClose }) {
             {/* OVERVIEW */}
             {activeSection === 'overview' && (
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Service Overview</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Service Overview</div>
                 <div style={{ background: D.bg, borderRadius: 10, padding: 14, border: `1px solid ${D.border}`, marginBottom: 12 }}>
-                  <div style={{ fontSize: 13, color: D.white, fontWeight: 600 }}>{service.serviceType}</div>
+                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>{service.serviceType}</div>
                   <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{service.customerName} — {service.address}</div>
                   <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>Est. duration: {service.estimatedDuration || 30} min</div>
                   {service.lawnType && <div style={{ fontSize: 12, color: D.teal, marginTop: 2 }}>{service.lawnType} — {service.lotSqft?.toLocaleString() || '?'} sf lot</div>}
@@ -827,14 +828,14 @@ function ProtocolPanel({ service, onClose }) {
             {/* SEASONAL PEST PRESSURE */}
             {activeSection === 'seasonal' && (
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 4 }}>This Month in SWFL</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 4 }}>This Month in SWFL</div>
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 12 }}>What to look for and how to respond</div>
                 {seasonal.length === 0 ? (
                   <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No seasonal data for this service line</div>
                 ) : seasonal.map((p, i) => (
                   <div key={i} style={{ background: D.bg, borderRadius: 10, padding: 14, border: `1px solid ${D.border}`, marginBottom: 8, borderLeft: `3px solid ${pressureColors[p.pressure_level] || D.gray}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{p.pest_name}</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{p.pest_name}</span>
                       <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '2px 8px', borderRadius: 8, background: `${pressureColors[p.pressure_level]}22`, color: pressureColors[p.pressure_level] }}>{p.pressure_level}</span>
                     </div>
                     <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.5 }}>{p.description}</div>
@@ -851,7 +852,7 @@ function ProtocolPanel({ service, onClose }) {
             {/* PHOTO ID GUIDE */}
             {activeSection === 'photos' && (
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 4 }}>Identification References</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Identification References</div>
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 12 }}>Visual ID guides for this service type</div>
                 {photos.length === 0 ? (
                   <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No photo references for this service</div>
@@ -868,13 +869,13 @@ function ProtocolPanel({ service, onClose }) {
             {/* COMMUNICATION SCRIPTS */}
             {activeSection === 'scripts' && (
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 4 }}>Customer Communication Scripts</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Customer Communication Scripts</div>
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 12 }}>What to say on the property</div>
                 {scripts.length === 0 ? (
                   <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No scripts for this service line</div>
                 ) : scripts.map((s, i) => (
                   <div key={i} style={{ background: D.bg, borderRadius: 10, padding: 14, border: `1px solid ${D.border}`, marginBottom: 8 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: D.white, marginBottom: 6 }}>{s.title}</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, marginBottom: 6 }}>{s.title}</div>
                     <div style={{ fontSize: 12, color: D.text, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{s.script}</div>
                     {s.tone_notes && (
                       <div style={{ fontSize: 11, color: D.amber, marginTop: 8, fontStyle: 'italic' }}>💡 {s.tone_notes}</div>
@@ -887,7 +888,7 @@ function ProtocolPanel({ service, onClose }) {
             {/* EQUIPMENT CHECKLIST */}
             {activeSection === 'equipment' && (
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 4 }}>Equipment Checklist</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Equipment Checklist</div>
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 12 }}>What to grab before this service</div>
                 {equipment.length === 0 ? (
                   <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No checklist for this service type</div>
@@ -980,12 +981,12 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
     { value: 'route_overload', label: 'Route Overload' },
   ];
 
-  const inputSt = { width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.input, color: D.white, fontSize: 14, outline: 'none', boxSizing: 'border-box' };
+  const inputSt = { width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.input, color: D.heading, fontSize: 14, outline: 'none', boxSizing: 'border-box' };
 
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div onClick={e => e.stopPropagation()} style={{ background: D.card, borderRadius: 16, padding: 24, maxWidth: 480, width: '100%', border: `1px solid ${D.border}`, maxHeight: '80vh', overflowY: 'auto' }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: D.white, marginBottom: 4 }}>Reschedule Service</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Reschedule Service</div>
         <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>{service.customerName} — {service.serviceType}</div>
 
         <div style={{ marginBottom: 14 }}>
@@ -1015,12 +1016,12 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
                 onMouseLeave={e => e.currentTarget.style.borderColor = D.border}
               >
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{opt.displayDate}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{opt.displayDate}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{opt.suggestedWindow?.display} · {opt.currentLoad} jobs · {opt.sameAreaServices} same area</div>
                 </div>
                 <button onClick={() => handleReschedule(opt)} disabled={sending} style={{
                   padding: '8px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                  background: D.teal, color: D.white, fontSize: 12, fontWeight: 600,
+                  background: D.teal, color: '#fff', fontSize: 12, fontWeight: 600,
                   opacity: sending ? 0.6 : 1,
                 }}>Select</button>
               </div>
@@ -1049,7 +1050,7 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
               <div style={{ display: 'flex', alignItems: 'flex-end' }}>
                 <button onClick={handleManualReschedule} disabled={sending || !manualDate} style={{
                   padding: '10px 16px', borderRadius: 10, border: 'none', cursor: 'pointer',
-                  background: manualDate ? D.teal : D.border, color: D.white, fontSize: 13, fontWeight: 600,
+                  background: manualDate ? D.teal : D.border, color: D.heading, fontSize: 13, fontWeight: 600,
                   opacity: sending ? 0.6 : 1, whiteSpace: 'nowrap',
                 }}>Reschedule</button>
               </div>
@@ -1220,7 +1221,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
         {/* Header */}
         <div style={{ padding: '20px 24px', borderBottom: `1px solid ${D.border}`, flexShrink: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.white }}>Complete Service</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Complete Service</div>
             <button onClick={() => onClose(false)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 24, cursor: 'pointer', padding: 4 }}>&times;</button>
           </div>
           <div style={{ fontSize: 14, color: D.text, fontWeight: 600 }}>{service.customerName}</div>
@@ -1347,7 +1348,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
             }} disabled={generating} style={{
               width: '100%', padding: '10px 16px', borderRadius: 10, border: 'none',
               background: generating ? D.card : 'linear-gradient(135deg, #8b5cf6, #6366f1)',
-              color: D.white, fontSize: 13, fontWeight: 700, cursor: generating ? 'wait' : 'pointer',
+              color: D.heading, fontSize: 13, fontWeight: 700, cursor: generating ? 'wait' : 'pointer',
               marginBottom: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
             }}>
               {generating ? 'Generating Report...' : 'Generate AI Service Report'}
@@ -1376,7 +1377,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
                       }} />
                       <button onClick={() => removePhoto(i)} style={{
                         position: 'absolute', top: -6, right: -6, width: 20, height: 20,
-                        borderRadius: '50%', background: D.red, color: D.white, border: 'none',
+                        borderRadius: '50%', background: D.red, color: '#fff', border: 'none',
                         fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                         lineHeight: 1, fontWeight: 700,
                       }}>&times;</button>
@@ -1545,7 +1546,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
               <div style={{ fontSize: 12, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
                 Next Scheduled Visit
               </div>
-              <div style={{ fontSize: 14, color: D.white, fontWeight: 600 }}>
+              <div style={{ fontSize: 14, color: D.heading, fontWeight: 600 }}>
                 {nextVisit.date ? new Date(nextVisit.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : 'N/A'}
                 <span style={{ fontSize: 12, color: D.muted, fontWeight: 400, marginLeft: 8 }}>
                   ({nextVisit.serviceType || 'Standard service'})
@@ -1570,7 +1571,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0 }}>
           <button onClick={handleSubmit} disabled={submitting} style={{
-            ...btnBase, width: '100%', background: D.green, color: D.white, fontSize: 14, height: 52,
+            ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
             opacity: submitting ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
             {submitting ? 'Completing...' : (
@@ -1911,7 +1912,7 @@ function ProtocolReferenceTab() {
           {/* Header */}
           <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' }}>
             <div style={{ padding: '14px 16px', background: D.bg }}>
-              <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>{trackData.name}</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>{trackData.name}</div>
             </div>
           </div>
 
@@ -2056,7 +2057,7 @@ function ProtocolReferenceTab() {
       {!selectedTrack && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 40, textAlign: 'center' }}>
           <div style={{ fontSize: 32, marginBottom: 12 }}>{'\ud83d\udccb'}</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 4 }}>Select a program above</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 4 }}>Select a program above</div>
           <div style={{ fontSize: 13, color: D.muted }}>View the full visit-by-visit protocol with products, rates, costs, and tier requirements.</div>
         </div>
       )}
@@ -2286,7 +2287,7 @@ export default function SchedulePage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 26, fontWeight: 700, color: D.white, marginBottom: 4 }}>Schedule & Dispatch</div>
+          <div style={{ fontSize: 26, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Schedule & Dispatch</div>
           {/* Date nav */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
             <button onClick={() => shiftDate(-1)} style={navBtnStyle} title="Previous">&#9664;</button>
@@ -2318,7 +2319,7 @@ export default function SchedulePage() {
                 background: D.card, padding: '8px 16px', borderRadius: 10, border: `1px solid ${D.border}`,
                 flexWrap: 'wrap',
               }}>
-                <span><strong style={{ color: D.white }}>{totalCount}</strong> services</span>
+                <span><strong style={{ color: D.heading }}>{totalCount}</strong> services</span>
                 <span><strong style={{ color: D.green }}>{completedCount}</strong> done</span>
                 <span><strong style={{ color: D.amber }}>{remainingCount}</strong> left</span>
                 <span style={{ borderLeft: `1px solid ${D.border}`, paddingLeft: 12 }}>
@@ -2330,7 +2331,7 @@ export default function SchedulePage() {
                 </span>
               </div>
               <button onClick={() => setShowNewAppt(!showNewAppt)} style={{
-                ...btnBase, background: D.green, color: D.white, fontSize: 13, height: 38,
+                ...btnBase, background: D.green, color: '#fff', fontSize: 13, height: 38,
               }}>+ New Appointment</button>
             </>
           )}

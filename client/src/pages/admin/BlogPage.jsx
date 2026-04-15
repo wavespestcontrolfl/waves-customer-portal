@@ -2,7 +2,7 @@ import { useState, useEffect, lazy, Suspense } from 'react';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', orange: '#f97316', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', orange: '#EA580C', text: '#334155', muted: '#64748B', white: '#FFFFFF', purple: '#7C3AED', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path) {
@@ -123,7 +123,7 @@ function PostList({ status, onSelectPost }) {
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
                 {p.seo_score != null && <span style={{ marginRight: 6 }}>{seoEmoji(p.seo_score)} {p.seo_score}/100</span>}
                 {p.title}
               </div>
@@ -248,7 +248,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Title</label>
             <input value={editing.title || ''} onChange={e => setEditing(prev => ({ ...prev, title: e.target.value }))} style={{
               width: '100%', padding: '10px 12px', borderRadius: 8, border: `1px solid ${D.border}`,
-              background: D.bg, color: D.white, fontSize: 15, fontWeight: 600,
+              background: D.bg, color: D.heading, fontSize: 15, fontWeight: 600,
             }} />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : '1fr 1fr 1fr 1fr', gap: 10 }}>
@@ -299,12 +299,12 @@ function PostEditor({ post, onBack, onUpdate }) {
       {/* Content */}
       <Card>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>Content</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Content</div>
           <div style={{ display: 'flex', gap: 8 }}>
             {!editing.content && (
               <button onClick={handleGenerate} disabled={generating} style={{
                 padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal,
-                color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: generating ? 0.5 : 1,
+                color: D.heading, fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: generating ? 0.5 : 1,
               }}>{generating ? 'Generating...' : '✨ Generate Content'}</button>
             )}
             {editing.content && (
@@ -358,7 +358,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           {optimization.suggested_title && (
             <div style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 8 }}>
               <div style={{ fontSize: 11, color: D.muted }}>Suggested Title</div>
-              <div style={{ fontSize: 13, color: D.white }}>{optimization.suggested_title}</div>
+              <div style={{ fontSize: 13, color: D.heading }}>{optimization.suggested_title}</div>
             </div>
           )}
           {optimization.suggested_meta && (
@@ -407,7 +407,7 @@ function PostEditor({ post, onBack, onUpdate }) {
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={handleSave} style={{
           padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal,
-          color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          color: D.heading, fontSize: 13, fontWeight: 600, cursor: 'pointer',
         }}>Save Draft</button>
         {editing.content && (
           <button onClick={handlePublish} disabled={publishing} style={{
@@ -453,7 +453,7 @@ function AuditTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       {/* Summary */}
       <Card>
-        <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 12 }}>{'📊'} Content Health Scorecard</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 12 }}>{'📊'} Content Health Scorecard</div>
         <div style={{ fontSize: 14, color: D.text, marginBottom: 16 }}>
           Total posts: <span style={{ fontFamily: MONO, color: D.teal }}>{audit.total}</span>
           {' '}({audit.published} published + {audit.drafts} drafts + {audit.queued} queued + {audit.ideas} ideas)
@@ -469,7 +469,7 @@ function AuditTab() {
               borderLeft: `3px solid ${prioColor}`,
             }}>
               <div style={{ fontSize: 11, color: prioColor, fontWeight: 700, marginBottom: 2 }}>{prioLabel}</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{rec.title}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{rec.title}</div>
               <div style={{ fontSize: 12, color: D.muted }}>{rec.action}</div>
             </div>
           );
@@ -478,7 +478,7 @@ function AuditTab() {
 
       {/* Topic Distribution */}
       <Card>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>By Topic</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>By Topic</div>
         {Object.entries(audit.topicDistribution?.counts || {}).sort((a, b) => b[1] - a[1]).map(([tag, count]) => {
           const isLow = count < 5;
           return (
@@ -504,7 +504,7 @@ function AuditTab() {
 
       {/* City Distribution */}
       <Card>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>By City</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>By City</div>
         {Object.entries(audit.cityDistribution?.counts || {}).sort((a, b) => b[1] - a[1]).map(([city, count]) => {
           const isHigh = audit.cityDistribution.overrepresented?.some(o => o.city === city);
           const isLow = count === 0;
@@ -638,7 +638,7 @@ function GenerateTab({ onGenerated }) {
 
         {/* A) Content type selector */}
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Content Type</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Content Type</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, 1fr)', gap: 10 }}>
             {CONTENT_TYPES.map(ct => (
               <div key={ct.id} onClick={() => setContentType(ct.id)} style={{
@@ -656,7 +656,7 @@ function GenerateTab({ onGenerated }) {
 
         {/* B) Topic input + suggestions */}
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 8 }}>Topic</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 8 }}>Topic</div>
           <textarea
             value={topic}
             onChange={e => setTopic(e.target.value)}
@@ -664,7 +664,7 @@ function GenerateTab({ onGenerated }) {
             rows={3}
             style={{
               width: '100%', padding: '10px 12px', borderRadius: 8, border: `1px solid ${D.border}`,
-              background: D.bg, color: D.white, fontSize: 14, lineHeight: 1.5,
+              background: D.bg, color: D.heading, fontSize: 14, lineHeight: 1.5,
               fontFamily: "'DM Sans', sans-serif", resize: 'vertical', boxSizing: 'border-box',
             }}
           />
@@ -683,7 +683,7 @@ function GenerateTab({ onGenerated }) {
 
         {/* C) City selector */}
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 10 }}>Target City</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 10 }}>Target City</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {CITIES.map(c => (
               <button key={c} onClick={() => setCity(c)} style={{
@@ -700,7 +700,7 @@ function GenerateTab({ onGenerated }) {
         <button onClick={handleGenerate} disabled={generating || !topic.trim()} style={{
           padding: '14px 24px', borderRadius: 10, border: 'none',
           background: generating ? D.border : D.teal,
-          color: D.white, fontSize: 15, fontWeight: 700, cursor: generating ? 'default' : 'pointer',
+          color: D.heading, fontSize: 15, fontWeight: 700, cursor: generating ? 'default' : 'pointer',
           opacity: !topic.trim() ? 0.4 : 1,
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
         }}>
@@ -721,7 +721,7 @@ function GenerateTab({ onGenerated }) {
 
         {/* Weather snapshot */}
         <Card style={{ padding: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 10 }}>{'🌡'} FAWN Weather</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>{'🌡'} FAWN Weather</div>
           {weather ? (
             <div style={{ fontSize: 12, color: D.text, lineHeight: 1.7 }}>
               {weather.temp && <div>Temp: <span style={{ color: D.teal, fontFamily: MONO }}>{weather.temp}F</span></div>}
@@ -748,7 +748,7 @@ function GenerateTab({ onGenerated }) {
 
         {/* Article checklist */}
         <Card style={{ padding: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 10 }}>Every article includes</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>Every article includes</div>
           {ARTICLE_CHECKLIST.map((item, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
               <span style={{ fontSize: 12 }}>{item.icon}</span>
@@ -796,7 +796,7 @@ export default function BlogPage() {
   if (selectedPost) {
     return (
       <div>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.white, marginBottom: 24 }}>Blog Editor</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 24 }}>Blog Editor</div>
         <PostEditor post={selectedPost} onBack={() => setSelectedPost(null)} onUpdate={(p) => { setSelectedPost(null); }} />
       </div>
     );
@@ -807,7 +807,7 @@ export default function BlogPage() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>Blog Content</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Blog Content</div>
         <button onClick={handleGenerateIdeas} disabled={generatingIdeas} style={{
           padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.teal}`, background: 'transparent',
           color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: generatingIdeas ? 0.5 : 1,

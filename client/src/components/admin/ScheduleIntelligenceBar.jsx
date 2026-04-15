@@ -15,7 +15,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#fff', heading: '#0F172A', inputBg: '#FFFFFF' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -35,8 +35,8 @@ function renderMarkdown(text) {
   let key = 0;
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i];
-    if (line.startsWith('### ')) { elements.push(<div key={key++} style={{ fontSize: 14, fontWeight: 700, color: D.white, marginTop: 12, marginBottom: 4 }}>{line.slice(4)}</div>); continue; }
-    if (line.startsWith('## ')) { elements.push(<div key={key++} style={{ fontSize: 15, fontWeight: 700, color: D.white, marginTop: 14, marginBottom: 6 }}>{line.slice(3)}</div>); continue; }
+    if (line.startsWith('### ')) { elements.push(<div key={key++} style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginTop: 12, marginBottom: 4 }}>{line.slice(4)}</div>); continue; }
+    if (line.startsWith('## ')) { elements.push(<div key={key++} style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginTop: 14, marginBottom: 6 }}>{line.slice(3)}</div>); continue; }
     if (line.match(/^[-•*]\s/)) {
       elements.push(<div key={key++} style={{ display: 'flex', gap: 8, paddingLeft: 4, marginBottom: 3 }}><span style={{ color: D.teal, fontSize: 10, marginTop: 5 }}>●</span><span>{renderInline(line.replace(/^[-•*]\s/, ''))}</span></div>);
       continue;
@@ -54,7 +54,7 @@ function renderMarkdown(text) {
 
 function renderInline(text) {
   return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
-    if (part.startsWith('**') && part.endsWith('**')) return <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith('**') && part.endsWith('**')) return <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
     return part;
   });
 }
@@ -222,7 +222,7 @@ export default function ScheduleIntelligenceBar({ date, scheduleData, onRefresh 
             placeholder="Optimize routes, assign techs, find gaps, move stops..."
             style={{
               width: '100%', padding: '9px 14px', paddingRight: 80,
-              background: D.bg, border: `1px solid ${D.border}`,
+              background: D.inputBg, border: `1px solid ${D.border}`,
               borderRadius: 10, color: D.text, fontSize: 13,
               fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box',
             }}
@@ -248,7 +248,7 @@ export default function ScheduleIntelligenceBar({ date, scheduleData, onRefresh 
         {/* Inline stats */}
         {totalServices > 0 && !expanded && (
           <div style={{ display: 'flex', gap: 8, fontSize: 11, color: D.muted, flexShrink: 0 }}>
-            <span><strong style={{ color: D.white }}>{totalServices}</strong> stops</span>
+            <span><strong style={{ color: D.heading }}>{totalServices}</strong> stops</span>
             <span><strong style={{ color: D.green }}>{completedCount}</strong> done</span>
             {unassignedCount > 0 && <span><strong style={{ color: D.red }}>{unassignedCount}</strong> unassigned</span>}
           </div>
@@ -303,7 +303,7 @@ export default function ScheduleIntelligenceBar({ date, scheduleData, onRefresh 
               value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Follow up — 'do it', 'assign to Adam', 'move to Thursday'..."
               style={{
-                flex: 1, padding: '7px 12px', background: D.bg, border: `1px solid ${D.border}`,
+                flex: 1, padding: '7px 12px', background: D.inputBg, border: `1px solid ${D.border}`,
                 borderRadius: 8, color: D.text, fontSize: 12, fontFamily: 'DM Sans, sans-serif', outline: 'none',
               }}
             />

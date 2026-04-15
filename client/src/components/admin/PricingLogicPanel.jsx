@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
 const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b',
-  red: '#ef4444', purple: '#a855f7',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
-  input: '#0f172a',
+  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0',
+  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500',
+  red: '#C0392B', purple: '#7C3AED',
+  text: '#334155', muted: '#64748B', white: '#fff',
+  input: '#FFFFFF',
 };
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -49,14 +49,14 @@ function EditCell({ value, onSave, type = 'number', width = 70 }) {
         onChange={e => setVal(e.target.value)}
         onBlur={() => { onSave(type === 'number' ? Number(val) : val); setEditing(false); }}
         onKeyDown={e => { if (e.key === 'Enter') { onSave(type === 'number' ? Number(val) : val); setEditing(false); } if (e.key === 'Escape') setEditing(false); }}
-        style={{ width, padding: '4px 6px', background: D.input, border: `1px solid ${D.teal}`, borderRadius: 4, color: D.white, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", textAlign: 'right', outline: 'none' }}
+        style={{ width, padding: '4px 6px', background: D.input, border: `1px solid ${D.teal}`, borderRadius: 4, color: '#0F172A', fontSize: 13, fontFamily: "'JetBrains Mono', monospace", textAlign: 'right', outline: 'none' }}
       />
     );
   }
   return (
     <span
       onClick={() => { setVal(value); setEditing(true); }}
-      style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 4, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", color: D.white, display: 'inline-block', minWidth: width, textAlign: 'right' }}
+      style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 4, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", color: '#0F172A', display: 'inline-block', minWidth: width, textAlign: 'right' }}
       title="Click to edit"
     >
       {typeof value === 'number' ? (value < 1 && value > 0 ? `${(value * 100).toFixed(1)}%` : value.toLocaleString(undefined, { minimumFractionDigits: value % 1 ? 2 : 0, maximumFractionDigits: 4 })) : value}
@@ -141,7 +141,7 @@ function ConfigCard({ config, onUpdate }) {
               {arr.map((row, i) => (
                 <tr key={i}>
                   {cols.map(c => (
-                    <td key={c} style={{ padding: '3px 8px', color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>{typeof row[c] === 'number' ? row[c].toLocaleString() : String(row[c])}</td>
+                    <td key={c} style={{ padding: '3px 8px', color: '#0F172A', fontFamily: "'JetBrains Mono', monospace" }}>{typeof row[c] === 'number' ? row[c].toLocaleString() : String(row[c])}</td>
                   ))}
                 </tr>
               ))}
@@ -161,7 +161,7 @@ function ConfigCard({ config, onUpdate }) {
         style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', cursor: 'pointer' }}
       >
         <div>
-          <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{config.name}</span>
+          <span style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{config.name}</span>
           {saving && <span style={{ marginLeft: 8, fontSize: 10, color: D.green }}>Saving...</span>}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -182,7 +182,7 @@ function ConfigCard({ config, onUpdate }) {
                 value={rawText}
                 onChange={e => setRawText(e.target.value)}
                 rows={Math.min(20, rawText.split('\n').length + 1)}
-                style={{ width: '100%', padding: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 12, fontFamily: "'JetBrains Mono', monospace", resize: 'vertical', outline: 'none', boxSizing: 'border-box' }}
+                style={{ width: '100%', padding: 10, background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 8, color: '#0F172A', fontSize: 12, fontFamily: "'JetBrains Mono', monospace", resize: 'vertical', outline: 'none', boxSizing: 'border-box' }}
               />
               <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                 <button onClick={handleRawSave} disabled={saving} style={{ fontSize: 11, padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.green, color: D.white }}>{saving ? '...' : 'Save'}</button>
@@ -315,7 +315,7 @@ function DiscountRulesTab() {
 
   return (
     <div>
-      <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Service Discount Rules</div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>Service Discount Rules</div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
           <thead>
@@ -393,7 +393,7 @@ function ProductsTab() {
 
   return (
     <div>
-      <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>Product Cost Reference</div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 4 }}>Product Cost Reference</div>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
         {products.length} products loaded. Full catalog available under Inventory tab.
       </div>
@@ -439,7 +439,7 @@ function AuditLog() {
 
   return (
     <div style={{ marginTop: 24, background: D.card, borderRadius: 10, border: `1px solid ${D.border}`, padding: 16 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 12 }}>Recent Changes</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>Recent Changes</div>
       {logs.map((l, i) => (
         <div key={i} style={{ fontSize: 11, color: D.muted, padding: '4px 0', borderBottom: `1px solid ${D.border}22` }}>
           <span style={{ color: D.teal }}>{l.config_key}</span>
@@ -498,7 +498,7 @@ export default function PricingLogicPanel() {
           {/* Lawn tab has special bracket grid */}
           {activeTab === 'lawn' && (
             <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Monthly Price Brackets</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>Monthly Price Brackets</div>
               <LawnBracketsTab />
             </div>
           )}
@@ -518,12 +518,12 @@ export default function PricingLogicPanel() {
           {activeTab !== 'products' && filteredConfigs.length > 0 && (
             <div>
               {activeTab !== 'lawn' && activeTab !== 'waveguard' && (
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>
                   {TABS.find(t => t.key === activeTab)?.label || activeTab} Configuration
                 </div>
               )}
-              {activeTab === 'waveguard' && <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12, marginTop: 12 }}>Tier Configuration</div>}
-              {activeTab === 'lawn' && <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12, marginTop: 12 }}>Lawn Pricing Config</div>}
+              {activeTab === 'waveguard' && <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12, marginTop: 12 }}>Tier Configuration</div>}
+              {activeTab === 'lawn' && <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12, marginTop: 12 }}>Lawn Pricing Config</div>}
               {filteredConfigs.map(c => (
                 <ConfigCard key={c.config_key} config={c} onUpdate={handleConfigUpdate} />
               ))}

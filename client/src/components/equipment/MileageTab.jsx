@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#fff', input: '#FFFFFF' };
 
 function adminFetch(path, opts = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -19,7 +19,7 @@ function adminFetchRaw(path) {
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16, marginBottom: 12 };
 const sBtn = (bg, color) => ({ padding: '7px 14px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
-const sInput = { padding: '7px 10px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
+const sInput = { padding: '7px 10px', background: D.input, border: '1px solid #CBD5E1', borderRadius: 8, color: '#0F172A', fontSize: 13, outline: 'none', boxSizing: 'border-box' };
 const fmt = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '--';
 const fmtMi = (n) => n != null ? Number(n).toFixed(1) : '0.0';
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
@@ -178,12 +178,12 @@ export default function MileageTab() {
         {/* Live Vehicle */}
         <div style={sCard}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: D.white }}>Live Vehicle Status</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A' }}>Live Vehicle Status</div>
             <button style={sBtn(D.teal, D.white)} onClick={syncNow} disabled={loading}>{loading ? 'Syncing...' : 'Sync Now'}</button>
           </div>
           {v ? (
             <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
-              <div><span style={{ color: D.muted, fontSize: 11 }}>Vehicle</span><div style={{ color: D.white, fontSize: 14, fontWeight: 600 }}>{v.nickname || `${v.make} ${v.model}`}</div></div>
+              <div><span style={{ color: D.muted, fontSize: 11 }}>Vehicle</span><div style={{ color: '#0F172A', fontSize: 14, fontWeight: 600 }}>{v.nickname || `${v.make} ${v.model}`}</div></div>
               <div><span style={{ color: D.muted, fontSize: 11 }}>Status</span><div><span style={sBadge(v.isRunning ? D.green : D.muted, D.white)}>{v.isRunning ? 'RUNNING' : 'STOPPED'}</span></div></div>
               {v.lastLocation && <div><span style={{ color: D.muted, fontSize: 11 }}>Location</span><div style={{ color: D.text, fontSize: 13 }}>{v.lastLocation.address || `${v.lastLocation.lat}, ${v.lastLocation.lon}`}</div></div>}
               {v.odometer != null && <div><span style={{ color: D.muted, fontSize: 11 }}>Odometer</span><div style={{ color: D.text, fontSize: 13 }}>{Number(v.odometer).toLocaleString()} mi</div></div>}
@@ -194,7 +194,7 @@ export default function MileageTab() {
 
         {/* Today's Summary */}
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: D.white, marginBottom: 12 }}>Today — {t.date || 'N/A'}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>Today — {t.date || 'N/A'}</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 12, marginBottom: 14 }}>
             <StatBox label="Miles" value={fmtMi(t.total_miles)} color={D.teal} />
             <StatBox label="Trips" value={t.trip_count || 0} color={D.purple} />
@@ -308,7 +308,7 @@ export default function MileageTab() {
         {/* Month Navigator */}
         <div style={{ ...sCard, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
           <button style={sBtn('transparent', D.teal)} onClick={() => changeMonth(-1)}>&#9664; Prev</button>
-          <span style={{ color: D.white, fontSize: 16, fontWeight: 700 }}>{monthLabel(monthDate + '-01')}</span>
+          <span style={{ color: '#0F172A', fontSize: 16, fontWeight: 700 }}>{monthLabel(monthDate + '-01')}</span>
           <button style={sBtn('transparent', D.teal)} onClick={() => changeMonth(1)}>Next &#9654;</button>
           <button style={sBtn(D.teal, D.white)} onClick={loadDaily}>Load</button>
         </div>
@@ -374,7 +374,7 @@ export default function MileageTab() {
     return (
       <div>
         <div style={{ ...sCard, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <span style={{ color: D.white, fontWeight: 600 }}>Tax Year:</span>
+          <span style={{ color: '#0F172A', fontWeight: 600 }}>Tax Year:</span>
           <select value={irsYear} onChange={e => setIrsYear(parseInt(e.target.value))} style={{ ...sInput, width: 100 }}>
             {[2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
           </select>
@@ -393,12 +393,12 @@ export default function MileageTab() {
             </div>
 
             <div style={{ ...sCard, fontSize: 12, color: D.muted, marginBottom: 12 }}>
-              IRS Standard Mileage Rate: <strong style={{ color: D.white }}>${irsReport.irs_rate}/mile</strong> | Total Trips: <strong style={{ color: D.white }}>{irsReport.ytd.trip_count}</strong>
+              IRS Standard Mileage Rate: <strong style={{ color: '#0F172A' }}>${irsReport.irs_rate}/mile</strong> | Total Trips: <strong style={{ color: '#0F172A' }}>{irsReport.ytd.trip_count}</strong>
             </div>
 
             {/* Monthly Breakdown */}
             <div style={{ ...sCard, overflowX: 'auto' }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Monthly Breakdown</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>Monthly Breakdown</div>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
                   <tr style={{ borderBottom: `1px solid ${D.border}` }}>
@@ -448,14 +448,14 @@ export default function MileageTab() {
     return (
       <div>
         <div style={{ ...sCard, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>Geo-Fences</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A' }}>Geo-Fences</div>
           <button style={sBtn(D.teal, D.white)} onClick={() => setFenceForm({ name: '', fence_type: 'business', lat: '', lng: '', radius_meters: 200, notes: '' })}>Add Fence</button>
         </div>
 
         {/* Fence Form */}
         {fenceForm && (
           <div style={sCard}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: D.white, marginBottom: 12 }}>{fenceForm.id ? 'Edit' : 'New'} Geo-Fence</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>{fenceForm.id ? 'Edit' : 'New'} Geo-Fence</div>
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
               <input placeholder="Name" value={fenceForm.name} onChange={e => setFenceForm({ ...fenceForm, name: e.target.value })} style={sInput} />
               <select value={fenceForm.fence_type} onChange={e => setFenceForm({ ...fenceForm, fence_type: e.target.value })} style={sInput}>
@@ -540,7 +540,7 @@ function StatBox({ label, value, color }) {
   return (
     <div>
       <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
-      <div style={{ fontSize: 20, fontWeight: 700, color: color || D.white, marginTop: 2 }}>{value}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: color || '#0F172A', marginTop: 2 }}>{value}</div>
     </div>
   );
 }
@@ -565,7 +565,7 @@ function TripRow({ trip, expanded, selected, onToggle, onSelect, onReclassify })
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={10} style={{ padding: '8px 16px', background: D.bg, fontSize: 11 }}>
+          <td colSpan={10} style={{ padding: '8px 16px', background: '#F8FAFC', fontSize: 11 }}>
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(5, 1fr)', gap: 8 }}>
               <div><span style={{ color: D.muted }}>Start:</span> <span style={{ color: D.text }}>{trip.start_address || '--'}</span></div>
               <div><span style={{ color: D.muted }}>End:</span> <span style={{ color: D.text }}>{trip.end_address || '--'}</span></div>
@@ -590,5 +590,5 @@ function renderSpinner() {
 }
 
 // ── Table Styles ─────────────────────────────────────────────────
-const th = { textAlign: 'left', padding: '8px 6px', color: D.muted, fontWeight: 600, fontSize: 11, whiteSpace: 'nowrap' };
-const td = { padding: '8px 6px', color: D.text, verticalAlign: 'top' };
+const th = { textAlign: 'left', padding: '8px 6px', color: '#64748B', fontWeight: 600, fontSize: 11, whiteSpace: 'nowrap' };
+const td = { padding: '8px 6px', color: '#334155', verticalAlign: 'top' };

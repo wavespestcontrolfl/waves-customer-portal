@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', blue: '#2563eb', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', blue: '#0A7EC2', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -21,7 +21,7 @@ function useIsMobile(breakpoint = 768) {
   return isMobile;
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
 const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -48,7 +48,7 @@ export default function KnowledgeBasePage() {
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
         <div>
-          <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: D.white }}>Knowledge Base</div>
+          <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: D.heading }}>Knowledge Base</div>
           <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>Claudeopedia — living knowledge for AI assistant, pricing engines & SOPs</div>
         </div>
       </div>
@@ -214,7 +214,7 @@ function BrowseTab({ showToast, onRefresh, isMobile }) {
               }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>{entry.title}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>{entry.title}</div>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     <span style={sBadge(`${CONFIDENCE_COLORS[entry.confidence]}22`, CONFIDENCE_COLORS[entry.confidence])}>{entry.confidence}</span>
                     <span style={sBadge(`${D.blue}22`, D.blue)}>{entry.category}</span>
@@ -255,7 +255,7 @@ function DetailPanel({ selected, editing, editContent, setEditing, setEditConten
   return (
     <div style={sCard}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-        <div style={{ fontSize: isMobile ? 16 : 18, fontWeight: 700, color: D.white }}>{selected.title}</div>
+        <div style={{ fontSize: isMobile ? 16 : 18, fontWeight: 700, color: D.heading }}>{selected.title}</div>
         {!isMobile && <button onClick={() => setSelected(null)} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 18 }}>x</button>}
       </div>
 
@@ -347,7 +347,7 @@ function CreateTab({ showToast, onCreated, isMobile }) {
   return (
     <div style={{ maxWidth: 800 }}>
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>New Knowledge Base Entry</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>New Knowledge Base Entry</div>
 
         <div style={{ marginBottom: 12 }}>
           <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Title</label>
@@ -416,7 +416,7 @@ function AuditTab({ showToast, onRefresh, isMobile }) {
   return (
     <div style={{ maxWidth: 900 }}>
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 8 }}>AI Knowledge Audit</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 8 }}>AI Knowledge Audit</div>
         <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
           "Question Your Assumptions" -- AI reviews entries for accuracy, staleness, and correctness.
           Runs automatically weekly via cron, or trigger manually below.
@@ -441,7 +441,7 @@ function AuditTab({ showToast, onRefresh, isMobile }) {
 
       {results && (
         <div style={sCard}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
             Results: {results.audited} reviewed, <span style={{ color: results.flagged > 0 ? D.amber : D.green }}>{results.flagged} flagged</span>
           </div>
           <div style={{ display: 'grid', gap: 8 }}>
@@ -451,7 +451,7 @@ function AuditTab({ showToast, onRefresh, isMobile }) {
                 borderLeft: `3px solid ${r.status === 'pass' ? D.green : r.status === 'flag' ? D.amber : D.red}`,
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{r.title}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{r.title}</div>
                   <span style={sBadge(
                     r.status === 'pass' ? `${D.green}22` : `${D.amber}22`,
                     r.status === 'pass' ? D.green : D.amber,
@@ -505,7 +505,7 @@ function TokensTab({ showToast, isMobile }) {
     <div style={{ maxWidth: 900 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
         <div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>API Token Health</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>API Token Health</div>
           <div style={{ fontSize: 12, color: D.muted }}>Monitor OAuth tokens and API credentials across all platforms</div>
         </div>
         <button onClick={runCheck} disabled={checking} style={{ ...sBtn(D.teal, D.white), opacity: checking ? 0.5 : 1 }}>
@@ -523,7 +523,7 @@ function TokensTab({ showToast, isMobile }) {
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{token.platform}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{token.platform}</div>
                   <div style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>{token.env_var_name}</div>
                 </div>
                 <span style={sBadge(

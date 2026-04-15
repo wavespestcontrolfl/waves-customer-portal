@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#fff' };
 const MONO = "'JetBrains Mono', monospace";
 const FONT = "'DM Sans', sans-serif";
 
@@ -32,7 +32,7 @@ function fmtDate(d) {
 
 function fmtCurrency(v) { return '$' + parseFloat(v || 0).toFixed(2); }
 
-const TIER_COLORS = { Platinum: '#a855f7', Gold: D.amber, Silver: '#94a3b8', Bronze: '#cd7f32', 'One-Time': '#0ea5e9' };
+const TIER_COLORS = { Platinum: '#7C3AED', Gold: D.amber, Silver: '#64748B', Bronze: '#cd7f32', 'One-Time': '#0A7EC2' };
 const STAGE_LABELS = { new_lead: 'New Lead', contacted: 'Contacted', estimate_sent: 'Est. Sent', estimate_viewed: 'Est. Viewed', follow_up: 'Follow Up', won: 'Won', active_customer: 'Active', at_risk: 'At Risk', churned: 'Churned', lost: 'Lost', dormant: 'Dormant' };
 
 // --- Health Score Circle ---
@@ -240,7 +240,7 @@ export default function Customer360Profile({ customerId, onClose }) {
         <div style={{ position: 'sticky', top: 0, zIndex: 10, background: D.card, borderBottom: `1px solid ${D.border}`, padding: '16px 24px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              <div style={{ fontSize: 20, fontWeight: 700, color: D.white, fontFamily: FONT }}>{c.firstName} {c.lastName}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#0F172A', fontFamily: FONT }}>{c.firstName} {c.lastName}</div>
               <HealthCircle score={score} />
               <TierBadge tier={c.tier} />
               <StageBadge stage={c.pipelineStage} />
@@ -311,7 +311,7 @@ export default function Customer360Profile({ customerId, onClose }) {
                 <SectionTitle>Recent Services ({services.length})</SectionTitle>
                 {services.slice(0, 5).map((s, i) => (
                   <div key={i} style={{ padding: '6px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22`, display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: D.white }}>{s.service_type}</span>
+                    <span style={{ color: '#0F172A' }}>{s.service_type}</span>
                     <span style={{ color: D.muted }}>{fmtDate(s.service_date)}</span>
                   </div>
                 ))}
@@ -338,7 +338,7 @@ export default function Customer360Profile({ customerId, onClose }) {
                 <SectionTitle>Recent Invoices</SectionTitle>
                 {invoices.slice(0, 3).map((inv, i) => (
                   <div key={i} style={{ padding: '5px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22`, display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: D.white }}>{fmtCurrency(inv.amount_due)}</span>
+                    <span style={{ color: '#0F172A' }}>{fmtCurrency(inv.amount_due)}</span>
                     <span style={{ color: inv.status === 'paid' ? D.green : D.red, fontWeight: 600 }}>{inv.status}</span>
                     <span style={{ color: D.muted }}>{fmtDate(inv.created_at)}</span>
                   </div>
@@ -472,7 +472,7 @@ export default function Customer360Profile({ customerId, onClose }) {
                   <SectionTitle>Cards on File ({cards.length})</SectionTitle>
                   {cards.map((cd, i) => (
                     <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 8, marginBottom: 6, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ color: D.white }}>{cd.card_brand} ending {cd.last_four}</span>
+                      <span style={{ color: '#0F172A' }}>{cd.card_brand} ending {cd.last_four}</span>
                       {cd.exp_month && <span style={{ color: D.muted, fontFamily: MONO }}>{cd.exp_month}/{cd.exp_year}</span>}
                       {cd.is_default && <span style={{ color: D.teal, fontSize: 10, fontWeight: 700 }}>DEFAULT</span>}
                     </div>
@@ -507,7 +507,7 @@ export default function Customer360Profile({ customerId, onClose }) {
                 <div style={{ display: 'flex', gap: 8, padding: '12px 0', borderTop: `1px solid ${D.border}` }}>
                   <input value={smsReply} onChange={e => setSmsReply(e.target.value)} placeholder="Type a message..."
                     onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendSms(); } }}
-                    style={{ flex: 1, padding: '10px 14px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', fontFamily: FONT }} />
+                    style={{ flex: 1, padding: '10px 14px', background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', fontFamily: FONT }} />
                   <button onClick={sendSms} disabled={sendingSms || !smsReply.trim()} style={{
                     padding: '10px 20px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
                     fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: sendingSms ? 0.5 : 1, minHeight: 44,
@@ -565,7 +565,7 @@ export default function Customer360Profile({ customerId, onClose }) {
                   ].map(([label, val]) => val && (
                     <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22` }}>
                       <span style={{ color: D.muted }}>{label}</span>
-                      <span style={{ color: D.white }}>{val}</span>
+                      <span style={{ color: '#0F172A' }}>{val}</span>
                     </div>
                   ))}
                 </div>
@@ -586,7 +586,7 @@ export default function Customer360Profile({ customerId, onClose }) {
                   ].map(([label, val]) => val && (
                     <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${D.border}22` }}>
                       <span style={{ color: D.muted }}>{label}</span>
-                      <span style={{ color: D.white, textAlign: 'right', maxWidth: 200, wordBreak: 'break-word' }}>{val}</span>
+                      <span style={{ color: '#0F172A', textAlign: 'right', maxWidth: 200, wordBreak: 'break-word' }}>{val}</span>
                     </div>
                   ))}
                 </div>
@@ -609,7 +609,7 @@ export default function Customer360Profile({ customerId, onClose }) {
                     {compliance.map((r, i) => (
                       <tr key={i}>
                         <td style={tdStyle}>{fmtDate(r.applied_at)}</td>
-                        <td style={{ ...tdStyle, color: D.white }}>{r.product_name || r.product_id}</td>
+                        <td style={{ ...tdStyle, color: '#0F172A' }}>{r.product_name || r.product_id}</td>
                         <td style={{ ...tdStyle, fontFamily: MONO }}>{r.rate_per_1000_sqft ? `${r.rate_per_1000_sqft}/1k sqft` : '--'}</td>
                         <td style={tdStyle}>{r.area_treated || '--'}</td>
                         <td style={tdStyle}>{r.technician_name || '--'}</td>
@@ -687,7 +687,7 @@ function StatCard({ label, value, color }) {
   return (
     <div style={{ padding: 12, background: D.bg, borderRadius: 8, textAlign: 'center' }}>
       <div style={{ fontSize: 10, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
-      <div style={{ fontSize: 16, fontWeight: 700, color: color || D.white, fontFamily: MONO }}>{value}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: color || '#0F172A', fontFamily: MONO }}>{value}</div>
     </div>
   );
 }
@@ -700,7 +700,7 @@ function ServiceRow({ service: s }) {
         padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         cursor: 'pointer', fontSize: 13,
       }}>
-        <span style={{ color: D.white, fontWeight: 600 }}>{s.service_type}</span>
+        <span style={{ color: '#0F172A', fontWeight: 600 }}>{s.service_type}</span>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           {s.total_cost > 0 && <span style={{ color: D.green, fontFamily: MONO }}>{fmtCurrency(s.total_cost)}</span>}
           <span style={{ color: D.muted }}>{fmtDate(s.service_date)}</span>
@@ -728,7 +728,7 @@ const overlayStyle = {
 const panelBaseStyle = {
   width: '100%', maxWidth: 900, height: '100vh', background: D.card,
   display: 'flex', flexDirection: 'column', overflowY: 'auto',
-  boxShadow: '-4px 0 24px rgba(0,0,0,0.4)', fontFamily: FONT,
+  boxShadow: '-4px 0 24px rgba(0,0,0,0.1)', fontFamily: FONT,
 };
 
 function actionBtnStyle(borderColor) {

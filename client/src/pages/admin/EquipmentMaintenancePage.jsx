@@ -1,14 +1,14 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a', darkCard: '#162032' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', darkCard: '#F8FAFC', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function af(path, opts = {}) {
   return fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' }, ...opts })
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, c) => ({ padding: '8px 16px', background: bg, color: c, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, c) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color: c, fontWeight: 600, display: 'inline-block' });
 const sInput = { width: '100%', padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -138,7 +138,7 @@ export default function EquipmentMaintenancePage() {
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       {/* Header */}
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>Equipment Maintenance & Fleet</div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Equipment Maintenance & Fleet</div>
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Maintenance schedules, mileage tracking, cost analysis, fleet health</div>
       </div>
 
@@ -152,7 +152,7 @@ export default function EquipmentMaintenancePage() {
       </div>
 
       {/* Toast */}
-      {toast && <div style={{ position: 'fixed', top: 20, right: 20, background: D.green, color: D.white, padding: '10px 20px', borderRadius: 8, fontSize: 13, fontWeight: 600, zIndex: 9999 }}>{toast}</div>}
+      {toast && <div style={{ position: 'fixed', top: 20, right: 20, background: D.green, color: '#fff', padding: '10px 20px', borderRadius: 8, fontSize: 13, fontWeight: 600, zIndex: 9999 }}>{toast}</div>}
 
       {tab === 'fleet' && <FleetTab {...{ loading, overview, alerts, dismissAlert, filtered, categories, filterCat, setFilterCat, filterStatus, setFilterStatus, sortBy, setSortBy, expandedId, setExpandedId, showToast, loadFleet }} />}
       {tab === 'analytics' && <AnalyticsTab {...{ costs, reliability, mileageSummary, dueSchedules, monthlyCosts, overview }} />}
@@ -257,7 +257,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
         <div style={{ fontSize: 28, lineHeight: 1 }}>{CAT_ICONS[eq.category] || '\u{1F527}'}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: D.white }}>{eq.name}</span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{eq.name}</span>
             <span style={sBadge(STATUS_COLORS[eq.status] || D.muted, D.white)}>{eq.status}</span>
           </div>
           <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
@@ -301,7 +301,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
 
           {/* Maintenance Schedules */}
           <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 8 }}>Maintenance Schedules</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 8 }}>Maintenance Schedules</div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
@@ -361,7 +361,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
           {/* Recent Maintenance History */}
           {(detail.recentRecords || []).length > 0 && (
             <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 8 }}>Maintenance History</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 8 }}>Maintenance History</div>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
@@ -392,15 +392,15 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
           {/* Cost of Ownership */}
           {detail.costOfOwnership && (
             <div style={{ ...sCard, background: D.darkCard }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Cost of Ownership</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Cost of Ownership</div>
               <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 12, fontSize: 12 }}>
-                <div><div style={{ color: D.muted }}>Purchase</div><div style={{ color: D.white, fontWeight: 600 }}>{fmt(detail.costOfOwnership.purchase_price)}</div></div>
-                <div><div style={{ color: D.muted }}>Total Maintenance</div><div style={{ color: D.white, fontWeight: 600 }}>{fmt(detail.costOfOwnership.total_maintenance)}</div></div>
-                <div><div style={{ color: D.muted }}>Total Fuel</div><div style={{ color: D.white, fontWeight: 600 }}>{fmt(detail.costOfOwnership.total_fuel)}</div></div>
+                <div><div style={{ color: D.muted }}>Purchase</div><div style={{ color: D.heading, fontWeight: 600 }}>{fmt(detail.costOfOwnership.purchase_price)}</div></div>
+                <div><div style={{ color: D.muted }}>Total Maintenance</div><div style={{ color: D.heading, fontWeight: 600 }}>{fmt(detail.costOfOwnership.total_maintenance)}</div></div>
+                <div><div style={{ color: D.muted }}>Total Fuel</div><div style={{ color: D.heading, fontWeight: 600 }}>{fmt(detail.costOfOwnership.total_fuel)}</div></div>
                 <div><div style={{ color: D.muted }}>Total Cost</div><div style={{ color: D.amber, fontWeight: 700 }}>{fmt(detail.costOfOwnership.total_cost)}</div></div>
-                <div><div style={{ color: D.muted }}>Monthly Cost</div><div style={{ color: D.white, fontWeight: 600 }}>{fmt(detail.costOfOwnership.monthly_cost)}</div></div>
-                <div><div style={{ color: D.muted }}>Age</div><div style={{ color: D.white, fontWeight: 600 }}>{detail.costOfOwnership.age_months} months</div></div>
-                {detail.costOfOwnership.cost_per_mile && <div><div style={{ color: D.muted }}>Cost/Mile</div><div style={{ color: D.white, fontWeight: 600 }}>{fmt(detail.costOfOwnership.cost_per_mile)}</div></div>}
+                <div><div style={{ color: D.muted }}>Monthly Cost</div><div style={{ color: D.heading, fontWeight: 600 }}>{fmt(detail.costOfOwnership.monthly_cost)}</div></div>
+                <div><div style={{ color: D.muted }}>Age</div><div style={{ color: D.heading, fontWeight: 600 }}>{detail.costOfOwnership.age_months} months</div></div>
+                {detail.costOfOwnership.cost_per_mile && <div><div style={{ color: D.muted }}>Cost/Mile</div><div style={{ color: D.heading, fontWeight: 600 }}>{fmt(detail.costOfOwnership.cost_per_mile)}</div></div>}
                 {detail.costOfOwnership.total_irs_deduction > 0 && <div><div style={{ color: D.muted }}>IRS Deduction</div><div style={{ color: D.green, fontWeight: 700 }}>{fmt(detail.costOfOwnership.total_irs_deduction)}</div></div>}
               </div>
             </div>
@@ -409,11 +409,11 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
           {/* Vehicle Mileage Section */}
           {mileage && mileage.logs && mileage.logs.length > 0 && (
             <div style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 8 }}>Mileage Log (Last 30 Days)</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 8 }}>Mileage Log (Last 30 Days)</div>
               <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 12, marginBottom: 12 }}>
                 <div style={{ ...sCard, background: D.darkCard, padding: 12, textAlign: 'center' }}>
                   <div style={{ fontSize: 10, color: D.muted }}>Total Miles</div>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>{fmtN(Math.round(mileage.summary.total_miles))}</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>{fmtN(Math.round(mileage.summary.total_miles))}</div>
                 </div>
                 <div style={{ ...sCard, background: D.darkCard, padding: 12, textAlign: 'center' }}>
                   <div style={{ fontSize: 10, color: D.muted }}>Business Miles</div>
@@ -529,7 +529,7 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
 
   return (
     <div style={{ ...sCard, background: D.darkCard, marginBottom: 16 }}>
-      <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Record Maintenance</div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Record Maintenance</div>
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
         <div>
           <label style={{ fontSize: 11, color: D.muted }}>Schedule (optional)</label>
@@ -660,7 +660,7 @@ function MileageForm({ vehicleId, currentMiles, onDone }) {
 
   return (
     <div style={{ ...sCard, background: D.darkCard, marginBottom: 16 }}>
-      <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 12 }}>Log Mileage</div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Log Mileage</div>
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 10 }}>
         <div>
           <label style={{ fontSize: 11, color: D.muted }}>Date</label>
@@ -721,7 +721,7 @@ function AnalyticsTab({ costs, reliability, mileageSummary, dueSchedules, monthl
     <>
       {/* Cost of Ownership Table */}
       <div style={{ ...sCard, marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 12 }}>Cost of Ownership</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Cost of Ownership</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
@@ -754,9 +754,9 @@ function AnalyticsTab({ costs, reliability, mileageSummary, dueSchedules, monthl
             {costs.length > 0 && (
               <tfoot>
                 <tr style={{ borderTop: `2px solid ${D.border}` }}>
-                  <td style={{ padding: '8px', color: D.white, fontWeight: 700 }} colSpan={3}>Totals</td>
-                  <td style={{ padding: '8px', color: D.white, fontWeight: 700, textAlign: 'right' }}>{fmt(costs.reduce((s, c) => s + c.purchase_price, 0))}</td>
-                  <td style={{ padding: '8px', color: D.white, fontWeight: 700, textAlign: 'right' }}>{fmt(costs.reduce((s, c) => s + c.total_maintenance, 0))}</td>
+                  <td style={{ padding: '8px', color: D.heading, fontWeight: 700 }} colSpan={3}>Totals</td>
+                  <td style={{ padding: '8px', color: D.heading, fontWeight: 700, textAlign: 'right' }}>{fmt(costs.reduce((s, c) => s + c.purchase_price, 0))}</td>
+                  <td style={{ padding: '8px', color: D.heading, fontWeight: 700, textAlign: 'right' }}>{fmt(costs.reduce((s, c) => s + c.total_maintenance, 0))}</td>
                   <td style={{ padding: '8px', color: D.amber, fontWeight: 700, textAlign: 'right' }}>{fmt(costs.reduce((s, c) => s + c.monthly_cost, 0))}</td>
                   <td />
                 </tr>
@@ -769,7 +769,7 @@ function AnalyticsTab({ costs, reliability, mileageSummary, dueSchedules, monthl
       {/* Monthly Cost Trend - SVG Bar Chart */}
       {monthlyCosts.length > 0 && (
         <div style={{ ...sCard, marginBottom: 16 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 12 }}>Maintenance Cost Trend (Last 6 Months)</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Maintenance Cost Trend (Last 6 Months)</div>
           <CostBarChart data={monthlyCosts} />
         </div>
       )}
@@ -777,7 +777,7 @@ function AnalyticsTab({ costs, reliability, mileageSummary, dueSchedules, monthl
       {/* Reliability Ranking */}
       {reliability.length > 0 && (
         <div style={{ ...sCard, marginBottom: 16 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 12 }}>Reliability Ranking (Downtime Hours)</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Reliability Ranking (Downtime Hours)</div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
@@ -808,7 +808,7 @@ function AnalyticsTab({ costs, reliability, mileageSummary, dueSchedules, monthl
       {/* Fleet Mileage Summary */}
       {mileageSummary && mileageSummary.vehicles && mileageSummary.vehicles.length > 0 && (
         <div style={{ ...sCard, marginBottom: 16 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 12 }}>Fleet Mileage Summary ({mileageSummary.year})</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Fleet Mileage Summary ({mileageSummary.year})</div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
@@ -836,12 +836,12 @@ function AnalyticsTab({ costs, reliability, mileageSummary, dueSchedules, monthl
               {mileageSummary.fleet_totals && (
                 <tfoot>
                   <tr style={{ borderTop: `2px solid ${D.border}` }}>
-                    <td style={{ padding: '8px', color: D.white, fontWeight: 700 }}>Fleet Totals</td>
-                    <td style={{ padding: '8px', color: D.white, fontWeight: 700, textAlign: 'right' }}>{fmtN(Math.round(mileageSummary.fleet_totals.total_miles))}</td>
+                    <td style={{ padding: '8px', color: D.heading, fontWeight: 700 }}>Fleet Totals</td>
+                    <td style={{ padding: '8px', color: D.heading, fontWeight: 700, textAlign: 'right' }}>{fmtN(Math.round(mileageSummary.fleet_totals.total_miles))}</td>
                     <td style={{ padding: '8px', color: D.teal, fontWeight: 700, textAlign: 'right' }}>{fmtN(Math.round(mileageSummary.fleet_totals.business_miles))}</td>
                     <td style={{ padding: '8px', color: D.amber, fontWeight: 700, textAlign: 'right' }}>{fmt(mileageSummary.fleet_totals.total_fuel_cost)}</td>
                     <td style={{ padding: '8px', color: D.green, fontWeight: 700, textAlign: 'right' }}>{fmt(mileageSummary.fleet_totals.total_irs_deduction)}</td>
-                    <td style={{ padding: '8px', color: D.white, fontWeight: 700, textAlign: 'right' }}>{mileageSummary.fleet_totals.total_jobs}</td>
+                    <td style={{ padding: '8px', color: D.heading, fontWeight: 700, textAlign: 'right' }}>{mileageSummary.fleet_totals.total_jobs}</td>
                   </tr>
                 </tfoot>
               )}
@@ -853,7 +853,7 @@ function AnalyticsTab({ costs, reliability, mileageSummary, dueSchedules, monthl
       {/* Upcoming Maintenance (Next 30 Days) */}
       {dueSchedules.length > 0 && (
         <div style={{ ...sCard }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 12 }}>Upcoming Maintenance (Next 30 Days)</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Upcoming Maintenance (Next 30 Days)</div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>

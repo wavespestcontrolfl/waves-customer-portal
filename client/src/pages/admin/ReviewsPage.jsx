@@ -4,7 +4,7 @@ import GBPManagementPanel from './GBPManagement';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
 function adminFetch(path, options = {}) {
@@ -64,7 +64,7 @@ function BreakdownBar({ star, count, max }) {
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
       <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.muted, width: 16, textAlign: 'right' }}>{star}</span>
       <span style={{ color: D.amber, fontSize: 12 }}>★</span>
-      <div style={{ flex: 1, height: 8, background: '#0f1923', borderRadius: 4, overflow: 'hidden' }}>
+      <div style={{ flex: 1, height: 8, background: '#FFFFFF', borderRadius: 4, overflow: 'hidden' }}>
         <div style={{ height: '100%', width: `${pct}%`, background: D.amber, borderRadius: 4, transition: 'width 0.3s ease' }} />
       </div>
       <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: D.muted, width: 24, textAlign: 'right' }}>{count}</span>
@@ -79,9 +79,9 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
     <div style={{
       background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? 14 : 20, flex: isMobile ? '1 1 100%' : '1 1 220px', minWidth: isMobile ? 0 : 220,
     }}>
-      <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 4 }}>{loc.name}</div>
+      <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>{loc.name}</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 20, fontWeight: 700, color: D.white }}>{loc.avgRating}</span>
+        <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 20, fontWeight: 700, color: D.heading }}>{loc.avgRating}</span>
         <Stars count={Math.round(Number(loc.avgRating))} size={14} />
         <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: D.muted }}>({loc.count})</span>
       </div>
@@ -92,7 +92,7 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
       </div>
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={() => onRequestReview(loc)} style={{
-          flex: 1, padding: '8px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+          flex: 1, padding: '8px 12px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
           fontSize: 13, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: 'pointer',
         }}>Request Review</button>
         {loc.reviewUrl && (
@@ -168,7 +168,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             }}>{(review.reviewerName || '?')[0]}</div>
           )}
           <div>
-            <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 15, fontWeight: 600, color: D.white }}>{review.reviewerName}</div>
+            <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 15, fontWeight: 600, color: D.heading }}>{review.reviewerName}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <Stars count={review.starRating} size={14} />
               <span style={{
@@ -237,7 +237,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             />
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <button onClick={handleSubmit} disabled={submitting || !replyText.trim()} style={{
-                padding: '8px 18px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+                padding: '8px 18px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
                 fontSize: 13, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: submitting ? 'not-allowed' : 'pointer',
                 opacity: submitting || !replyText.trim() ? 0.5 : 1,
               }}>{submitting ? 'Posting...' : review.reply ? 'Update Reply' : 'Reply'}</button>
@@ -372,7 +372,7 @@ function GBPManagement() {
           {locTab === 'info' && (
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 16 }}>
               <div style={{ background: D.card, borderRadius: 12, padding: isMobile ? 14 : 20, border: `1px solid ${D.border}` }}>
-                <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16, fontFamily: 'DM Sans, sans-serif' }}>Business Information</div>
+                <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16, fontFamily: 'DM Sans, sans-serif' }}>Business Information</div>
                 {[
                   { label: 'Business Name', value: loc.name },
                   { label: 'Address', value: loc.address },
@@ -387,7 +387,7 @@ function GBPManagement() {
                     {field.link ? (
                       <a href={field.value} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: D.teal, textDecoration: 'none', textAlign: 'right', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{field.value}</a>
                     ) : (
-                      <span style={{ fontSize: 13, color: D.white, textAlign: 'right', maxWidth: 300 }}>{field.value || '--'}</span>
+                      <span style={{ fontSize: 13, color: D.heading, textAlign: 'right', maxWidth: 300 }}>{field.value || '--'}</span>
                     )}
                   </div>
                 ))}
@@ -401,7 +401,7 @@ function GBPManagement() {
                   <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>{loc.totalReviews} reviews on Google</div>
                   <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'center' }}>
                     <a href={loc.mapsUrl} target="_blank" rel="noopener noreferrer" style={{
-                      padding: '8px 16px', borderRadius: 8, background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, textDecoration: 'none',
+                      padding: '8px 16px', borderRadius: 8, background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, textDecoration: 'none',
                     }}>View on Maps</a>
                     <a href={loc.reviewUrl} target="_blank" rel="noopener noreferrer" style={{
                       padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, color: D.muted, fontSize: 13, textDecoration: 'none',
@@ -411,16 +411,16 @@ function GBPManagement() {
 
                 {/* Quick Actions */}
                 <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Quick Actions</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Quick Actions</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <a href={`https://business.google.com/dashboard/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{
-                      padding: '10px 14px', background: '#0f1923', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
+                      padding: '10px 14px', background: '#FFFFFF', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
                     }}>Open Google Business Profile</a>
                     <a href={`https://business.google.com/posts/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{
-                      padding: '10px 14px', background: '#0f1923', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
+                      padding: '10px 14px', background: '#FFFFFF', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
                     }}>Create Google Post</a>
                     <a href={`https://business.google.com/messaging/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{
-                      padding: '10px 14px', background: '#0f1923', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
+                      padding: '10px 14px', background: '#FFFFFF', borderRadius: 8, border: `1px solid ${D.border}`, color: D.text, fontSize: 13, textDecoration: 'none', display: 'block',
                     }}>View Messages</a>
                   </div>
                 </div>
@@ -431,7 +431,7 @@ function GBPManagement() {
           {/* Hours */}
           {locTab === 'hours' && (
             <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}`, maxWidth: 500 }}>
-              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Business Hours</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Business Hours</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
                 <span style={{ width: 10, height: 10, borderRadius: '50%', background: loc.openNow ? D.green : D.red }} />
                 <span style={{ fontSize: 14, color: loc.openNow ? D.green : D.red, fontWeight: 600 }}>{loc.openNow ? 'Currently Open' : 'Currently Closed'}</span>
@@ -461,7 +461,7 @@ function GBPManagement() {
           {locTab === 'photos' && (
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>{loc.name} Photos ({(loc.photos || []).length})</div>
+                <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>{loc.name} Photos ({(loc.photos || []).length})</div>
                 <a href={`https://business.google.com/photos/l/${loc.placeId}`} target="_blank" rel="noopener noreferrer" style={{
                   padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.teal}`, color: D.teal, fontSize: 13, textDecoration: 'none',
                 }}>Manage on Google</a>
@@ -484,10 +484,10 @@ function GBPManagement() {
           {/* Export */}
           {locTab === 'export' && (
             <div style={{ background: D.card, borderRadius: 12, padding: 24, border: `1px solid ${D.border}`, maxWidth: 500 }}>
-              <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 8 }}>Export Reviews</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 8 }}>Export Reviews</div>
               <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>Download all synced reviews across all locations as a CSV file.</div>
               <button onClick={handleExport} style={{
-                padding: '12px 24px', borderRadius: 8, border: 'none', background: D.teal, color: D.white,
+                padding: '12px 24px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff',
                 fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'DM Sans, sans-serif',
               }}>Download CSV</button>
             </div>
@@ -563,7 +563,7 @@ function ReviewOutreach() {
           {filtered.map(c => (
             <div key={c.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
               <div>
-                <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{c.name}</div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{c.name}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
                   {c.city && <span>{c.city} </span>}
                   {c.phone && <span>· {c.phone} </span>}
@@ -577,7 +577,7 @@ function ReviewOutreach() {
                   <span style={{ fontSize: 12, color: D.green, fontWeight: 600 }}>Sent</span>
                 ) : (
                   <button onClick={() => sendReviewRequest(c)} disabled={sending[c.id]} style={{
-                    padding: '8px 16px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+                    padding: '8px 16px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
                     fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: sending[c.id] ? 0.5 : 1,
                   }}>{sending[c.id] ? 'Sending...' : 'Send Review Request'}</button>
                 )}
@@ -851,7 +851,7 @@ function _PLACEHOLDER_REMOVED() {
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.white }}>{c.name}</div>
+                    <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.heading }}>{c.name}</div>
                     <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: D.green }}>
                       ${c.totalRevenue.toFixed(0)}
                     </div>
@@ -896,7 +896,7 @@ function _PLACEHOLDER_REMOVED() {
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
                   <div>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: D.white, fontFamily: 'DM Sans, sans-serif' }}>{selectedCustomer.name}</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: D.heading, fontFamily: 'DM Sans, sans-serif' }}>{selectedCustomer.name}</div>
                     <div style={{ fontSize: 13, color: D.muted, fontFamily: 'DM Sans, sans-serif', marginTop: 2 }}>
                       {selectedCustomer.addr && <span>{selectedCustomer.addr}</span>}
                       {selectedCustomer.email && <span> &middot; {selectedCustomer.email}</span>}
@@ -918,7 +918,7 @@ function _PLACEHOLDER_REMOVED() {
                         setTimeout(() => smsEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 200);
                       }}
                       style={{
-                        padding: '8px 16px', background: D.teal, color: D.white, border: 'none',
+                        padding: '8px 16px', background: D.teal, color: '#fff', border: 'none',
                         borderRadius: 8, fontSize: 13, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: 'pointer',
                       }}
                     >{'💬'} Send Review SMS</button>
@@ -1000,7 +1000,7 @@ function _PLACEHOLDER_REMOVED() {
                       }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
                           <div>
-                            <span style={{ fontSize: 13, fontWeight: 600, color: D.white, fontFamily: 'DM Sans, sans-serif' }}>{j.svcType}</span>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: D.heading, fontFamily: 'DM Sans, sans-serif' }}>{j.svcType}</span>
                             <span style={{ fontSize: 12, color: D.muted, fontFamily: 'JetBrains Mono, monospace', marginLeft: 10 }}>
                               {j.parsedDate ? formatDate(j.parsedDate) : j.date}
                             </span>
@@ -1104,7 +1104,7 @@ function _PLACEHOLDER_REMOVED() {
                   onClick={handleSendSms}
                   disabled={!composeText.trim()}
                   style={{
-                    padding: '12px 24px', background: D.teal, color: D.white, border: 'none',
+                    padding: '12px 24px', background: D.teal, color: '#fff', border: 'none',
                     borderRadius: 8, fontSize: 14, fontFamily: 'DM Sans, sans-serif', fontWeight: 600,
                     cursor: composeText.trim() ? 'pointer' : 'not-allowed',
                     opacity: composeText.trim() ? 1 : 0.5, whiteSpace: 'nowrap',
@@ -1128,7 +1128,7 @@ function _PLACEHOLDER_REMOVED() {
             padding: '32px 40px', textAlign: 'center', maxWidth: 400,
           }}>
             <div style={{ fontSize: 48, marginBottom: 16 }}>{'📞'}</div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.white, fontFamily: 'DM Sans, sans-serif', marginBottom: 8 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, fontFamily: 'DM Sans, sans-serif', marginBottom: 8 }}>
               Initiating Call via Twilio
             </div>
             <div style={{ fontSize: 14, color: D.muted, fontFamily: 'DM Sans, sans-serif', marginBottom: 4 }}>
@@ -1143,7 +1143,7 @@ function _PLACEHOLDER_REMOVED() {
               Twilio integration coming soon. This is a placeholder.
             </div>
             <button onClick={() => setCallModal(false)} style={{
-              padding: '10px 28px', background: D.teal, color: D.white, border: 'none',
+              padding: '10px 28px', background: D.teal, color: '#fff', border: 'none',
               borderRadius: 8, fontSize: 14, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: 'pointer',
             }}>Close</button>
           </div>
@@ -1330,7 +1330,7 @@ export default function ReviewsPage() {
               <div style={{ fontSize: 16, marginBottom: 12 }}>Failed to load reviews</div>
               <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>{error}</div>
               <button onClick={loadData} style={{
-                padding: '8px 20px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+                padding: '8px 20px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
                 fontSize: 14, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
               }}>Retry</button>
             </div>
@@ -1342,13 +1342,13 @@ export default function ReviewsPage() {
               {/* Page header */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
                 <div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: D.white, fontFamily: 'DM Sans, sans-serif' }}>Google Reviews</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: D.heading, fontFamily: 'DM Sans, sans-serif' }}>Google Reviews</div>
                   <div style={{ fontSize: 13, color: D.muted, fontFamily: 'DM Sans, sans-serif', marginTop: 4 }}>
                     Manage reviews across all locations
                   </div>
                 </div>
                 <button onClick={handleSync} disabled={syncing} style={{
-                  padding: '10px 20px', background: syncing ? D.border : D.teal, color: D.white, border: 'none',
+                  padding: '10px 20px', background: syncing ? D.border : D.teal, color: D.heading, border: 'none',
                   borderRadius: 8, fontSize: 14, fontFamily: 'DM Sans, sans-serif', fontWeight: 600,
                   cursor: syncing ? 'not-allowed' : 'pointer', opacity: syncing ? 0.7 : 1,
                 }}>{syncing ? 'Syncing...' : 'Sync Reviews'}</button>

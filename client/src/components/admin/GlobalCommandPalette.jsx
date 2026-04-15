@@ -11,7 +11,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#a855f7', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#fff' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -97,8 +97,8 @@ function renderMarkdown(text) {
   const elements = [];
   let key = 0;
   for (const line of lines) {
-    if (line.startsWith('### ')) { elements.push(<div key={key++} style={{ fontSize: 14, fontWeight: 700, color: D.white, marginTop: 12, marginBottom: 4 }}>{line.slice(4)}</div>); continue; }
-    if (line.startsWith('## ')) { elements.push(<div key={key++} style={{ fontSize: 15, fontWeight: 700, color: D.white, marginTop: 14, marginBottom: 6 }}>{line.slice(3)}</div>); continue; }
+    if (line.startsWith('### ')) { elements.push(<div key={key++} style={{ fontSize: 14, fontWeight: 700, color: '#0F172A', marginTop: 12, marginBottom: 4 }}>{line.slice(4)}</div>); continue; }
+    if (line.startsWith('## ')) { elements.push(<div key={key++} style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginTop: 14, marginBottom: 6 }}>{line.slice(3)}</div>); continue; }
     if (line.match(/^[-•*]\s/)) { elements.push(<div key={key++} style={{ display: 'flex', gap: 8, paddingLeft: 4, marginBottom: 3 }}><span style={{ color: D.teal, fontSize: 10, marginTop: 5 }}>●</span><span>{renderInline(line.replace(/^[-•*]\s/, ''))}</span></div>); continue; }
     if (line.match(/^\d+\.\s/)) { const num = line.match(/^(\d+)\./)[1]; elements.push(<div key={key++} style={{ display: 'flex', gap: 8, paddingLeft: 4, marginBottom: 3 }}><span style={{ color: D.teal, fontSize: 12, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace', minWidth: 18 }}>{num}.</span><span>{renderInline(line.replace(/^\d+\.\s/, ''))}</span></div>); continue; }
     if (!line.trim()) { elements.push(<div key={key++} style={{ height: 8 }} />); continue; }
@@ -109,7 +109,7 @@ function renderMarkdown(text) {
 
 function renderInline(text) {
   return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
-    if (part.startsWith('**') && part.endsWith('**')) return <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith('**') && part.endsWith('**')) return <strong key={i} style={{ color: '#0F172A', fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
     return part;
   });
 }
@@ -223,7 +223,7 @@ export default function GlobalCommandPalette() {
         position: 'fixed', top: '10%', left: '50%', transform: 'translateX(-50%)',
         width: '90%', maxWidth: 640, maxHeight: '75vh',
         background: D.card, border: `1px solid ${D.border}`, borderRadius: 16,
-        boxShadow: '0 24px 80px rgba(0,0,0,0.5)', zIndex: 9999,
+        boxShadow: '0 24px 80px rgba(0,0,0,0.15)', zIndex: 9999,
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
         animation: 'paletteIn 0.15s ease',
       }}>
@@ -250,7 +250,7 @@ export default function GlobalCommandPalette() {
               autoFocus
               style={{
                 width: '100%', padding: '10px 14px', paddingRight: 90,
-                background: D.bg, border: `1px solid ${D.border}`,
+                background: '#FFFFFF', border: `1px solid ${D.border}`,
                 borderRadius: 10, color: D.text, fontSize: 15,
                 fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box',
               }}
@@ -267,6 +267,7 @@ export default function GlobalCommandPalette() {
                 }}>Go</button>
               ) : (
                 <span style={{ padding: '4px 8px', borderRadius: 4, background: D.bg, border: `1px solid ${D.border}`, fontSize: 10, color: D.muted, fontFamily: 'JetBrains Mono, monospace' }}>ESC</span>
+
               )}
             </div>
           </div>
@@ -287,7 +288,7 @@ export default function GlobalCommandPalette() {
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 5,
                   padding: '5px 12px', borderRadius: 9999,
-                  background: D.bg, border: `1px solid ${D.border}`,
+                  background: '#FFFFFF', border: `1px solid ${D.border}`,
                   color: D.muted, fontSize: 12, fontWeight: 600,
                   fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
                   transition: 'all 0.1s',
@@ -330,7 +331,7 @@ export default function GlobalCommandPalette() {
               value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Follow up..."
               style={{
-                flex: 1, padding: '8px 12px', background: D.bg, border: `1px solid ${D.border}`,
+                flex: 1, padding: '8px 12px', background: '#FFFFFF', border: `1px solid ${D.border}`,
                 borderRadius: 8, color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none',
               }}
             />

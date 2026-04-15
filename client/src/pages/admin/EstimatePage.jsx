@@ -10,10 +10,10 @@ class EstimateErrorBoundary extends Component {
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: 40, background: '#1e293b', border: '1px solid #ef4444', borderRadius: 12, textAlign: 'center' }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: '#ef4444', marginBottom: 12 }}>Estimate Render Error</div>
-          <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 16, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', textAlign: 'left', maxHeight: 200, overflow: 'auto' }}>{this.state.error.message}{'\n'}{this.state.error.stack}</div>
-          <button onClick={() => this.setState({ error: null })} style={{ padding: '8px 20px', background: '#0ea5e9', color: '#fff', border: 'none', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>Try Again</button>
+        <div style={{ padding: 40, background: '#FFFFFF', border: '1px solid #C0392B', borderRadius: 12, textAlign: 'center' }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#C0392B', marginBottom: 12 }}>Estimate Render Error</div>
+          <div style={{ fontSize: 13, color: '#64748B', marginBottom: 16, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', textAlign: 'left', maxHeight: 200, overflow: 'auto' }}>{this.state.error.message}{'\n'}{this.state.error.stack}</div>
+          <button onClick={() => this.setState({ error: null })} style={{ padding: '8px 20px', background: '#0A7EC2', color: '#fff', border: 'none', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>Try Again</button>
         </div>
       );
     }
@@ -23,18 +23,20 @@ class EstimateErrorBoundary extends Component {
 
 /* ── theme tokens ───────────────────────────────────────────── */
 const C = {
-  dark: '#0f1923',
-  navy: '#1a2937',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  green: '#10b981',
-  amber: '#f59e0b',
-  red: '#ef4444',
+  dark: '#F1F5F9',
+  navy: '#F0F7FC',
+  card: '#FFFFFF',
+  border: '#E2E8F0',
+  teal: '#0A7EC2',
+  green: '#16A34A',
+  amber: '#F0A500',
+  red: '#C0392B',
   blue: '#2563eb',
-  white: '#f0f4f8',
-  gray: '#94a3b8',
-  input: '#0f172a',
+  white: '#334155',
+  gray: '#64748B',
+  input: '#FFFFFF',
+  heading: '#0F172A',
+  inputBorder: '#CBD5E1',
   radius: '10px',
 };
 
@@ -42,12 +44,12 @@ const C = {
 const sPanel = { background: C.card, border: `1px solid ${C.border}`, borderRadius: C.radius, padding: 22, marginBottom: 18 };
 const sPanelTitle = { fontSize: 15, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1.5, color: C.teal, marginBottom: 18, paddingBottom: 10, borderBottom: `1px solid ${C.border}` };
 const sLabel = { display: 'block', fontSize: 13, fontWeight: 600, color: C.gray, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.8 };
-const sInput = { width: '100%', padding: '12px 14px', background: C.input, border: `1px solid ${C.border}`, borderRadius: C.radius, color: C.white, fontFamily: "'DM Sans', sans-serif", fontSize: 16, minHeight: 46, boxSizing: 'border-box', outline: 'none' };
+const sInput = { width: '100%', padding: '12px 14px', background: C.input, border: `1px solid ${C.inputBorder}`, borderRadius: C.radius, color: C.heading, fontFamily: "'DM Sans', sans-serif", fontSize: 16, minHeight: 46, boxSizing: 'border-box', outline: 'none' };
 const sSelect = { ...sInput, cursor: 'pointer', WebkitAppearance: 'none', appearance: 'none', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 14px center', paddingRight: 36 };
 const sField = { marginBottom: 16 };
 const sRow = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 };
 const sRow3 = { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14 };
-const sCheckbox = { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, cursor: 'pointer', fontSize: 15, color: C.white };
+const sCheckbox = { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, cursor: 'pointer', fontSize: 15, color: C.heading };
 const sCb = { width: 20, height: 20, accentColor: C.teal, cursor: 'pointer', flexShrink: 0 };
 const sSvcSection = { fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1.2, color: C.amber, margin: '18px 0 10px 0', paddingBottom: 6, borderBottom: `1px solid rgba(245,158,11,0.2)` };
 const sSubOpts = { margin: '6px 0 10px 30px', padding: '10px 14px', background: C.input, borderRadius: 8, border: `1px solid ${C.border}` };
@@ -62,7 +64,7 @@ const sTierRow = (rec, dim) => ({
   borderRadius: 8, padding: '14px 18px', fontSize: 15, transition: 'all 0.2s',
   opacity: dim ? 0.5 : 1,
 });
-const sTierName = { fontWeight: 700, color: C.white, fontSize: 15 };
+const sTierName = { fontWeight: 700, color: C.heading, fontSize: 15 };
 const sTierDetail = { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: C.gray };
 const sTierPrice = { fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, fontSize: 16, color: C.green, textAlign: 'right' };
 const sSpecCard = { background: C.navy, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 };
@@ -103,7 +105,7 @@ function Select({ k, options }) {
   const { form, set } = useContext(FormCtx);
   return (
     <select value={form[k]} onChange={e => set(k, e.target.value)} style={sSelect}>
-      {options.map(o => <option key={o.value} value={o.value} style={{ background: C.input, color: C.white }}>{o.label}</option>)}
+      {options.map(o => <option key={o.value} value={o.value} style={{ background: C.input, color: C.heading }}>{o.label}</option>)}
     </select>
   );
 }
@@ -141,15 +143,15 @@ function EstimateToolView() {
       const style = document.createElement('style');
       style.id = 'pac-dark-style';
       style.textContent = `
-        .pac-container { background: #1e293b !important; border: 1px solid #334155 !important; border-radius: 8px !important; margin-top: 4px !important; z-index: 99999 !important; font-family: 'DM Sans', sans-serif !important; box-shadow: 0 8px 24px rgba(0,0,0,0.5) !important; }
-        .pac-item { padding: 8px 12px !important; border-top: 1px solid #334155 !important; color: #e2e8f0 !important; cursor: pointer !important; font-size: 14px !important; }
+        .pac-container { background: #FFFFFF !important; border: 1px solid #E2E8F0 !important; border-radius: 8px !important; margin-top: 4px !important; z-index: 99999 !important; font-family: 'DM Sans', sans-serif !important; box-shadow: 0 8px 24px rgba(0,0,0,0.1) !important; }
+        .pac-item { padding: 8px 12px !important; border-top: 1px solid #E2E8F0 !important; color: #334155 !important; cursor: pointer !important; font-size: 14px !important; }
         .pac-item:first-child { border-top: none !important; }
-        .pac-item:hover, .pac-item-selected { background: #0f172a !important; }
-        .pac-item-query { color: #f0f4f8 !important; font-weight: 600 !important; }
-        .pac-matched { color: #0ea5e9 !important; font-weight: 700 !important; }
+        .pac-item:hover, .pac-item-selected { background: #F0F7FC !important; }
+        .pac-item-query { color: #0F172A !important; font-weight: 600 !important; }
+        .pac-matched { color: #0A7EC2 !important; font-weight: 700 !important; }
         .pac-icon { display: none !important; }
-        .pac-item span { color: #94a3b8 !important; }
-        .pac-item-query span { color: #f0f4f8 !important; }
+        .pac-item span { color: #64748B !important; }
+        .pac-item-query span { color: #0F172A !important; }
         .pac-logo::after { display: none !important; }
       `;
       document.head.appendChild(style);
@@ -1020,8 +1022,8 @@ function EstimateToolView() {
 
           {/* Action buttons */}
           <div className="estimate-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
-            <button style={{ ...sBtn(C.teal, C.dark), fontSize: 16, padding: '16px 28px' }} onClick={doGenerate}>GENERATE ESTIMATE</button>
-            <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 16, padding: '16px 28px' }} onClick={() => {
+            <button style={{ ...sBtn(C.teal, '#fff'), fontSize: 16, padding: '16px 28px' }} onClick={doGenerate}>GENERATE ESTIMATE</button>
+            <button style={{ ...sBtn(C.blue, '#fff'), fontSize: 16, padding: '16px 28px' }} onClick={() => {
               if (!estimate) { doGenerate(); }
               setShowSendForm(true);
             }}>SEND ESTIMATE</button>
@@ -1094,7 +1096,7 @@ function EstimateToolView() {
                     const id = await doSave();
                     if (id) await doSend(id, 'sms');
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule SMS' : 'SMS Only'}</button>
-                  <button style={{ ...sBtn('#3b82f6', 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
+                  <button style={{ ...sBtn(C.blue, '#fff'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerEmail) { alert('Enter an email.'); return; }
                     if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
                     if (!estimate) { doGenerate(); }
@@ -1124,7 +1126,7 @@ function EstimateToolView() {
           {!estimate ? (
             <div style={{ ...sPanel, textAlign: 'center', padding: '60px 24px' }}>
               <div style={{ fontSize: 56, marginBottom: 18 }}>{livePreview.anySelected ? '\u26A1' : '\uD83D\uDCCB'}</div>
-              <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10, color: C.white }}>
+              <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10, color: C.heading }}>
                 {!livePreview.anySelected ? 'Select Services to Get Started' : 'Ready to Generate'}
               </div>
               <div style={{ fontSize: 15, color: C.gray, marginBottom: 16 }}>
@@ -1163,12 +1165,12 @@ function EstimateToolView() {
                       <div className="estimate-summary-flex" style={{ display: 'flex', justifyContent: 'center', gap: 40, marginTop: 14, flexWrap: 'wrap' }}>
                         {E.oneTime.total > 0 && (
                           <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: C.white }}>{fmtInt(E.oneTime.total)}</div>
+                            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: C.heading }}>{fmtInt(E.oneTime.total)}</div>
                             <div style={{ fontSize: 12, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.5 }}>{E.oneTime.tmInstall > 0 ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)` : 'WaveGuard Membership'}</div>
                           </div>
                         )}
                         <div style={{ textAlign: 'center' }}>
-                          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: C.white }}>{fmt(E.totals.year1)}</div>
+                          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: C.heading }}>{fmt(E.totals.year1)}</div>
                           <div style={{ fontSize: 12, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.5 }}>Year 1 Total</div>
                         </div>
                         {E.recurring.savings > 0 && (
@@ -1208,7 +1210,7 @@ function EstimateToolView() {
                 <div style={{ marginBottom: 24 }}>
                   <div style={sSectionTitle}>Property Summary</div>
                   <div style={{ fontSize: 15, color: C.gray, lineHeight: 1.8 }}>
-                    <strong style={{ color: C.white }}>{E.property?.type || E.property?.propertyType || 'Residential'}</strong> — {(E.property?.homeSqFt || 0).toLocaleString()} sf / {(E.property?.lotSqFt || 0).toLocaleString()} sf lot / {E.property?.stories || 1} story<br />
+                    <strong style={{ color: C.heading }}>{E.property?.type || E.property?.propertyType || 'Residential'}</strong> — {(E.property?.homeSqFt || 0).toLocaleString()} sf / {(E.property?.lotSqFt || 0).toLocaleString()} sf lot / {E.property?.stories || 1} story<br />
                     Footprint: <strong>{(E.property?.footprint || 0).toLocaleString()} sf</strong> | Pool: {E.property?.pool === 'YES' || E.property?.pool === true ? 'Yes' : 'No'}{E.property?.poolCage === 'YES' ? ' (caged)' : ''} | Driveway: {E.property?.largeDriveway === 'YES' || E.property?.largeDriveway === true ? 'Large' : 'Normal'}<br />
                     Shrubs: {E.property?.shrubDensity || E.property?.shrubs || '--'} | Trees: {E.property?.treeDensity || E.property?.trees || '--'} | Complexity: {E.property?.landscapeComplexity || E.property?.complexity || '--'} | Water: {E.property?.nearWater && E.property.nearWater !== 'NONE' ? E.property.nearWater.replace(/_/g, ' ') : 'No'}
                     {E.property?.yearBuilt && <><br />Built: {E.property.yearBuilt} | {E.property?.constructionMaterial} | {E.property?.foundationType} foundation | {E.property?.roofType} roof</>}
@@ -1232,10 +1234,10 @@ function EstimateToolView() {
                         <span style={{ fontSize: 12, flexShrink: 0 }}>
                           {m.type === 'up' ? '▲' : m.type === 'down' ? '▼' : '●'}
                         </span>
-                        <span style={{ fontSize: 12, color: m.type === 'up' ? '#ef4444' : m.type === 'down' ? '#10b981' : C.gray, flex: 1 }}>
+                        <span style={{ fontSize: 12, color: m.type === 'up' ? C.red : m.type === 'down' ? C.green : C.gray, flex: 1 }}>
                           {m.label}
                         </span>
-                        <span style={{ fontSize: 11, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", color: m.type === 'up' ? '#ef4444' : m.type === 'down' ? '#10b981' : C.gray }}>{m.impact != null ? (m.impact >= 0 ? '+$' + m.impact : '-$' + Math.abs(m.impact)) : '$0'}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", color: m.type === 'up' ? C.red : m.type === 'down' ? C.green : C.gray }}>{m.impact != null ? (m.impact >= 0 ? '+$' + m.impact : '-$' + Math.abs(m.impact)) : '$0'}</span>
                       </div>
                     ))}
                   </div>
@@ -1464,11 +1466,11 @@ function EstimateToolView() {
                           {E.recurring.services.map((s, i) => (
                             <React.Fragment key={i}>
                               <div style={{ color: C.gray }}>{s.name}</div>
-                              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: C.white, textAlign: 'right' }}>{fmt(s.mo)}/mo</div>
+                              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: C.heading, textAlign: 'right' }}>{fmt(s.mo)}/mo</div>
                             </React.Fragment>
                           ))}
-                          <div style={{ fontWeight: 700, color: C.white, borderTop: `1px solid ${C.border}`, paddingTop: 6, marginTop: 4 }}>Total before discount</div>
-                          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, borderTop: `1px solid ${C.border}`, paddingTop: 6, marginTop: 4, textAlign: 'right', color: C.white }}>{fmt(Math.round(E.recurring.annualBeforeDiscount / 12 * 100) / 100)}/mo</div>
+                          <div style={{ fontWeight: 700, color: C.heading, borderTop: `1px solid ${C.border}`, paddingTop: 6, marginTop: 4 }}>Total before discount</div>
+                          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, borderTop: `1px solid ${C.border}`, paddingTop: 6, marginTop: 4, textAlign: 'right', color: C.heading }}>{fmt(Math.round(E.recurring.annualBeforeDiscount / 12 * 100) / 100)}/mo</div>
                           {E.recurring.discount > 0 && (
                             <>
                               <div style={{ color: C.green }}>{E.recurring.waveGuardTier} discount (-{Math.round(E.recurring.discount * 100)}%)</div>
@@ -1545,21 +1547,21 @@ function EstimateToolView() {
     {livePreview.anySelected && !estimate && (
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 1000,
-        background: 'linear-gradient(135deg, #1a2937 0%, #0f1923 100%)',
+        background: 'linear-gradient(135deg, #FFFFFF 0%, #F1F5F9 100%)',
         borderTop: `2px solid ${C.teal}`,
         padding: '12px 24px',
         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 20, flexWrap: 'wrap',
         fontFamily: "'JetBrains Mono', monospace",
-        boxShadow: '0 -4px 20px rgba(0,0,0,0.5)',
+        boxShadow: '0 -4px 20px rgba(0,0,0,0.1)',
       }}>
         <div style={{ fontSize: 11, color: C.gray, textTransform: 'uppercase', letterSpacing: 1 }}>Approx</div>
         {livePreview.recurringCount > 0 && (
           <>
-            <div style={{ fontSize: 15, color: C.white }}>
+            <div style={{ fontSize: 15, color: C.heading }}>
               Monthly: <strong style={{ color: C.green }}>${livePreview.recurringMonthly}</strong>
             </div>
             <div style={{ fontSize: 13, color: C.gray }}>{'\u00B7'}</div>
-            <div style={{ fontSize: 15, color: C.white }}>
+            <div style={{ fontSize: 15, color: C.heading }}>
               Annual: <strong style={{ color: C.green }}>${livePreview.annualRecurring.toLocaleString()}</strong>
             </div>
             {livePreview.annualSavings > 0 && (
@@ -1576,7 +1578,7 @@ function EstimateToolView() {
           <div style={{ fontSize: 14, color: C.gray }}>{livePreview.onetimeCount} one-time service{livePreview.onetimeCount > 1 ? 's' : ''} selected</div>
         )}
         <button onClick={doGenerate} style={{
-          marginLeft: 10, padding: '8px 20px', background: C.teal, color: C.dark,
+          marginLeft: 10, padding: '8px 20px', background: C.teal, color: '#fff',
           border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer',
           fontFamily: "'DM Sans', sans-serif",
         }}>Generate</button>
@@ -1678,7 +1680,7 @@ function FollowUpModal({ estimate, onClose, onSent }) {
       onClick={onClose}>
       <div style={{ background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, padding: 24, maxWidth: 480, width: '100%' }}
         onClick={ev => ev.stopPropagation()}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: C.white, marginBottom: 4 }}>Follow Up — {estimate.customerName}</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: C.heading, marginBottom: 4 }}>Follow Up — {estimate.customerName}</div>
         <div style={{ fontSize: 12, color: C.gray, marginBottom: 16 }}>{estimate.address}</div>
         <label style={{ fontSize: 12, fontWeight: 600, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6, display: 'block' }}>SMS Message</label>
         <textarea value={message} onChange={ev => setMessage(ev.target.value)} rows={4}
@@ -1686,7 +1688,7 @@ function FollowUpModal({ estimate, onClose, onSent }) {
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: 8, border: `1px solid ${C.border}`, background: 'transparent', color: C.gray, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
           <button onClick={handleSend} disabled={sending}
-            style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: C.amber, color: C.dark, fontSize: 13, fontWeight: 700, cursor: 'pointer', opacity: sending ? 0.6 : 1 }}>
+            style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: C.amber, color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', opacity: sending ? 0.6 : 1 }}>
             {sending ? 'Sending...' : 'Send Follow-Up SMS'}
           </button>
         </div>
@@ -1720,12 +1722,12 @@ function DeclineModal({ estimate, onClose, onSaved }) {
       onClick={onClose}>
       <div style={{ background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, padding: 24, maxWidth: 400, width: '100%' }}
         onClick={ev => ev.stopPropagation()}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: C.white, marginBottom: 4 }}>Mark as Lost</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: C.heading, marginBottom: 4 }}>Mark as Lost</div>
         <div style={{ fontSize: 12, color: C.gray, marginBottom: 16 }}>{estimate.customerName} — {estimate.address?.split(',')[0]}</div>
         <label style={{ fontSize: 12, fontWeight: 600, color: C.gray, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8, display: 'block' }}>Reason</label>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 18 }}>
           {DECLINE_REASONS.map(r => (
-            <label key={r} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 14, color: reason === r ? C.white : C.gray, padding: '8px 12px', borderRadius: 8, background: reason === r ? `${C.red}18` : 'transparent', border: `1px solid ${reason === r ? C.red : C.border}`, transition: 'all 0.15s' }}>
+            <label key={r} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 14, color: reason === r ? C.heading : C.gray, padding: '8px 12px', borderRadius: 8, background: reason === r ? `${C.red}18` : 'transparent', border: `1px solid ${reason === r ? C.red : C.border}`, transition: 'all 0.15s' }}>
               <input type="radio" name="declineReason" checked={reason === r} onChange={() => setReason(r)}
                 style={{ accentColor: C.red, width: 16, height: 16 }} />
               {r}
@@ -1746,7 +1748,7 @@ function DeclineModal({ estimate, onClose, onSaved }) {
 
 /* ── Action-oriented filter logic ─────────────────────────── */
 const PIPELINE_FILTERS = [
-  { key: 'all', label: 'All', color: C.white },
+  { key: 'all', label: 'All', color: C.heading },
   { key: 'needs_estimate', label: 'Needs Estimate', color: C.amber },
   { key: 'ready_to_send', label: 'Ready to Send', color: C.teal },
   { key: 'awaiting', label: 'Awaiting Response', color: C.blue },
@@ -1864,9 +1866,9 @@ function EstimatePipelineView() {
           { label: 'Pipeline Value', value: `$${Math.round(pipelineValue)}`, sub: '/mo potential', color: C.teal },
           { label: 'MRR Won', value: `$${Math.round(totalMRRWon)}`, sub: '/mo closed', color: C.green },
           { label: 'Conversion', value: `${conversionRate}%`, sub: `${accepted} of ${sent + accepted + declined}`, color: conversionRate >= 50 ? C.green : conversionRate >= 25 ? C.amber : C.red },
-          { label: 'Avg Estimate', value: `$${avgEstimateValue}`, sub: '/mo', color: C.white },
+          { label: 'Avg Estimate', value: `$${avgEstimateValue}`, sub: '/mo', color: C.heading },
           { label: 'Follow-Up Overdue', value: followUpOverdue, sub: followUpOverdue > 0 ? 'need attention' : 'all clear', color: followUpOverdue > 0 ? C.red : C.green },
-          { label: 'Total', value: total, sub: `${accepted} won · ${declined} lost`, color: C.white },
+          { label: 'Total', value: total, sub: `${accepted} won · ${declined} lost`, color: C.heading },
         ].map((s, i) => (
           <div key={i} style={{
             flex: '1 1 140px', background: C.card, borderRadius: 10, padding: '14px 16px',
@@ -1888,7 +1890,7 @@ function EstimatePipelineView() {
             <button key={f.key} onClick={() => setFilter(f.key)} style={{
               padding: '7px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
               background: isActive ? f.color : C.card,
-              color: isActive ? (f.color === C.white ? C.dark : C.dark) : f.color,
+              color: isActive ? '#fff' : f.color,
               fontSize: 12, fontWeight: 600, transition: 'all 0.15s',
               border: `1px solid ${isActive ? f.color : C.border}`,
             }}>
@@ -1932,7 +1934,7 @@ function EstimatePipelineView() {
                 {/* Customer info */}
                 <div style={{ flex: 1, minWidth: 150 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 14, fontWeight: 600, color: C.white }}>{e.customerName || 'Unknown'}</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: C.heading }}>{e.customerName || 'Unknown'}</span>
                     {e.source === 'lead_webhook' && <span title="Website lead" style={{ fontSize: 14 }}>{'🌐'}</span>}
                     {e.source === 'voice_agent' && <span title="Voice agent lead" style={{ fontSize: 14 }}>{'🎙️'}</span>}
                     {e.source === 'referral' && <span title="Referral" style={{ fontSize: 14 }}>{'🤝'}</span>}
@@ -1958,8 +1960,8 @@ function EstimatePipelineView() {
                 {e.tier && (
                   <span style={{
                     padding: '3px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700, flexShrink: 0,
-                    background: e.tier === 'Gold' ? `${C.amber}22` : e.tier === 'Platinum' ? `${C.white}15` : `${C.teal}22`,
-                    color: e.tier === 'Gold' ? C.amber : e.tier === 'Platinum' ? C.white : C.teal,
+                    background: e.tier === 'Gold' ? `${C.amber}22` : e.tier === 'Platinum' ? `${C.heading}15` : `${C.teal}22`,
+                    color: e.tier === 'Gold' ? C.amber : e.tier === 'Platinum' ? C.heading : C.teal,
                   }}>{e.tier}</span>
                 )}
 
@@ -1996,7 +1998,7 @@ function EstimatePipelineView() {
                       refreshEstimates();
                     }} style={{
                       padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
-                      background: C.teal, color: C.dark, fontSize: 11, fontWeight: 600,
+                      background: C.teal, color: '#fff', fontSize: 11, fontWeight: 600,
                     }}>Send</button>
                   )}
 
@@ -2085,7 +2087,7 @@ function WebsiteQuotesView() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-              <span style={{ fontSize: 14, fontWeight: 600, color: C.white }}>{e.customerName || 'Unknown'}</span>
+              <span style={{ fontSize: 14, fontWeight: 600, color: C.heading }}>{e.customerName || 'Unknown'}</span>
               <span style={{ fontSize: 16 }}>{sourceIcon(e.source)}</span>
               <span style={{
                 padding: '2px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700,
@@ -2176,14 +2178,14 @@ export default function EstimatePage() {
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: C.white }}>Pipeline</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: C.heading }}>Pipeline</div>
         <div style={{ display: 'flex', gap: 8 }}>
           {tabs.map(t => (
             <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
               padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer',
               fontSize: 13, fontWeight: 600,
-              background: activeTab === t.key ? (t.key === 'pricing' ? '#f59e0b' : C.teal) : C.card,
-              color: activeTab === t.key ? (t.key === 'pricing' ? C.dark : '#fff') : C.gray,
+              background: activeTab === t.key ? (t.key === 'pricing' ? C.amber : C.teal) : C.card,
+              color: activeTab === t.key ? '#fff' : C.gray,
               transition: 'all 0.15s',
             }}>{t.label}</button>
           ))}

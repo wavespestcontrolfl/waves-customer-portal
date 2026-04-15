@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import ProcurementIntelligenceBar from '../../components/admin/ProcurementIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -11,7 +11,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600 });
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -41,7 +41,7 @@ export default function InventoryPage() {
     <div style={{ maxWidth: 1300, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>Procurement Intelligence</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Procurement Intelligence</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>Products, vendor pricing, approvals & COGS</div>
         </div>
       </div>
@@ -49,7 +49,7 @@ export default function InventoryPage() {
       {stats && (
         <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
           {[
-            { label: 'Products', value: stats.products?.total, color: D.white, filter: 'all' },
+            { label: 'Products', value: stats.products?.total, color: D.heading, filter: 'all' },
             { label: 'Priced', value: stats.products?.priced, color: D.green, filter: 'priced' },
             { label: 'Needs Price', value: stats.products?.needsPrice, color: D.amber, filter: 'needs_price' },
             { label: 'Vendors', value: stats.vendors?.total, color: D.teal, action: () => setTab('vendors') },
@@ -164,12 +164,12 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
           <option value="">All Categories</option>
           {categories.map(c => <option key={c.name} value={c.name}>{c.name} ({c.count})</option>)}
         </select>
-        <button onClick={() => setShowAddForm(!showAddForm)} style={{ padding: '10px 16px', borderRadius: 8, border: 'none', background: D.green, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add Product</button>
+        <button onClick={() => setShowAddForm(!showAddForm)} style={{ padding: '10px 16px', borderRadius: 8, border: 'none', background: D.green, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add Product</button>
       </div>
 
       {showAddForm && (
         <div style={{ background: D.card, borderRadius: 10, padding: 16, border: `1px solid ${D.green}44`, marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 10 }}>New Product</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>New Product</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 10 }}>
             <input value={newProduct.name} onChange={e => setNewProduct(p => ({ ...p, name: e.target.value }))} placeholder="Product name *" style={sInput} />
             <input value={newProduct.category} onChange={e => setNewProduct(p => ({ ...p, category: e.target.value }))} placeholder="Category" style={sInput} />
@@ -184,7 +184,7 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
               <button onClick={async () => {
                 if (!newProduct.name.trim()) { showToast('Product name required'); return; }
                 try { await adminFetch('/admin/inventory', { method: 'POST', body: JSON.stringify(newProduct) }); showToast('Product added'); setNewProduct({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz' }); setShowAddForm(false); load(); } catch (e) { showToast('Failed: ' + e.message); }
-              }} style={{ flex: 1, padding: '10px', borderRadius: 8, border: 'none', background: D.green, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Save</button>
+              }} style={{ flex: 1, padding: '10px', borderRadius: 8, border: 'none', background: D.green, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Save</button>
               <button onClick={() => setShowAddForm(false)} style={{ padding: '10px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'none', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
             </div>
           </div>
@@ -202,7 +202,7 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
             const isExpanded = expanded === p.id && !isEditing;
             return [
               <tr key={p.id} onClick={() => !isEditing && setExpanded(expanded === p.id ? null : p.id)} style={{ cursor: isEditing ? 'default' : 'pointer', background: isEditing ? `${D.teal}10` : isExpanded ? `${D.teal}08` : 'transparent' }}>
-                <td style={{ ...tdS, fontWeight: 600, color: D.white }}>{isEditing ? <input value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} style={{ ...sInput, width: '100%', fontWeight: 600 }} onClick={e => e.stopPropagation()} /> : p.name}</td>
+                <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{isEditing ? <input value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} style={{ ...sInput, width: '100%', fontWeight: 600 }} onClick={e => e.stopPropagation()} /> : p.name}</td>
                 <td style={tdS}>{isEditing ? <input value={editForm.category} onChange={e => setEditForm(f => ({ ...f, category: e.target.value }))} style={{ ...sInput, width: 100 }} onClick={e => e.stopPropagation()} /> : <span style={sBadge(`${D.teal}22`, D.teal)}>{p.category}</span>}</td>
                 <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>{isEditing ? <input value={editForm.activeIngredient} onChange={e => setEditForm(f => ({ ...f, activeIngredient: e.target.value }))} style={{ ...sInput, width: '100%' }} onClick={e => e.stopPropagation()} /> : (p.activeIngredient || '—')}</td>
                 <td style={{ ...tdS, color: D.muted, fontSize: 11 }}>{isEditing ? <input value={editForm.moaGroup} onChange={e => setEditForm(f => ({ ...f, moaGroup: e.target.value }))} style={{ ...sInput, width: 80 }} onClick={e => e.stopPropagation()} /> : (p.moaGroup || '—')}</td>
@@ -214,7 +214,7 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
                   <div style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
                     {isEditing ? (
                       <>
-                        <button onClick={() => saveEdit(p.id)} style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, border: 'none', background: D.green, color: D.white, cursor: 'pointer', fontWeight: 600 }}>Save</button>
+                        <button onClick={() => saveEdit(p.id)} style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, border: 'none', background: D.green, color: '#fff', cursor: 'pointer', fontWeight: 600 }}>Save</button>
                         <button onClick={() => setEditing(null)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'none', color: D.muted, cursor: 'pointer' }}>×</button>
                       </>
                     ) : (
@@ -222,7 +222,7 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
                         <button onClick={(e) => startEdit(p, e)} style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'none', color: D.teal, cursor: 'pointer' }} title="Edit">✎</button>
                         {deleting === p.id ? (
                           <>
-                            <button onClick={async () => { try { await adminFetch(`/admin/inventory/${p.id}`, { method: 'DELETE' }); showToast('Deleted'); load(); } catch { showToast('Delete failed'); } setDeleting(null); }} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, border: 'none', background: D.red, color: D.white, cursor: 'pointer' }}>Yes</button>
+                            <button onClick={async () => { try { await adminFetch(`/admin/inventory/${p.id}`, { method: 'DELETE' }); showToast('Deleted'); load(); } catch { showToast('Delete failed'); } setDeleting(null); }} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, border: 'none', background: D.red, color: '#fff', cursor: 'pointer' }}>Yes</button>
                             <button onClick={() => setDeleting(null)} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'none', color: D.muted, cursor: 'pointer' }}>No</button>
                           </>
                         ) : (
@@ -278,7 +278,7 @@ function ExpandedProduct({ product, vendors, onSave }) {
           <div style={{ display: 'grid', gap: 4 }}>
             {product.vendorPricing.map((vp, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 10px', background: D.input, borderRadius: 6, fontSize: 12 }}>
-                <span style={{ color: D.white, fontWeight: 600, minWidth: 140 }}>{vp.vendorName}</span>
+                <span style={{ color: D.heading, fontWeight: 600, minWidth: 140 }}>{vp.vendorName}</span>
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", color: vp.isBest ? D.green : D.text }}>${vp.price.toFixed(2)}</span>
                 {vp.quantity && <span style={{ color: D.muted }}>{vp.quantity}</span>}
                 {vp.pricePerOz && <span style={{ color: D.muted, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>${vp.pricePerOz}/oz</span>}
@@ -319,7 +319,7 @@ function VendorsTab({ showToast }) {
       {vendors.map(v => (
         <div key={v.id} style={{ ...sCard, marginBottom: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-            <div><div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{v.name}</div><div style={{ fontSize: 11, color: D.muted }}>{v.type}</div></div>
+            <div><div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{v.name}</div><div style={{ fontSize: 11, color: D.muted }}>{v.type}</div></div>
             <div style={{ display: 'flex', gap: 4 }}>
               {v.scrapingEnabled && <span style={sBadge(`${D.green}22`, D.green)}>Scrape</span>}
               {v.hasCredentials && <span style={sBadge(`${D.teal}22`, D.teal)}>Login</span>}
@@ -382,13 +382,13 @@ function ApprovalsTab({ showToast, onUpdate }) {
               <div key={a.id} style={{ ...sCard, marginBottom: 0, display: 'flex', alignItems: 'center', gap: 12 }}>
                 <input type="checkbox" checked={selected.has(a.id)} onChange={() => toggleSel(a.id)} style={{ accentColor: D.teal, cursor: 'pointer' }} />
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{a.product_name}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{a.product_name}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{a.vendor_name} · {a.category}</div>
                   {a.notes && <div style={{ fontSize: 11, color: D.purple, marginTop: 2 }}>{a.notes}</div>}
                 </div>
                 <div style={{ textAlign: 'center', minWidth: 80 }}>
                   {a.old_price && <div style={{ fontSize: 12, color: D.muted, textDecoration: 'line-through' }}>${parseFloat(a.old_price).toFixed(2)}</div>}
-                  <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: D.white }}>${parseFloat(a.new_price).toFixed(2)}</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: D.heading }}>${parseFloat(a.new_price).toFixed(2)}</div>
                 </div>
                 {pct !== null && <span style={sBadge(isUp ? `${D.red}22` : `${D.green}22`, isUp ? D.red : D.green)}>{isUp ? '+' : ''}{pct}%</span>}
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -441,7 +441,7 @@ function ProtocolsTab({ showToast }) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div><div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>Treatment Protocols by Service Line</div>
+        <div><div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Treatment Protocols by Service Line</div>
           <div style={{ fontSize: 12, color: D.muted }}>Define which products each service uses, at what rates — drives COGS calculations</div></div>
         <button onClick={() => setShowNewService(!showNewService)} style={sBtn(D.green, D.white)}>+ New Service Type</button>
       </div>
@@ -456,7 +456,7 @@ function ProtocolsTab({ showToast }) {
 
       {showAdd && !services.find(s => s.serviceType === showAdd) && (
         <div style={{ ...sCard, border: `1px solid ${D.teal}44` }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>{showAdd}</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>{showAdd}</div>
           <AddProtocolRow products={products} newRow={newRow} setNewRow={setNewRow} unitOpts={unitOpts} onAdd={() => addRow(showAdd)} onCancel={() => setShowAdd(null)} />
         </div>
       )}
@@ -466,7 +466,7 @@ function ProtocolsTab({ showToast }) {
       {services.map(svc => (
         <div key={svc.serviceType} style={{ ...sCard }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{svc.serviceType}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{svc.serviceType}</div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 16, fontWeight: 700, color: D.green }}>${svc.totalCost.toFixed(2)}/app</div>
               <button onClick={() => setShowAdd(showAdd === svc.serviceType ? null : svc.serviceType)} style={{ ...sBtn(D.teal, D.white), fontSize: 11, padding: '6px 12px' }}>+ Product</button>
@@ -484,7 +484,7 @@ function ProtocolsTab({ showToast }) {
                   <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace", color: D.green }}>{p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : '—'}</td>
                   <td style={tdS}><input type="checkbox" checked={editForm.isPrimary} onChange={e => setEditForm(f => ({ ...f, isPrimary: e.target.checked }))} style={{ accentColor: D.teal }} /></td>
                   <td style={tdS}><input value={editForm.notes} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} style={{ ...sInput, width: '100%' }} /></td>
-                  <td style={{ ...tdS, width: 80 }}><div style={{ display: 'flex', gap: 4 }}><button onClick={() => saveEdit(p.id)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: 'none', background: D.green, color: D.white, cursor: 'pointer' }}>Save</button><button onClick={() => setEditingRow(null)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'none', color: D.muted, cursor: 'pointer' }}>×</button></div></td>
+                  <td style={{ ...tdS, width: 80 }}><div style={{ display: 'flex', gap: 4 }}><button onClick={() => saveEdit(p.id)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: 'none', background: D.green, color: '#fff', cursor: 'pointer' }}>Save</button><button onClick={() => setEditingRow(null)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'none', color: D.muted, cursor: 'pointer' }}>×</button></div></td>
                 </tr>
               ) : (
                 <tr key={p.id}>
@@ -544,11 +544,11 @@ function MarginsTab({ showToast }) {
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading service margins...</div>;
   return (
     <div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>COGS by Service Line</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>COGS by Service Line</div>
       {services.length === 0 ? <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No service product mappings yet.</div> : services.map(svc => (
         <div key={svc.serviceType} style={{ ...sCard }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{svc.serviceType}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{svc.serviceType}</div>
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 16, fontWeight: 700, color: D.green }}>${svc.totalCost.toFixed(2)}/app</div>
           </div>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -582,15 +582,15 @@ function ScrapeTab({ showToast }) {
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading scrape data...</div>;
   return (
     <div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Vendor Scrape Status</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Vendor Scrape Status</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10, marginBottom: 24 }}>
         {vendors.map(v => {
           const sc = v.lastScrapeStatus === 'completed' ? D.green : v.lastScrapeStatus === 'running' ? D.amber : v.lastScrapeStatus === 'failed' ? D.red : D.muted;
-          return (<div key={v.id} style={{ ...sCard, marginBottom: 0, textAlign: 'center' }}><div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>{v.name}</div><div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>{v.productCount} products</div><span style={sBadge(`${sc}22`, sc)}>{v.lastScrapeStatus || 'never'}</span><button onClick={() => triggerScrape(v.id)} style={{ ...sBtn(D.teal, D.white), marginTop: 8, width: '100%', fontSize: 11 }}>Trigger Scrape</button></div>);
+          return (<div key={v.id} style={{ ...sCard, marginBottom: 0, textAlign: 'center' }}><div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>{v.name}</div><div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>{v.productCount} products</div><span style={sBadge(`${sc}22`, sc)}>{v.lastScrapeStatus || 'never'}</span><button onClick={() => triggerScrape(v.id)} style={{ ...sBtn(D.teal, D.white), marginTop: 8, width: '100%', fontSize: 11 }}>Trigger Scrape</button></div>);
         })}
         {!vendors.length && <div style={{ color: D.muted, gridColumn: '1 / -1', textAlign: 'center', padding: 20 }}>No vendors with scraping enabled</div>}
       </div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Recent Scrape Jobs</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Recent Scrape Jobs</div>
       {!jobs.length ? <div style={{ ...sCard, textAlign: 'center', padding: 30, color: D.muted }}>No scrape jobs yet</div> : (
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead><tr>{['Vendor', 'Status', 'Products', 'Updated', 'New', 'Errors', 'Duration', 'Date'].map(h => <th key={h} style={thS}>{h}</th>)}</tr></thead>

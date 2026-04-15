@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
@@ -12,7 +12,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', transition: 'opacity .15s' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
 const sInput = { width: '100%', padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -102,7 +102,7 @@ export default function WordPressSitesPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>WordPress Fleet</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>WordPress Fleet</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>15-domain network management</div>
         </div>
         <button onClick={quickScanAll} style={{ ...sBtn('transparent', D.teal), border: `1px solid ${D.teal}33`, padding: '10px 20px' }}>
@@ -144,13 +144,13 @@ export default function WordPressSitesPage() {
           {/* Stat cards */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10, marginBottom: 20 }}>
             {[
-              { label: 'Total Sites', value: sites.length, color: D.white },
+              { label: 'Total Sites', value: sites.length, color: D.heading },
               { label: 'Connected', value: connected, color: D.green },
               { label: 'Built', value: sites.filter(s => s.content_status === 'built').length, color: D.green },
               { label: 'Need Rebuild', value: sites.filter(s => s.content_status === 'clone_needs_rebuild').length, color: D.red },
               { label: 'Schema Live', value: sites.filter(s => s.schema_deployed).length, color: D.teal },
               { label: 'llms.txt Live', value: sites.filter(s => s.llms_txt_deployed).length, color: D.purple },
-              { label: 'Total Pages', value: sites.reduce((s, x) => s + (x.total_pages || 0), 0), color: D.white },
+              { label: 'Total Pages', value: sites.reduce((s, x) => s + (x.total_pages || 0), 0), color: D.heading },
               { label: 'Blog Posts', value: sites.reduce((s, x) => s + (x.blog_post_count || 0), 0), color: D.amber },
             ].map(s => (
               <div key={s.label} style={{ ...sCard, marginBottom: 0, textAlign: 'center', padding: 14 }}>
@@ -168,7 +168,7 @@ export default function WordPressSitesPage() {
               const spokes = vSites.filter(s => s.hub_type !== 'hub');
               return (
                 <div key={v} style={{ ...sCard, marginBottom: 0, borderLeft: `3px solid ${TYPE_COLORS[v]}` }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 10 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10 }}>
                     {TYPE_ICONS[v]} {v === 'pest_control' ? 'Pest Control' : v === 'exterminator' ? 'Exterminators' : 'Lawn Care'}
                     <span style={{ fontSize: 11, color: D.muted, fontWeight: 400, marginLeft: 8 }}>{vSites.length} sites</span>
                   </div>
@@ -198,7 +198,7 @@ export default function WordPressSitesPage() {
 
           {/* Build progress table */}
           <div style={{ ...sCard, overflow: 'auto' }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 14 }}>Build Progress</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 14 }}>Build Progress</div>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${D.border}` }}>
@@ -244,7 +244,7 @@ export default function WordPressSitesPage() {
             <div key={site.id} style={{ ...sCard, marginBottom: 0, borderLeft: `3px solid ${TYPE_COLORS[site.site_type] || D.muted}` }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
                     {TYPE_ICONS[site.site_type] || '🌐'} {site.name}
                     {site.hub_type === 'hub' && <span style={{ ...sBadge(`${D.purple}22`, D.purple), marginLeft: 6, verticalAlign: 'middle' }}>HUB</span>}
                   </div>
@@ -345,7 +345,7 @@ export default function WordPressSitesPage() {
 
           {/* Implementation checklist */}
           <div style={sCard}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 14 }}>Implementation Checklist</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 14 }}>Implementation Checklist</div>
             {[
               { phase: 'Phase 1: Quick Wins (Weeks 1–2)', color: D.teal, items: [
                 'Deploy LocalBusiness schema to all 11 built sites',
@@ -397,7 +397,7 @@ export default function WordPressSitesPage() {
 
           {/* Network page target */}
           <div style={{ ...sCard, marginTop: 12 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.white, marginBottom: 8 }}>Network Target: ~595 Pages</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 8 }}>Network Target: ~595 Pages</div>
             <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.6 }}>
               Current: ~343 pages across 15 domains. After full build-out: ~595 pages including
               waveslawncare.com hub expansion (~37 new pages), 4 lawn care spoke rebuilds (~135 new pages),

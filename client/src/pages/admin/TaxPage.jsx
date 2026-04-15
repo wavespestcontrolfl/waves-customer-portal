@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', cardHover: '#253347', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#a855f7', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', blue: '#3b82f6', orange: '#f97316' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', cardHover: '#F0F7FC', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', blue: '#0A7EC2', orange: '#EA580C', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
@@ -28,7 +28,7 @@ function StatCard({ label, value, color, sub, onClick }) {
 function TabBtn({ active, label, count, onClick, color }) {
   return <button onClick={onClick} style={{ background: active ? D.card : 'transparent', border: active ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 8, padding: '8px 14px', color: active ? D.white : D.muted, fontSize: 12, cursor: 'pointer', fontWeight: active ? 600 : 400, transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44 }}>{label}{count != null && <span style={{ background: `${color || D.teal}22`, color: color || D.teal, fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 9999 }}>{count}</span>}</button>;
 }
-const inputStyle = { background: '#0f1923', border: `1px solid ${D.border}`, borderRadius: 6, padding: '6px 10px', color: D.text, fontSize: 12, fontFamily: 'inherit', outline: 'none' };
+const inputStyle = { background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, padding: '6px 10px', color: D.text, fontSize: 12, fontFamily: 'inherit', outline: 'none' };
 const fmtD = (d) => d ? new Date(d).toLocaleDateString() : '—';
 const fmtM = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
 const fmtPct = (n) => n != null ? (n * 100).toFixed(2) + '%' : '—';
@@ -53,12 +53,12 @@ function TaxRatesTab() {
   useEffect(() => { adminFetch('/admin/tax/rates').then(d => setRates(d.rates || [])).catch(() => {}); }, []);
   return (
     <div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 12 }}>Florida Sales Tax Rates by County</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Florida Sales Tax Rates by County</div>
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
         {rates.filter(r => r.active).map(r => (
           <div key={r.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: '14px 16px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ fontSize: 15, fontWeight: 700, color: D.white }}>{r.county} County</span>
+              <span style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{r.county} County</span>
               <span style={{ fontFamily: MONO, fontSize: 18, fontWeight: 700, color: D.green }}>{fmtPct(r.combinedRate)}</span>
             </div>
             <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>State: {fmtPct(r.stateRate)} + County surtax: {fmtPct(r.countySurtax)}</div>
@@ -108,13 +108,13 @@ function ServiceTaxabilityTab() {
 
   return (
     <div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 4 }}>Service Taxability Matrix</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 4 }}>Service Taxability Matrix</div>
       <div style={{ fontSize: 11, color: D.muted, marginBottom: 14 }}>Click a service to toggle FL sales tax collection</div>
       {services.map(s => (
         <div key={s.id} onClick={() => toggleTaxable(s)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, marginBottom: 4, cursor: 'pointer', opacity: toggling === s.id ? 0.5 : 1 }}>
           <span style={{ width: 10, height: 10, borderRadius: '50%', background: s.isTaxable ? D.green : D.muted, flexShrink: 0 }} />
           <div style={{ flex: 1 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{s.serviceLabel}</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{s.serviceLabel}</span>
             <span style={{ fontSize: 11, color: D.muted, marginLeft: 8 }}>{s.serviceKey}</span>
           </div>
           <Badge color={s.isTaxable ? D.green : D.muted}>{s.isTaxable ? 'Taxable' : 'Exempt'}</Badge>
@@ -153,10 +153,10 @@ function EquipmentTab() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>Equipment & Depreciation Register</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>Equipment & Depreciation Register</div>
           <div style={{ fontSize: 11, color: D.muted }}>Section 179 & MACRS tracking</div>
         </div>
-        <button onClick={() => setShowAdd(!showAdd)} style={{ background: D.teal, border: 'none', borderRadius: 6, padding: '6px 14px', color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>+ Add Equipment</button>
+        <button onClick={() => setShowAdd(!showAdd)} style={{ background: D.teal, border: 'none', borderRadius: 6, padding: '6px 14px', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>+ Add Equipment</button>
       </div>
 
       {/* Summary */}
@@ -180,7 +180,7 @@ function EquipmentTab() {
             <select value={form.depreciationMethod} onChange={e => setForm(f => ({ ...f, depreciationMethod: e.target.value }))} style={{ ...inputStyle, minWidth: 110 }}>
               <option value="section_179">Section 179</option><option value="MACRS">MACRS</option><option value="SL">Straight Line</option><option value="bonus_100">100% Bonus</option>
             </select></div>
-          <button onClick={handleAdd} style={{ background: D.green, border: 'none', borderRadius: 6, padding: '6px 14px', color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Save</button>
+          <button onClick={handleAdd} style={{ background: D.green, border: 'none', borderRadius: 6, padding: '6px 14px', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Save</button>
           <button onClick={() => setShowAdd(false)} style={{ background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, padding: '6px 10px', color: D.muted, fontSize: 12, cursor: 'pointer' }}>Cancel</button>
         </div>
       )}
@@ -188,7 +188,7 @@ function EquipmentTab() {
       {equipment.filter(e => e.active).map(e => (
         <div key={e.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: '12px 14px', marginBottom: 4 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: D.white, flex: 1 }}>{e.name}</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: D.heading, flex: 1 }}>{e.name}</span>
             <Badge color={D.teal} small>{e.assetCategory}</Badge>
             <Badge color={e.section179Elected ? D.green : D.amber} small>{e.depreciationMethod}</Badge>
           </div>
@@ -242,12 +242,12 @@ function ExpensesTab() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>Business Expenses</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>Business Expenses</div>
           <select value={yearFilter} onChange={e => setYearFilter(e.target.value)} style={{ ...inputStyle, minWidth: 80 }}>
             <option value="2026">2026</option><option value="2025">2025</option><option value="2024">2024</option>
           </select>
         </div>
-        <button onClick={() => setShowAdd(!showAdd)} style={{ background: D.teal, border: 'none', borderRadius: 6, padding: '6px 14px', color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>+ Add Expense</button>
+        <button onClick={() => setShowAdd(!showAdd)} style={{ background: D.teal, border: 'none', borderRadius: 6, padding: '6px 14px', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>+ Add Expense</button>
       </div>
 
       <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
@@ -265,7 +265,7 @@ function ExpensesTab() {
           <div><div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>Amount *</div><input type="number" step="0.01" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} style={{ ...inputStyle, width: 90 }} /></div>
           <div><div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>Date *</div><input type="date" value={form.expenseDate} onChange={e => setForm(f => ({ ...f, expenseDate: e.target.value }))} style={{ ...inputStyle, width: 130 }} /></div>
           <div><div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>Vendor</div><input value={form.vendorName} onChange={e => setForm(f => ({ ...f, vendorName: e.target.value }))} style={{ ...inputStyle, width: 130 }} /></div>
-          <button onClick={handleAdd} style={{ background: D.green, border: 'none', borderRadius: 6, padding: '6px 14px', color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Save</button>
+          <button onClick={handleAdd} style={{ background: D.green, border: 'none', borderRadius: 6, padding: '6px 14px', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Save</button>
           <button onClick={() => setShowAdd(false)} style={{ background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, padding: '6px 10px', color: D.muted, fontSize: 12, cursor: 'pointer' }}>Cancel</button>
         </div>
       )}
@@ -276,7 +276,7 @@ function ExpensesTab() {
           <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>By Schedule C Category</div>
           {summary.map((c, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 12px', background: D.card, borderRadius: 6, marginBottom: 3, border: `1px solid ${D.border}` }}>
-              <span style={{ fontSize: 12, color: D.white, fontWeight: 500, flex: 1 }}>{c.category || 'Uncategorized'}</span>
+              <span style={{ fontSize: 12, color: D.heading, fontWeight: 500, flex: 1 }}>{c.category || 'Uncategorized'}</span>
               <span style={{ fontFamily: MONO, fontSize: 12, color: D.text }}>{fmtM(c.total)}</span>
               <span style={{ fontFamily: MONO, fontSize: 11, color: D.green }}>{fmtM(c.deductible)} deductible</span>
               <span style={{ fontSize: 10, color: D.muted }}>{c.count} items</span>
@@ -289,7 +289,7 @@ function ExpensesTab() {
       {expenses.map(e => (
         <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: D.card, borderRadius: 6, marginBottom: 3, border: `1px solid ${D.border}` }}>
           <span style={{ fontSize: 11, color: D.muted, minWidth: 70 }}>{fmtD(e.expenseDate)}</span>
-          <span style={{ fontSize: 12, color: D.white, flex: 1 }}>{e.description}</span>
+          <span style={{ fontSize: 12, color: D.heading, flex: 1 }}>{e.description}</span>
           {e.categoryName && <Badge color={D.teal} small>{e.categoryName}</Badge>}
           {e.vendorName && <span style={{ fontSize: 11, color: D.muted }}>{e.vendorName}</span>}
           <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: D.text }}>{fmtM(e.amount)}</span>
@@ -323,7 +323,7 @@ function FilingCalendarTab() {
 
   return (
     <div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 14 }}>Tax Filing Calendar</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Tax Filing Calendar</div>
 
       {/* Upcoming */}
       <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Upcoming Deadlines</div>
@@ -334,7 +334,7 @@ function FilingCalendarTab() {
         return (
           <div key={f.id} style={{ background: D.card, border: `1px solid ${du <= 7 ? D.red + '66' : D.border}`, borderRadius: 8, padding: '12px 14px', marginBottom: 6 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: D.white, flex: 1 }}>{f.title}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: D.heading, flex: 1 }}>{f.title}</span>
               <Badge color={STATUS_COLORS[f.status]}>{f.status}</Badge>
               <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700, color: urgentColor }}>{du > 0 ? `${du}d` : du === 0 ? 'TODAY' : `${Math.abs(du)}d OVERDUE`}</span>
             </div>
@@ -422,10 +422,10 @@ function AdvisorTab() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>AI Tax Advisor</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>AI Tax Advisor</div>
           <div style={{ fontSize: 11, color: D.muted }}>Weekly analysis of tax situation, regulations & savings</div>
         </div>
-        <button onClick={handleRunAdvisor} disabled={running} style={{ background: running ? D.border : D.purple, border: 'none', borderRadius: 6, padding: '6px 16px', color: D.white, fontSize: 12, fontWeight: 600, cursor: running ? 'not-allowed' : 'pointer', opacity: running ? 0.6 : 1 }}>
+        <button onClick={handleRunAdvisor} disabled={running} style={{ background: running ? D.border : D.purple, border: 'none', borderRadius: 6, padding: '6px 16px', color: D.heading, fontSize: 12, fontWeight: 600, cursor: running ? 'not-allowed' : 'pointer', opacity: running ? 0.6 : 1 }}>
           {running ? 'Running analysis...' : 'Run Advisor Now'}
         </button>
       </div>
@@ -434,7 +434,7 @@ function AdvisorTab() {
       {(alertCounts.new || 0) > 0 && (
         <div style={{ marginBottom: 20 }}>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: D.white }}>Action Items</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: D.heading }}>Action Items</div>
             {['new', 'reviewed', 'acted_on', 'dismissed'].map(s => (
               <button key={s} onClick={() => { setAlertFilter(s); }} style={{ background: alertFilter === s ? D.card : 'transparent', border: alertFilter === s ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 4, padding: '3px 8px', fontSize: 10, color: alertFilter === s ? D.white : D.muted, cursor: 'pointer', textTransform: 'capitalize' }}>
                 {s.replace('_', ' ')} {alertCounts[s] ? `(${alertCounts[s]})` : ''}
@@ -446,13 +446,13 @@ function AdvisorTab() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                 <Badge color={PRIORITY_COLORS[a.priority]} small>{a.priority}</Badge>
                 <Badge color={D.teal} small>{a.type}</Badge>
-                <span style={{ fontSize: 12, fontWeight: 600, color: D.white, flex: 1 }}>{a.title}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: D.heading, flex: 1 }}>{a.title}</span>
                 {a.estimatedSavings && <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700, color: D.green }}>~{fmtM(a.estimatedSavings)}/yr</span>}
               </div>
               {a.description && <div style={{ fontSize: 11, color: D.muted, marginBottom: 6 }}>{a.description}</div>}
               <div style={{ display: 'flex', gap: 4 }}>
-                {a.status === 'new' && <button onClick={() => handleAlertAction(a.id, 'reviewed')} style={{ background: D.teal, border: 'none', borderRadius: 4, padding: '3px 10px', color: D.white, fontSize: 10, cursor: 'pointer' }}>Mark Reviewed</button>}
-                {(a.status === 'new' || a.status === 'reviewed') && <button onClick={() => handleAlertAction(a.id, 'acted_on')} style={{ background: D.green, border: 'none', borderRadius: 4, padding: '3px 10px', color: D.white, fontSize: 10, cursor: 'pointer' }}>Done</button>}
+                {a.status === 'new' && <button onClick={() => handleAlertAction(a.id, 'reviewed')} style={{ background: D.teal, border: 'none', borderRadius: 4, padding: '3px 10px', color: '#fff', fontSize: 10, cursor: 'pointer' }}>Mark Reviewed</button>}
+                {(a.status === 'new' || a.status === 'reviewed') && <button onClick={() => handleAlertAction(a.id, 'acted_on')} style={{ background: D.green, border: 'none', borderRadius: 4, padding: '3px 10px', color: '#fff', fontSize: 10, cursor: 'pointer' }}>Done</button>}
                 {a.status !== 'dismissed' && <button onClick={() => handleAlertAction(a.id, 'dismissed')} style={{ background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 4, padding: '3px 8px', color: D.muted, fontSize: 10, cursor: 'pointer' }}>Dismiss</button>}
               </div>
             </div>
@@ -478,7 +478,7 @@ function AdvisorTab() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
               <span style={{ fontFamily: MONO, fontSize: 32, fontWeight: 800, color: gradeColor }}>{r.grade}</span>
               <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{r.period}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{r.period}</div>
                 <div style={{ fontSize: 12, color: D.muted }}>{r.date}</div>
               </div>
             </div>
@@ -488,10 +488,10 @@ function AdvisorTab() {
           {/* Regulation changes */}
           {r.regulationChanges?.length > 0 && (
             <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 8 }}>📜 Regulation Changes Found</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>📜 Regulation Changes Found</div>
               {r.regulationChanges.map((rc, i) => (
                 <div key={i} style={{ background: D.card, border: `1px solid ${D.amber}44`, borderRadius: 8, padding: '10px 14px', marginBottom: 4 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 4 }}>{rc.change}</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 4 }}>{rc.change}</div>
                   <div style={{ fontSize: 11, color: D.muted }}>{rc.impact}</div>
                   {rc.action_required && <div style={{ fontSize: 11, color: D.amber, marginTop: 4 }}>Action: {rc.action_required}</div>}
                   <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>{rc.source} {rc.effective_date && `· Effective ${rc.effective_date}`}</div>
@@ -503,12 +503,12 @@ function AdvisorTab() {
           {/* Savings opportunities */}
           {r.savingsOpportunities?.length > 0 && (
             <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 8 }}>💰 Savings Opportunities</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>💰 Savings Opportunities</div>
               {r.savingsOpportunities.map((s, i) => (
                 <div key={i} style={{ background: D.card, border: `1px solid ${D.green}33`, borderRadius: 8, padding: '10px 14px', marginBottom: 4 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <Badge color={PRIORITY_COLORS[s.priority]} small>{s.priority}</Badge>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: D.white, flex: 1 }}>{s.title}</span>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: D.heading, flex: 1 }}>{s.title}</span>
                     {s.estimated_annual_savings && <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: D.green }}>~{fmtM(s.estimated_annual_savings)}/yr</span>}
                   </div>
                   <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{s.action}</div>
@@ -520,10 +520,10 @@ function AdvisorTab() {
           {/* Deduction gaps */}
           {r.deductionGaps?.length > 0 && (
             <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 8 }}>🔍 Deduction Gaps</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>🔍 Deduction Gaps</div>
               {r.deductionGaps.map((d, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: D.card, borderRadius: 6, marginBottom: 3, border: `1px solid ${D.border}` }}>
-                  <span style={{ fontSize: 12, color: D.white, flex: 1 }}>{d.deduction}</span>
+                  <span style={{ fontSize: 12, color: D.heading, flex: 1 }}>{d.deduction}</span>
                   {d.estimated_value && <span style={{ fontFamily: MONO, fontSize: 12, color: D.green }}>{fmtM(d.estimated_value)}</span>}
                   {d.irs_reference && <span style={{ fontSize: 10, color: D.muted }}>{d.irs_reference}</span>}
                 </div>
@@ -534,11 +534,11 @@ function AdvisorTab() {
           {/* Compliance alerts */}
           {r.complianceAlerts?.length > 0 && (
             <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 8 }}>⚠️ Compliance Alerts</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>⚠️ Compliance Alerts</div>
               {r.complianceAlerts.map((a, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: D.card, borderRadius: 6, marginBottom: 3, border: `1px solid ${PRIORITY_COLORS[a.severity] || D.border}44` }}>
                   <Badge color={PRIORITY_COLORS[a.severity]} small>{a.severity}</Badge>
-                  <span style={{ fontSize: 12, color: D.white, flex: 1 }}>{a.alert}</span>
+                  <span style={{ fontSize: 12, color: D.heading, flex: 1 }}>{a.alert}</span>
                   {a.deadline && <span style={{ fontSize: 11, color: D.amber }}>By: {a.deadline}</span>}
                 </div>
               ))}
@@ -548,7 +548,7 @@ function AdvisorTab() {
       ) : (
         <div style={{ padding: 40, textAlign: 'center' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>🤖</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 6 }}>No Advisor Reports Yet</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 6 }}>No Advisor Reports Yet</div>
           <div style={{ fontSize: 13, color: D.muted, maxWidth: 400, margin: '0 auto' }}>Click "Run Advisor Now" to generate your first weekly tax analysis. The advisor will search for current regulations, analyze your financials, and identify savings opportunities.</div>
         </div>
       )}
@@ -564,7 +564,7 @@ function ExemptionsTab() {
   useEffect(() => { adminFetch('/admin/tax/exemptions').then(d => setExemptions(d.exemptions || [])).catch(() => {}); }, []);
   return (
     <div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 4 }}>Tax Exemption Certificates</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 4 }}>Tax Exemption Certificates</div>
       <div style={{ fontSize: 11, color: D.muted, marginBottom: 14 }}>DR-14 exemption certificates for tax-exempt customers</div>
       {exemptions.length === 0 ? (
         <div style={{ padding: 30, textAlign: 'center', color: D.muted, fontSize: 13 }}>No exemption certificates on file. Add one when a customer provides a DR-14.</div>
@@ -572,7 +572,7 @@ function ExemptionsTab() {
         exemptions.map(e => (
           <div key={e.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: '10px 14px', marginBottom: 4 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: D.white, flex: 1 }}>{e.customerName}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: D.heading, flex: 1 }}>{e.customerName}</span>
               <Badge color={e.verified ? D.green : D.amber}>{e.verified ? 'Verified' : 'Unverified'}</Badge>
               <Badge color={D.teal} small>{e.exemptionType}</Badge>
             </div>
@@ -647,14 +647,14 @@ function MileageTab() {
 
       {/* Sync + Add */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-        <button onClick={handleSync} disabled={syncing} style={{ padding: '8px 16px', background: D.teal, color: D.white, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: syncing ? 0.5 : 1 }}>{syncing ? 'Syncing Bouncie...' : '🚗 Sync from Bouncie'}</button>
+        <button onClick={handleSync} disabled={syncing} style={{ padding: '8px 16px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: syncing ? 0.5 : 1 }}>{syncing ? 'Syncing Bouncie...' : '🚗 Sync from Bouncie'}</button>
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end' }}>
           <div><label style={{ fontSize: 10, color: D.muted, display: 'block' }}>Date</label><input type="date" value={form.trip_date} onChange={e => setForm(f => ({ ...f, trip_date: e.target.value }))} style={{ ...inputStyle, width: 130 }} /></div>
           <div><label style={{ fontSize: 10, color: D.muted, display: 'block' }}>From</label><input value={form.start_address} onChange={e => setForm(f => ({ ...f, start_address: e.target.value }))} placeholder="Start" style={{ ...inputStyle, width: 140 }} /></div>
           <div><label style={{ fontSize: 10, color: D.muted, display: 'block' }}>To</label><input value={form.end_address} onChange={e => setForm(f => ({ ...f, end_address: e.target.value }))} placeholder="End" style={{ ...inputStyle, width: 140 }} /></div>
           <div><label style={{ fontSize: 10, color: D.muted, display: 'block' }}>Miles</label><input type="number" value={form.distance_miles} onChange={e => setForm(f => ({ ...f, distance_miles: e.target.value }))} placeholder="0.0" step="0.1" style={{ ...inputStyle, width: 70 }} /></div>
           <select value={form.purpose} onChange={e => setForm(f => ({ ...f, purpose: e.target.value }))} style={{ ...inputStyle, cursor: 'pointer' }}><option value="business">Business</option><option value="personal">Personal</option><option value="commute">Commute</option></select>
-          <button onClick={handleAdd} style={{ padding: '6px 14px', background: D.green, color: D.white, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>+ Add</button>
+          <button onClick={handleAdd} style={{ padding: '6px 14px', background: D.green, color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>+ Add</button>
         </div>
       </div>
 
@@ -671,7 +671,7 @@ function MileageTab() {
                   <td style={{ padding: '8px 10px', fontSize: 12 }}>{fmtD(e.trip_date)}</td>
                   <td style={{ padding: '8px 10px', fontSize: 11, color: D.muted, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.start_address || '—'}</td>
                   <td style={{ padding: '8px 10px', fontSize: 11, color: D.muted, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.end_address || '—'}</td>
-                  <td style={{ padding: '8px 10px', fontFamily: MONO, fontSize: 12, color: D.white }}>{parseFloat(e.distance_miles || 0).toFixed(1)}</td>
+                  <td style={{ padding: '8px 10px', fontFamily: MONO, fontSize: 12, color: D.heading }}>{parseFloat(e.distance_miles || 0).toFixed(1)}</td>
                   <td style={{ padding: '8px 10px' }}><Badge color={e.purpose === 'business' ? D.green : D.muted}>{e.purpose}</Badge></td>
                   <td style={{ padding: '8px 10px', fontFamily: MONO, fontSize: 12, color: D.green }}>{fmtM(e.deduction_amount)}</td>
                   <td style={{ padding: '8px 10px' }}><Badge color={e.source === 'bouncie' ? D.teal : D.muted} small>{e.source || 'manual'}</Badge></td>
@@ -727,7 +727,7 @@ function RevenueTab() {
       {/* Quarterly Estimate */}
       {quarterly && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, marginBottom: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Quarterly Estimated Tax Payment — {quarterly.quarter}</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Quarterly Estimated Tax Payment — {quarterly.quarter}</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 8, fontSize: 12 }}>
             {[
               ['YTD Revenue', fmtM(quarterly.ytdRevenue)],
@@ -739,7 +739,7 @@ function RevenueTab() {
             ].map(([l, v]) => (
               <div key={l} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: `1px solid ${D.border}22` }}>
                 <span style={{ color: D.muted }}>{l}</span>
-                <span style={{ color: D.white, fontFamily: MONO }}>{v}</span>
+                <span style={{ color: D.heading, fontFamily: MONO }}>{v}</span>
               </div>
             ))}
           </div>
@@ -805,10 +805,10 @@ function PnlTab() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>Profit & Loss Statement</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>Profit & Loss Statement</div>
           <div style={{ fontSize: 11, color: D.muted }}>{pnl ? `${pnl.startDate} to ${pnl.endDate}` : 'Select a period'}</div>
         </div>
-        <button onClick={downloadPnl} style={{ background: D.teal, border: 'none', borderRadius: 6, padding: '6px 14px', color: D.white, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Download P&L</button>
+        <button onClick={downloadPnl} style={{ background: D.teal, border: 'none', borderRadius: 6, padding: '6px 14px', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Download P&L</button>
       </div>
 
       {/* Period selector */}
@@ -862,7 +862,7 @@ function PnlTab() {
 
           <div style={{ height: 16 }} />
           <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderTop: `2px solid ${D.border}` }}>
-            <span style={{ fontSize: 16, fontWeight: 800, color: D.white }}>NET INCOME</span>
+            <span style={{ fontSize: 16, fontWeight: 800, color: D.heading }}>NET INCOME</span>
             <span style={{ fontFamily: MONO, fontSize: 18, fontWeight: 800, color: pnl.netIncome >= 0 ? D.green : D.red }}>{fmtM(pnl.netIncome)}</span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
@@ -916,14 +916,14 @@ function ExportsTab() {
       <div style={{ background: D.card, border: `2px solid ${D.teal}66`, borderRadius: 12, padding: '24px 28px', marginBottom: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 4 }}>Download Complete Tax Package</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Download Complete Tax Package</div>
             <div style={{ fontSize: 12, color: D.muted }}>ZIP file with all CSVs + README for your CPA</div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <select value={year} onChange={e => setYear(e.target.value)} style={{ ...inputStyle, minWidth: 80 }}>
               <option value="2026">2026</option><option value="2025">2025</option><option value="2024">2024</option>
             </select>
-            <button onClick={() => download('tax-package', `waves-tax-package-${year}.zip`)} disabled={downloading === 'tax-package'} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '10px 24px', color: D.white, fontSize: 14, fontWeight: 700, cursor: downloading === 'tax-package' ? 'not-allowed' : 'pointer', opacity: downloading === 'tax-package' ? 0.6 : 1 }}>
+            <button onClick={() => download('tax-package', `waves-tax-package-${year}.zip`)} disabled={downloading === 'tax-package'} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '10px 24px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: downloading === 'tax-package' ? 'not-allowed' : 'pointer', opacity: downloading === 'tax-package' ? 0.6 : 1 }}>
               {downloading === 'tax-package' ? 'Generating...' : 'Download ZIP'}
             </button>
           </div>
@@ -945,7 +945,7 @@ function ExportsTab() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ width: 32, height: 32, borderRadius: 8, background: `${exp.color}22`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 14, fontWeight: 800, color: exp.color }}>{exp.icon}</div>
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{exp.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{exp.label}</div>
                 <div style={{ fontSize: 11, color: D.muted }}>{exp.desc}</div>
               </div>
             </div>
@@ -1002,7 +1002,7 @@ function AccountsReceivableTab() {
 
   return (
     <div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 4 }}>Accounts Receivable Aging</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 4 }}>Accounts Receivable Aging</div>
       <div style={{ fontSize: 11, color: D.muted, marginBottom: 14 }}>Outstanding invoices by aging bucket</div>
 
       {/* Aging summary cards */}
@@ -1032,9 +1032,9 @@ function AccountsReceivableTab() {
                 const rowBg = inv.daysOverdue >= 90 ? `${D.red}11` : inv.daysOverdue >= 60 ? `${D.orange}11` : inv.daysOverdue >= 30 ? `${D.amber}11` : 'transparent';
                 return (
                   <tr key={inv.id || i} style={{ background: rowBg, borderBottom: `1px solid ${D.border}22` }}>
-                    <td style={{ padding: '8px 10px', fontSize: 12, color: D.white, fontWeight: 500 }}>{inv.customerName}</td>
+                    <td style={{ padding: '8px 10px', fontSize: 12, color: D.heading, fontWeight: 500 }}>{inv.customerName}</td>
                     <td style={{ padding: '8px 10px', fontSize: 11, color: D.muted }}>{inv.invoiceNumber}</td>
-                    <td style={{ padding: '8px 10px', fontFamily: MONO, fontSize: 13, fontWeight: 700, color: D.white }}>{fmtM(inv.amount)}</td>
+                    <td style={{ padding: '8px 10px', fontFamily: MONO, fontSize: 13, fontWeight: 700, color: D.heading }}>{fmtM(inv.amount)}</td>
                     <td style={{ padding: '8px 10px', fontSize: 11, color: D.muted }}>{fmtD(inv.dueDate)}</td>
                     <td style={{ padding: '8px 10px', fontFamily: MONO, fontSize: 12, fontWeight: 700, color: bucketColor(inv.bucket) }}>{inv.daysOverdue}d</td>
                     <td style={{ padding: '8px 10px' }}><Badge color={bucketColor(inv.bucket)}>{inv.bucket === '90+' ? '90+ days' : inv.bucket === '60' ? '60 days' : inv.bucket === '30' ? '30 days' : 'Current'}</Badge></td>
@@ -1073,7 +1073,7 @@ export default function TaxPage() {
   return (
     <div style={{ maxWidth: 1200 }}>
       <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: D.white, margin: 0, fontFamily: "'DM Sans', sans-serif" }}>Tax Center</h1>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0, fontFamily: "'DM Sans', sans-serif" }}>Tax Center</h1>
         <p style={{ fontSize: 13, color: D.muted, margin: '4px 0 0' }}>Tax rates, filing calendar, expenses, depreciation & AI tax advisor</p>
       </div>
 
@@ -1105,13 +1105,13 @@ export default function TaxPage() {
           {/* Upcoming deadlines */}
           {d.nextDeadlines?.length > 0 && (
             <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 8 }}>Upcoming Deadlines</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>Upcoming Deadlines</div>
               {d.nextDeadlines.map(dl => {
                 const days = daysUntil(dl.dueDate);
                 return (
                   <div key={dl.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: D.card, borderRadius: 6, marginBottom: 3, border: `1px solid ${days <= 7 ? D.red + '66' : D.border}` }}>
                     <Badge color={STATUS_COLORS[dl.status]}>{dl.status}</Badge>
-                    <span style={{ fontSize: 12, color: D.white, flex: 1 }}>{dl.title}</span>
+                    <span style={{ fontSize: 12, color: D.heading, flex: 1 }}>{dl.title}</span>
                     <span style={{ fontSize: 11, color: D.muted }}>{fmtD(dl.dueDate)}</span>
                     <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 700, color: days <= 7 ? D.red : days <= 30 ? D.amber : D.muted }}>{days}d</span>
                   </div>
@@ -1162,7 +1162,7 @@ export default function TaxPage() {
             {/* Download Tax Package */}
             <div style={{ background: D.card, border: `2px solid ${D.teal}44`, borderRadius: 10, padding: '14px 18px', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
               <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1 }}>CPA Tax Package</div>
-              <button onClick={() => setActiveTab('exports')} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '10px 20px', color: D.white, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Download Tax Package</button>
+              <button onClick={() => setActiveTab('exports')} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '10px 20px', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Download Tax Package</button>
               <div style={{ fontSize: 10, color: D.muted }}>ZIP with all CSVs + README</div>
             </div>
           </div>

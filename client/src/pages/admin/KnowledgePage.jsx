@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', orange: '#f97316', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', orange: '#EA580C', text: '#334155', muted: '#64748B', white: '#FFFFFF', purple: '#7C3AED', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path) {
@@ -46,16 +46,16 @@ function QAModal({ onClose }) {
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div style={{ background: D.card, borderRadius: 16, padding: 28, maxWidth: 600, width: '100%', maxHeight: '80vh', overflow: 'auto', border: `1px solid ${D.border}` }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: D.white }}>{'🔍'} Ask the Knowledge Base</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>{'🔍'} Ask the Knowledge Base</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 20, cursor: 'pointer' }}>{'✕'}</button>
         </div>
 
         <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
           <input value={question} onChange={e => setQuestion(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAsk()}
             placeholder="What's the max annual rate for Celsius WG?"
-            style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: D.bg, color: D.white, fontSize: 14 }} />
+            style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: D.bg, color: D.heading, fontSize: 14 }} />
           <button onClick={handleAsk} disabled={loading} style={{
-            padding: '10px 18px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: loading ? 0.5 : 1,
+            padding: '10px 18px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: loading ? 0.5 : 1,
           }}>{loading ? '...' : 'Ask'}</button>
         </div>
 
@@ -110,7 +110,7 @@ function ArticleViewer({ articleId, onBack }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
           <span style={{ fontSize: 24 }}>{CATEGORY_ICONS[article.category] || '📄'}</span>
           <div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: D.white }}>{article.title}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: D.heading }}>{article.title}</div>
             <div style={{ fontSize: 12, color: D.muted }}>{article.path} • v{article.version} • {article.word_count} words</div>
           </div>
         </div>
@@ -164,7 +164,7 @@ function HealthCheck() {
           {health.healthScore}
         </div>
         <div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Wiki Health Score</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Wiki Health Score</div>
           <div style={{ fontSize: 13, color: D.muted }}>{health.totalArticles} articles • {health.issues.length} issues</div>
         </div>
       </div>
@@ -173,7 +173,7 @@ function HealthCheck() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {health.issues.slice(0, 15).map((issue, i) => (
             <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, fontSize: 12, borderLeft: `3px solid ${severityColor[issue.severity] || D.muted}` }}>
-              <span style={{ color: D.white, fontWeight: 600 }}>{issue.title || issue.article}</span>
+              <span style={{ color: D.heading, fontWeight: 600 }}>{issue.title || issue.article}</span>
               <span style={{ color: D.muted, marginLeft: 8 }}>— {issue.detail}</span>
             </div>
           ))}
@@ -230,7 +230,7 @@ function SourcesView() {
 
       {showAdd && (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Add Source Document</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Add Source Document</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
             <input value={addForm.filename} onChange={e => setAddForm(p => ({ ...p, filename: e.target.value }))} placeholder="Filename" style={{ padding: '8px 10px', borderRadius: 6, border: `1px solid ${D.border}`, background: D.bg, color: D.text, fontSize: 12 }} />
             <input value={addForm.file_path} onChange={e => setAddForm(p => ({ ...p, file_path: e.target.value }))} placeholder="Full file path" style={{ padding: '8px 10px', borderRadius: 6, border: `1px solid ${D.border}`, background: D.bg, color: D.text, fontSize: 12 }} />
@@ -240,7 +240,7 @@ function SourcesView() {
             <input value={addForm.description} onChange={e => setAddForm(p => ({ ...p, description: e.target.value }))} placeholder="Description" style={{ padding: '8px 10px', borderRadius: 6, border: `1px solid ${D.border}`, background: D.bg, color: D.text, fontSize: 12 }} />
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={handleAdd} style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal, color: D.white, fontSize: 12, cursor: 'pointer' }}>Add</button>
+            <button onClick={handleAdd} style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal, color: '#fff', fontSize: 12, cursor: 'pointer' }}>Add</button>
             <button onClick={() => setShowAdd(false)} style={{ padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 12, cursor: 'pointer' }}>Cancel</button>
           </div>
         </Card>
@@ -249,7 +249,7 @@ function SourcesView() {
       {sources.map(s => (
         <div key={s.id} style={{ padding: '12px 16px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{s.filename}</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{s.filename}</div>
             <div style={{ fontSize: 11, color: D.muted }}>{s.description || 'No description'} • {s.file_type}</div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -257,7 +257,7 @@ function SourcesView() {
               <span style={{ fontSize: 11, color: D.green }}>{'✅'} Compiled</span>
             ) : (
               <button onClick={() => handleCompile(s.id)} disabled={compiling === s.id} style={{
-                padding: '4px 10px', borderRadius: 4, border: 'none', background: D.teal, color: D.white, fontSize: 11, cursor: 'pointer', opacity: compiling === s.id ? 0.5 : 1,
+                padding: '4px 10px', borderRadius: 4, border: 'none', background: D.teal, color: '#fff', fontSize: 11, cursor: 'pointer', opacity: compiling === s.id ? 0.5 : 1,
               }}>{compiling === s.id ? 'Compiling...' : 'Compile'}</button>
             )}
           </div>
@@ -304,7 +304,7 @@ export default function KnowledgePage() {
   if (selectedArticle) {
     return (
       <div>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.white, marginBottom: 24 }}>Knowledge Base</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 24 }}>Knowledge Base</div>
         <ArticleViewer articleId={selectedArticle} onBack={() => setSelectedArticle(null)} />
       </div>
     );
@@ -318,11 +318,11 @@ export default function KnowledgePage() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>Knowledge Base</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Knowledge Base</div>
           <div style={{ fontSize: 13, color: D.muted }}>{totalArticles} articles across {Object.keys(categoryCounts).length} categories</div>
         </div>
         <button onClick={() => setShowQA(true)} style={{
-          padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+          padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
         }}>{'🔍'} Ask a Question</button>
       </div>
 
@@ -348,7 +348,7 @@ export default function KnowledgePage() {
                 borderRadius: 10, cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s',
               }}>
                 <div style={{ fontSize: 22, marginBottom: 4 }}>{CATEGORY_ICONS[cat] || '📄'}</div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: D.white, textTransform: 'capitalize' }}>{cat}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: 'capitalize' }}>{cat}</div>
                 <div style={{ fontSize: 18, fontWeight: 700, color: D.teal, fontFamily: MONO }}>{count}</div>
               </div>
             ))}
@@ -356,7 +356,7 @@ export default function KnowledgePage() {
 
           {/* Search */}
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search articles..." style={{
-            padding: '10px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: D.bg, color: D.white, fontSize: 14, width: '100%',
+            padding: '10px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: D.bg, color: D.heading, fontSize: 14, width: '100%',
           }} />
 
           {/* Article List */}
@@ -365,7 +365,7 @@ export default function KnowledgePage() {
           ) : articles.length === 0 ? (
             <Card style={{ textAlign: 'center', padding: 60 }}>
               <div style={{ fontSize: 48, marginBottom: 16 }}>{'📚'}</div>
-              <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No Articles Yet</div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>No Articles Yet</div>
               <div style={{ fontSize: 14, color: D.muted }}>Add source documents and compile them to build your knowledge base.</div>
             </Card>
           ) : (
@@ -378,7 +378,7 @@ export default function KnowledgePage() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ fontSize: 18 }}>{CATEGORY_ICONS[a.category] || '📄'}</span>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{a.title}</div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{a.title}</div>
                       <div style={{ fontSize: 12, color: D.muted }}>{a.summary || a.path}</div>
                     </div>
                     <div style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}>{a.word_count}w</div>

@@ -11,7 +11,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#a855f7', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#a855f7', text: '#334155', muted: '#64748B', white: '#fff', heading: '#0F172A', inputBg: '#FFFFFF' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -26,8 +26,8 @@ function renderMarkdown(text) {
   const elements = [];
   let key = 0;
   for (const line of lines) {
-    if (line.startsWith('### ')) { elements.push(<div key={key++} style={{ fontSize: 14, fontWeight: 700, color: D.white, marginTop: 12, marginBottom: 4 }}>{line.slice(4)}</div>); continue; }
-    if (line.startsWith('## ')) { elements.push(<div key={key++} style={{ fontSize: 15, fontWeight: 700, color: D.white, marginTop: 14, marginBottom: 6 }}>{line.slice(3)}</div>); continue; }
+    if (line.startsWith('### ')) { elements.push(<div key={key++} style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginTop: 12, marginBottom: 4 }}>{line.slice(4)}</div>); continue; }
+    if (line.startsWith('## ')) { elements.push(<div key={key++} style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginTop: 14, marginBottom: 6 }}>{line.slice(3)}</div>); continue; }
     if (line.match(/^[-•*]\s/)) { elements.push(<div key={key++} style={{ display: 'flex', gap: 8, paddingLeft: 4, marginBottom: 3 }}><span style={{ color: D.purple, fontSize: 10, marginTop: 5 }}>●</span><span>{renderInline(line.replace(/^[-•*]\s/, ''))}</span></div>); continue; }
     if (line.match(/^\d+\.\s/)) { const num = line.match(/^(\d+)\./)[1]; elements.push(<div key={key++} style={{ display: 'flex', gap: 8, paddingLeft: 4, marginBottom: 3 }}><span style={{ color: D.purple, fontSize: 12, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace', minWidth: 18 }}>{num}.</span><span>{renderInline(line.replace(/^\d+\.\s/, ''))}</span></div>); continue; }
     if (!line.trim()) { elements.push(<div key={key++} style={{ height: 8 }} />); continue; }
@@ -38,7 +38,7 @@ function renderMarkdown(text) {
 
 function renderInline(text) {
   return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
-    if (part.startsWith('**') && part.endsWith('**')) return <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith('**') && part.endsWith('**')) return <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
     return part;
   });
 }
@@ -149,7 +149,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
             placeholder="Compare vendor prices, run lookups, check margins, manage approvals..."
             style={{
               width: '100%', padding: '9px 14px', paddingRight: 80,
-              background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10,
+              background: D.inputBg, border: `1px solid ${D.border}`, borderRadius: 10,
               color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box',
             }}
             onFocusCapture={e => e.target.style.borderColor = D.purple + '66'}
@@ -176,7 +176,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
         {/* Inline stats when collapsed */}
         {stats && !expanded && (
           <div style={{ display: 'flex', gap: 8, fontSize: 11, color: D.muted, flexShrink: 0 }}>
-            <span><strong style={{ color: D.white }}>{stats.total}</strong> products</span>
+            <span><strong style={{ color: D.heading }}>{stats.total}</strong> products</span>
             {stats.needsPrice > 0 && <span><strong style={{ color: D.amber }}>{stats.needsPrice}</strong> unpriced</span>}
             {stats.pendingApprovals > 0 && <span><strong style={{ color: D.purple }}>{stats.pendingApprovals}</strong> pending</span>}
           </div>
@@ -217,7 +217,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
           <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
             <input value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Follow up — 'approve those', 'check the herbicides too', 'compare to LESCO'..."
-              style={{ flex: 1, padding: '7px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12, fontFamily: 'DM Sans, sans-serif', outline: 'none' }} />
+              style={{ flex: 1, padding: '7px 12px', background: D.inputBg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12, fontFamily: 'DM Sans, sans-serif', outline: 'none' }} />
             <button onClick={() => submit()} disabled={!prompt.trim() || loading} style={{
               padding: '7px 14px', background: D.purple, color: D.white, border: 'none', borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: 'pointer', opacity: prompt.trim() ? 1 : 0.4,
             }}>Send</button>

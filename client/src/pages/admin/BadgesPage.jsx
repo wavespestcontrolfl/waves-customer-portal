@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', white: '#fff', muted: '#94a3b8', text: '#e2e8f0' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', white: '#FFFFFF', muted: '#64748B', text: '#334155', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, opts = {}) {
@@ -62,7 +62,7 @@ export default function BadgesPage() {
 
   return (
     <div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: D.white, marginBottom: 4 }}>Badge Management</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Badge Management</div>
       <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>22 badges across 5 categories — earned by customers through activity</div>
 
       {/* Stats */}
@@ -72,7 +72,7 @@ export default function BadgesPage() {
             { label: 'Total Badges', value: stats.totalDefinitions || badges.length, color: D.teal },
             { label: 'Badges Earned', value: stats.totalEarned || 0, color: D.green },
             { label: 'With Rewards', value: (Array.isArray(badges) ? badges : []).filter(b => b.reward).length, color: D.amber },
-            { label: 'Customers with Badges', value: stats.customersWithBadges || 0, color: D.white },
+            { label: 'Customers with Badges', value: stats.customersWithBadges || 0, color: D.heading },
           ].map(s => (
             <div key={s.label} style={{ flex: '1 1 120px', background: D.card, borderRadius: 10, padding: '12px 16px', border: `1px solid ${D.border}`, textAlign: 'center' }}>
               <div style={{ fontSize: 22, fontWeight: 700, fontFamily: MONO, color: s.color }}>{s.value}</div>
@@ -84,13 +84,13 @@ export default function BadgesPage() {
 
       {/* Customer Badge Lookup */}
       <div style={{ background: D.card, borderRadius: 12, padding: 16, border: `1px solid ${D.border}`, marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 10 }}>Check Customer Badges</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>Check Customer Badges</div>
         <div style={{ position: 'relative' }}>
-          <input type="text" value={customerSearch} onChange={e => searchCustomers(e.target.value)} placeholder="Search customer by name or phone..." style={{ width: '100%', padding: '10px 14px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 14, outline: 'none', boxSizing: 'border-box' }} />
+          <input type="text" value={customerSearch} onChange={e => searchCustomers(e.target.value)} placeholder="Search customer by name or phone..." style={{ width: '100%', padding: '10px 14px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.heading, fontSize: 14, outline: 'none', boxSizing: 'border-box' }} />
           {customerResults.length > 0 && (
             <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 8px 8px', zIndex: 20, maxHeight: 200, overflowY: 'auto' }}>
               {customerResults.map(c => (
-                <div key={c.id} onClick={() => selectCustomer(c)} style={{ padding: '10px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, color: D.white }}>
+                <div key={c.id} onClick={() => selectCustomer(c)} style={{ padding: '10px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, color: D.heading }}>
                   <strong>{c.firstName} {c.lastName}</strong> <span style={{ color: D.muted }}>{c.phone}</span>
                   {c.tier && <span style={{ marginLeft: 8, fontSize: 10, padding: '1px 6px', borderRadius: 4, background: `${D.teal}22`, color: D.teal }}>{c.tier}</span>}
                 </div>
@@ -100,14 +100,14 @@ export default function BadgesPage() {
         </div>
         {customerBadges && selectedCustomer && (
           <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 8 }}>{selectedCustomer.firstName} {selectedCustomer.lastName}'s Badges</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 8 }}>{selectedCustomer.firstName} {selectedCustomer.lastName}'s Badges</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {(customerBadges.earned || []).length === 0 && <div style={{ color: D.muted, fontSize: 13 }}>No badges earned yet</div>}
               {(customerBadges.earned || []).map((b, i) => (
                 <div key={i} style={{ background: D.bg, borderRadius: 8, padding: '8px 12px', border: `1px solid ${D.border}`, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: 18 }}>{b.icon}</span>
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: D.white }}>{b.title}</div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: D.heading }}>{b.title}</div>
                     <div style={{ fontSize: 10, color: D.muted }}>{b.earnedAt ? new Date(b.earnedAt).toLocaleDateString() : 'Earned'}</div>
                   </div>
                 </div>
@@ -139,7 +139,7 @@ export default function BadgesPage() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
                   <span style={{ fontSize: 26 }}>{b.icon}</span>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>{b.title}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>{b.title}</div>
                     <div style={{ fontSize: 11, color: D.muted }}>{b.description}</div>
                   </div>
                 </div>

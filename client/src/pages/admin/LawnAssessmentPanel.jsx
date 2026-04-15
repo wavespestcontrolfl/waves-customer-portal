@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
@@ -122,7 +122,7 @@ export default function LawnAssessmentPanel() {
     return (
       <div style={{ ...cardStyle, maxWidth: 420, margin: '0 auto', textAlign: 'center', padding: 30 }}>
         <div style={{ fontSize: 40, marginBottom: 12 }}>📸</div>
-        <div style={{ fontSize: 18, fontWeight: 700, color: D.white, marginBottom: 8 }}>Lawn Assessment Guide</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 8 }}>Lawn Assessment Guide</div>
         <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.7, marginBottom: 20 }}>
           <p style={{ marginBottom: 8 }}>Stand upright, point camera at the turf at roughly 45°, capture a 6–8 ft area of lawn.</p>
           <p style={{ marginBottom: 8 }}>Avoid shadows and feet in frame.</p>
@@ -137,7 +137,7 @@ export default function LawnAssessmentPanel() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: D.white }}>Lawn Health Assessment</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Lawn Health Assessment</div>
           <div style={{ fontSize: 12, color: D.muted }}>Today's scheduled lawn services — upload photos for AI scoring</div>
         </div>
         {step !== 'select' && <button onClick={() => { setStep('select'); setPhotos([]); setResult(null); }} style={btnOutline}>← Back</button>}
@@ -152,7 +152,7 @@ export default function LawnAssessmentPanel() {
               <div key={c.id} style={{ ...cardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', cursor: 'pointer' }}
                 onClick={() => { setSelectedCustomer(c); setStep('capture'); }}>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
                     {c.windowStart && <span style={{ color: D.teal, marginRight: 8 }}>{c.windowStart}</span>}
                     {c.firstName} {c.lastName}
                   </div>
@@ -183,7 +183,7 @@ export default function LawnAssessmentPanel() {
             {photos.map((p, i) => (
               <div key={i} style={{ position: 'relative', aspectRatio: '4/3', borderRadius: 10, overflow: 'hidden', border: `1px solid ${D.border}` }}>
                 <img src={p.preview} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                <button onClick={() => removePhoto(i)} style={{ position: 'absolute', top: 4, right: 4, background: D.red, color: D.white, border: 'none', borderRadius: '50%', width: 24, height: 24, fontSize: 12, cursor: 'pointer' }}>×</button>
+                <button onClick={() => removePhoto(i)} style={{ position: 'absolute', top: 4, right: 4, background: D.red, color: '#fff', border: 'none', borderRadius: '50%', width: 24, height: 24, fontSize: 12, cursor: 'pointer' }}>×</button>
               </div>
             ))}
             {photos.length < 3 && (
@@ -206,7 +206,7 @@ export default function LawnAssessmentPanel() {
       {step === 'analyzing' && (
         <div style={{ textAlign: 'center', padding: 60 }}>
           <div style={{ fontSize: 32, marginBottom: 16 }}>🔬</div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 8 }}>Analyzing with Claude + Gemini...</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 8 }}>Analyzing with Claude + Gemini...</div>
           <div style={{ fontSize: 12, color: D.muted }}>Running dual-model vision analysis for accuracy</div>
           <div style={{ marginTop: 20, display: 'flex', gap: 8, justifyContent: 'center' }}>
             {['Claude Sonnet', 'Gemini Flash'].map(m => (
@@ -220,7 +220,7 @@ export default function LawnAssessmentPanel() {
       {step === 'review' && result && (
         <div style={{ maxWidth: 520, margin: '0 auto' }}>
           <div style={{ ...cardStyle, marginBottom: 16 }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>AI Scorecard — {selectedCustomer?.firstName} {selectedCustomer?.lastName}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>AI Scorecard — {selectedCustomer?.firstName} {selectedCustomer?.lastName}</div>
 
             {/* Scores */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
@@ -238,7 +238,7 @@ export default function LawnAssessmentPanel() {
                 return (
                   <div key={m.key} style={{ padding: 14, background: D.input, borderRadius: 10, textAlign: 'center', border: flagged ? `2px solid ${D.amber}` : `1px solid ${D.border}` }}>
                     <div style={{ fontFamily: MONO, fontSize: 28, fontWeight: 800, color: scoreColor(val) }}>{val}%</div>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginTop: 2 }}>{m.label}</div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginTop: 2 }}>{m.label}</div>
                     {claude != null && gemini != null && (
                       <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>Claude: {claude}% · Gemini: {gemini}%</div>
                     )}
@@ -251,7 +251,7 @@ export default function LawnAssessmentPanel() {
             {/* Observations */}
             {result.observations && (
               <div style={{ marginTop: 12, padding: 12, background: D.input, borderRadius: 8, fontSize: 12, color: D.muted, lineHeight: 1.6 }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: D.white, marginBottom: 4 }}>AI Observations</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: D.heading, marginBottom: 4 }}>AI Observations</div>
                 {result.observations}
               </div>
             )}
@@ -275,14 +275,14 @@ export default function LawnAssessmentPanel() {
       {/* HISTORY VIEW */}
       {step === 'history' && (
         <div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>{selectedCustomer?.firstName} {selectedCustomer?.lastName} — Assessment History</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>{selectedCustomer?.firstName} {selectedCustomer?.lastName} — Assessment History</div>
           {history.length === 0 ? (
             <div style={{ ...cardStyle, textAlign: 'center', padding: 40, color: D.muted }}>No assessments yet</div>
           ) : history.map((a, i) => (
             <div key={a.id || i} style={{ ...cardStyle, marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{new Date(a.service_date).toLocaleDateString()}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{new Date(a.service_date).toLocaleDateString()}</span>
                   <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: `${D.teal}22`, color: D.teal }}>{a.season}</span>
                   {a.is_baseline && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: `${D.amber}22`, color: D.amber }}>Baseline</span>}
                 </div>
@@ -311,6 +311,6 @@ export default function LawnAssessmentPanel() {
 }
 
 const cardStyle = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
-const btnStyle = (bg) => ({ padding: '8px 16px', background: bg, color: D.white, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
+const btnStyle = (bg) => ({ padding: '8px 16px', background: bg, color: D.heading, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const btnOutline = { padding: '8px 16px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 8, color: D.muted, fontSize: 13, cursor: 'pointer' };
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };

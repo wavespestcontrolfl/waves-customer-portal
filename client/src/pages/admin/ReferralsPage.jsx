@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', purple: '#7C3AED', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
@@ -114,11 +114,11 @@ export default function ReferralsPage() {
   const thR = { ...thSt, textAlign: 'right' };
   const tdSt = { padding: '10px 14px', fontSize: 13, color: D.text, borderBottom: `1px solid ${D.border}` };
   const tdR = { ...tdSt, textAlign: 'right', fontFamily: MONO };
-  const inputSt = { width: '100%', padding: '8px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
+  const inputSt = { width: '100%', padding: '8px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.heading, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
 
   return (
     <div>
-      <div style={{ fontSize: 28, fontWeight: 700, color: D.white, marginBottom: 24 }}>Referrals</div>
+      <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 24 }}>Referrals</div>
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto' }}>
@@ -151,13 +151,13 @@ export default function ReferralsPage() {
 
           {/* Recent referrals */}
           <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Recent Referrals</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Recent Referrals</div>
             {queue.length === 0 ? (
               <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No referrals yet</div>
             ) : queue.slice(0, 10).map(r => (
               <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: `1px solid ${D.border}33` }}>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{r.referral_first_name} {r.referral_last_name}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{r.referral_first_name} {r.referral_last_name}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{r.referral_phone} · from {r.promoter_name || 'unknown'} · {r.source}</div>
                 </div>
                 <StatusBadge status={r.status} />
@@ -167,11 +167,11 @@ export default function ReferralsPage() {
 
           {/* Top promoters */}
           <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Top Promoters</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Top Promoters</div>
             {promoters.slice(0, 10).map(p => (
               <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}33` }}>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{p.first_name} {p.last_name}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{p.first_name} {p.last_name}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{p.total_referrals_converted} converted · {p.total_clicks} clicks</div>
                 </div>
                 <div style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: D.green }}>{fmtCents(p.total_earned_cents)}</div>
@@ -186,7 +186,7 @@ export default function ReferralsPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* Submit referral form */}
           <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Submit Referral</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Submit Referral</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
               <input placeholder="First name *" value={refForm.firstName} onChange={e => setRefForm(f => ({ ...f, firstName: e.target.value }))} style={inputSt} />
               <input placeholder="Last name" value={refForm.lastName} onChange={e => setRefForm(f => ({ ...f, lastName: e.target.value }))} style={inputSt} />
@@ -200,14 +200,14 @@ export default function ReferralsPage() {
             <div style={{ display: 'flex', gap: 8 }}>
               <input placeholder="Notes" value={refForm.notes} onChange={e => setRefForm(f => ({ ...f, notes: e.target.value }))} style={{ ...inputSt, flex: 1 }} />
               <button onClick={handleSubmitReferral} disabled={submitting} style={{
-                padding: '8px 20px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+                padding: '8px 20px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
               }}>{submitting ? 'Submitting...' : 'Submit'}</button>
             </div>
           </div>
 
           {/* Queue table */}
           <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Referral Queue ({queue.length})</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Referral Queue ({queue.length})</div>
             {queue.length === 0 ? (
               <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No pending referrals</div>
             ) : (
@@ -227,7 +227,7 @@ export default function ReferralsPage() {
                         <td style={tdR}>
                           <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
                             {r.status === 'pending' && <button onClick={() => handleStatusChange(r.id, 'contacted')} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal, fontSize: 10, cursor: 'pointer' }}>Contacted</button>}
-                            {(r.status === 'contacted' || r.status === 'estimated') && <button onClick={() => handleStatusChange(r.id, 'converted')} style={{ padding: '3px 8px', borderRadius: 4, border: 'none', background: D.green, color: D.white, fontSize: 10, cursor: 'pointer' }}>Convert</button>}
+                            {(r.status === 'contacted' || r.status === 'estimated') && <button onClick={() => handleStatusChange(r.id, 'converted')} style={{ padding: '3px 8px', borderRadius: 4, border: 'none', background: D.green, color: '#fff', fontSize: 10, cursor: 'pointer' }}>Convert</button>}
                             {r.status !== 'converted' && r.status !== 'rejected' && <button onClick={() => handleStatusChange(r.id, 'rejected')} style={{ padding: '3px 8px', borderRadius: 4, border: `1px solid ${D.red}33`, background: 'transparent', color: D.red, fontSize: 10, cursor: 'pointer' }}>Reject</button>}
                           </div>
                         </td>
@@ -244,7 +244,7 @@ export default function ReferralsPage() {
       {/* ═══ PROMOTERS ═══ */}
       {tab === 'promoters' && (
         <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Promoters ({promoters.length})</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Promoters ({promoters.length})</div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead><tr><th style={thSt}>Name</th><th style={thSt}>Phone</th><th style={thSt}>Clicks</th><th style={thSt}>Referrals</th><th style={thR}>Earned</th><th style={thR}>Balance</th><th style={thSt}>Link</th></tr></thead>
@@ -269,7 +269,7 @@ export default function ReferralsPage() {
       {/* ═══ PAYOUTS ═══ */}
       {tab === 'payouts' && (
         <div style={{ background: D.card, borderRadius: 12, padding: 20, border: `1px solid ${D.border}` }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 14 }}>Payouts</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 14 }}>Payouts</div>
           {payouts.length === 0 ? (
             <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>No payout requests yet</div>
           ) : (
@@ -284,7 +284,7 @@ export default function ReferralsPage() {
                       <td style={tdSt}>{p.method?.replace('_', ' ')}</td>
                       <td style={tdSt}><StatusBadge status={p.status} /></td>
                       <td style={tdR}>
-                        {p.status === 'pending' && <button onClick={() => handleApprovePayout(p.id)} style={{ padding: '3px 8px', borderRadius: 4, border: 'none', background: D.green, color: D.white, fontSize: 10, cursor: 'pointer' }}>Approve</button>}
+                        {p.status === 'pending' && <button onClick={() => handleApprovePayout(p.id)} style={{ padding: '3px 8px', borderRadius: 4, border: 'none', background: D.green, color: '#fff', fontSize: 10, cursor: 'pointer' }}>Approve</button>}
                       </td>
                     </tr>
                   ))}
@@ -298,14 +298,14 @@ export default function ReferralsPage() {
       {/* ═══ ENROLL ═══ */}
       {tab === 'enroll' && (
         <div style={{ background: D.card, borderRadius: 12, padding: 24, border: `1px solid ${D.border}`, maxWidth: 500 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Enroll New Promoter</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Enroll New Promoter</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <input placeholder="First name *" value={enrollForm.firstName} onChange={e => setEnrollForm(f => ({ ...f, firstName: e.target.value }))} style={inputSt} />
             <input placeholder="Last name" value={enrollForm.lastName} onChange={e => setEnrollForm(f => ({ ...f, lastName: e.target.value }))} style={inputSt} />
             <input placeholder="Phone *" value={enrollForm.phone} onChange={e => setEnrollForm(f => ({ ...f, phone: e.target.value }))} style={inputSt} />
             <input placeholder="Email" value={enrollForm.email} onChange={e => setEnrollForm(f => ({ ...f, email: e.target.value }))} style={inputSt} />
             <button onClick={handleEnroll} disabled={enrolling} style={{
-              padding: '12px 24px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              padding: '12px 24px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
             }}>{enrolling ? 'Enrolling...' : 'Enroll Promoter'}</button>
             {enrollResult && <div style={{ fontSize: 13, color: enrollResult.includes('Error') ? D.red : D.green }}>{enrollResult}</div>}
           </div>

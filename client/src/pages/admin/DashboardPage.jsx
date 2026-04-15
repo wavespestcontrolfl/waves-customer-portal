@@ -3,7 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import DashboardIntelligenceBar from '../../components/admin/DashboardIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path) {
   return fetch(`${API_BASE}${path}`, {
@@ -82,7 +82,7 @@ export default function DashboardPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
         <div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>{greeting()}, Adam</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>{greeting()}, Adam</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>{today}</div>
         </div>
       </div>
@@ -100,7 +100,7 @@ export default function DashboardPage() {
             <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, color: D.muted, marginBottom: 8 }}>
               {kpi.icon} {kpi.label}
             </div>
-            <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 700, color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>
+            <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 700, color: D.heading, fontFamily: "'JetBrains Mono', monospace" }}>
               {kpi.value}
             </div>
             {kpi.change != null && (
@@ -118,7 +118,7 @@ export default function DashboardPage() {
       {/* Revenue Chart */}
       <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}`, marginBottom: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Revenue — {new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Revenue — {new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</div>
           <div style={{ display: 'flex', gap: 8 }}>
             <div style={{ fontSize: 13, color: D.muted }}>
               MRR: <span style={{ color: D.teal, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{fmtD(data.mrr)}</span>
@@ -136,7 +136,7 @@ export default function DashboardPage() {
               return isNaN(parsed) ? '' : parsed.getDate();
             }} />
               <YAxis tick={{ fill: D.muted, fontSize: 10 }} tickFormatter={v => `$${v}`} />
-              <Tooltip contentStyle={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13 }} formatter={(v) => fmtD(v)} />
+              <Tooltip contentStyle={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, color: D.heading, fontSize: 13 }} formatter={(v) => fmtD(v)} />
               <Bar dataKey="total" fill={D.teal} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -148,7 +148,7 @@ export default function DashboardPage() {
         {/* Today's Schedule */}
         <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Today's Schedule</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Today's Schedule</div>
             <span style={{ fontSize: 11, fontWeight: 600, padding: '3px 10px', borderRadius: 10, background: `${D.teal}20`, color: D.teal }}>
               {data.todaysSchedule.length} services
             </span>
@@ -168,7 +168,7 @@ export default function DashboardPage() {
                   <div style={{ fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: D.teal }}>
                     {fmtTimeShort(s.windowStart)} – {fmtTimeShort(s.windowEnd)}
                   </div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginTop: 2 }}>{s.customerName}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginTop: 2 }}>{s.customerName}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{s.address}</div>
                   <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{s.serviceType} · {s.technicianName}</div>
                 </div>
@@ -183,7 +183,7 @@ export default function DashboardPage() {
 
         {/* Recent Activity */}
         <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}` }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 14 }}>Recent Activity</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 14 }}>Recent Activity</div>
           <div style={{ maxHeight: 400, overflowY: 'auto' }}>
             {data.recentActivity.length === 0 ? (
               <div style={{ textAlign: 'center', padding: 30, color: D.muted, fontSize: 13 }}>No recent activity</div>
@@ -192,7 +192,7 @@ export default function DashboardPage() {
                 <div key={a.id} style={{ display: 'flex', gap: 10, padding: '10px 0', borderBottom: `1px solid ${D.border}`, alignItems: 'flex-start' }}>
                   <span style={{ fontSize: 16, flexShrink: 0, marginTop: 2 }}>{ACTIVITY_ICONS[a.action] || '📌'}</span>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, color: D.white, lineHeight: 1.4 }}>{a.description}</div>
+                    <div style={{ fontSize: 13, color: D.heading, lineHeight: 1.4 }}>{a.description}</div>
                   </div>
                   <span style={{ fontSize: 11, color: D.muted, flexShrink: 0, whiteSpace: 'nowrap' }}>{timeAgo(a.createdAt)}</span>
                 </div>
@@ -216,7 +216,7 @@ export default function DashboardPage() {
             cursor: 'pointer',
           }}>
             <div style={{ fontSize: 24, marginBottom: 6 }}>{a.icon}</div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{a.label}</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{a.label}</div>
           </a>
         ))}
       </div>

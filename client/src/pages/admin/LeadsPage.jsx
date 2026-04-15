@@ -17,9 +17,10 @@ function adminFetch(path, opts = {}) {
 }
 
 const C = {
-  bg: '#0f1923', card: '#1e293b', cardHover: '#263548', border: '#334155',
-  text: '#e2e8f0', muted: '#94a3b8', teal: '#0ea5e9', green: '#10b981',
-  amber: '#f59e0b', red: '#ef4444', purple: '#a855f7', white: '#ffffff',
+  bg: '#F1F5F9', card: '#FFFFFF', cardHover: '#F0F7FC', border: '#E2E8F0',
+  text: '#334155', muted: '#64748B', teal: '#0A7EC2', green: '#16A34A',
+  amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', white: '#FFFFFF',
+  heading: '#0F172A', input: '#FFFFFF', inputBorder: '#CBD5E1',
 };
 const mono = { fontFamily: "'JetBrains Mono', monospace" };
 
@@ -44,7 +45,7 @@ function Card({ children, style, onClick }) {
 function MetricCard({ label, value, sub, color }) {
   return <Card style={{ flex:'1 1 180px', minWidth:160 }}>
     <div style={{ fontSize:12, color:C.muted, marginBottom:4 }}>{label}</div>
-    <div style={{ fontSize:26, fontWeight:700, color:color||C.white, ...mono }}>{value}</div>
+    <div style={{ fontSize:26, fontWeight:700, color:color||C.heading, ...mono }}>{value}</div>
     {sub && <div style={{ fontSize:11, color:C.muted, marginTop:2 }}>{sub}</div>}
   </Card>;
 }
@@ -62,13 +63,13 @@ function TabBar({ tabs, active, onChange }) {
 function Btn({ children, onClick, color, small, style, disabled }) {
   return <button onClick={onClick} disabled={disabled} style={{
     padding:small?'4px 12px':'8px 16px', borderRadius:8, border:'none', cursor:disabled?'not-allowed':'pointer',
-    backgroundColor:color||C.teal, color:C.white, fontSize:small?12:13, fontWeight:600, opacity:disabled?0.5:1,
+    backgroundColor:color||C.teal, color:'#fff', fontSize:small?12:13, fontWeight:600, opacity:disabled?0.5:1,
     transition:'opacity 0.2s', ...style,
   }}>{children}</button>;
 }
 
 function Input({ label, value, onChange, type, placeholder, style, options }) {
-  const base = { backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8, padding:'8px 12px',
+  const base = { backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'8px 12px',
     color:C.text, fontSize:13, width:'100%', outline:'none', boxSizing:'border-box', ...style };
   return <div style={{ marginBottom:12 }}>
     {label && <label style={{ fontSize:12, color:C.muted, display:'block', marginBottom:4 }}>{label}</label>}
@@ -85,7 +86,7 @@ function Modal({ title, onClose, children }) {
     <div onClick={e=>e.stopPropagation()} style={{ backgroundColor:C.card, borderRadius:16, border:`1px solid ${C.border}`,
       padding:24, maxWidth:520, width:'90%', maxHeight:'80vh', overflowY:'auto' }}>
       <div style={{ display:'flex', justifyContent:'space-between', marginBottom:16 }}>
-        <h3 style={{ margin:0, color:C.white, fontSize:18 }}>{title}</h3>
+        <h3 style={{ margin:0, color:C.heading, fontSize:18 }}>{title}</h3>
         <button onClick={onClose} style={{ background:'none', border:'none', color:C.muted, cursor:'pointer', fontSize:20 }}>x</button>
       </div>
       {children}
@@ -123,22 +124,22 @@ function LeadSynopsisBlock({ synopsis }) {
     const t = line.trim();
     if (!t) return <div key={key} style={{ height: 4 }} />;
     if (t.startsWith('## ')) return <div key={key} style={{ fontSize: 13, fontWeight: 700, color: C.teal, marginTop: 10, marginBottom: 4 }}>{t.replace(/^##\s*/, '')}</div>;
-    if (t.startsWith('### ')) return <div key={key} style={{ fontSize: 12, fontWeight: 600, color: C.white, marginTop: 8, marginBottom: 2 }}>{t.replace(/^###\s*/, '')}</div>;
-    if (t.startsWith('**') && t.endsWith('**')) return <div key={key} style={{ fontSize: 12, fontWeight: 700, color: C.white, marginTop: 8, marginBottom: 2 }}>{t.replace(/\*\*/g, '')}</div>;
+    if (t.startsWith('### ')) return <div key={key} style={{ fontSize: 12, fontWeight: 600, color: C.heading, marginTop: 8, marginBottom: 2 }}>{t.replace(/^###\s*/, '')}</div>;
+    if (t.startsWith('**') && t.endsWith('**')) return <div key={key} style={{ fontSize: 12, fontWeight: 700, color: C.heading, marginTop: 8, marginBottom: 2 }}>{t.replace(/\*\*/g, '')}</div>;
     if (t.startsWith('- ') || t.startsWith('* ')) {
       const text = t.replace(/^[-*]\s*/, '');
       const parts = text.split(/(\*\*[^*]+\*\*)/g);
       return <div key={key} style={{ fontSize: 12, color: C.text, lineHeight: 1.6, paddingLeft: 14, position: 'relative' }}>
         <span style={{ position: 'absolute', left: 0, color: C.muted }}>-</span>
         {parts.map((p, i) => p.startsWith('**') && p.endsWith('**')
-          ? <strong key={i} style={{ color: C.white, fontWeight: 600 }}>{p.replace(/\*\*/g, '')}</strong>
+          ? <strong key={i} style={{ color: C.heading, fontWeight: 600 }}>{p.replace(/\*\*/g, '')}</strong>
           : <span key={i}>{p}</span>)}
       </div>;
     }
     const parts = t.split(/(\*\*[^*]+\*\*)/g);
     return <div key={key} style={{ fontSize: 12, color: C.text, lineHeight: 1.6 }}>
       {parts.map((p, i) => p.startsWith('**') && p.endsWith('**')
-        ? <strong key={i} style={{ color: C.white, fontWeight: 600 }}>{p.replace(/\*\*/g, '')}</strong>
+        ? <strong key={i} style={{ color: C.heading, fontWeight: 600 }}>{p.replace(/\*\*/g, '')}</strong>
         : <span key={i}>{p}</span>)}
     </div>;
   };
@@ -346,7 +347,7 @@ export default function LeadsPage() {
 
       {/* Funnel */}
       <Card style={{ marginBottom:24 }}>
-        <h3 style={{ margin:'0 0 16px', color:C.white, fontSize:15 }}>Lead Funnel</h3>
+        <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Lead Funnel</h3>
         <div style={{ display:'flex', alignItems:'flex-end', gap:2, height:120 }}>
           {funnelData.map((f, i) => {
             const maxCount = Math.max(...funnelData.map(d => d.count), 1);
@@ -354,7 +355,7 @@ export default function LeadsPage() {
             const dropoff = i > 0 && funnelData[i-1].count > 0
               ? Math.round((1 - f.count / funnelData[i-1].count) * 100) : null;
             return <div key={f.stage} style={{ flex:1, textAlign:'center' }}>
-              <div style={{ fontSize:18, fontWeight:700, color:C.white, ...mono, marginBottom:4 }}>{f.count}</div>
+              <div style={{ fontSize:18, fontWeight:700, color:C.heading, ...mono, marginBottom:4 }}>{f.count}</div>
               <div style={{ height:h, backgroundColor:STATUS_COLORS[f.stage]||C.teal, borderRadius:'6px 6px 0 0',
                 margin:'0 auto', width:'70%', minWidth:30, transition:'height 0.3s' }} />
               <div style={{ fontSize:11, color:C.muted, marginTop:6 }}>{f.label || f.stage}</div>
@@ -367,14 +368,14 @@ export default function LeadsPage() {
       {/* Filters + Actions */}
       <div style={{ display:'flex', gap:12, marginBottom:16, flexWrap:'wrap', alignItems:'center' }}>
         <select value={filters.status} onChange={e=>setFilters(f=>({...f, status:e.target.value, page:1}))}
-          style={{ backgroundColor:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13 }}>
+          style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13 }}>
           <option value="">All Statuses</option>
           {STATUSES.map(s => <option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
         </select>
         <input placeholder="Search leads..." value={filters.search} onChange={e=>setFilters(f=>({...f, search:e.target.value, page:1}))}
-          style={{ backgroundColor:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13, minWidth:200 }} />
+          style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13, minWidth:200 }} />
         <select value={filters.sort} onChange={e=>setFilters(f=>({...f, sort:e.target.value}))}
-          style={{ backgroundColor:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13 }}>
+          style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13 }}>
           <option value="first_contact_at">Newest First</option>
           <option value="name">Name</option>
           <option value="status">Status</option>
@@ -402,7 +403,7 @@ export default function LeadsPage() {
                 <tr onClick={()=>expandLead(lead)} style={{ borderBottom:`1px solid ${C.border}`, cursor:'pointer',
                   backgroundColor:isExpanded?C.cardHover:'transparent', transition:'background 0.15s' }}>
                   <td style={{ padding:'12px 16px' }}>
-                    <div style={{ color:C.white, fontSize:14, fontWeight:500 }}>{[lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unknown'}</div>
+                    <div style={{ color:C.heading, fontSize:14, fontWeight:500 }}>{[lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unknown'}</div>
                     <div style={{ color:C.muted, fontSize:12, ...mono }}>{lead.phone || lead.email || '--'}</div>
                   </td>
                   <td style={{ padding:'12px 16px' }}>
@@ -432,7 +433,7 @@ export default function LeadsPage() {
                   <div style={{ padding:'16px 24px', backgroundColor:C.bg, borderBottom:`1px solid ${C.border}` }}>
                     <div style={{ display:'flex', gap:16, flexWrap:'wrap', marginBottom:16 }}>
                       <div style={{ flex:'1 1 300px' }}>
-                        <h4 style={{ margin:'0 0 8px', color:C.white, fontSize:14 }}>Details</h4>
+                        <h4 style={{ margin:'0 0 8px', color:C.heading, fontSize:14 }}>Details</h4>
                         <div style={{ fontSize:13, color:C.muted, lineHeight:1.8 }}>
                           <div>Email: <span style={{ color:C.text }}>{lead.email || '--'}</span></div>
                           <div>Address: <span style={{ color:C.text }}>{[lead.address, lead.city, lead.zip].filter(Boolean).join(', ') || '--'}</span></div>
@@ -443,7 +444,7 @@ export default function LeadsPage() {
                         </div>
                       </div>
                       <div style={{ flex:'1 1 300px' }}>
-                        <h4 style={{ margin:'0 0 8px', color:C.white, fontSize:14 }}>Activity Timeline</h4>
+                        <h4 style={{ margin:'0 0 8px', color:C.heading, fontSize:14 }}>Activity Timeline</h4>
                         <div style={{ maxHeight:200, overflowY:'auto' }}>
                           {leadActivities.length === 0 && <div style={{ color:C.muted, fontSize:12 }}>No activities logged</div>}
                           {leadActivities.map(a => <div key={a.id} style={{ fontSize:12, color:C.muted, padding:'4px 0',
@@ -521,7 +522,7 @@ export default function LeadsPage() {
                       </div>)}
                       <textarea value={smsCompose.message} onChange={e=>setSmsCompose(prev=>({...prev, message:e.target.value}))}
                         placeholder="Type your message..."
-                        style={{ width:'100%', minHeight:60, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8,
+                        style={{ width:'100%', minHeight:60, backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8,
                           padding:'8px 12px', color:C.text, fontSize:13, resize:'vertical', boxSizing:'border-box', marginBottom:8 }} />
                       <div style={{ display:'flex', gap:8 }}>
                         <Btn small color={C.teal} disabled={smsSending||!smsCompose.message} onClick={async ()=>{
@@ -541,13 +542,13 @@ export default function LeadsPage() {
                       <div style={{ fontSize:12, color:C.amber, fontWeight:600, marginBottom:8 }}>Schedule Callback</div>
                       <div style={{ display:'flex', gap:8, marginBottom:8 }}>
                         <input type="date" value={callbackForm.date} onChange={e=>setCallbackForm(prev=>({...prev, date:e.target.value}))}
-                          style={{ flex:1, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', color:C.text, fontSize:13 }} />
+                          style={{ flex:1, backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 10px', color:C.text, fontSize:13 }} />
                         <input type="time" value={callbackForm.time} onChange={e=>setCallbackForm(prev=>({...prev, time:e.target.value}))}
-                          style={{ flex:1, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', color:C.text, fontSize:13 }} />
+                          style={{ flex:1, backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 10px', color:C.text, fontSize:13 }} />
                       </div>
                       <textarea value={callbackForm.notes||''} onChange={e=>setCallbackForm(prev=>({...prev, notes:e.target.value}))}
                         placeholder="Notes..."
-                        style={{ width:'100%', minHeight:40, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8,
+                        style={{ width:'100%', minHeight:40, backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8,
                           padding:'8px 12px', color:C.text, fontSize:13, resize:'vertical', boxSizing:'border-box', marginBottom:8 }} />
                       <div style={{ display:'flex', gap:8 }}>
                         <Btn small color={C.amber} disabled={!callbackForm.date||!callbackForm.time} onClick={async ()=>{
@@ -597,7 +598,7 @@ export default function LeadsPage() {
   const renderSources = () => {
     return <>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-        <h3 style={{ margin:0, color:C.white, fontSize:16 }}>Lead Sources ({sources.length})</h3>
+        <h3 style={{ margin:0, color:C.heading, fontSize:16 }}>Lead Sources ({sources.length})</h3>
         <div style={{ display:'flex', gap:8 }}>
           <Btn small onClick={()=>{ setFormData({ source_type:'phone_tracking', cost_type:'per_month' }); setShowModal('newSource'); }}>+ Add Source</Btn>
         </div>
@@ -627,13 +628,13 @@ export default function LeadsPage() {
                 <tr onClick={()=>expandSource(src)} style={{ borderBottom:`1px solid ${C.border}`, cursor:'pointer',
                   backgroundColor:isExp?C.cardHover:'transparent', opacity:src.is_active?1:0.5 }}>
                   <td style={{ padding:'12px 14px' }}>
-                    <div style={{ color:C.white, fontSize:13, fontWeight:500 }}>{src.name}</div>
+                    <div style={{ color:C.heading, fontSize:13, fontWeight:500 }}>{src.name}</div>
                     {src.domain && <div style={{ color:C.muted, fontSize:11 }}>{src.domain}</div>}
                   </td>
                   <td style={{ padding:'12px 14px' }}><Badge label={src.source_type?.replace(/_/g,' ')} color={C.teal} /></td>
                   <td style={{ padding:'12px 14px', color:C.text, fontSize:13 }}>{src.channel || '--'}</td>
                   <td style={{ padding:'12px 14px', ...mono, fontSize:13, color:C.text }}>{fmtMoney(mc)}</td>
-                  <td style={{ padding:'12px 14px', ...mono, fontSize:13, color:C.white }}>{monthLeads}</td>
+                  <td style={{ padding:'12px 14px', ...mono, fontSize:13, color:C.heading }}>{monthLeads}</td>
                   <td style={{ padding:'12px 14px', ...mono, fontSize:13, color:C.green }}>{monthConv}</td>
                   <td style={{ padding:'12px 14px', ...mono, fontSize:13, color:convRate>20?C.green:convRate>10?C.amber:C.muted }}>{fmtPct(convRate)}</td>
                   <td style={{ padding:'12px 14px', ...mono, fontSize:13, color:C.text }}>{cpl>0?fmtMoney(cpl):'--'}</td>
@@ -643,7 +644,7 @@ export default function LeadsPage() {
                 {isExp && sourceROI && <tr><td colSpan={10} style={{ padding:0 }}>
                   <div style={{ padding:'16px 24px', backgroundColor:C.bg, borderBottom:`1px solid ${C.border}` }}>
                     <div style={{ display:'flex', gap:24, flexWrap:'wrap', marginBottom:12 }}>
-                      <div><span style={{ color:C.muted, fontSize:12 }}>Total Leads: </span><span style={{ color:C.white, ...mono }}>{sourceROI.totalLeads}</span></div>
+                      <div><span style={{ color:C.muted, fontSize:12 }}>Total Leads: </span><span style={{ color:C.heading, ...mono }}>{sourceROI.totalLeads}</span></div>
                       <div><span style={{ color:C.muted, fontSize:12 }}>Conversions: </span><span style={{ color:C.green, ...mono }}>{sourceROI.conversions}</span></div>
                       <div><span style={{ color:C.muted, fontSize:12 }}>Total Cost: </span><span style={{ color:C.text, ...mono }}>{fmtMoney(sourceROI.totalCost)}</span></div>
                       <div><span style={{ color:C.muted, fontSize:12 }}>Total Revenue: </span><span style={{ color:C.green, ...mono }}>{fmtMoney(sourceROI.totalRevenue)}</span></div>
@@ -667,7 +668,7 @@ export default function LeadsPage() {
   const renderCampaigns = () => {
     return <>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-        <h3 style={{ margin:0, color:C.white, fontSize:16 }}>Marketing Campaigns ({campaigns.length})</h3>
+        <h3 style={{ margin:0, color:C.heading, fontSize:16 }}>Marketing Campaigns ({campaigns.length})</h3>
         <Btn onClick={()=>{ setFormData({ channel:'website_organic' }); setShowModal('newCampaign'); }}>+ New Campaign</Btn>
       </div>
       <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
@@ -678,7 +679,7 @@ export default function LeadsPage() {
           const statusColor = camp.status==='active'?C.green:camp.status==='paused'?C.amber:C.muted;
           return <Card key={camp.id} style={{ flex:'1 1 300px', maxWidth:400 }}>
             <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
-              <h4 style={{ margin:0, color:C.white, fontSize:14 }}>{camp.name}</h4>
+              <h4 style={{ margin:0, color:C.heading, fontSize:14 }}>{camp.name}</h4>
               <Badge label={camp.status} color={statusColor} />
             </div>
             <div style={{ display:'flex', gap:8, marginBottom:12 }}>
@@ -699,7 +700,7 @@ export default function LeadsPage() {
               </div>
             </div>
             <div style={{ display:'flex', gap:16, fontSize:13 }}>
-              <div><span style={{ color:C.muted }}>Leads: </span><span style={{ color:C.white, ...mono }}>{camp.actual_leads||0}{camp.target_leads ? `/${camp.target_leads}`:''}</span></div>
+              <div><span style={{ color:C.muted }}>Leads: </span><span style={{ color:C.heading, ...mono }}>{camp.actual_leads||0}{camp.target_leads ? `/${camp.target_leads}`:''}</span></div>
               <div><span style={{ color:C.muted }}>Conv: </span><span style={{ color:C.green, ...mono }}>{camp.actual_conversions||0}{camp.target_conversions ? `/${camp.target_conversions}`:''}</span></div>
             </div>
             {camp.offer_details && <div style={{ fontSize:12, color:C.muted, marginTop:8, fontStyle:'italic' }}>{camp.offer_details}</div>}
@@ -737,7 +738,7 @@ export default function LeadsPage() {
     return <>
       {/* Channel Comparison */}
       <Card style={{ marginBottom:24 }}>
-        <h3 style={{ margin:'0 0 16px', color:C.white, fontSize:15 }}>Channel Comparison</h3>
+        <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Channel Comparison</h3>
         {byChannel.length === 0 && <div style={{ color:C.muted, fontSize:13 }}>No channel data available yet</div>}
         {byChannel.map(ch => <div key={ch.channel} style={{ marginBottom:12 }}>
           <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginBottom:4 }}>
@@ -761,7 +762,7 @@ export default function LeadsPage() {
 
       {/* Source ROI Matrix */}
       <Card style={{ marginBottom:24 }}>
-        <h3 style={{ margin:'0 0 16px', color:C.white, fontSize:15 }}>Source ROI Matrix</h3>
+        <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Source ROI Matrix</h3>
         {scatterSources.length === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No source data with leads yet</div> :
         <svg viewBox="0 0 400 300" style={{ width:'100%', maxWidth:600, height:'auto' }}>
           {/* Quadrant lines */}
@@ -792,14 +793,14 @@ export default function LeadsPage() {
       <div style={{ display:'flex', gap:16, flexWrap:'wrap', marginBottom:24 }}>
         {/* Response Time vs Conversion */}
         <Card style={{ flex:'1 1 400px' }}>
-          <h3 style={{ margin:'0 0 16px', color:C.white, fontSize:15 }}>Response Time vs Conversion</h3>
+          <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Response Time vs Conversion</h3>
           {responseBuckets.length === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No response data yet</div> :
           <div style={{ display:'flex', alignItems:'flex-end', gap:6, height:140 }}>
             {responseBuckets.map((b, i) => {
               const h = Math.max(8, (b.total / maxResp) * 120);
               const wonH = b.total > 0 ? (b.won / b.total) * h : 0;
               return <div key={i} style={{ flex:1, textAlign:'center' }}>
-                <div style={{ fontSize:11, color:C.white, ...mono, marginBottom:4 }}>{b.conversionRate}%</div>
+                <div style={{ fontSize:11, color:C.heading, ...mono, marginBottom:4 }}>{b.conversionRate}%</div>
                 <div style={{ position:'relative', height:h, margin:'0 auto', width:'80%', minWidth:16 }}>
                   <div style={{ position:'absolute', bottom:0, width:'100%', height:h, backgroundColor:C.border, borderRadius:'4px 4px 0 0' }} />
                   <div style={{ position:'absolute', bottom:0, width:'100%', height:wonH, backgroundColor:C.green, borderRadius:wonH>=h?'4px 4px 0 0':'0 0 0 0' }} />
@@ -817,7 +818,7 @@ export default function LeadsPage() {
 
         {/* Lost Lead Analysis */}
         <Card style={{ flex:'1 1 300px' }}>
-          <h3 style={{ margin:'0 0 16px', color:C.white, fontSize:15 }}>Lost Lead Reasons</h3>
+          <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Lost Lead Reasons</h3>
           {totalLost === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No lost leads yet</div> :
           <div style={{ display:'flex', gap:24, alignItems:'center' }}>
             <svg viewBox="0 0 100 100" style={{ width:120, height:120, flexShrink:0 }}>
@@ -857,7 +858,7 @@ export default function LeadsPage() {
       {/* Phone Number ROI Table */}
       <Card style={{ padding:0, overflow:'auto' }}>
         <div style={{ padding:'16px 20px', borderBottom:`1px solid ${C.border}` }}>
-          <h3 style={{ margin:0, color:C.white, fontSize:15 }}>Phone Number ROI</h3>
+          <h3 style={{ margin:0, color:C.heading, fontSize:15 }}>Phone Number ROI</h3>
         </div>
         <table style={{ width:'100%', borderCollapse:'collapse', minWidth:700 }}>
           <thead>
@@ -872,7 +873,7 @@ export default function LeadsPage() {
               <td style={{ padding:'10px 14px', color:C.teal, ...mono, fontSize:13 }}>{s.source?.twilio_phone_number}</td>
               <td style={{ padding:'10px 14px', color:C.text, fontSize:13 }}>{s.source?.name?.slice(0,30)}</td>
               <td style={{ padding:'10px 14px', ...mono, fontSize:13, color:C.text }}>{fmtMoney(s.totalCost)}</td>
-              <td style={{ padding:'10px 14px', ...mono, fontSize:13, color:C.white }}>{s.totalLeads}</td>
+              <td style={{ padding:'10px 14px', ...mono, fontSize:13, color:C.heading }}>{s.totalLeads}</td>
               <td style={{ padding:'10px 14px', ...mono, fontSize:13, color:C.green }}>{s.conversions}</td>
               <td style={{ padding:'10px 14px', ...mono, fontSize:13, color:C.green }}>{fmtMoney(s.totalRevenue)}</td>
               <td style={{ padding:'10px 14px', ...mono, fontSize:13, fontWeight:600, color:roiColor(s.roi) }}>{s.roi > 0 ? fmtPct(s.roi) : '--'}</td>
@@ -929,7 +930,7 @@ export default function LeadsPage() {
         <label style={{ fontSize:12, color:C.muted, display:'block', marginBottom:4 }}>Notes</label>
         <textarea value={formData.notes||''} onChange={e=>setFormData(f=>({...f,notes:e.target.value}))}
           placeholder="Additional context about why this lead was lost..."
-          style={{ width:'100%', minHeight:80, backgroundColor:'#0f1923', border:`1px solid ${C.border}`, borderRadius:8,
+          style={{ width:'100%', minHeight:80, backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8,
             padding:'8px 12px', color:C.text, fontSize:13, resize:'vertical', boxSizing:'border-box' }} />
       </div>
       <Btn onClick={submitForm} disabled={loading} color={C.red}>{loading?'Saving...':'Mark Lost'}</Btn>
@@ -993,7 +994,7 @@ export default function LeadsPage() {
   // MAIN RENDER
   // ═════════════════════════════════════════════════════════════════════════
   return <div style={{ padding:24, maxWidth:1400, margin:'0 auto', color:C.text }}>
-    <h1 style={{ margin:'0 0 8px', fontSize:24, color:C.white }}>Lead Attribution & Marketing ROI</h1>
+    <h1 style={{ margin:'0 0 8px', fontSize:24, color:C.heading }}>Lead Attribution & Marketing ROI</h1>
     <p style={{ margin:'0 0 24px', fontSize:14, color:C.muted }}>Track every lead from first touch to conversion</p>
 
     <SEOIntelligenceBar context="leads" />

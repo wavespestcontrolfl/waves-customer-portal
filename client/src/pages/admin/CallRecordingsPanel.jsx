@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a', blue: '#3b82f6', gray: '#6b7280' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', blue: '#0A7EC2', gray: '#64748B', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -10,7 +10,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
 
@@ -129,7 +129,7 @@ export default function CallRecordingsPanel() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: D.white }}>Call Recording Processor</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: D.heading }}>Call Recording Processor</div>
             <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>AI transcription + customer extraction -- replaces Zapier</div>
           </div>
           <span style={{ ...sBadge(`${D.green}22`, D.green), fontSize: 11, padding: '4px 10px' }}>Auto-processing enabled</span>
@@ -179,7 +179,7 @@ export default function CallRecordingsPanel() {
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
                       {callerName || (isPending ? r.from_phone : 'Unknown -- potential lead')}
                     </div>
                     <div style={{ fontSize: 11, color: D.muted }}>
@@ -226,11 +226,11 @@ export default function CallRecordingsPanel() {
       {/* Source Analytics Section */}
       {stats?.sourceBreakdown && stats.sourceBreakdown.length > 0 && (
         <div style={{ ...sCard, marginTop: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Source Analytics</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Source Analytics</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 13, color: D.text }}>
             {stats.sourceBreakdown.map((s, i) => (
               <span key={s.number} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontWeight: 600, color: D.white }}>{getNumberLabel(s.number)}:</span>
+                <span style={{ fontWeight: 600, color: D.heading }}>{getNumberLabel(s.number)}:</span>
                 <span style={{ color: D.teal }}>{s.count}</span>
                 {i < stats.sourceBreakdown.length - 1 && <span style={{ color: D.border, margin: '0 4px' }}>|</span>}
               </span>
@@ -299,9 +299,9 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
       if (trimmed.startsWith('## ')) {
         elements.push(<div key={key++} style={{ fontSize: 13, fontWeight: 700, color: D.teal, marginTop: 10, marginBottom: 4 }}>{trimmed.replace(/^##\s*/, '')}</div>);
       } else if (trimmed.startsWith('### ')) {
-        elements.push(<div key={key++} style={{ fontSize: 12, fontWeight: 600, color: D.white, marginTop: 8, marginBottom: 2 }}>{trimmed.replace(/^###\s*/, '')}</div>);
+        elements.push(<div key={key++} style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginTop: 8, marginBottom: 2 }}>{trimmed.replace(/^###\s*/, '')}</div>);
       } else if (trimmed.startsWith('**') && trimmed.endsWith('**')) {
-        elements.push(<div key={key++} style={{ fontSize: 12, fontWeight: 700, color: D.white, marginTop: 8, marginBottom: 2 }}>{trimmed.replace(/\*\*/g, '')}</div>);
+        elements.push(<div key={key++} style={{ fontSize: 12, fontWeight: 700, color: D.heading, marginTop: 8, marginBottom: 2 }}>{trimmed.replace(/\*\*/g, '')}</div>);
       } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
         const bulletText = trimmed.replace(/^[-*]\s*/, '');
         // Handle bold within bullets
@@ -310,7 +310,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
           <div key={key++} style={{ fontSize: 12, color: D.text, lineHeight: 1.6, paddingLeft: 12, position: 'relative' }}>
             <span style={{ position: 'absolute', left: 0, color: D.muted }}>-</span>
             {parts.map((part, i) => part.startsWith('**') && part.endsWith('**')
-              ? <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{part.replace(/\*\*/g, '')}</strong>
+              ? <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>{part.replace(/\*\*/g, '')}</strong>
               : <span key={i}>{part}</span>
             )}
           </div>
@@ -320,7 +320,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
         elements.push(
           <div key={key++} style={{ fontSize: 12, color: D.text, lineHeight: 1.6 }}>
             {parts.map((part, i) => part.startsWith('**') && part.endsWith('**')
-              ? <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{part.replace(/\*\*/g, '')}</strong>
+              ? <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>{part.replace(/\*\*/g, '')}</strong>
               : <span key={i}>{part}</span>
             )}
           </div>
@@ -337,7 +337,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
     <div style={{ position: 'sticky', top: 20, maxHeight: 'calc(100vh - 40px)', overflowY: 'auto' }}>
       <div style={sCard}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Call Details</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Call Details</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 18, cursor: 'pointer' }}>{'\u00D7'}</button>
         </div>
 
@@ -364,7 +364,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
 
         {/* Receiving number label */}
         <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
-          Receiving line: <span style={{ color: D.white, fontWeight: 600 }}>{getNumberLabel(r.to_phone)}</span>
+          Receiving line: <span style={{ color: D.heading, fontWeight: 600 }}>{getNumberLabel(r.to_phone)}</span>
         </div>
 
         {/* Audio player */}
@@ -410,7 +410,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
               ].map(([label, value]) => value && (
                 <div key={label} style={{ display: 'contents' }}>
                   <span style={{ color: D.muted, padding: '4px 0' }}>{label}</span>
-                  <span style={{ color: D.white, padding: '4px 0' }}>{value}</span>
+                  <span style={{ color: D.heading, padding: '4px 0' }}>{value}</span>
                 </div>
               ))}
             </div>

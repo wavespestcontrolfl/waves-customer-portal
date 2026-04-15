@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 const LABOR_RATE = 35;
 
@@ -13,7 +13,7 @@ function adminFetch(path, opts = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
 const sInput = { width: '100%', padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -49,7 +49,7 @@ export default function TimeTrackingPage() {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>Time Tracking & Labor</div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Time Tracking & Labor</div>
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Clock management, timesheets, payroll, and labor analytics</div>
       </div>
 
@@ -122,7 +122,7 @@ function DashboardTab({ showToast }) {
   return (
     <div>
       {/* Live Tech Status Cards */}
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Live Status</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Live Status</div>
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12, marginBottom: 24 }}>
         {allTechs.filter(tech => {
           // Only show techs with activity — hide inactive techs with 0 hours/jobs
@@ -143,7 +143,7 @@ function DashboardTab({ showToast }) {
             <div key={tech.id} style={{ ...sCard, display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{ width: 10, height: 10, borderRadius: '50%', background: active ? D.green : D.muted, boxShadow: active ? `0 0 8px ${D.green}` : 'none' }} />
-                <div style={{ fontWeight: 600, color: D.white, flex: 1 }}>{tech.name}</div>
+                <div style={{ fontWeight: 600, color: D.heading, flex: 1 }}>{tech.name}</div>
                 <span style={sBadge(active ? D.green + '22' : D.muted + '22', active ? D.green : D.muted)}>
                   {active ? 'CLOCKED IN' : 'OFF'}
                 </span>
@@ -169,7 +169,7 @@ function DashboardTab({ showToast }) {
       </div>
 
       {/* Today's Labor Summary */}
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Today's Labor</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Today's Labor</div>
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(5, 1fr)', gap: 12, marginBottom: 24 }}>
         <StatCard label="Total Hours" value={fmtHrs(todayShiftMin)} color={D.teal} />
         <StatCard label="Labor Cost" value={fmt(todayLaborCost)} color={D.amber} />
@@ -179,7 +179,7 @@ function DashboardTab({ showToast }) {
       </div>
 
       {/* This Week Bar Chart */}
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>This Week</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>This Week</div>
       <div style={sCard}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
           <span style={{ fontSize: 12, color: D.muted }}>Week total: {fmtHrs(weekShiftMin)} | Revenue: {fmt(weekRevenue)} | OT: {fmtHrs(weekOT)}</span>
@@ -193,7 +193,7 @@ function DashboardTab({ showToast }) {
 function MiniStat({ label, value }) {
   return (
     <div style={{ textAlign: 'center' }}>
-      <div style={{ fontSize: 14, fontWeight: 700, color: D.white, fontFamily: MONO }}>{value}</div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, fontFamily: MONO }}>{value}</div>
       <div style={{ fontSize: 10, color: D.muted }}>{label}</div>
     </div>
   );
@@ -337,7 +337,7 @@ function TimesheetTab({ showToast }) {
       {/* Week nav */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
         <button onClick={() => setWeekStart(addDays(weekStart, -7))} style={sBtn(D.card, D.text)}>&#9664; Prev</button>
-        <span style={{ fontWeight: 600, color: D.white, fontFamily: MONO, fontSize: 14 }}>
+        <span style={{ fontWeight: 600, color: D.heading, fontFamily: MONO, fontSize: 14 }}>
           {weekStart} to {weekEnd}
         </span>
         <button onClick={() => setWeekStart(addDays(weekStart, 7))} style={sBtn(D.card, D.text)}>Next &#9654;</button>
@@ -375,7 +375,7 @@ function TimesheetTab({ showToast }) {
 
               return (
                 <tr key={tech.id} style={{ borderBottom: `1px solid ${D.border}` }}>
-                  <td style={{ ...tdStyle, fontWeight: 600, color: D.white }}>{tech.name}</td>
+                  <td style={{ ...tdStyle, fontWeight: 600, color: D.heading }}>{tech.name}</td>
                   {DAYS.map((_, i) => {
                     const dt = addDays(weekStart, i);
                     const d = days[dt];
@@ -389,7 +389,7 @@ function TimesheetTab({ showToast }) {
                       </td>
                     );
                   })}
-                  <td style={{ ...tdStyle, fontFamily: MONO, fontWeight: 700, color: D.white }}>{(totalMin / 60).toFixed(1)}</td>
+                  <td style={{ ...tdStyle, fontFamily: MONO, fontWeight: 700, color: D.heading }}>{(totalMin / 60).toFixed(1)}</td>
                   <td style={{ ...tdStyle, fontFamily: MONO, fontWeight: 700, color: totalOT > 0 ? D.red : D.muted }}>{(totalOT / 60).toFixed(1)}</td>
                   <td style={tdStyle}>
                     <span style={sBadge((STATUS_COLORS[weekStatus] || D.muted) + '22', STATUS_COLORS[weekStatus] || D.muted)}>
@@ -406,7 +406,7 @@ function TimesheetTab({ showToast }) {
       {/* Expanded cell entries */}
       {expanded && (
         <div style={{ ...sCard, marginTop: 12 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 8 }}>
             Entries for {expanded.date}
           </div>
           {cellEntries.length === 0 ? (
@@ -604,7 +604,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
   return (
     <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,.7)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={onClose}>
       <div style={{ ...sCard, maxWidth: 500, width: '100%' }} onClick={e => e.stopPropagation()}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 16 }}>Edit Time Entry</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 16 }}>Edit Time Entry</div>
 
         {entry.original_clock_in && (
           <div style={{ fontSize: 11, color: D.amber, marginBottom: 12, padding: 8, background: D.amber + '11', borderRadius: 6 }}>
@@ -701,7 +701,7 @@ function AnalyticsTab() {
       </div>
 
       {/* Actual vs Estimated */}
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Actual vs Estimated by Service Type</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Actual vs Estimated by Service Type</div>
       <div style={sCard}>
         {serviceTypeStats.length === 0 ? (
           <div style={{ color: D.muted, fontSize: 12 }}>No job data in this period</div>
@@ -733,7 +733,7 @@ function AnalyticsTab() {
       </div>
 
       {/* Per-tech comparison */}
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Per-Tech Service Time Comparison</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Per-Tech Service Time Comparison</div>
       <div style={sCard}>
         {comparison.length === 0 ? (
           <div style={{ color: D.muted, fontSize: 12 }}>No comparison data</div>
@@ -764,7 +764,7 @@ function AnalyticsTab() {
       </div>
 
       {/* RPMH by Tech */}
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Revenue Per Man-Hour (RPMH)</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Revenue Per Man-Hour (RPMH)</div>
       <div style={sCard}>
         {Object.keys(rpmhMap).length === 0 ? (
           <div style={{ color: D.muted, fontSize: 12 }}>No RPMH data yet</div>
@@ -795,7 +795,7 @@ function AnalyticsTab() {
       </div>
 
       {/* Utilization Trend - SVG Line Chart */}
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Utilization Trend (12 Weeks)</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Utilization Trend (12 Weeks)</div>
       <div style={sCard}>
         {utilWeeks.length === 0 ? (
           <div style={{ color: D.muted, fontSize: 12 }}>No trend data yet</div>
@@ -805,7 +805,7 @@ function AnalyticsTab() {
       </div>
 
       {/* Overtime by Tech */}
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Weekly Overtime</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Weekly Overtime</div>
       <div style={sCard}>
         {(overtimeTrend || []).length === 0 ? (
           <div style={{ color: D.muted, fontSize: 12 }}>No overtime data</div>
@@ -956,14 +956,14 @@ function TeamTab({ showToast }) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Technicians</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Technicians</div>
         <button onClick={() => { setShowAdd(true); setEditingId(null); setForm({ name: '', phone: '', email: '' }); }} style={sBtn(D.teal, D.white)}>+ Add Technician</button>
       </div>
 
       {/* Add / Edit form */}
       {showAdd && (
         <div style={{ ...sCard, marginBottom: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>{editingId ? 'Edit Technician' : 'New Technician'}</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>{editingId ? 'Edit Technician' : 'New Technician'}</div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 12 }}>
             <div>
               <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Name *</div>
@@ -1000,7 +1000,7 @@ function TeamTab({ showToast }) {
           <tbody>
             {techs.map(t => (
               <tr key={t.id} style={{ opacity: t.active ? 1 : 0.5 }}>
-                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.white, fontWeight: 600 }}>{t.name}</td>
+                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.heading, fontWeight: 600 }}>{t.name}</td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontFamily: MONO, fontSize: 12 }}>{t.phone || '\u2014'}</td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 12 }}>{t.email || '\u2014'}</td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}` }}>
@@ -1130,7 +1130,7 @@ function DocumentsTab({ showToast }) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Company Documents</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Company Documents</div>
         <button onClick={() => setShowUpload(true)} style={sBtn(D.teal, D.white)}>+ Upload Document</button>
       </div>
 
@@ -1149,7 +1149,7 @@ function DocumentsTab({ showToast }) {
       {/* Upload form */}
       {showUpload && (
         <div style={{ ...sCard, borderColor: D.teal + '44' }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Upload Document</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Upload Document</div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 12 }}>
             <div>
               <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Title</div>
@@ -1193,7 +1193,7 @@ function DocumentsTab({ showToast }) {
           if (isEditing) {
             return (
               <div key={doc.id} style={{ ...sCard, borderColor: D.teal + '44' }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 10 }}>Edit Document</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>Edit Document</div>
                 <div style={{ marginBottom: 8 }}>
                   <div style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}>Title</div>
                   <input value={editForm.title} onChange={e => setEditForm(f => ({ ...f, title: e.target.value }))} style={sInput} />
@@ -1221,7 +1221,7 @@ function DocumentsTab({ showToast }) {
               <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
                 <div style={{ fontSize: 28, flexShrink: 0, lineHeight: 1 }}>{icon}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.title}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.title}</div>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
                     <span style={sBadge(catColor + '22', catColor)}>{(DOC_CATEGORIES.find(c => c.value === doc.category) || {}).label || doc.category}</span>
                     <span style={{ fontSize: 11, color: D.muted }}>{doc.file_type?.toUpperCase()}</span>
@@ -1244,7 +1244,7 @@ function DocumentsTab({ showToast }) {
       {docs.length === 0 && !showUpload && (
         <div style={{ ...sCard, textAlign: 'center', padding: 40 }}>
           <div style={{ fontSize: 32, marginBottom: 12 }}>{'\uD83D\uDCC1'}</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 6 }}>No documents yet</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 6 }}>No documents yet</div>
           <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>Upload SOPs, onboarding packets, offer letters, and other internal documents.</div>
           <button onClick={() => setShowUpload(true)} style={sBtn(D.teal, D.white)}>+ Upload First Document</button>
         </div>

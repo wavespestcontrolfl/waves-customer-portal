@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', blue: '#2563eb', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', blue: '#0A7EC2', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -11,7 +11,7 @@ function adminFetch(path, options = {}) {
 }
 
 // ── Shared styles ──
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" });
 const sBtnOutline = { ...sBtn('transparent', D.muted), border: `1px solid ${D.border}` };
 const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, fontFamily: "'DM Sans', sans-serif", outline: 'none', boxSizing: 'border-box' };
@@ -213,7 +213,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
       {/* Left — Profile Summary */}
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Profile Summary</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Profile Summary</div>
         {[
           { label: 'Business Name', value: info.business_name || loc.name },
           { label: 'Address', value: info.address || loc.address },
@@ -229,7 +229,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
             {f.link ? (
               <a href={f.value} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: D.teal, textDecoration: 'none', textAlign: 'right', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.value || '—'}</a>
             ) : (
-              <span style={{ fontSize: 13, color: D.white, textAlign: 'right', maxWidth: 280 }}>{f.value || '—'}</span>
+              <span style={{ fontSize: 13, color: D.heading, textAlign: 'right', maxWidth: 280 }}>{f.value || '—'}</span>
             )}
           </div>
         ))}
@@ -247,7 +247,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
         </div>
 
         <div style={sCard}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Actions</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Actions</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <button onClick={onSync} disabled={syncing} style={{ ...sBtn(D.teal, D.white), width: '100%', opacity: syncing ? 0.5 : 1 }}>
               {syncing ? 'Syncing from Google...' : 'Sync from Google'}
@@ -314,7 +314,7 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
   return (
     <div style={{ maxWidth: 700 }}>
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Edit Business Information</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Edit Business Information</div>
         <FieldGroup>
           <Field label="Business Name">
             <input value={form.business_name} onChange={e => setForm(f => ({ ...f, business_name: e.target.value }))} style={sInput} />
@@ -401,7 +401,7 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
   return (
     <div style={{ maxWidth: 600 }}>
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Regular Hours</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Regular Hours</div>
         {DAYS.map(day => {
           const h = hours[day] || {};
           const today = isToday(day);
@@ -421,7 +421,7 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
 
       <div style={sCard}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Special Hours</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Special Hours</div>
           <button onClick={addSpecialHour} style={sBtn(D.teal, D.white)}>+ Add</button>
         </div>
         {specialHours.length === 0 ? (
@@ -500,7 +500,7 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
       {/* Current services */}
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Current Services ({services.length})</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Current Services ({services.length})</div>
         <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
           <input value={newService} onChange={e => setNewService(e.target.value)} onKeyDown={e => e.key === 'Enter' && addService(newService)} placeholder="Add a service..." style={{ ...sInput, flex: 1 }} />
           <button onClick={() => addService(newService)} style={sBtn(D.teal, D.white)}>Add</button>
@@ -523,7 +523,7 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
       {/* Suggested services */}
       <div style={sCard}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Google Suggestions</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Google Suggestions</div>
           <button onClick={loadSuggestions} disabled={loadingSugg} style={sBtnOutline}>{loadingSugg ? 'Loading...' : 'Refresh'}</button>
         </div>
         <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>Click to add to your profile</div>
@@ -554,7 +554,7 @@ function PhotosTab({ loc, gbp }) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>{loc.name} Photos ({photos.length})</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>{loc.name} Photos ({photos.length})</div>
         <a href={`https://business.google.com/photos/l/${loc.googlePlaceId}`} target="_blank" rel="noopener noreferrer" style={{ ...sBtnOutline, textDecoration: 'none' }}>Manage on Google</a>
       </div>
       {photos.length === 0 ? (
@@ -593,7 +593,7 @@ function UpdateQueueTab({ updates, locations, onApprove, onReject, onBulkReject 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Pending Updates ({updates.length})</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Pending Updates ({updates.length})</div>
         {selectedIds.size > 0 && (
           <button onClick={() => { onBulkReject([...selectedIds]); setSelectedIds(new Set()); }} style={sBtn(D.red, D.white)}>
             Reject Selected ({selectedIds.size})
@@ -615,7 +615,7 @@ function UpdateQueueTab({ updates, locations, onApprove, onReject, onBulkReject 
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{fieldLabel(u.field_name)}</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{fieldLabel(u.field_name)}</span>
                     <span style={sBadge(`${D.teal}22`, D.teal)}>{locName(u.location_id)}</span>
                     <span style={sBadge(`${D.purple}22`, D.purple)}>{u.source}</span>
                   </div>
@@ -657,7 +657,7 @@ function ChangeHistoryTab({ updates, locations, filter, setFilter, loadUpdates }
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Change History</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Change History</div>
         <div style={{ display: 'flex', gap: 4 }}>
           {['all', 'pending', 'approved', 'rejected'].map(f => (
             <button key={f} onClick={() => { setFilter(f === 'all' ? '' : f); }} style={{
@@ -745,7 +745,7 @@ function BulkEditTab({ locations, onSave, showToast }) {
   return (
     <div style={{ maxWidth: 700 }}>
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Bulk Edit Locations</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Bulk Edit Locations</div>
 
         <div style={{ marginBottom: 16 }}>
           <span style={sLabel}>Select Locations</span>
@@ -828,7 +828,7 @@ function NotificationsTab({ showToast }) {
   return (
     <div style={{ maxWidth: 600 }}>
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>GBP Change Alerts</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>GBP Change Alerts</div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 14, color: D.text, marginBottom: 16 }}>
           <input type="checkbox" checked={prefs.enabled} onChange={e => setPrefs(p => ({ ...p, enabled: e.target.checked }))} style={{ accentColor: D.teal, width: 18, height: 18 }} />

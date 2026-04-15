@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
@@ -11,7 +11,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600 });
 const sInput = { width: '100%', padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -30,7 +30,7 @@ export default function EquipmentPage() {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>Equipment & Job Costing</div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Equipment & Job Costing</div>
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Equipment tracking, tank mixes, calibration, and service margins</div>
       </div>
 
@@ -81,13 +81,13 @@ function EquipmentTab({ showToast }) {
           <div key={e.id} style={{ ...sCard, marginBottom: 0, borderLeft: `3px solid ${STATUS_COLORS[e.status] || D.muted}` }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
               <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{CAT_ICONS[e.category] || '🔧'} {e.name}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{CAT_ICONS[e.category] || '🔧'} {e.name}</div>
                 <div style={{ fontSize: 11, color: D.muted }}>{e.make} {e.model}</div>
               </div>
               <span style={sBadge(`${STATUS_COLORS[e.status]}22`, STATUS_COLORS[e.status])}>{e.status}</span>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 11 }}>
-              {e.current_hours > 0 && <div><span style={{ color: D.muted }}>Hours:</span> <span style={{ color: D.white, fontFamily: MONO }}>{e.current_hours}</span></div>}
+              {e.current_hours > 0 && <div><span style={{ color: D.muted }}>Hours:</span> <span style={{ color: D.heading, fontFamily: MONO }}>{e.current_hours}</span></div>}
               {e.purchase_price > 0 && <div><span style={{ color: D.muted }}>Cost:</span> <span style={{ color: D.green, fontFamily: MONO }}>{fmt(e.purchase_price)}</span></div>}
               {e.book_value > 0 && <div><span style={{ color: D.muted }}>Book:</span> <span style={{ fontFamily: MONO }}>{fmt(e.book_value)}</span></div>}
               {e.last_service_date && <div><span style={{ color: D.muted }}>Last Svc:</span> <span>{new Date(e.last_service_date).toLocaleDateString()}</span></div>}
@@ -137,7 +137,7 @@ function TankMixTab({ showToast }) {
           <div key={m.id} style={{ ...sCard }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <div>
-                <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{m.name}</div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{m.name}</div>
                 <div style={{ fontSize: 12, color: D.muted }}>{m.service_type} · {m.tank_size_gal}gal tank · covers {(m.coverage_sqft || 0).toLocaleString()} sqft</div>
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -156,7 +156,7 @@ function TankMixTab({ showToast }) {
               <tbody>
                 {products.map((p, i) => (
                   <tr key={i}>
-                    <td style={{ padding: '6px 8px', fontSize: 12, color: D.white }}>{p.product_name}</td>
+                    <td style={{ padding: '6px 8px', fontSize: 12, color: D.heading }}>{p.product_name}</td>
                     <td style={{ padding: '6px 8px', fontSize: 12, fontFamily: MONO }}>{p.rate_per_1000sf} {p.rate_unit}</td>
                     <td style={{ padding: '6px 8px', fontSize: 12, fontFamily: MONO }}>{p.oz_per_tank}</td>
                     <td style={{ padding: '6px 8px', fontSize: 12, fontFamily: MONO, color: D.green }}>{fmt(p.cost)}</td>
@@ -195,7 +195,7 @@ function JobCostTab() {
             { label: 'Avg Margin', value: summary.avgMargin ? `${summary.avgMargin.toFixed(1)}%` : '—', color: summary.avgMargin >= 50 ? D.green : D.amber },
             { label: 'Avg Revenue/Job', value: fmt(summary.avgRevenue), color: D.green },
             { label: 'Avg Cost/Job', value: fmt(summary.avgCost), color: D.amber },
-            { label: 'Total Jobs Costed', value: summary.totalJobs || 0, color: D.white },
+            { label: 'Total Jobs Costed', value: summary.totalJobs || 0, color: D.heading },
           ].map(s => (
             <div key={s.label} style={{ ...sCard, flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 140px', minWidth: isMobile ? 0 : 140, marginBottom: 0, textAlign: 'center' }}>
               <div style={{ fontFamily: MONO, fontSize: isMobile ? 18 : 22, fontWeight: 700, color: s.color }}>{s.value}</div>
@@ -208,10 +208,10 @@ function JobCostTab() {
       {/* By service type */}
       {summary?.byServiceType && (
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Margins by Service Type</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Margins by Service Type</div>
           {Object.entries(summary.byServiceType).map(([svc, stats]) => (
             <div key={svc} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${D.border}22`, fontSize: 12 }}>
-              <span style={{ color: D.white, fontWeight: 500 }}>{svc}</span>
+              <span style={{ color: D.heading, fontWeight: 500 }}>{svc}</span>
               <div style={{ display: 'flex', gap: 16 }}>
                 <span style={{ color: D.muted }}>{stats.count} jobs</span>
                 <span style={{ color: D.green, fontFamily: MONO }}>Rev: {fmt(stats.avgRevenue)}</span>
@@ -248,7 +248,7 @@ function MaintenanceTab({ showToast }) {
 
   return (
     <div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Upcoming Maintenance</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Upcoming Maintenance</div>
       {equipment.length === 0 ? (
         <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No equipment needs service soon</div>
       ) : equipment.map(e => {
@@ -257,7 +257,7 @@ function MaintenanceTab({ showToast }) {
           <div key={e.id} style={{ ...sCard, borderLeft: `3px solid ${hoursLeft <= 10 ? D.red : D.amber}` }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{e.name}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{e.name}</div>
                 <div style={{ fontSize: 12, color: D.muted }}>{e.next_service_type} — in {Math.round(hoursLeft)} hours</div>
               </div>
               <button onClick={async () => {

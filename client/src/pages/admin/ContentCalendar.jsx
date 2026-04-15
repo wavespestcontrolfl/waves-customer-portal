@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -89,7 +89,7 @@ export default function ContentCalendar() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <button onClick={() => shiftMonth(-1)} style={{ background: 'none', border: `1px solid ${D.border}`, borderRadius: 6, padding: '4px 10px', color: D.muted, cursor: 'pointer' }}>←</button>
-          <div style={{ fontSize: 18, fontWeight: 700, color: D.white, minWidth: 200, textAlign: 'center' }}>{monthName}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, minWidth: 200, textAlign: 'center' }}>{monthName}</div>
           <button onClick={() => shiftMonth(1)} style={{ background: 'none', border: `1px solid ${D.border}`, borderRadius: 6, padding: '4px 10px', color: D.muted, cursor: 'pointer' }}>→</button>
         </div>
         <div style={{ display: 'flex', gap: 12, fontSize: 11, color: D.muted }}>
@@ -146,7 +146,7 @@ export default function ContentCalendar() {
       {/* Selected day detail */}
       {selectedDay && (
         <div style={{ marginTop: 12, background: D.card, border: `1px solid ${D.teal}`, borderRadius: 10, padding: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
             {new Date(month.year, month.month, selectedDay).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
           </div>
           {getItemsForDay(selectedDay).length === 0 ? (
@@ -155,7 +155,7 @@ export default function ContentCalendar() {
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${D.border}22`, fontSize: 13 }}>
               <span style={{ fontSize: 16 }}>{TYPE_ICONS[item.type]}</span>
               <div style={{ flex: 1 }}>
-                <div style={{ color: D.white, fontWeight: 500 }}>{item.title}</div>
+                <div style={{ color: D.heading, fontWeight: 500 }}>{item.title}</div>
                 <div style={{ fontSize: 11, color: D.muted }}>{item.status} · {item.platforms?.join(', ') || item.type}</div>
               </div>
               <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: `${TYPE_COLORS[item.type]}22`, color: TYPE_COLORS[item.type] }}>{item.status}</span>

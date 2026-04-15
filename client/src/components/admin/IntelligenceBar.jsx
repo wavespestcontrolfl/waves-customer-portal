@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#fff', heading: '#0F172A', inputBg: '#FFFFFF' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -25,11 +25,11 @@ function renderMarkdown(text) {
 
     // Headers
     if (line.startsWith('### ')) {
-      elements.push(<div key={key++} style={{ fontSize: 14, fontWeight: 700, color: D.white, marginTop: 12, marginBottom: 4 }}>{line.slice(4)}</div>);
+      elements.push(<div key={key++} style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginTop: 12, marginBottom: 4 }}>{line.slice(4)}</div>);
       continue;
     }
     if (line.startsWith('## ')) {
-      elements.push(<div key={key++} style={{ fontSize: 15, fontWeight: 700, color: D.white, marginTop: 14, marginBottom: 6 }}>{line.slice(3)}</div>);
+      elements.push(<div key={key++} style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginTop: 14, marginBottom: 6 }}>{line.slice(3)}</div>);
       continue;
     }
 
@@ -76,7 +76,7 @@ function renderInline(text) {
   const parts = text.split(/(\*\*[^*]+\*\*)/g);
   return parts.map((part, i) => {
     if (part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+      return <strong key={i} style={{ color: D.heading, fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
     }
     // Inline code
     if (part.includes('`')) {
@@ -137,7 +137,7 @@ function CustomerRow({ customer, onSelect }) {
       }}
     >
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: D.white, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unnamed'}
         </div>
         <div style={{ fontSize: 11, color: D.muted }}>
@@ -290,7 +290,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
             placeholder="Ask anything about your customers, schedule, or revenue..."
             style={{
               width: '100%', padding: '10px 14px', paddingRight: 80,
-              background: D.bg, border: `1px solid ${D.border}`,
+              background: D.inputBg, border: `1px solid ${D.border}`,
               borderRadius: 10, color: D.text, fontSize: 14,
               fontFamily: 'DM Sans, sans-serif', outline: 'none',
               boxSizing: 'border-box',
@@ -415,8 +415,8 @@ export default function IntelligenceBar({ onSelectCustomer }) {
           {/* Structured customer list if available */}
           {customerList && customerList.length > 0 && (
             <div style={{
-              marginTop: 14, background: D.bg,
-              border: `1px solid ${D.border}44`, borderRadius: 10,
+              marginTop: 14, background: D.inputBg,
+              border: `1px solid ${D.border}`, borderRadius: 10,
               overflow: 'hidden', maxHeight: 300, overflowY: 'auto',
             }}>
               <div style={{
@@ -448,7 +448,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
               placeholder="Follow up..."
               style={{
                 flex: 1, padding: '8px 12px',
-                background: D.bg, border: `1px solid ${D.border}`,
+                background: D.inputBg, border: `1px solid ${D.border}`,
                 borderRadius: 8, color: D.text, fontSize: 13,
                 fontFamily: 'DM Sans, sans-serif', outline: 'none',
               }}

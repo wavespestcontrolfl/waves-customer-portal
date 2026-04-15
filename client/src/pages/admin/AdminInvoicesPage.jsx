@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', blue: '#2563eb', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', blue: '#0A7EC2', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -10,7 +10,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
 const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -40,7 +40,7 @@ export default function AdminInvoicesPage() {
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
         <div>
-          <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: D.white }}>Invoices</div>
+          <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: D.heading }}>Invoices</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Waves-branded invoices with service recap and tap-to-pay</div>
         </div>
       </div>
@@ -48,7 +48,7 @@ export default function AdminInvoicesPage() {
       {stats && (
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
           {[
-            { label: 'Total', value: stats.total, color: D.white },
+            { label: 'Total', value: stats.total, color: D.heading },
             { label: 'Paid', value: stats.paid, color: D.green },
             { label: 'Outstanding', value: stats.outstanding, color: D.amber },
             { label: 'Overdue', value: stats.overdue, color: D.red },
@@ -136,7 +136,7 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'flex-start', marginBottom: 8, flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 8 : 0 }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{inv.invoice_number}</span>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{inv.invoice_number}</span>
                   <span style={sBadge(`${STATUS_COLORS[inv.status]}22`, STATUS_COLORS[inv.status])}>
                     {inv.status}
                   </span>
@@ -252,7 +252,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       {/* Left — Form */}
       <div>
         <div style={sCard}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>New Invoice</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>New Invoice</div>
 
           {/* Customer Search */}
           <div style={{ marginBottom: 16 }}>
@@ -260,7 +260,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             {selectedCustomer ? (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: D.input, borderRadius: 8, padding: '10px 12px', border: `1px solid ${D.teal}`, flexWrap: 'wrap', gap: 8 }}>
                 <div>
-                  <span style={{ color: D.white, fontWeight: 600 }}>{selectedCustomer.first_name} {selectedCustomer.last_name}</span>
+                  <span style={{ color: D.heading, fontWeight: 600 }}>{selectedCustomer.first_name} {selectedCustomer.last_name}</span>
                   <span style={{ color: D.muted, fontSize: 12, marginLeft: 8 }}>{selectedCustomer.phone}</span>
                   {selectedCustomer.waveguard_tier && <span style={{ ...sBadge(`${D.amber}22`, D.amber), marginLeft: 8 }}>{selectedCustomer.waveguard_tier}</span>}
                 </div>
@@ -274,7 +274,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     {customers.map(c => (
                       <div key={c.id} onClick={() => { setSelectedCustomer(c); setCustomers([]); setCustomerQuery(''); }}
                         style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13 }}>
-                        <span style={{ color: D.white }}>{c.first_name} {c.last_name}</span>
+                        <span style={{ color: D.heading }}>{c.first_name} {c.last_name}</span>
                         <span style={{ color: D.muted, marginLeft: 8 }}>{c.phone}</span>
                         {c.waveguard_tier && <span style={{ ...sBadge(`${D.amber}22`, D.amber), marginLeft: 8 }}>{c.waveguard_tier}</span>}
                       </div>
@@ -349,7 +349,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       {/* Right — Preview */}
       <div style={{ position: isMobile ? 'relative' : 'sticky', top: 20, alignSelf: 'start' }}>
         <div style={sCard}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Preview</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Preview</div>
 
           {lineItems.filter(i => i.description).map((item, i) => (
             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: D.text, marginBottom: 6 }}>
@@ -370,7 +370,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.muted, marginBottom: 4 }}>
               <span>Tax (7%)</span><span>${tax.toFixed(2)}</span>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: D.white, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: D.heading, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
               <span>Total</span><span>${total.toFixed(2)}</span>
             </div>
           </div>

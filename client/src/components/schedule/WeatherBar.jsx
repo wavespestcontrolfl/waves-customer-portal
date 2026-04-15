@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#1e293b', border: '#334155', teal: '#0ea5e9', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#fff' };
 
 export default function WeatherBar({ date }) {
   const [weather, setWeather] = useState(null);

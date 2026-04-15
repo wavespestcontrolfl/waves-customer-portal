@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path) {
@@ -18,7 +18,7 @@ function Toggle({ checked, onChange, label, description }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 0', borderBottom: `1px solid ${D.border}` }}>
       <div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{label}</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{label}</div>
         {description && <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{description}</div>}
       </div>
       <div onClick={() => onChange(!checked)} style={{
@@ -62,7 +62,7 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <div style={{ fontSize: 28, fontWeight: 700, color: D.white, marginBottom: 24 }}>Settings</div>
+      <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 24 }}>Settings</div>
 
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto' }}>
         {TABS.map(t => (
@@ -77,7 +77,7 @@ export default function SettingsPage() {
       {tab === 'general' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Card>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Company Info</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Company Info</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               {[
                 { label: 'Company', value: 'Waves Pest Control' },
@@ -87,30 +87,30 @@ export default function SettingsPage() {
               ].map((f, i) => (
                 <div key={i} style={{ padding: '10px 14px', background: D.bg, borderRadius: 8 }}>
                   <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{f.label}</div>
-                  <div style={{ fontSize: 13, color: D.white, fontWeight: 500 }}>{f.value}</div>
+                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{f.value}</div>
                 </div>
               ))}
             </div>
           </Card>
 
           <Card>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Logged In As</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Logged In As</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
               <div style={{
                 width: 48, height: 48, borderRadius: 12,
                 background: `linear-gradient(135deg, ${D.teal}, ${D.green})`,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: D.white, fontSize: 20, fontWeight: 700,
+                color: D.heading, fontSize: 20, fontWeight: 700,
               }}>{(user?.name || 'A')[0]}</div>
               <div>
-                <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{user?.name || 'Unknown'}</div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{user?.name || 'Unknown'}</div>
                 <div style={{ fontSize: 12, color: D.muted }}>{user?.email} · {user?.role}</div>
               </div>
             </div>
           </Card>
 
           <Card>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>WaveGuard Tiers</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>WaveGuard Tiers</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
               {[
                 { tier: 'Bronze', discount: '0%', color: '#CD7F32' },
@@ -145,7 +145,7 @@ export default function SettingsPage() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                   <span style={{ fontSize: 24 }}>{int.icon}</span>
                   <div>
-                    <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{int.name}</div>
+                    <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{int.name}</div>
                     <div style={{ fontSize: 12, color: D.muted }}>{int.desc}</div>
                   </div>
                 </div>
@@ -168,12 +168,12 @@ export default function SettingsPage() {
       {/* ── FEATURE GATES ── */}
       {tab === 'gates' && (
         <Card>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 4 }}>Feature Gates</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>Feature Gates</div>
           <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>Control which integrations are active. Set via Railway environment variables.</div>
           {Object.entries(gates).map(([key, enabled]) => (
             <div key={key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: `1px solid ${D.border}` }}>
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{key}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{key}</div>
                 <div style={{ fontSize: 11, fontFamily: MONO, color: D.muted }}>GATE_{key.replace(/([A-Z])/g, '_$1').toUpperCase()}</div>
               </div>
               <span style={{
@@ -192,7 +192,7 @@ export default function SettingsPage() {
       {/* ── TEAM ── */}
       {tab === 'team' && (
         <Card>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Team Members</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Team Members</div>
           <TeamList />
         </Card>
       )}
@@ -201,7 +201,7 @@ export default function SettingsPage() {
       {tab === 'system' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Card>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>System Info</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>System Info</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               {[
                 { label: 'Environment', value: health?.environment || '—' },
@@ -215,14 +215,14 @@ export default function SettingsPage() {
               ].map((f, i) => (
                 <div key={i} style={{ padding: '10px 14px', background: D.bg, borderRadius: 8 }}>
                   <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{f.label}</div>
-                  <div style={{ fontSize: 13, color: D.white, fontFamily: MONO }}>{f.value}</div>
+                  <div style={{ fontSize: 13, color: D.heading, fontFamily: MONO }}>{f.value}</div>
                 </div>
               ))}
             </div>
           </Card>
 
           <Card>
-            <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 12 }}>Cron Jobs</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Cron Jobs</div>
             <div style={{ fontSize: 12, color: gates.cronJobs ? D.green : D.red, fontWeight: 600, marginBottom: 12 }}>
               {gates.cronJobs ? '✅ Cron jobs ENABLED' : '🔒 Cron jobs DISABLED'}
             </div>
@@ -271,10 +271,10 @@ function TeamList() {
             width: 40, height: 40, borderRadius: 10,
             background: `linear-gradient(135deg, ${D.teal}, ${D.green})`,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: D.white, fontSize: 16, fontWeight: 700,
+            color: D.heading, fontSize: 16, fontWeight: 700,
           }}>{(t.name || '?')[0]}</div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{t.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{t.name}</div>
             <div style={{ fontSize: 12, color: D.muted }}>{t.email}</div>
           </div>
           <span style={{

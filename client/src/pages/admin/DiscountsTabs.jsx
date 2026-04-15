@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function af(path, opts = {}) {
   return fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' }, ...opts }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, c) => ({ padding: '8px 16px', background: bg, color: c, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, c) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color: c, fontWeight: 600, display: 'inline-block' });
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box' };
@@ -16,7 +16,7 @@ const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize
 
 const TYPE_COLORS = { percentage: { bg: '#0ea5e920', c: D.teal }, fixed_amount: { bg: '#f59e0b20', c: D.amber }, variable_amount: { bg: '#a855f620', c: '#a855f6' }, variable_percentage: { bg: '#10b98120', c: D.green }, free_service: { bg: '#10b98120', c: D.green } };
 const TYPE_LABELS = { percentage: 'Percentage (%)', fixed_amount: 'Amount ($)', variable_amount: 'Variable ($)', variable_percentage: 'Variable (%)', free_service: 'Free Service' };
-const EMPTY = { discount_key: '', name: '', description: '', discount_type: 'percentage', amount: 0, max_discount_dollars: '', applies_to: 'all', service_category_filter: '', service_key_filter: '', requires_waveguard_tier: '', is_waveguard_tier_discount: false, requires_military: false, requires_senior: false, requires_referral: false, requires_new_customer: false, requires_multi_home: false, requires_prepayment: false, min_service_count: '', min_subtotal: '', is_stackable: true, stack_group: '', priority: 100, promo_code: '', promo_code_expiry: '', promo_code_max_uses: '', is_active: true, is_auto_apply: false, show_in_estimates: true, show_in_invoices: true, show_in_scheduling: false, sort_order: '', color: '#0ea5e9', icon: '' };
+const EMPTY = { discount_key: '', name: '', description: '', discount_type: 'percentage', amount: 0, max_discount_dollars: '', applies_to: 'all', service_category_filter: '', service_key_filter: '', requires_waveguard_tier: '', is_waveguard_tier_discount: false, requires_military: false, requires_senior: false, requires_referral: false, requires_new_customer: false, requires_multi_home: false, requires_prepayment: false, min_service_count: '', min_subtotal: '', is_stackable: true, stack_group: '', priority: 100, promo_code: '', promo_code_expiry: '', promo_code_max_uses: '', is_active: true, is_auto_apply: false, show_in_estimates: true, show_in_invoices: true, show_in_scheduling: false, sort_order: '', color: '#0A7EC2', icon: '' };
 
 function DiscountsSection() {
   const [discounts, setDiscounts] = useState([]);
@@ -114,7 +114,7 @@ function DiscountsSection() {
                 return (
                   <tr key={d.id} style={{ opacity: d.is_active ? 1 : 0.45 }}>
                     <td style={tdS}>{d.icon || ''}</td>
-                    <td style={{ ...tdS, fontWeight: 600, color: D.white }}>{d.name}</td>
+                    <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{d.name}</td>
                     <td style={tdS}><span style={sBadge(tc.bg, tc.c)}>{TYPE_LABELS[d.discount_type] || d.discount_type}</span></td>
                     <td style={tdS}>{d.discount_type.includes('percentage') ? `${d.amount}%` : d.discount_type.includes('amount') || d.discount_type === 'fixed_amount' ? `$${Number(d.amount).toFixed(2)}` : 'Free'}</td>
                     <td style={{ ...tdS, fontSize: 11 }}>{rules.length ? rules.join(', ') : <span style={{ color: D.muted }}>None</span>}</td>
@@ -134,7 +134,7 @@ function DiscountsSection() {
 
       {tab === 'form' && (
         <div style={sCard}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 16 }}>{editing ? 'Edit Discount' : 'New Discount'}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 16 }}>{editing ? 'Edit Discount' : 'New Discount'}</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <label style={{ color: D.muted, fontSize: 11 }}>Key<input style={sInput} value={form.discount_key} onChange={e => upd('discount_key', e.target.value)} /></label>
             <label style={{ color: D.muted, fontSize: 11 }}>Name<input style={sInput} value={form.name} onChange={e => upd('name', e.target.value)} /></label>
@@ -205,7 +205,7 @@ function DiscountsSection() {
 
       {tab === 'preview' && (
         <div style={sCard}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white, marginBottom: 16 }}>Discount Preview</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 16 }}>Discount Preview</div>
           <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
             <div style={{ flex: 1, minWidth: 200 }}>
               <label style={{ color: D.muted, fontSize: 11 }}>Customer Search</label>
@@ -232,7 +232,7 @@ function DiscountsSection() {
           {previewResult && (
             <div>
               <div style={{ display: 'flex', gap: 20, marginBottom: 16 }}>
-                <div style={{ ...sCard, flex: 1, textAlign: 'center' }}><div style={{ color: D.muted, fontSize: 11 }}>Subtotal</div><div style={{ color: D.white, fontSize: 20, fontWeight: 700 }}>${previewResult.subtotal.toFixed(2)}</div></div>
+                <div style={{ ...sCard, flex: 1, textAlign: 'center' }}><div style={{ color: D.muted, fontSize: 11 }}>Subtotal</div><div style={{ color: D.heading, fontSize: 20, fontWeight: 700 }}>${previewResult.subtotal.toFixed(2)}</div></div>
                 <div style={{ ...sCard, flex: 1, textAlign: 'center' }}><div style={{ color: D.muted, fontSize: 11 }}>Discount</div><div style={{ color: D.red, fontSize: 20, fontWeight: 700 }}>-${previewResult.totalDiscount.toFixed(2)}</div></div>
                 <div style={{ ...sCard, flex: 1, textAlign: 'center' }}><div style={{ color: D.muted, fontSize: 11 }}>After Discount</div><div style={{ color: D.green, fontSize: 20, fontWeight: 700 }}>${previewResult.afterDiscount.toFixed(2)}</div></div>
               </div>
@@ -241,7 +241,7 @@ function DiscountsSection() {
                 const tc = TYPE_COLORS[d.discount_type] || TYPE_COLORS.percentage;
                 return (
                   <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}22` }}>
-                    <div><span style={{ marginRight: 8 }}>{d.icon}</span><span style={{ color: D.white, fontWeight: 600 }}>{d.name}</span> <span style={sBadge(tc.bg, tc.c)}>{d.discount_type.includes('percentage') ? `${d.amount}%` : d.discount_type.includes('amount') || d.discount_type === 'fixed_amount' ? `$${d.amount}` : 'Free'}</span></div>
+                    <div><span style={{ marginRight: 8 }}>{d.icon}</span><span style={{ color: D.heading, fontWeight: 600 }}>{d.name}</span> <span style={sBadge(tc.bg, tc.c)}>{d.discount_type.includes('percentage') ? `${d.amount}%` : d.discount_type.includes('amount') || d.discount_type === 'fixed_amount' ? `$${d.amount}` : 'Free'}</span></div>
                     <div style={{ color: D.red, fontWeight: 600 }}>-${d.discount_dollars.toFixed(2)}</div>
                   </div>
                 );
@@ -254,7 +254,7 @@ function DiscountsSection() {
       {tab === 'stats' && stats && (
         <div>
           <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-            <div style={{ ...sCard, flex: 1, textAlign: 'center' }}><div style={{ color: D.muted, fontSize: 11 }}>Total Applications</div><div style={{ color: D.white, fontSize: 24, fontWeight: 700 }}>{stats.totalApplied}</div></div>
+            <div style={{ ...sCard, flex: 1, textAlign: 'center' }}><div style={{ color: D.muted, fontSize: 11 }}>Total Applications</div><div style={{ color: D.heading, fontSize: 24, fontWeight: 700 }}>{stats.totalApplied}</div></div>
             <div style={{ ...sCard, flex: 1, textAlign: 'center' }}><div style={{ color: D.muted, fontSize: 11 }}>Total Discounts Given</div><div style={{ color: D.amber, fontSize: 24, fontWeight: 700 }}>${stats.totalGiven.toFixed(2)}</div></div>
           </div>
           <div style={sCard}>
@@ -263,7 +263,7 @@ function DiscountsSection() {
               <tbody>
                 {stats.discounts.map(d => (
                   <tr key={d.id}>
-                    <td style={{ ...tdS, fontWeight: 600, color: D.white }}>{d.name}</td>
+                    <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{d.name}</td>
                     <td style={{ ...tdS, color: D.muted, fontSize: 11 }}>{d.discount_key}</td>
                     <td style={tdS}>{d.times_applied || 0}</td>
                     <td style={tdS}>${Number(d.total_discount_given || 0).toFixed(2)}</td>

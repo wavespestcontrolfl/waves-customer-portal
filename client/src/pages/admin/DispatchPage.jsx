@@ -4,10 +4,11 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
 const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155', input: '#0f172a',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444',
-  blue: '#3b82f6', purple: '#a855f7', gray: '#64748b',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
+  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', input: '#FFFFFF',
+  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B',
+  blue: '#0A7EC2', purple: '#7C3AED', gray: '#64748B',
+  text: '#334155', muted: '#64748B', white: '#FFFFFF',
+  heading: '#0F172A', inputBorder: '#CBD5E1',
 };
 
 const SERVICE_TYPE_COLORS = {
@@ -17,11 +18,11 @@ const SERVICE_TYPE_COLORS = {
 const STATUS_CONFIG = {
   pending:    { label: 'Pending',    bg: 'transparent', color: D.amber, border: D.amber },
   confirmed:  { label: 'Confirmed',  bg: 'transparent', color: D.green, border: D.green },
-  en_route:   { label: 'En Route',   bg: D.teal,        color: D.white, border: D.teal, pulse: true },
-  on_site:    { label: 'On Site',    bg: D.blue,        color: D.white, border: D.blue },
-  in_progress:{ label: 'In Progress',bg: D.blue,        color: D.white, border: D.blue },
-  completed:  { label: 'Completed',  bg: D.green,       color: D.white, border: D.green },
-  skipped:    { label: 'Skipped',    bg: D.gray,        color: D.white, border: D.gray },
+  en_route:   { label: 'En Route',   bg: D.teal,        color: '#fff', border: D.teal, pulse: true },
+  on_site:    { label: 'On Site',    bg: D.blue,        color: '#fff', border: D.blue },
+  in_progress:{ label: 'In Progress',bg: D.blue,        color: '#fff', border: D.blue },
+  completed:  { label: 'Completed',  bg: D.green,       color: '#fff', border: D.green },
+  skipped:    { label: 'Skipped',    bg: D.gray,        color: '#fff', border: D.gray },
 };
 
 const QUICK_NOTES = [
@@ -36,11 +37,11 @@ const QUICK_NOTES = [
 ];
 
 const TIER_COLORS = {
-  Platinum: { bg: '#E5E4E2', text: '#0f1923' },
-  Gold:     { bg: '#FDD835', text: '#0f1923' },
-  Silver:   { bg: '#90CAF9', text: '#0f1923' },
+  Platinum: { bg: '#E5E4E2', text: '#0F172A' },
+  Gold:     { bg: '#FDD835', text: '#0F172A' },
+  Silver:   { bg: '#90CAF9', text: '#0F172A' },
   Bronze:   { bg: '#CD7F32', text: '#fff' },
-  'One-Time': { bg: '#0ea5e9', text: '#fff' },
+  'One-Time': { bg: '#0A7EC2', text: '#fff' },
 };
 
 /* ── Helpers ──────────────────────────────────────────── */
@@ -193,12 +194,12 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
     { value: 'route_overload', label: 'Route Overload' },
   ];
 
-  const inputSt = { width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.input, color: D.white, fontSize: 14, outline: 'none', boxSizing: 'border-box' };
+  const inputSt = { width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${D.border}`, background: D.input, color: D.heading, fontSize: 14, outline: 'none', boxSizing: 'border-box' };
 
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div onClick={e => e.stopPropagation()} style={{ background: D.card, borderRadius: 16, padding: 24, maxWidth: 480, width: '100%', border: `1px solid ${D.border}`, maxHeight: '80vh', overflowY: 'auto' }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: D.white, marginBottom: 4 }}>Reschedule Service</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Reschedule Service</div>
         <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>{service.customerName} — {service.serviceType}</div>
 
         <div style={{ marginBottom: 14 }}>
@@ -228,12 +229,12 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
                 onMouseLeave={e => e.currentTarget.style.borderColor = D.border}
               >
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{opt.displayDate}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{opt.displayDate}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{opt.suggestedWindow?.display} · {opt.currentLoad} jobs · {opt.sameAreaServices} same area</div>
                 </div>
                 <button onClick={() => handleReschedule(opt)} disabled={sending} style={{
                   padding: '8px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                  background: D.teal, color: D.white, fontSize: 12, fontWeight: 600,
+                  background: D.teal, color: '#fff', fontSize: 12, fontWeight: 600,
                   opacity: sending ? 0.6 : 1,
                 }}>Select</button>
               </div>
@@ -262,7 +263,7 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
               <div style={{ display: 'flex', alignItems: 'flex-end' }}>
                 <button onClick={handleManualReschedule} disabled={sending || !manualDate} style={{
                   padding: '10px 16px', borderRadius: 10, border: 'none', cursor: 'pointer',
-                  background: manualDate ? D.teal : D.border, color: D.white, fontSize: 13, fontWeight: 600,
+                  background: manualDate ? D.teal : D.border, color: D.heading, fontSize: 13, fontWeight: 600,
                   opacity: sending ? 0.6 : 1, whiteSpace: 'nowrap',
                 }}>Reschedule</button>
               </div>
@@ -328,7 +329,7 @@ function ServiceCard({ service, onStatusChange, onComplete, onReschedule, cardRe
 
       {/* Customer name + tier */}
       <div style={{ marginBottom: 6 }}>
-        <span style={{ fontSize: 16, fontWeight: 700, color: D.white }}>
+        <span style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
           {service.customerName}
         </span>
         <TierBadge tier={service.waveguardTier} />
@@ -392,14 +393,14 @@ function ServiceCard({ service, onStatusChange, onComplete, onReschedule, cardRe
       <div style={{ display: 'flex', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
         {(status === 'pending' || status === 'confirmed') && (
           <button onClick={() => changeStatus('en_route')} disabled={updating} style={{
-            ...btnBase, background: D.teal, color: D.white,
+            ...btnBase, background: D.teal, color: '#fff',
           }}>
             En Route
           </button>
         )}
         {status === 'en_route' && (
           <button onClick={() => changeStatus('on_site')} disabled={updating} style={{
-            ...btnBase, background: D.blue, color: D.white,
+            ...btnBase, background: D.blue, color: '#fff',
           }}>
             On Site
           </button>
@@ -407,12 +408,12 @@ function ServiceCard({ service, onStatusChange, onComplete, onReschedule, cardRe
         {(status === 'on_site' || status === 'in_progress') && (
           <>
             <button onClick={() => onComplete(service)} style={{
-              ...btnBase, background: D.green, color: D.white,
+              ...btnBase, background: D.green, color: '#fff',
             }}>
               Complete
             </button>
             <button onClick={() => changeStatus('skipped')} disabled={updating} style={{
-              ...btnBase, background: D.gray, color: D.white,
+              ...btnBase, background: D.gray, color: D.heading,
             }}>
               Skip
             </button>
@@ -548,7 +549,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
         {/* Header */}
         <div style={{ padding: '20px 24px', borderBottom: `1px solid ${D.border}`, flexShrink: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.white }}>Complete Service</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Complete Service</div>
             <button onClick={() => onClose(false)} style={{
               background: 'none', border: 'none', color: D.muted, fontSize: 24, cursor: 'pointer', padding: 4,
             }}>&times;</button>
@@ -687,7 +688,7 @@ function CompletionPanel({ service, products, onClose, onSubmit }) {
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0 }}>
           <button onClick={handleSubmit} disabled={submitting} style={{
-            ...btnBase, width: '100%', background: D.green, color: D.white, fontSize: 16,
+            ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 16,
             opacity: submitting ? 0.6 : 1,
           }}>
             {submitting ? 'Completing...' : 'Complete Service'}
@@ -822,7 +823,7 @@ export default function DispatchPage() {
         }}>
           <span style={{ fontSize: 22 }}>{weatherAlert.needsReschedule?.length > 0 ? '🌧️' : '⛅'}</span>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
               Tomorrow's Weather: {weatherAlert.overallConditions?.summary || 'Check forecast'}
             </div>
             {weatherAlert.needsReschedule?.length > 0 && (
@@ -842,14 +843,14 @@ export default function DispatchPage() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: D.white, marginBottom: 4 }}>Dispatch</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Dispatch</div>
           <div style={{ fontSize: 13, color: D.muted }}>{today}</div>
         </div>
         <div style={{
           display: 'flex', gap: 16, alignItems: 'center', fontSize: 13, color: D.muted,
           background: D.card, padding: '8px 16px', borderRadius: 10, border: `1px solid ${D.border}`,
         }}>
-          <span><strong style={{ color: D.white }}>{totalCount}</strong> services</span>
+          <span><strong style={{ color: D.heading }}>{totalCount}</strong> services</span>
           <span><strong style={{ color: D.green }}>{completedCount}</strong> completed</span>
           <span><strong style={{ color: D.amber }}>{remainingCount}</strong> remaining</span>
         </div>

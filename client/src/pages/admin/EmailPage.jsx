@@ -10,10 +10,11 @@ function adminFetch(path, options = {}) {
 }
 
 const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b',
-  red: '#ef4444', purple: '#a855f7',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
+  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0',
+  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500',
+  red: '#C0392B', purple: '#7C3AED',
+  text: '#334155', muted: '#64748B', white: '#FFFFFF',
+  heading: '#0F172A', inputBorder: '#CBD5E1',
 };
 
 const CATEGORY_COLORS = {
@@ -289,15 +290,15 @@ export default function EmailPage() {
   if (status && !status.connected) {
     return (
       <div style={{ padding: 32 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.white, marginBottom: 24 }}>Email</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 24 }}>Email</div>
         <div style={{ background: D.card, borderRadius: 12, padding: 40, textAlign: 'center', border: `1px solid ${D.border}`, maxWidth: 480, margin: '60px auto' }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>📧</div>
-          <div style={{ fontSize: 20, fontWeight: 600, color: D.white, marginBottom: 8 }}>Connect Gmail</div>
+          <div style={{ fontSize: 20, fontWeight: 600, color: D.heading, marginBottom: 8 }}>Connect Gmail</div>
           <div style={{ fontSize: 14, color: D.muted, marginBottom: 24, lineHeight: 1.5 }}>
             Connect your contact@wavespestcontrol.com inbox to view, reply, and manage emails directly from the portal.
           </div>
           <a href="/api/admin/email/oauth/start" style={{
-            display: 'inline-block', padding: '12px 32px', background: D.teal, color: D.white,
+            display: 'inline-block', padding: '12px 32px', background: D.teal, color: '#fff',
             borderRadius: 8, fontSize: 15, fontWeight: 600, textDecoration: 'none',
           }}>Connect Gmail Account</a>
         </div>
@@ -325,7 +326,7 @@ export default function EmailPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>Email</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Email</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
             contact@wavespestcontrol.com
             {status?.lastSync && ` \u2014 synced ${timeAgo(status.lastSync)}`}
@@ -333,7 +334,7 @@ export default function EmailPage() {
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={handleSync} disabled={syncing} style={{
-            padding: '8px 20px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+            padding: '8px 20px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
             fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: syncing ? 0.6 : 1,
           }}>{syncing ? 'Syncing...' : 'Sync Now'}</button>
         </div>
@@ -345,7 +346,7 @@ export default function EmailPage() {
       {/* Daily digest card */}
       {digest && digest.total_received > 0 && (
         <div style={{ background: D.card, borderRadius: 10, padding: '14px 20px', border: `1px solid ${D.border}`, marginBottom: 16, display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>Today</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>Today</div>
           <div style={{ fontSize: 12, color: D.muted }}>
             <span style={{ color: D.text, fontFamily: "'JetBrains Mono', monospace" }}>{digest.total_received}</span> received
           </div>
@@ -419,7 +420,7 @@ export default function EmailPage() {
               }}
             />
             <button onClick={handleBlock} style={{
-              padding: '10px 20px', background: D.red, color: D.white, border: 'none', borderRadius: 8,
+              padding: '10px 20px', background: D.red, color: '#fff', border: 'none', borderRadius: 8,
               fontSize: 13, fontWeight: 600, cursor: 'pointer',
             }}>Block</button>
           </div>
@@ -431,7 +432,7 @@ export default function EmailPage() {
             ) : blocked.map(b => (
               <div key={b.id} style={{ padding: '12px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${D.border}` }}>
                 <div>
-                  <div style={{ fontSize: 13, color: D.white, fontWeight: 600 }}>
+                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>
                     {b.domain || b.email_address}
                   </div>
                   <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
@@ -603,7 +604,7 @@ export default function EmailPage() {
                         <div key={msg.id} style={{ marginBottom: 16, background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}` }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                             <div>
-                              <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{msg.from_name || msg.from_address}</span>
+                              <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{msg.from_name || msg.from_address}</span>
                               <span style={{ fontSize: 12, color: D.muted, marginLeft: 8 }}>&lt;{msg.from_address}&gt;</span>
                             </div>
                             <span style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
@@ -666,7 +667,7 @@ export default function EmailPage() {
                           }}>{'\uD83D\uDCAC'} Reply via SMS</button>
                           <button onClick={handleReply} disabled={sending || !replyText.trim()} style={{
                             padding: '8px 20px', borderRadius: 6, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer',
-                            background: D.teal, color: D.white, opacity: sending || !replyText.trim() ? 0.5 : 1,
+                            background: D.teal, color: '#fff', opacity: sending || !replyText.trim() ? 0.5 : 1,
                           }}>{sending ? 'Sending...' : 'Send Reply'}</button>
                         </div>
                       </div>

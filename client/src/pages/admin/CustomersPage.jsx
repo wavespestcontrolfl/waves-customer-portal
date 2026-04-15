@@ -5,7 +5,7 @@ import IntelligenceBar from '../../components/admin/IntelligenceBar';
 import { CustomerHealthSection } from './CustomerHealthTabs';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -37,8 +37,8 @@ const STAGES = [
   { key: 'new_lead', label: 'New Lead', color: D.teal, bg: `${D.teal}22` },
   { key: 'contacted', label: 'Contacted', color: D.teal, bg: D.teal, textColor: D.white },
   { key: 'estimate_sent', label: 'Est. Sent', color: D.amber, bg: `${D.amber}22` },
-  { key: 'estimate_viewed', label: 'Est. Viewed', color: D.amber, bg: D.amber, textColor: '#1e293b' },
-  { key: 'follow_up', label: 'Follow Up', color: '#a855f7', bg: `${'#a855f7'}22` },
+  { key: 'estimate_viewed', label: 'Est. Viewed', color: D.amber, bg: D.amber, textColor: '#FFFFFF' },
+  { key: 'follow_up', label: 'Follow Up', color: '#7C3AED', bg: `${'#7C3AED'}22` },
   { key: 'won', label: 'Won', color: D.green, bg: `${D.green}22` },
   { key: 'active_customer', label: 'Active', color: D.green, bg: D.green, textColor: D.white },
   { key: 'at_risk', label: 'At Risk', color: D.red, bg: `${D.red}22`, pulse: true },
@@ -49,7 +49,7 @@ const STAGES = [
 const STAGE_MAP = {};
 STAGES.forEach(s => { STAGE_MAP[s.key] = s; });
 
-const TIER_COLORS = { Platinum: '#a855f7', Gold: D.amber, Silver: '#94a3b8', Bronze: '#cd7f32', 'One-Time': '#0ea5e9' };
+const TIER_COLORS = { Platinum: '#7C3AED', Gold: D.amber, Silver: '#64748B', Bronze: '#cd7f32', 'One-Time': '#0A7EC2' };
 
 const LEAD_SOURCES = ['referral', 'google', 'facebook', 'nextdoor', 'website', 'door_knock', 'yelp', 'other'];
 
@@ -162,7 +162,7 @@ function QuickAddModal({ onClose, onCreated }) {
         background: D.card, border: `1px solid ${D.border}`, borderRadius: 14, padding: 28,
         width: '100%', maxWidth: 520, maxHeight: '90vh', overflowY: 'auto',
       }}>
-        <div style={{ fontSize: 20, fontWeight: 700, color: D.white, fontFamily: 'DM Sans, sans-serif', marginBottom: 20 }}>
+        <div style={{ fontSize: 20, fontWeight: 700, color: D.heading, fontFamily: 'DM Sans, sans-serif', marginBottom: 20 }}>
           Add Customer
         </div>
         <form onSubmit={handleSubmit}>
@@ -218,7 +218,7 @@ function QuickAddModal({ onClose, onCreated }) {
               borderRadius: 8, fontSize: 14, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
             }}>Cancel</button>
             <button type="submit" disabled={submitting} style={{
-              padding: '10px 24px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+              padding: '10px 24px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
               fontSize: 14, fontFamily: 'DM Sans, sans-serif', fontWeight: 600,
               cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.6 : 1,
             }}>{submitting ? 'Creating...' : 'Create Customer'}</button>
@@ -243,7 +243,7 @@ function PipelineCard({ customer, onDelete }) {
       position: 'relative',
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>
+        <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
           {customer.firstName} {customer.lastName}
         </div>
         <button onClick={(e) => { e.stopPropagation(); setConfirming(!confirming); }} style={{
@@ -259,7 +259,7 @@ function PipelineCard({ customer, onDelete }) {
                 await fetch(`${API_BASE}/admin/customers/${customer.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` } });
                 onDelete?.(customer.id);
               } catch (e) { alert('Delete failed: ' + e.message); }
-            }} style={{ padding: '4px 12px', borderRadius: 6, border: 'none', background: D.red, color: D.white, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Delete</button>
+            }} style={{ padding: '4px 12px', borderRadius: 6, border: 'none', background: D.red, color: '#fff', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Delete</button>
             <button onClick={() => setConfirming(false)} style={{ padding: '4px 12px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'none', color: D.muted, fontSize: 11, cursor: 'pointer' }}>Cancel</button>
           </div>
         </div>
@@ -298,7 +298,7 @@ function PipelineColumn({ stage, customers, onDeleteCustomer }) {
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
       }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white, fontFamily: 'DM Sans, sans-serif' }}>{stage.label}</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, fontFamily: 'DM Sans, sans-serif' }}>{stage.label}</div>
           <div style={{ fontSize: 11, color: D.muted, fontFamily: 'JetBrains Mono, monospace', marginTop: 2 }}>
             {customers.length} {customers.length === 1 ? 'customer' : 'customers'}
           </div>
@@ -408,7 +408,7 @@ function CustomerIntelligenceTab() {
 
       {/* Health Distribution */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Customer Health Overview</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Customer Health Overview</div>
         <div className="intel-health-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
           {['healthy', 'watch', 'at_risk', 'critical'].map(level => (
             <div key={level} style={{ padding: 14, background: D.bg, borderRadius: 10, textAlign: 'center', borderTop: `3px solid ${riskColor[level]}` }}>
@@ -436,7 +436,7 @@ function CustomerIntelligenceTab() {
               <div key={c.id} style={{ padding: '14px 16px', background: D.bg, borderRadius: 10, marginBottom: 10, borderLeft: `3px solid ${riskColor[c.churn_risk_level]}` }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
                   <div>
-                    <span style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{c.first_name} {c.last_name}</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{c.first_name} {c.last_name}</span>
                     <span style={{ fontSize: 12, color: D.muted, marginLeft: 8 }}>{c.waveguard_tier} ${parseFloat(c.monthly_rate || 0).toFixed(0)}/mo</span>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -474,14 +474,14 @@ function CustomerIntelligenceTab() {
           <div style={{ fontSize: 16, fontWeight: 600, color: D.amber, marginBottom: 16 }}>Pending Retention Outreach ({data.pendingOutreach.length})</div>
           {data.pendingOutreach.map(o => (
             <div key={o.id} style={{ padding: '12px 14px', background: D.bg, borderRadius: 8, marginBottom: 8 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 4 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
                 {o.first_name} {o.last_name} — {o.outreach_type?.toUpperCase()} ({o.outreach_strategy?.replace(/_/g, ' ')})
               </div>
               <div style={{ fontSize: 12, color: D.text, lineHeight: 1.6, marginBottom: 8, padding: '8px 10px', background: D.card, borderRadius: 6, fontStyle: 'italic' }}>
                 "{o.message_content}"
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => handleApprove(o.id)} style={{ padding: '5px 12px', borderRadius: 5, border: 'none', background: D.green, color: D.white, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
+                <button onClick={() => handleApprove(o.id)} style={{ padding: '5px 12px', borderRadius: 5, border: 'none', background: D.green, color: '#fff', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
                   {o.outreach_type === 'sms' ? '✅ Approve & Send' : '✅ Approve & Call'}
                 </button>
                 <button style={{ padding: '5px 12px', borderRadius: 5, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 11, cursor: 'pointer' }}>✏️ Edit</button>
@@ -514,13 +514,13 @@ function CustomerIntelligenceTab() {
               <tbody>
                 {data.upsells.slice(0, 15).map(u => (
                   <tr key={u.id}>
-                    <td style={{ padding: '8px 12px', fontSize: 13, color: D.white, borderBottom: `1px solid ${D.border}` }}>{u.first_name} {u.last_name}</td>
+                    <td style={{ padding: '8px 12px', fontSize: 13, color: D.heading, borderBottom: `1px solid ${D.border}` }}>{u.first_name} {u.last_name}</td>
                     <td style={{ padding: '8px 12px', fontSize: 12, color: D.muted, borderBottom: `1px solid ${D.border}` }}>{u.waveguard_tier}</td>
                     <td style={{ padding: '8px 12px', fontSize: 12, color: D.teal, borderBottom: `1px solid ${D.border}` }}>{(u.recommended_service || '').replace(/_/g, ' ')}</td>
                     <td style={{ padding: '8px 12px', fontSize: 13, color: D.green, textAlign: 'right', fontFamily: MONO, borderBottom: `1px solid ${D.border}` }}>+${parseFloat(u.estimated_monthly_value || 0).toFixed(0)}</td>
                     <td style={{ padding: '8px 12px', fontSize: 12, color: D.muted, textAlign: 'right', fontFamily: MONO, borderBottom: `1px solid ${D.border}` }}>{Math.round(parseFloat(u.confidence || 0) * 100)}%</td>
                     <td style={{ padding: '8px 12px', textAlign: 'center', borderBottom: `1px solid ${D.border}` }}>
-                      <button onClick={() => handleUpsellStatus(u.id, 'pitched')} style={{ padding: '3px 8px', borderRadius: 4, border: 'none', background: D.teal, color: D.white, fontSize: 10, cursor: 'pointer' }}>Pitch</button>
+                      <button onClick={() => handleUpsellStatus(u.id, 'pitched')} style={{ padding: '3px 8px', borderRadius: 4, border: 'none', background: D.teal, color: '#fff', fontSize: 10, cursor: 'pointer' }}>Pitch</button>
                     </td>
                   </tr>
                 ))}
@@ -533,7 +533,7 @@ function CustomerIntelligenceTab() {
       {/* Retention Metrics */}
       {data.metrics && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>📊 Retention Metrics (Last 30 Days)</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>📊 Retention Metrics (Last 30 Days)</div>
           <div className="intel-metrics-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
             <div style={{ padding: 12, background: D.bg, borderRadius: 8, textAlign: 'center' }}>
               <div style={{ fontSize: 11, color: D.muted }}>Outreach Sent</div>
@@ -609,8 +609,8 @@ function CustomerTimeline({ customerId }) {
 // CUSTOMER MAP — Interactive Google Maps with customer pins
 // ═══════════════════════════════════════════════════════════════════
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
-const TIER_PIN_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0ea5e9' };
-const STAGE_PIN_COLORS = { active_customer: '#10b981', won: '#10b981', new_lead: '#0ea5e9', contacted: '#0ea5e9', estimate_sent: '#f59e0b', at_risk: '#ef4444', churned: '#ef4444' };
+const TIER_PIN_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0A7EC2' };
+const STAGE_PIN_COLORS = { active_customer: '#16A34A', won: '#16A34A', new_lead: '#0A7EC2', contacted: '#0A7EC2', estimate_sent: '#F0A500', at_risk: '#C0392B', churned: '#C0392B' };
 
 function CustomerMap({ customers: _ignored, onSelect }) {
   const mapRef = useRef(null);
@@ -723,7 +723,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
     });
 
     function placeMarker(c, position) {
-      const color = TIER_PIN_COLORS[c.tier] || STAGE_PIN_COLORS[c.pipelineStage] || '#0ea5e9';
+      const color = TIER_PIN_COLORS[c.tier] || STAGE_PIN_COLORS[c.pipelineStage] || '#0A7EC2';
       const marker = new window.google.maps.Marker({
         position, map: mapInstance.current,
         icon: {
@@ -762,7 +762,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
     return (
       <div style={{ background: D.card, borderRadius: 12, padding: 40, textAlign: 'center', border: `1px solid ${D.border}` }}>
         <div style={{ fontSize: 32, marginBottom: 12 }}>🗺️</div>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 4 }}>Google Maps API Key Required</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 4 }}>Google Maps API Key Required</div>
         <div style={{ fontSize: 13, color: D.muted }}>Set VITE_GOOGLE_MAPS_API_KEY in your environment to enable the customer map.</div>
       </div>
     );
@@ -836,13 +836,13 @@ function CustomerMap({ customers: _ignored, onSelect }) {
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: D.white }}>{selectedPin.firstName} {selectedPin.lastName}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{selectedPin.firstName} {selectedPin.lastName}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{selectedPin.address} {selectedPin.city}</div>
                 <div style={{ fontSize: 12, color: D.muted }}>{selectedPin.phone}</div>
                 {selectedPin.tier && <div style={{ fontSize: 11, color: TIER_PIN_COLORS[selectedPin.tier] || D.teal, fontWeight: 600, marginTop: 4 }}>WaveGuard {selectedPin.tier}</div>}
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => onSelect(selectedPin)} style={{ padding: '6px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>View</button>
+                <button onClick={() => onSelect(selectedPin)} style={{ padding: '6px 12px', background: D.teal, color: '#fff', border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>View</button>
                 <button onClick={() => setSelectedPin(null)} style={{ padding: '6px 8px', background: 'transparent', color: D.muted, border: `1px solid ${D.border}`, borderRadius: 6, fontSize: 14, cursor: 'pointer' }}>✕</button>
               </div>
             </div>
@@ -1033,7 +1033,7 @@ export default function CustomersPage() {
         <div style={{ fontSize: 16, marginBottom: 12 }}>Failed to load customers</div>
         <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>{error}</div>
         <button onClick={loadCustomers} style={{
-          padding: '8px 20px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+          padding: '8px 20px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
           fontSize: 14, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
         }}>Retry</button>
       </div>
@@ -1069,7 +1069,7 @@ export default function CustomersPage() {
         display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12,
       }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-          <div style={{ fontSize: 24, fontWeight: 700, color: D.white, fontFamily: 'DM Sans, sans-serif' }}>Customers</div>
+          <div style={{ fontSize: 24, fontWeight: 700, color: D.heading, fontFamily: 'DM Sans, sans-serif' }}>Customers</div>
           <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14, color: D.muted }}>{totalCount}</span>
         </div>
         <div className="customers-header-actions" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -1104,7 +1104,7 @@ export default function CustomersPage() {
           />
           {/* Add button */}
           <button onClick={() => setShowAddModal(true)} style={{
-            padding: '8px 18px', background: D.teal, color: D.white, border: 'none', borderRadius: 8,
+            padding: '8px 18px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
             fontSize: 14, fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: 'pointer',
             whiteSpace: 'nowrap',
           }}>+ Add Customer</button>
@@ -1232,7 +1232,7 @@ export default function CustomersPage() {
                 >
                   {/* Name + Phone */}
                   <div>
-                    <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.white }}>
+                    <div style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 14, fontWeight: 600, color: D.heading }}>
                       {c.firstName} {c.lastName}
                     </div>
                     {c.phone ? (
@@ -1300,7 +1300,7 @@ export default function CustomersPage() {
                 {/* Inline edit modal */}
                 {editingId === c.id && (
                   <div style={{ background: D.card, border: `1px solid ${D.teal}`, borderRadius: 10, padding: 20, marginTop: -2 }}>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Edit Customer</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Edit Customer</div>
                     <div className="customer-edit-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10, marginBottom: 12 }}>
                       {[
                         { key: 'firstName', label: 'First Name' },
@@ -1312,24 +1312,24 @@ export default function CustomersPage() {
                       ].map(f => (
                         <div key={f.key}>
                           <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>{f.label}</label>
-                          <input value={editForm[f.key] || ''} onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))} type={f.type || 'text'} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+                          <input value={editForm[f.key] || ''} onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))} type={f.type || 'text'} style={{ width: '100%', padding: '8px 10px', background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
                         </div>
                       ))}
                       <div>
                         <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Tier</label>
-                        <select value={editForm.tier || ''} onChange={e => setEditForm(p => ({ ...p, tier: e.target.value || null }))} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
+                        <select value={editForm.tier || ''} onChange={e => setEditForm(p => ({ ...p, tier: e.target.value || null }))} style={{ width: '100%', padding: '8px 10px', background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
                           <option value="">No Plan</option><option value="Platinum">Platinum (20%)</option><option value="Gold">Gold (15%)</option><option value="Silver">Silver (10%)</option><option value="Bronze">Bronze (0%)</option><option value="One-Time">One-Time</option>
                         </select>
                       </div>
                       <div>
                         <label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Stage</label>
-                        <select value={editForm.pipelineStage || ''} onChange={e => setEditForm(p => ({ ...p, pipelineStage: e.target.value }))} style={{ width: '100%', padding: '8px 10px', background: '#0f172a', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
+                        <select value={editForm.pipelineStage || ''} onChange={e => setEditForm(p => ({ ...p, pipelineStage: e.target.value }))} style={{ width: '100%', padding: '8px 10px', background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, outline: 'none', cursor: 'pointer' }}>
                           {STAGES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
                         </select>
                       </div>
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <button onClick={saveEdit} disabled={savingEdit} style={{ padding: '8px 18px', background: D.teal, color: D.white, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: savingEdit ? 0.5 : 1 }}>{savingEdit ? 'Saving...' : 'Save'}</button>
+                      <button onClick={saveEdit} disabled={savingEdit} style={{ padding: '8px 18px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: savingEdit ? 0.5 : 1 }}>{savingEdit ? 'Saving...' : 'Save'}</button>
                       <button onClick={() => setEditingId(null)} style={{ padding: '8px 18px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted, borderRadius: 8, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
                     </div>
                   </div>

@@ -1,0 +1,51 @@
+:root {
+  /* ── Primary ── */
+  --waves-blue:          #0A7EC2;
+  --waves-blue-dark:     #065A8C;
+  --waves-blue-deeper:   #04395E;
+  --waves-blue-light:    #E8F4FC;
+  --waves-blue-50:       #F0F7FC;
+
+  /* ── Accent ── */
+  --waves-red:           #C0392B;
+  --waves-red-light:     #FDECEA;
+  --waves-gold:          #F0A500;
+  --waves-gold-light:    #FEF7E0;
+
+  /* ── Neutrals ── */
+  --slate-900:           #0F172A;
+  --slate-700:           #334155;
+  --slate-500:           #64748B;
+  --slate-300:           #CBD5E1;
+  --slate-200:           #E2E8F0;
+  --slate-100:           #F1F5F9;
+  --white:               #FFFFFF;
+
+  /* ── Semantic ── */
+  --success:             #16A34A;
+  --success-light:       #DCFCE7;
+  --warning:             #F0A500;
+  --warning-light:       #FEF7E0;
+  --danger:              #C0392B;
+  --danger-light:        #FDECEA;
+  --info:                #0A7EC2;
+  --info-light:          #E8F4FC;
+
+  /* ── Layout ── */
+  --sidebar-width:       240px;
+  --sidebar-collapsed:   64px;
+  --topbar-height:       56px;
+  --content-max-width:   1280px;
+
+  /* ── Shadows ── */
+  --shadow-sm:           0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md:           0 4px 6px rgba(0,0,0,0.07);
+  --shadow-lg:           0 10px 15px rgba(0,0,0,0.1);
+
+  /* ── Radius ── */
+  --radius-sm:           4px;
+  --radius-md:           6px;
+  --radius-lg:           8px;
+  --radius-xl:           12px;
+  --radius-full:         9999px;
+}

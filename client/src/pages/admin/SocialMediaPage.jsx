@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 const ContentCalendar = lazy(() => import('./ContentCalendar'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', blue: '#2563eb', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', blue: '#0A7EC2', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -11,7 +11,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
 const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -56,7 +56,7 @@ export default function SocialMediaPage() {
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>Social Media Engine</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Social Media Engine</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Auto-post blog content to Facebook, Instagram, LinkedIn & GBP</div>
         </div>
       </div>
@@ -67,7 +67,7 @@ export default function SocialMediaPage() {
           {Object.entries(status.platforms).map(([key, p]) => (
             <div key={key} style={{ ...sCard, flex: '1 1 140px', minWidth: 140, marginBottom: 0, textAlign: 'center' }}>
               <div style={{ fontSize: 24, marginBottom: 4 }}>{PLATFORM_ICONS[key] || '⚙️'}</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.white, textTransform: 'capitalize' }}>{key}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, textTransform: 'capitalize' }}>{key}</div>
               <div style={{ marginTop: 4 }}>
                 {p.configured
                   ? <span style={sBadge(`${D.green}22`, D.green)}>Connected</span>
@@ -83,7 +83,7 @@ export default function SocialMediaPage() {
       {stats && (
         <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
           {[
-            { label: 'Total Posts', value: stats.total, color: D.white },
+            { label: 'Total Posts', value: stats.total, color: D.heading },
             { label: 'Published', value: stats.published, color: D.green },
             { label: 'Failed', value: stats.failed, color: D.red },
             { label: 'Last 7d', value: stats.last7d, color: D.teal },
@@ -182,7 +182,7 @@ function ComposeTab({ showToast, onPublished }) {
       {/* Left — Input */}
       <div>
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Content Source</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Content Source</div>
           <div style={{ marginBottom: 12 }}>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Title</label>
             <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Blog post title or topic..." style={sInput} />
@@ -220,7 +220,7 @@ function ComposeTab({ showToast, onPublished }) {
               <div key={platform} style={{ ...sCard, marginBottom: 0, borderLeft: `3px solid ${PLATFORM_COLORS[platform]}` }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <span style={{ fontSize: 18 }}>{PLATFORM_ICONS[platform]}</span>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: D.white, textTransform: 'capitalize' }}>{platform === 'gbp' ? 'Google Business (all 4 locations)' : platform}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: D.heading, textTransform: 'capitalize' }}>{platform === 'gbp' ? 'Google Business (all 4 locations)' : platform}</span>
                 </div>
                 <textarea
                   value={customContent[platform] || ''}
@@ -268,7 +268,7 @@ function RSSTab({ showToast, onPublished }) {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>Blog RSS Feed</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Blog RSS Feed</div>
           <div style={{ fontSize: 12, color: D.muted }}>wavespestcontrol.com/feed/ — checked every 4 hours automatically</div>
         </div>
         <button onClick={handleAutoPublish} disabled={checking} style={{ ...sBtn(D.teal, D.white), opacity: checking ? 0.5 : 1 }}>
@@ -280,7 +280,7 @@ function RSSTab({ showToast, onPublished }) {
         {items.map((item, i) => (
           <div key={i} style={{ ...sCard, marginBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>{item.title}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>{item.title}</div>
               <div style={{ fontSize: 12, color: D.muted, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.description?.substring(0, 150)}</div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <a href={item.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, textDecoration: 'none' }}>View post ↗</a>
@@ -305,7 +305,7 @@ function HistoryTab({ history, onRefresh }) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>Post History</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Post History</div>
         <button onClick={onRefresh} style={sBtn(D.teal, D.white)}>Refresh</button>
       </div>
       {history.length === 0 ? (
@@ -322,7 +322,7 @@ function HistoryTab({ history, onRefresh }) {
           <div key={post.id} style={{ ...sCard, marginBottom: 8 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
               <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{post.title}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{post.title}</div>
                 {post.source_url && <a href={post.source_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', maxWidth: isMobile ? 200 : 400 }}>{post.source_url}</a>}
               </div>
               <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
@@ -371,7 +371,7 @@ function AnalyticsTab() {
       {/* Summary */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
         {[
-          { label: 'Total Posts', value: summary.totalPosts || 0, color: D.white },
+          { label: 'Total Posts', value: summary.totalPosts || 0, color: D.heading },
           { label: 'Published', value: summary.published || 0, color: D.green },
           { label: 'Success Rate', value: `${summary.successRate || 0}%`, color: summary.successRate >= 80 ? D.green : D.amber },
           { label: 'Posts/Week', value: summary.postsPerWeek || 0, color: D.teal },
@@ -386,12 +386,12 @@ function AnalyticsTab() {
 
       {/* By Platform */}
       <div style={{ ...sCard, marginBottom: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Performance by Platform</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Performance by Platform</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
           {Object.entries(byPlatform).map(([platform, stats]) => (
             <div key={platform} style={{ padding: 14, background: D.input, borderRadius: 8, textAlign: 'center' }}>
               <div style={{ fontSize: 18, marginBottom: 4 }}>{PLATFORM_ICONS[platform] || '📌'}</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.white, textTransform: 'capitalize' }}>{platform}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, textTransform: 'capitalize' }}>{platform}</div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 8, fontSize: 11 }}>
                 <span style={{ color: D.green }}>{stats.success} ✓</span>
                 <span style={{ color: D.red }}>{stats.failed} ✗</span>
@@ -405,7 +405,7 @@ function AnalyticsTab() {
       {/* Weekly Trend */}
       {weeklyTrend.length > 0 && (
         <div style={{ ...sCard }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Weekly Posting Trend</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Weekly Posting Trend</div>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 100 }}>
             {weeklyTrend.map((w, i) => {
               const max = Math.max(...weeklyTrend.map(x => x.total), 1);
@@ -447,7 +447,7 @@ function TemplatesTab({ showToast }) {
 
   return (
     <div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Post Templates</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Post Templates</div>
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
         {TEMPLATES.map(t => (
           <div key={t.id} onClick={() => setSelectedTemplate(selectedTemplate === t.id ? null : t.id)} style={{
@@ -456,7 +456,7 @@ function TemplatesTab({ showToast }) {
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
               <span style={{ fontSize: 20 }}>{t.icon}</span>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{t.name}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{t.name}</div>
             </div>
             <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
               {t.platforms.map(p => <span key={p} style={sBadge(`${PLATFORM_COLORS[p] || D.muted}22`, PLATFORM_COLORS[p] || D.muted)}>{p}</span>)}

@@ -18,18 +18,20 @@ function adminFetch(path, opts = {}) {
 // Color / style helpers
 // ---------------------------------------------------------------------------
 const COLORS = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  cardHover: '#263548',
-  border: '#334155',
-  text: '#e2e8f0',
-  textMuted: '#94a3b8',
-  teal: '#0ea5e9',
-  green: '#10b981',
-  amber: '#f59e0b',
-  red: '#ef4444',
-  purple: '#a855f7',
-  white: '#ffffff',
+  bg: '#F1F5F9',
+  card: '#FFFFFF',
+  cardHover: '#F0F7FC',
+  border: '#E2E8F0',
+  text: '#334155',
+  textMuted: '#64748B',
+  teal: '#0A7EC2',
+  green: '#16A34A',
+  amber: '#F0A500',
+  red: '#C0392B',
+  purple: '#7C3AED',
+  white: '#FFFFFF',
+  heading: '#0F172A',
+  inputBorder: '#CBD5E1',
 };
 
 const GRADE_COLORS = { A: COLORS.green, B: COLORS.teal, C: COLORS.amber, D: '#f97316', F: COLORS.red };
@@ -176,7 +178,7 @@ function DashboardTab({ data }) {
 
       {/* Grade distribution bar */}
       <Card style={{ marginBottom: 24 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>Grade Distribution</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.heading, marginBottom: 12 }}>Grade Distribution</div>
         <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', height: 28 }}>
           {['A', 'B', 'C', 'D', 'F'].map(g => {
             const count = gradeMap[g] || 0;
@@ -204,7 +206,7 @@ function DashboardTab({ data }) {
 
       {/* At-risk customers table */}
       <Card style={{ marginBottom: 24 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>Top At-Risk Customers</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.heading, marginBottom: 12 }}>Top At-Risk Customers</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
@@ -240,7 +242,7 @@ function DashboardTab({ data }) {
 
       {/* Recent alerts */}
       <Card>
-        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>Recent Alerts</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.heading, marginBottom: 12 }}>Recent Alerts</div>
         {(data.recentAlerts || []).length === 0 && <div style={{ color: COLORS.textMuted, fontSize: 13 }}>No recent alerts</div>}
         {(data.recentAlerts || []).map(a => (
           <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0', borderBottom: `1px solid ${COLORS.border}22` }}>
@@ -281,8 +283,8 @@ function CustomerDetail({ customerId, onClose }) {
     { key: 'service_score', label: 'Service', detail: s.service_details, color: COLORS.teal },
     { key: 'engagement_score', label: 'Engagement', detail: s.engagement_details, color: COLORS.purple },
     { key: 'satisfaction_score', label: 'Satisfaction', detail: s.satisfaction_details, color: COLORS.amber },
-    { key: 'loyalty_score', label: 'Loyalty', detail: s.loyalty_details, color: '#0ea5e9' },
-    { key: 'growth_score', label: 'Growth', detail: s.growth_details, color: '#10b981' },
+    { key: 'loyalty_score', label: 'Loyalty', detail: s.loyalty_details, color: '#0A7EC2' },
+    { key: 'growth_score', label: 'Growth', detail: s.growth_details, color: '#16A34A' },
   ];
 
   const signals = s.churn_signals || [];
@@ -305,7 +307,7 @@ function CustomerDetail({ customerId, onClose }) {
   return (
     <div style={{ padding: 20, backgroundColor: COLORS.bg, borderTop: `1px solid ${COLORS.border}` }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text }}>{s.first_name} {s.last_name}</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.heading }}>{s.first_name} {s.last_name}</div>
         <button onClick={onClose} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', fontSize: 18 }}>x</button>
       </div>
 
@@ -347,7 +349,7 @@ function CustomerDetail({ customerId, onClose }) {
           {/* Churn signals */}
           {signals.length > 0 && (
             <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, marginBottom: 8 }}>Churn Signals</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.heading, marginBottom: 8 }}>Churn Signals</div>
               {signals.map((sig, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
                   <div style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: RISK_COLORS[sig.severity] || COLORS.textMuted, flexShrink: 0 }} />
@@ -482,7 +484,7 @@ function ScoresTab() {
                     onMouseEnter={e => e.currentTarget.style.backgroundColor = COLORS.cardHover}
                     onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
                   >
-                    <td style={{ padding: '10px 12px', color: COLORS.text, fontWeight: 500 }}>{c.first_name} {c.last_name}</td>
+                    <td style={{ padding: '10px 12px', color: COLORS.heading, fontWeight: 500 }}>{c.first_name} {c.last_name}</td>
                     <td style={{ padding: '10px 12px' }}>{c.waveguard_tier ? <Badge label={c.waveguard_tier} color={COLORS.teal} /> : <span style={{ color: COLORS.textMuted }}>--</span>}</td>
                     <td style={{ padding: '10px 12px' }}>
                       <span style={{ ...mono, color: COLORS.text, marginRight: 8 }}>{c.overall_score}</span>
@@ -618,7 +620,7 @@ function AlertsTab() {
               <div style={{ padding: 16, flex: 1 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>{a.title}</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.heading, marginBottom: 4 }}>{a.title}</div>
                     <div style={{ fontSize: 12, color: COLORS.textMuted }}>
                       {a.first_name} {a.last_name} -- {new Date(a.created_at).toLocaleDateString()} {new Date(a.created_at).toLocaleTimeString()}
                     </div>
@@ -758,7 +760,7 @@ function SequencesTab() {
             <Card key={seq.id}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
                 <div>
-                  <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.text }}>{seq.first_name} {seq.last_name}</span>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.heading }}>{seq.first_name} {seq.last_name}</span>
                   <span style={{ marginLeft: 8 }}><Badge label={seq.sequence_type.replace('_', ' ')} color={COLORS.purple} /></span>
                   {seq.waveguard_tier && <span style={{ marginLeft: 8 }}><Badge label={seq.waveguard_tier} color={COLORS.teal} /></span>}
                 </div>

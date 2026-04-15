@@ -9,28 +9,30 @@ function adminFetch(path) {
 }
 
 const C = {
-  bg: "#0B1120",
-  card: "#111827",
-  border: "#1E293B",
-  blue: "#3B82F6",
-  blueGlow: "rgba(59,130,246,0.15)",
-  green: "#10B981",
-  greenGlow: "rgba(16,185,129,0.15)",
-  red: "#EF4444",
-  redGlow: "rgba(239,68,68,0.12)",
-  yellow: "#F59E0B",
-  yellowGlow: "rgba(245,158,11,0.12)",
-  purple: "#8B5CF6",
-  purpleGlow: "rgba(139,92,246,0.12)",
+  bg: "#F1F5F9",
+  card: "#FFFFFF",
+  border: "#E2E8F0",
+  blue: "#0A7EC2",
+  blueGlow: "rgba(10,126,194,0.10)",
+  green: "#16A34A",
+  greenGlow: "rgba(22,163,74,0.10)",
+  red: "#C0392B",
+  redGlow: "rgba(192,57,43,0.08)",
+  yellow: "#F0A500",
+  yellowGlow: "rgba(240,165,0,0.10)",
+  purple: "#7C3AED",
+  purpleGlow: "rgba(124,58,237,0.08)",
   orange: "#F97316",
-  orangeGlow: "rgba(249,115,22,0.12)",
+  orangeGlow: "rgba(249,115,22,0.08)",
   cyan: "#06B6D4",
-  cyanGlow: "rgba(6,182,212,0.12)",
+  cyanGlow: "rgba(6,182,212,0.08)",
   gold: "#FBBF24",
-  text: "#F1F5F9",
-  text2: "#94A3B8",
+  text: "#334155",
+  text2: "#64748B",
   text3: "#64748B",
   text4: "#475569",
+  heading: "#0F172A",
+  inputBorder: "#CBD5E1",
 };
 
 // --- HELPERS ---
@@ -99,7 +101,7 @@ function StatusBadge({ status }) {
     watch: { bg: C.yellowGlow, color: C.yellow, label: "Watch" },
     negative: { bg: C.redGlow, color: C.red, label: "Negative" },
   };
-  const s = map[status] || { bg: "rgba(255,255,255,0.05)", color: C.text3, label: status };
+  const s = map[status] || { bg: "#F1F5F9", color: C.text3, label: status };
   return <span style={{ padding: "3px 10px", borderRadius: 10, fontSize: 11, fontWeight: 700, background: s.bg, color: s.color, whiteSpace: "nowrap" }}>{s.label}</span>;
 }
 
@@ -119,7 +121,7 @@ function FunnelBar({ label, value, maxValue, color, prefix = "" }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
       <div style={{ width: 80, fontSize: 12, color: C.text2, fontWeight: 500, textAlign: "right", flexShrink: 0 }}>{label}</div>
-      <div style={{ flex: 1, height: 26, background: "rgba(255,255,255,0.03)", borderRadius: 6, overflow: "hidden", position: "relative" }}>
+      <div style={{ flex: 1, height: 26, background: "#F1F5F9", borderRadius: 6, overflow: "hidden", position: "relative" }}>
         <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 6, transition: "width 0.6s ease", minWidth: value > 0 ? 4 : 0, boxShadow: `0 0 12px ${color}33` }} />
         <span style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, fontWeight: 700, color: C.text }}>{prefix}{fmt(value)}</span>
       </div>
@@ -243,7 +245,7 @@ export default function WavesPPCDashboard() {
     return (
       <Card style={{ padding: 60, textAlign: "center" }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}>{'📣'}</div>
-        <div style={{ fontSize: 18, fontWeight: 600, color: C.text, marginBottom: 8 }}>No Campaigns Yet</div>
+        <div style={{ fontSize: 18, fontWeight: 600, color: C.heading, marginBottom: 8 }}>No Campaigns Yet</div>
         <div style={{ fontSize: 13, color: C.text3 }}>Connect your Google Ads account and add campaigns to start tracking PPC performance.</div>
       </Card>
     );
@@ -282,7 +284,7 @@ export default function WavesPPCDashboard() {
       </div>
 
       {/* Tab Switcher */}
-      <div className="ppc-tab-bar" style={{ display: "flex", gap: 4, marginBottom: 24, background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: 4, width: "fit-content", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+      <div className="ppc-tab-bar" style={{ display: "flex", gap: 4, marginBottom: 24, background: "#F1F5F9", borderRadius: 10, padding: 4, width: "fit-content", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
         {[
           { id: "overview", label: "Overview" },
           { id: "campaigns", label: "Campaigns" },
@@ -410,7 +412,7 @@ export default function WavesPPCDashboard() {
                     const cpa = p.conversions > 0 ? (p.spend / p.conversions) : null;
                     const ctr = p.impressions > 0 ? ((p.clicks / p.impressions) * 100) : null;
                     return (
-                      <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}22`, background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.01)" }}>
+                      <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}22`, background: i % 2 === 0 ? "transparent" : "#F0F7FC" }}>
                         <td style={{ padding: "10px 8px", fontWeight: 600, color: C.text, whiteSpace: "nowrap", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis" }}>
                           <div>{c.campaign_name}</div>
                           <div style={{ fontSize: 11, color: C.text3 }}>{c.target_area} {c.campaign_type && `- ${c.campaign_type}`}</div>

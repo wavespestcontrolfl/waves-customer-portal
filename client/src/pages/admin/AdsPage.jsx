@@ -3,7 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 const PPCDashboardPage = lazy(() => import('./PPCDashboardPage'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', orange: '#f97316', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', purple: '#a78bfa' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', orange: '#EA580C', text: '#334155', muted: '#64748B', white: '#FFFFFF', purple: '#7C3AED', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path) {
@@ -94,7 +94,7 @@ function OverviewTab() {
       </div>
 
       <Card>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Campaign Performance</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Campaign Performance</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -143,7 +143,7 @@ function EmptyState() {
   return (
     <Card style={{ textAlign: 'center', padding: 60 }}>
       <div style={{ fontSize: 48, marginBottom: 16 }}>📣</div>
-      <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No Campaigns Yet</div>
+      <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>No Campaigns Yet</div>
       <div style={{ fontSize: 14, color: D.muted, maxWidth: 400, margin: '0 auto' }}>
         Connect your Google Ads account to start tracking campaign performance, service-line attribution, and get daily AI-powered recommendations.
       </div>
@@ -188,7 +188,7 @@ function ServiceLinesTab() {
         <Card key={b.bucket}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
             <span style={{ fontSize: 18 }}>{bucketIcons[b.bucket] || '📦'}</span>
-            <span style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{bucketLabels[b.bucket] || b.bucket.toUpperCase()}</span>
+            <span style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{bucketLabels[b.bucket] || b.bucket.toUpperCase()}</span>
           </div>
 
           <div style={{ overflowX: 'auto' }}>
@@ -249,7 +249,7 @@ function ServiceLinesTab() {
 
       {/* Per-service table */}
       <Card>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Per-Service Breakdown</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Per-Service Breakdown</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -360,7 +360,7 @@ function AdvisorTab() {
       {!report ? (
         <Card style={{ textAlign: 'center', padding: 60 }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>🤖</div>
-          <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No Reports Yet</div>
+          <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>No Reports Yet</div>
           <div style={{ fontSize: 14, color: D.muted }}>Click "Generate Report" to run the AI advisor, or wait for the daily 8 AM auto-run.</div>
         </Card>
       ) : (
@@ -375,7 +375,7 @@ function AdvisorTab() {
                 border: `2px solid ${gradeColor(data.grade)}44`,
               }}>{data.grade || '?'}</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>Overall Grade</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>Overall Grade</div>
                 <div style={{ fontSize: 14, color: D.text, lineHeight: 1.5 }}>{data.overall_assessment}</div>
               </div>
             </div>
@@ -384,7 +384,7 @@ function AdvisorTab() {
           {/* Recommendations */}
           {(data.recommendations || []).length > 0 && (
             <Card>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Recommendations</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Recommendations</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {['high', 'medium', 'low'].map(priority => {
                   const recs = (data.recommendations || []).filter(r => r.priority === priority);
@@ -401,7 +401,7 @@ function AdvisorTab() {
                             padding: '14px 16px', background: D.bg, borderRadius: 8, marginBottom: 8,
                             borderLeft: `3px solid ${priorityColor[priority]}`,
                           }}>
-                            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>
+                            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
                               {rec.campaign && <span style={{ color: D.teal }}>{rec.campaign}: </span>}
                               {rec.action}
                             </div>
@@ -456,7 +456,7 @@ function AdvisorTab() {
               <div style={{ fontSize: 15, fontWeight: 600, color: D.green, marginBottom: 12 }}>Scaling Opportunities</div>
               {data.scaling_opportunities.map((s, i) => (
                 <div key={i} style={{ padding: '10px 14px', background: D.bg, borderRadius: 8, marginBottom: 6 }}>
-                  <div style={{ fontSize: 13, color: D.white }}><strong>{s.campaign}</strong>: {fmt(s.current_budget)}/d → {fmt(s.suggested_budget)}/d</div>
+                  <div style={{ fontSize: 13, color: D.heading }}><strong>{s.campaign}</strong>: {fmt(s.current_budget)}/d → {fmt(s.suggested_budget)}/d</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{s.headroom_reason}</div>
                 </div>
               ))}
@@ -466,7 +466,7 @@ function AdvisorTab() {
           {/* Insights */}
           {(data.insights || []).length > 0 && (
             <Card>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>{'💡'} Insights</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>{'💡'} Insights</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {data.insights.map((ins, i) => (
                   <div key={i} style={{ fontSize: 13, color: D.text, padding: '8px 12px', background: D.bg, borderRadius: 6, lineHeight: 1.5 }}>
@@ -492,7 +492,7 @@ function AdvisorTab() {
           {/* History */}
           {history.length > 1 && (
             <Card>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Previous Reports</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Previous Reports</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {history.slice(1, 8).map((h, i) => (
                   <div key={i} style={{
@@ -540,7 +540,7 @@ function CapacityTab() {
         <Card key={area}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
             <div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>{areaLabels[area] || area}</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{areaLabels[area] || area}</div>
               <div style={{ fontSize: 12, color: D.muted }}>{info.techs} tech{info.techs !== 1 ? 's' : ''}</div>
             </div>
             <div style={{ fontSize: 14, fontFamily: MONO, color: D.text }}>
@@ -621,7 +621,7 @@ function SEODashboardTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <Card style={{ textAlign: 'center', padding: 60 }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}>🔍</div>
-        <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No Search Console Data Yet</div>
+        <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>No Search Console Data Yet</div>
         <div style={{ fontSize: 14, color: D.muted, maxWidth: 500, margin: '0 auto 20px' }}>
           Connect your Google Search Console account to start tracking organic search performance, query rankings, and page visibility.
         </div>
@@ -671,7 +671,7 @@ function SEODashboardTab() {
 
       {/* Branded vs Non-Branded Split */}
       <Card>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Branded vs Non-Branded</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Branded vs Non-Branded</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
           <div style={{ padding: 16, background: D.bg, borderRadius: 8, borderLeft: `3px solid ${D.teal}` }}>
             <div style={{ fontSize: 12, color: D.muted, marginBottom: 4 }}>Branded (people searching "Waves")</div>
@@ -689,7 +689,7 @@ function SEODashboardTab() {
       {/* Device Breakdown */}
       {(data.devices || []).length > 0 && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Device Breakdown</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Device Breakdown</div>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
             {data.devices.map((d, i) => {
               const icons = { mobile: '📱', desktop: '🖥️', tablet: '📟' };
@@ -698,7 +698,7 @@ function SEODashboardTab() {
               return (
                 <div key={i} style={{ flex: 1, minWidth: 140, padding: 14, background: D.bg, borderRadius: 8, textAlign: 'center' }}>
                   <div style={{ fontSize: 24, marginBottom: 4 }}>{icons[d.device] || '🌐'}</div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: D.white, textTransform: 'capitalize' }}>{d.device}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, textTransform: 'capitalize' }}>{d.device}</div>
                   <div style={{ fontSize: 18, fontWeight: 700, color: D.teal, fontFamily: MONO }}>{parseInt(d.clicks).toLocaleString()}</div>
                   <div style={{ fontSize: 11, color: D.muted }}>{pctOfTotal}% of clicks</div>
                 </div>
@@ -711,7 +711,7 @@ function SEODashboardTab() {
       {/* Top Queries */}
       <Card>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white }}>Top Queries</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Top Queries</div>
           <div style={{ display: 'flex', gap: 4 }}>
             {[['all', 'All'], ['nonbrand', 'Non-Brand'], ['branded', 'Branded']].map(([k, l]) => (
               <button key={k} onClick={() => setQueryFilter(k)} style={{
@@ -809,7 +809,7 @@ function SEODashboardTab() {
       {/* Top Pages */}
       {(data.topPages || []).length > 0 && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>Top Pages</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Top Pages</div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead><tr><th style={thStyle}>Page</th><th style={thR}>Clicks</th><th style={thR}>Impr</th><th style={thR}>CTR</th><th style={thR}>Position</th><th style={thStyle}>Type</th></tr></thead>
@@ -837,7 +837,7 @@ function SEODashboardTab() {
       {/* CWV */}
       {(data.cwv || []).length > 0 && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Core Web Vitals</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Core Web Vitals</div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
@@ -937,7 +937,7 @@ function SEOAdvisorTab() {
       {!report ? (
         <Card style={{ textAlign: 'center', padding: 60 }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>🧠</div>
-          <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No SEO Reports Yet</div>
+          <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>No SEO Reports Yet</div>
           <div style={{ fontSize: 14, color: D.muted }}>Click "Generate SEO Report" or wait for the weekly Monday 7 AM auto-run.</div>
         </Card>
       ) : (
@@ -952,7 +952,7 @@ function SEOAdvisorTab() {
                 border: `2px solid ${gradeColor(data.grade)}44`,
               }}>{data.grade || '?'}</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>SEO Grade</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>SEO Grade</div>
                 <div style={{ fontSize: 14, color: D.text, lineHeight: 1.5 }}>{data.overall_assessment}</div>
               </div>
             </div>
@@ -983,7 +983,7 @@ function SEOAdvisorTab() {
           {/* Recommendations */}
           {(data.recommendations || []).length > 0 && (
             <Card>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 16 }}>SEO Recommendations</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 16 }}>SEO Recommendations</div>
               {['high', 'medium', 'low'].map(priority => {
                 const recs = (data.recommendations || []).filter(r => r.priority === priority);
                 if (recs.length === 0) return null;
@@ -997,7 +997,7 @@ function SEOAdvisorTab() {
                         padding: '14px 16px', background: D.bg, borderRadius: 8, marginBottom: 8,
                         borderLeft: `3px solid ${priorityColor[priority]}`,
                       }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 4 }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
                           {rec.category && <span style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', marginRight: 8 }}>[{rec.category}]</span>}
                           {rec.action}
                         </div>
@@ -1018,7 +1018,7 @@ function SEOAdvisorTab() {
               <div style={{ fontSize: 15, fontWeight: 600, color: D.amber, marginBottom: 12 }}>Page 2 Opportunities</div>
               {data.page2_opportunities.map((opp, i) => (
                 <div key={i} style={{ padding: '10px 14px', background: D.bg, borderRadius: 8, marginBottom: 6, borderLeft: `3px solid ${D.amber}` }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>"{opp.query}" — Position {opp.position}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>"{opp.query}" — Position {opp.position}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{opp.impressions} impressions • {opp.action}</div>
                 </div>
               ))}
@@ -1031,7 +1031,7 @@ function SEOAdvisorTab() {
               <div style={{ fontSize: 15, fontWeight: 600, color: D.red, marginBottom: 12 }}>Declining Query Alerts</div>
               {data.declining_alerts.map((a, i) => (
                 <div key={i} style={{ padding: '10px 14px', background: D.bg, borderRadius: 8, marginBottom: 6, borderLeft: `3px solid ${D.red}` }}>
-                  <div style={{ fontSize: 13, color: D.white }}>"{a.query}" — <span style={{ color: D.red }}>{a.drop_pct}%</span> decline</div>
+                  <div style={{ fontSize: 13, color: D.heading }}>"{a.query}" — <span style={{ color: D.red }}>{a.drop_pct}%</span> decline</div>
                   {a.action && <div style={{ fontSize: 12, color: D.muted }}>{a.action}</div>}
                 </div>
               ))}
@@ -1041,7 +1041,7 @@ function SEOAdvisorTab() {
           {/* GBP Insights */}
           {(data.gbp_insights || []).length > 0 && (
             <Card>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>{'📍'} GBP Insights</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>{'📍'} GBP Insights</div>
               {data.gbp_insights.map((g, i) => (
                 <div key={i} style={{ padding: '10px 14px', background: D.bg, borderRadius: 8, marginBottom: 6 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: D.teal }}>{g.location}</div>
@@ -1057,7 +1057,7 @@ function SEOAdvisorTab() {
               <div style={{ fontSize: 15, fontWeight: 600, color: D.red, marginBottom: 12 }}>{'⚙️'} Technical Issues</div>
               {data.technical_issues.map((t, i) => (
                 <div key={i} style={{ padding: '10px 14px', background: D.bg, borderRadius: 8, marginBottom: 6, borderLeft: `3px solid ${t.severity === 'high' ? D.red : D.amber}` }}>
-                  <div style={{ fontSize: 13, color: D.white }}>{t.issue}</div>
+                  <div style={{ fontSize: 13, color: D.heading }}>{t.issue}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>{t.fix}</div>
                 </div>
               ))}
@@ -1067,7 +1067,7 @@ function SEOAdvisorTab() {
           {/* Mobile Insights */}
           {(data.mobile_insights || []).length > 0 && (
             <Card>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>{'📱'} Mobile Insights</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>{'📱'} Mobile Insights</div>
               {data.mobile_insights.map((m, i) => (
                 <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, fontSize: 13, color: D.text }}>
                   <strong>{m.finding}</strong> — {m.action}
@@ -1079,7 +1079,7 @@ function SEOAdvisorTab() {
           {/* Previous Reports */}
           {history.length > 1 && (
             <Card>
-              <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Previous SEO Reports</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Previous SEO Reports</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {history.slice(1, 8).map((h, i) => (
                   <div key={i} style={{ padding: '8px 14px', background: D.bg, borderRadius: 8, fontSize: 12, color: D.muted, border: `1px solid ${D.border}` }}>
@@ -1178,7 +1178,7 @@ function BacklinksTab() {
       </div>
       {data.anchorDistribution && (
         <Card>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Anchor Text Distribution</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Anchor Text Distribution</div>
           {Object.entries(data.anchorDistribution).map(([type, count]) => (
             <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
               <div style={{ width: 100, fontSize: 12, color: D.text, textAlign: 'right', textTransform: 'capitalize' }}>{type.replace('_', ' ')}</div>
@@ -1195,7 +1195,7 @@ function BacklinksTab() {
           <div style={{ fontSize: 14, fontWeight: 600, color: D.red, marginBottom: 12 }}>Toxic Links</div>
           {data.recentToxic.map((l, i) => (
             <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, borderLeft: `3px solid ${sevColor[l.severity]}` }}>
-              <div style={{ fontSize: 12, color: D.white }}>{l.source_domain}</div>
+              <div style={{ fontSize: 12, color: D.heading }}>{l.source_domain}</div>
               <div style={{ fontSize: 11, color: D.muted }}>Anchor: "{l.anchor_text}" · Toxicity: {l.toxicity_score}/100</div>
             </div>
           ))}
@@ -1232,7 +1232,7 @@ function ContentQATab() {
         </Card>
       )}
       <Card>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>All Scores</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>All Scores</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead><tr><th style={thStyle}>URL</th><th style={thR}>Grade</th><th style={thR}>Tech</th><th style={thR}>OnPage</th><th style={thR}>E-E-A-T</th><th style={thR}>Local</th><th style={thR}>Brand</th><th style={thR}>Total</th></tr></thead>
@@ -1277,14 +1277,14 @@ function AIOverviewTab() {
           <div style={{ fontSize: 14, fontWeight: 600, color: D.amber, marginBottom: 12 }}>Quick Wins — AIO exists but Waves not cited</div>
           {data.quickWins.map((r, i) => (
             <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4 }}>
-              <div style={{ fontSize: 13, color: D.white }}>"{r.keyword}" <span style={{ color: D.muted, fontSize: 11 }}>({r.city})</span></div>
+              <div style={{ fontSize: 13, color: D.heading }}>"{r.keyword}" <span style={{ color: D.muted, fontSize: 11 }}>({r.city})</span></div>
               <div style={{ fontSize: 11, color: D.muted }}>Currently cited: {r.sources.map(s => s.domain).join(', ') || 'unknown'}</div>
             </div>
           ))}
         </Card>
       )}
       <Card>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>All Keywords</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>All Keywords</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead><tr><th style={thStyle}>Keyword</th><th style={thStyle}>City</th><th style={thR}>AIO?</th><th style={thR}>Cited?</th><th style={thStyle}>Sources</th></tr></thead>
@@ -1331,7 +1331,7 @@ function SEOFunnelTab() {
         <KpiCard label="Revenue" value={fmt(data.revenue || 0)} color={D.green} />
       </div>
       <Card>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Top Landing Pages</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Top Landing Pages</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead><tr><th style={thStyle}>Page</th><th style={thR}>Impr</th><th style={thR}>Clicks</th><th style={thR}>CTR</th><th style={thStyle}>Keyword</th></tr></thead>
@@ -1373,17 +1373,17 @@ function CitationsTab() {
       </div>
       {data.canonicalNAP && (
         <Card style={{ padding: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.white, marginBottom: 6 }}>Canonical NAP</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 6 }}>Canonical NAP</div>
           <div style={{ fontSize: 12, color: D.text }}>{data.canonicalNAP.name} · {data.canonicalNAP.phone} · {data.canonicalNAP.website}</div>
         </Card>
       )}
       <Card>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Directory Listings</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Directory Listings</div>
         {(data.citations || []).map((c, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${D.border}` }}>
             <div style={{ width: 8, height: 8, borderRadius: 4, background: statusColor[c.status] || D.muted, flexShrink: 0 }} />
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: D.white }}>{c.directory_name}</div>
+              <div style={{ fontSize: 13, color: D.heading }}>{c.directory_name}</div>
               {c.listing_url && <div style={{ fontSize: 11, color: D.muted }}>{c.listing_url}</div>}
             </div>
             <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: (statusColor[c.status] || D.muted) + '22', color: statusColor[c.status] || D.muted, textTransform: 'uppercase', fontWeight: 700 }}>{c.status}</span>
@@ -1414,9 +1414,9 @@ function SiteAuditTab() {
   if (!data?.hasData) return (
     <Card style={{ textAlign: 'center', padding: 60 }}>
       <div style={{ fontSize: 48, marginBottom: 16 }}>{'🩺'}</div>
-      <div style={{ fontSize: 18, fontWeight: 600, color: D.white, marginBottom: 8 }}>No Audit Data Yet</div>
+      <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>No Audit Data Yet</div>
       <div style={{ fontSize: 14, color: D.muted, marginBottom: 20 }}>Run a site-wide technical audit to check all pages.</div>
-      <button onClick={runAudit} disabled={running} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: D.white, fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Auditing...' : 'Run Site Audit'}</button>
+      <button onClick={runAudit} disabled={running} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: running ? 0.5 : 1 }}>{running ? 'Auditing...' : 'Run Site Audit'}</button>
     </Card>
   );
 
@@ -1455,11 +1455,11 @@ function SiteAuditTab() {
       {/* Issues by category */}
       {(data.issues || []).length > 0 && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Issues ({data.issues.length})</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Issues ({data.issues.length})</div>
           {data.issues.map((issue, i) => (
             <div key={i} style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 4, borderLeft: `3px solid ${sevColor[issue.severity] || D.muted}` }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontSize: 12, color: D.white }}><span style={{ color: D.muted, textTransform: 'uppercase', fontSize: 10, marginRight: 8 }}>[{issue.issue_category}]</span>{issue.issue_type?.replace(/_/g, ' ')}</div>
+                <div style={{ fontSize: 12, color: D.heading }}><span style={{ color: D.muted, textTransform: 'uppercase', fontSize: 10, marginRight: 8 }}>[{issue.issue_category}]</span>{issue.issue_type?.replace(/_/g, ' ')}</div>
                 <span style={{ fontSize: 11, color: D.muted }}>{issue.affected_count} page{issue.affected_count !== 1 ? 's' : ''}</span>
               </div>
               {issue.recommendation && <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>{issue.recommendation}</div>}
@@ -1471,7 +1471,7 @@ function SiteAuditTab() {
       {/* Page scores table */}
       {(data.pages || []).length > 0 && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>All Pages ({data.pages.length})</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>All Pages ({data.pages.length})</div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead><tr>
@@ -1497,7 +1497,7 @@ function SiteAuditTab() {
       {/* Score trend */}
       {(data.history || []).length > 1 && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.white, marginBottom: 12 }}>Health Score Trend</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Health Score Trend</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', height: 80 }}>
             {data.history.reverse().map((h, i) => {
               const pct = (h.score || 0);
@@ -1522,7 +1522,7 @@ export default function AdsPage() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>PPC</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>PPC</div>
       </div>
 
       {/* Tabs */}

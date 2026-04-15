@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', blue: '#2563eb', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', blue: '#0A7EC2', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
@@ -11,7 +11,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12 };
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600 });
 const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
@@ -42,7 +42,7 @@ export default function PricingStrategyPage() {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>Pricing Strategy</div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Pricing Strategy</div>
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Hormozi-style value engineering, offer architecture, and money model</div>
       </div>
 
@@ -83,7 +83,7 @@ function MoneyModelTab({ dashboard, loading }) {
       {/* KPIs */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
         {[
-          { label: 'Total Customers', value: d.totalCustomers || 0, color: D.white },
+          { label: 'Total Customers', value: d.totalCustomers || 0, color: D.heading },
           { label: 'Avg LTV', value: fmt(d.avgLTV), color: D.green },
           { label: 'Avg CAC', value: fmt(d.avgCAC), color: D.amber },
           { label: 'LTV:CAC Ratio', value: d.ltvCacRatio ? `${d.ltvCacRatio.toFixed(1)}x` : '—', color: d.ltvCacRatio >= 3 ? D.green : d.ltvCacRatio >= 2 ? D.amber : D.red },
@@ -98,7 +98,7 @@ function MoneyModelTab({ dashboard, loading }) {
 
       {/* Hormozi Money Model Stages */}
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>$100M Money Model — Revenue by Stage</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>$100M Money Model — Revenue by Stage</div>
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 12 }}>
           {[
             { stage: 'Stage I: Attraction', desc: 'First service / one-time', value: stages.attraction, color: D.blue, icon: '🧲' },
@@ -108,7 +108,7 @@ function MoneyModelTab({ dashboard, loading }) {
           ].map(s => (
             <div key={s.stage} style={{ padding: 16, background: D.input, borderRadius: 10, textAlign: 'center', borderLeft: `3px solid ${s.color}` }}>
               <div style={{ fontSize: 24, marginBottom: 4 }}>{s.icon}</div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 2 }}>{s.stage}</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 2 }}>{s.stage}</div>
               <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>{s.desc}</div>
               <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, color: s.color }}>{fmt(s.value)}</div>
             </div>
@@ -118,7 +118,7 @@ function MoneyModelTab({ dashboard, loading }) {
 
       {/* Conversion Funnel */}
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Conversion Funnel</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Conversion Funnel</div>
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           {[
             { label: 'Leads', value: funnel.leads, color: D.muted },
@@ -139,11 +139,11 @@ function MoneyModelTab({ dashboard, loading }) {
       {/* Top Upsell Opportunities */}
       {(d.upsellOpportunities || []).length > 0 && (
         <div style={sCard}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 12 }}>Top Upsell Opportunities</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Top Upsell Opportunities</div>
           {d.upsellOpportunities.slice(0, 5).map((o, i) => (
             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}22` }}>
               <div>
-                <span style={{ color: D.white, fontWeight: 600, fontSize: 13 }}>{o.customerName}</span>
+                <span style={{ color: D.heading, fontWeight: 600, fontSize: 13 }}>{o.customerName}</span>
                 <span style={{ color: D.muted, marginLeft: 8, fontSize: 12 }}>Currently: {o.currentTier} ({o.serviceCount} services)</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -181,7 +181,7 @@ function ValueEquationTab() {
   const Slider = ({ label, desc, value, onChange, increaseLabel, decreaseLabel }) => (
     <div style={{ marginBottom: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-        <div><span style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{label}</span><span style={{ fontSize: 11, color: D.muted, marginLeft: 8 }}>{desc}</span></div>
+        <div><span style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{label}</span><span style={{ fontSize: 11, color: D.muted, marginLeft: 8 }}>{desc}</span></div>
         <span style={{ fontFamily: MONO, fontSize: 18, fontWeight: 700, color: value >= 7 ? D.green : value >= 4 ? D.amber : D.red }}>{value}</span>
       </div>
       <input type="range" min={1} max={10} value={value} onChange={e => onChange(parseInt(e.target.value))} style={{ width: '100%', accentColor: D.teal }} />
@@ -192,7 +192,7 @@ function ValueEquationTab() {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 20 }}>
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 4 }}>Value Equation</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>Value Equation</div>
         <div style={{ fontSize: 12, color: D.muted, marginBottom: 20 }}>Value = (Dream Outcome × Likelihood) ÷ (Time Delay × Effort)</div>
 
         <div style={{ fontSize: 12, fontWeight: 600, color: D.green, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>↑ Increase These</div>
@@ -208,14 +208,14 @@ function ValueEquationTab() {
         {result && (
           <div style={{ ...sCard, textAlign: 'center', borderColor: result.valueScore >= 70 ? D.green : result.valueScore >= 40 ? D.amber : D.red }}>
             <div style={{ fontSize: 56, fontWeight: 800, fontFamily: MONO, color: result.valueScore >= 70 ? D.green : result.valueScore >= 40 ? D.amber : D.red }}>{result.valueScore}</div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginTop: 4 }}>Value Score</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginTop: 4 }}>Value Score</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: D.teal, marginTop: 12 }}>{result.priceRecommendation}</div>
             <div style={{ fontSize: 13, color: D.muted, marginTop: 8, lineHeight: 1.6 }}>{result.positioning}</div>
           </div>
         )}
 
         <div style={sCard}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Waves Pest Control Value Levers</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Waves Pest Control Value Levers</div>
           {[
             { lever: 'Dream Outcome', current: 'Pest-free, healthy lawn, protected home', improve: 'Frame as "protecting your family\'s health and your biggest investment"' },
             { lever: 'Likelihood', current: 'Licensed, insured, local reputation', improve: 'Add guarantee language, show review count, before/after photos' },
@@ -250,7 +250,7 @@ function OfferBuilderTab({ showToast }) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Grand Slam Offers</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Grand Slam Offers</div>
         <button style={sBtn(D.teal, D.white)}>+ New Offer</button>
       </div>
 
@@ -263,7 +263,7 @@ function OfferBuilderTab({ showToast }) {
           { name: 'WaveGuard Platinum', services: '4+', discount: '20%', price: '$180-280/mo', anchor: '$400+/mo', guarantee: 'Unconditional Money Back', bonuses: ['All Gold perks', 'Dedicated Tech', 'Quarterly Property Reviews', 'Loyalty Rewards'] },
         ].map(o => (
           <div key={o.name} style={{ ...sCard, marginBottom: 0 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: D.white, marginBottom: 8 }}>{o.name}</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginBottom: 8 }}>{o.name}</div>
             <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
               <span style={sBadge(`${D.teal}22`, D.teal)}>{o.services} service{o.services !== 1 ? 's' : ''}</span>
               <span style={sBadge(`${D.green}22`, D.green)}>{o.discount} off</span>
@@ -283,10 +283,10 @@ function OfferBuilderTab({ showToast }) {
       {/* Custom offers */}
       {offers.length > 0 && (
         <div style={{ marginTop: 20 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>Custom Offer Packages</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Custom Offer Packages</div>
           {offers.map(o => (
             <div key={o.id} style={{ ...sCard, marginBottom: 8 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{o.name}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{o.name}</div>
               <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{o.description}</div>
               {o.conversion_rate > 0 && <div style={{ fontSize: 11, color: D.green, marginTop: 4 }}>Conversion: {o.conversion_rate}%</div>}
             </div>
@@ -329,13 +329,13 @@ function UpsellEngineTab({ showToast }) {
     <div>
       {/* Opportunities */}
       <div style={sCard}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 12 }}>Upsell Opportunities ({opportunities.length})</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Upsell Opportunities ({opportunities.length})</div>
         {opportunities.length === 0 ? (
           <div style={{ color: D.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>No upsell opportunities found</div>
         ) : opportunities.slice(0, 10).map((o, i) => (
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: `1px solid ${D.border}22` }}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{o.customerName}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{o.customerName}</div>
               <div style={{ fontSize: 11, color: D.muted }}>Currently: {o.currentTier} · {o.serviceCount} service{o.serviceCount !== 1 ? 's' : ''} · {fmt(o.monthlyRate)}/mo</div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -352,14 +352,14 @@ function UpsellEngineTab({ showToast }) {
       {/* Active Rules */}
       <div style={sCard}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Upsell Rules</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Upsell Rules</div>
         </div>
         {rules.length === 0 ? (
           <div style={{ color: D.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>No upsell rules configured</div>
         ) : rules.map(r => (
           <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${D.border}22` }}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{r.name}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{r.name}</div>
               <div style={{ fontSize: 11, color: D.muted }}>Trigger: {r.trigger_event} · Offer: {r.offer_service}</div>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -401,7 +401,7 @@ function LTVAnalysisTab() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Customer Lifetime Value</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Customer Lifetime Value</div>
         <button onClick={recalculate} disabled={recalculating} style={{ ...sBtn(D.teal, D.white), opacity: recalculating ? 0.5 : 1 }}>{recalculating ? 'Recalculating...' : 'Recalculate All'}</button>
       </div>
 
@@ -423,10 +423,10 @@ function LTVAnalysisTab() {
       {/* By Acquisition Source */}
       {data.bySource && (
         <div style={sCard}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginBottom: 12 }}>LTV by Acquisition Channel</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>LTV by Acquisition Channel</div>
           {Object.entries(data.bySource).map(([source, stats]) => (
             <div key={source} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: `1px solid ${D.border}22`, fontSize: 12 }}>
-              <span style={{ color: D.white, fontWeight: 500 }}>{source}</span>
+              <span style={{ color: D.heading, fontWeight: 500 }}>{source}</span>
               <div style={{ display: 'flex', gap: 16 }}>
                 <span style={{ color: D.muted }}>{stats.count} customers</span>
                 <span style={{ color: D.green, fontFamily: MONO }}>LTV: {fmt(stats.avgLTV)}</span>

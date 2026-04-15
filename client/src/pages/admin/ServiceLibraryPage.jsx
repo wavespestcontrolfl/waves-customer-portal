@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { DiscountsSection } from './DiscountsTabs';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', purple: '#8b5cf6', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', input: '#0f172a' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 
 async function aFetch(path, opts = {}) {
   const r = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' }, ...opts });
@@ -34,9 +34,9 @@ const BILLING_TYPES = [
   { value: 'free', label: 'Free' },
 ];
 
-const catColors = { pest_control: '#0ea5e9', lawn_care: '#10b981', mosquito: '#6366f1', termite: '#dc2626', rodent: '#78716c', tree_shrub: '#059669', inspection: '#f59e0b', specialty: '#8b5cf6', other: '#64748b' };
-const billingColors = { recurring: '#0ea5e9', one_time: '#f59e0b', free: '#64748b' };
-const tierColors = { Platinum: '#a78bfa', Gold: '#f59e0b', Silver: '#94a3b8', Bronze: '#cd7f32', 'One-Time': '#0ea5e9' };
+const catColors = { pest_control: '#0A7EC2', lawn_care: '#10b981', mosquito: '#6366f1', termite: '#dc2626', rodent: '#78716c', tree_shrub: '#059669', inspection: '#f59e0b', specialty: '#8b5cf6', other: '#64748b' };
+const billingColors = { recurring: '#0A7EC2', one_time: '#f59e0b', free: '#64748b' };
+const tierColors = { Platinum: '#a78bfa', Gold: '#f59e0b', Silver: '#94a3b8', Bronze: '#cd7f32', 'One-Time': '#0A7EC2' };
 
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16 };
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box', width: '100%' };
@@ -52,7 +52,7 @@ const EMPTY_SVC = {
   pricing_type: 'variable', base_price: '', pricing_model_key: '',
   is_taxable: false, tax_service_key: '', requires_license: false, license_category: '',
   min_tech_skill_level: 1, customer_visible: true, booking_enabled: true,
-  sort_order: 100, icon: '', color: '#0ea5e9', is_active: true,
+  sort_order: 100, icon: '', color: '#0A7EC2', is_active: true,
 };
 
 function Field({ label, children, half }) {
@@ -91,7 +91,7 @@ function ServiceForm({ svc, onSave, onCancel }) {
 
   return (
     <div style={{ ...sCard, marginTop: 8, borderColor: D.teal + '44' }}>
-      <div style={{ fontSize: 15, fontWeight: 700, color: D.white, marginBottom: 12 }}>{svc?.id ? 'Edit Service' : 'New Service'}</div>
+      <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginBottom: 12 }}>{svc?.id ? 'Edit Service' : 'New Service'}</div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
         <Field label="Name" half>{inp('name')}</Field>
@@ -127,7 +127,7 @@ function ServiceForm({ svc, onSave, onCancel }) {
         <Field label="Tax Service Key" half>{inp('tax_service_key')}</Field>
         <Field label="License Category" half>{inp('license_category')}</Field>
         <Field label="Min Tech Skill Level" half>{inp('min_tech_skill_level', 'number')}</Field>
-        <Field label="Color" half><input style={{ ...sInput, height: 36 }} type="color" value={form.color || '#0ea5e9'} onChange={e => set('color', e.target.value)} /></Field>
+        <Field label="Color" half><input style={{ ...sInput, height: 36 }} type="color" value={form.color || '#0A7EC2'} onChange={e => set('color', e.target.value)} /></Field>
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10 }}>
@@ -181,7 +181,7 @@ function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <span style={{ fontSize: 14, color: D.muted }}>{'>'}</span>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{svc.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{svc.name}</div>
             <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
               <span style={sBadge(catColor)}>{(CATEGORIES.find(c => c.value === svc.category) || {}).label || svc.category}</span>
               <span style={sBadge(billingColor)}>{svc.billing_type === 'one_time' ? 'One-Time' : svc.billing_type === 'recurring' ? 'Recurring' : svc.billing_type}</span>
@@ -190,7 +190,7 @@ function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
           </div>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>{price}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>{price}</div>
           {svc.frequency && <div style={{ fontSize: 11, color: D.muted }}>{svc.frequency}</div>}
           {svc.default_duration_minutes > 0 && <div style={{ fontSize: 11, color: D.muted }}>{svc.default_duration_minutes} min</div>}
         </div>
@@ -258,7 +258,7 @@ function PackageCard({ pkg, allServices, onUpdate }) {
         <div style={{ fontSize: 16, fontWeight: 700, color: tierColor }}>{pkg.name}</div>
         <button style={{ ...sBtn('transparent', D.muted), fontSize: 11, padding: '4px 8px' }} onClick={() => setEditing(true)}>Edit</button>
       </div>
-      <div style={{ fontSize: 20, fontWeight: 700, color: D.white, marginBottom: 2 }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: D.heading, marginBottom: 2 }}>
         ${Number(pkg.monthly_price_min || 0).toFixed(0)}-${Number(pkg.monthly_price_max || 0).toFixed(0)}<span style={{ fontSize: 12, fontWeight: 400, color: D.muted }}>/mo</span>
       </div>
       {pkg.discount_pct > 0 && <div style={{ ...sBadge(tierColor), marginBottom: 8 }}>{pkg.discount_pct}% off add-ons</div>}
@@ -358,7 +358,7 @@ export default function ServiceLibraryPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.white }}>Service Library</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Service Library</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>Single source of truth for all services, pricing, and WaveGuard packages</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -379,7 +379,7 @@ export default function ServiceLibraryPage() {
 
       {/* Toast */}
       {toast && (
-        <div style={{ position: 'fixed', top: 20, right: 20, background: D.green, color: D.white, padding: '10px 20px', borderRadius: 8, fontSize: 13, fontWeight: 600, zIndex: 9999 }}>
+        <div style={{ position: 'fixed', top: 20, right: 20, background: D.green, color: '#fff', padding: '10px 20px', borderRadius: 8, fontSize: 13, fontWeight: 600, zIndex: 9999 }}>
           {toast}
         </div>
       )}

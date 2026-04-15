@@ -3,7 +3,8 @@ import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import NotificationBell from './NotificationBell';
 import GlobalCommandPalette from './admin/GlobalCommandPalette';
 
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', red: '#ef4444' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', blue: '#0A7EC2', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', input: '#FFFFFF', inputBorder: '#CBD5E1' };
+const SB = { bg: '#04395E', active: 'rgba(255,255,255,0.1)', hover: 'rgba(255,255,255,0.08)', border: 'rgba(255,255,255,0.1)', section: 'rgba(255,255,255,0.4)', text: 'rgba(255,255,255,0.65)' };
 
 const NAV_SECTIONS = [
   { section: 'Operations', items: [
@@ -90,16 +91,16 @@ export default function AdminLayout() {
 
       {/* Mobile top bar */}
       <div style={{
-        display: 'none', position: 'fixed', top: 0, left: 0, right: 0, height: 52, zIndex: 60,
-        background: D.bg, borderBottom: `1px solid ${D.border}`, padding: '0 16px',
+        display: 'none', position: 'fixed', top: 0, left: 0, right: 0, height: 56, zIndex: 60,
+        background: D.white, borderBottom: `1px solid ${D.border}`, padding: '0 16px',
         alignItems: 'center', justifyContent: 'space-between',
       }} className="mobile-topbar">
         <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{
-          background: 'none', border: 'none', color: D.white, fontSize: 24, cursor: 'pointer', padding: 4,
+          background: 'none', border: 'none', color: D.heading, fontSize: 24, cursor: 'pointer', padding: 4,
         }}>☰</button>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
-          <span style={{ fontSize: 13, fontWeight: 700, color: D.white }}>WAVES</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>WAVES</span>
         </div>
         <NotificationBell type="admin" />
       </div>
@@ -113,7 +114,7 @@ export default function AdminLayout() {
 
       {/* Sidebar */}
       <div style={{
-        width: 240, background: D.bg, borderRight: `1px solid ${D.border}`,
+        width: 240, background: SB.bg, borderRight: `1px solid ${SB.border}`,
         display: 'flex', flexDirection: 'column', flexShrink: 0,
         position: 'fixed', left: 0, top: 0, bottom: 0, zIndex: 100,
         transform: sidebarOpen ? 'translateX(0)' : (isDesktop ? 'translateX(0)' : 'translateX(-100%)'),
@@ -127,15 +128,15 @@ export default function AdminLayout() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <img src="/waves-logo.png" alt="" style={{ height: 28 }} />
             <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.white }}>WAVES ADMIN</div>
-              <div style={{ fontSize: 11, color: D.muted }}>{userName}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: '#FFFFFF' }}>WAVES ADMIN</div>
+              <div style={{ fontSize: 11, color: SB.text }}>{userName}</div>
             </div>
           </div>
           <div className="desktop-bell" style={{ display: 'flex', alignItems: 'center' }}>
             <NotificationBell type="admin" />
           </div>
           <button onClick={() => setSidebarOpen(false)} style={{
-            background: 'none', border: 'none', color: D.muted, fontSize: 20, cursor: 'pointer',
+            background: 'none', border: 'none', color: SB.text, fontSize: 20, cursor: 'pointer',
             padding: 4, lineHeight: 1, display: 'none',
           }} className="sidebar-close">✕</button>
         </div>
@@ -145,7 +146,7 @@ export default function AdminLayout() {
           {NAV_SECTIONS.map(({ section, items }) => (
             <div key={section}>
               <div style={{
-                fontSize: 10, fontWeight: 700, color: D.border, textTransform: 'uppercase',
+                fontSize: 10, fontWeight: 700, color: SB.section, textTransform: 'uppercase',
                 letterSpacing: '0.08em', padding: '14px 12px 4px', userSelect: 'none',
               }}>{section}</div>
               {items.map(item => {
@@ -154,9 +155,9 @@ export default function AdminLayout() {
                   <Link key={item.path} to={item.path} style={{
                     display: 'flex', alignItems: 'center', gap: 10,
                     padding: '10px 12px', borderRadius: 8, marginBottom: 2,
-                    background: isActive ? D.card : 'transparent',
-                    borderLeft: isActive ? `3px solid ${D.teal}` : '3px solid transparent',
-                    color: isActive ? D.white : D.muted,
+                    background: isActive ? SB.active : 'transparent',
+                    borderLeft: isActive ? '3px solid #FFFFFF' : '3px solid transparent',
+                    color: isActive ? '#FFFFFF' : SB.text,
                     textDecoration: 'none', fontSize: 13, fontWeight: isActive ? 600 : 400,
                     transition: 'all 0.15s',
                   }}>
@@ -170,14 +171,14 @@ export default function AdminLayout() {
         </nav>
 
         {/* Footer */}
-        <div style={{ paddingTop: 12, padding: '12px', borderTop: `1px solid ${D.border}`, flexShrink: 0 }}>
-          <Link to="/" style={{ fontSize: 12, color: D.teal, textDecoration: 'none', display: 'block', padding: '8px 12px' }}>{'←'} Customer Portal</Link>
+        <div style={{ paddingTop: 12, padding: '12px', borderTop: `1px solid ${SB.border}`, flexShrink: 0 }}>
+          <Link to="/" style={{ fontSize: 12, color: '#E8F4FC', textDecoration: 'none', display: 'block', padding: '8px 12px' }}>{'←'} Customer Portal</Link>
           <div onClick={handleLogout} style={{
-            fontSize: 13, color: D.red, cursor: 'pointer', padding: '10px 12px',
+            fontSize: 13, color: '#FDECEA', cursor: 'pointer', padding: '10px 12px',
             borderRadius: 8, marginTop: 4, fontWeight: 600,
             display: 'flex', alignItems: 'center', gap: 8,
           }}>{'🚪'} Sign Out</div>
-          <div style={{ fontSize: 10, color: D.border, padding: '4px 12px' }}>v2.0</div>
+          <div style={{ fontSize: 10, color: SB.section, padding: '4px 12px' }}>v2.0</div>
         </div>
       </div>
 
@@ -209,7 +210,7 @@ export default function AdminLayout() {
         }
         .admin-sidebar::-webkit-scrollbar { width: 4px; }
         .admin-sidebar::-webkit-scrollbar-track { background: transparent; }
-        .admin-sidebar::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+        .admin-sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
       `}</style>
     </div>
   );

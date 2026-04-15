@@ -2,10 +2,11 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 
 import EmailAutomationsPanel from './EmailAutomationsPanel';
 import CallRecordingsPanel from './CallRecordingsPanel';
+import PushSettings from '../../components/admin/PushSettings';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
 function adminFetch(path, options = {}) {
@@ -161,7 +162,7 @@ function PhoneCard({ number, label, sent, received, isTracking }) {
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <span style={{ width: 8, height: 8, borderRadius: '50%', background: D.green, display: 'inline-block', flexShrink: 0 }} />
-        <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14, color: D.white }}>{number}</span>
+        <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14, color: D.heading }}>{number}</span>
       </div>
       <div style={{ color: D.muted, fontSize: 12, fontFamily: 'DM Sans, sans-serif', marginBottom: 10 }}>
         {isTracking ? '🚐 Van Wrap Tracking' : label}
@@ -255,13 +256,13 @@ function SmsLogItem({ msg: m, onReply }) {
         <div style={{ marginTop: 8, marginLeft: 30, display: 'flex', gap: 8 }}>
           {m.direction === 'inbound' && (
             <button onClick={e => { e.stopPropagation(); onReply(m.from, m.to); }} style={{
-              padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal, color: D.white,
+              padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal, color: '#fff',
               fontSize: 12, fontWeight: 600, cursor: 'pointer',
             }}>Reply</button>
           )}
           {m.direction === 'outbound' && (
             <button onClick={e => { e.stopPropagation(); onReply(m.to, m.from); }} style={{
-              padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal, color: D.white,
+              padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal, color: '#fff',
               fontSize: 12, fontWeight: 600, cursor: 'pointer',
             }}>Send Again</button>
           )}
@@ -307,11 +308,11 @@ function ConversationView({ thread, messages, onReply, onBack }) {
           fontSize: 13, padding: '6px 12px', cursor: 'pointer', fontFamily: 'DM Sans, sans-serif',
         }}>Back</button>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: D.white }}>{contactName}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{contactName}</div>
           <div style={{ fontSize: 12, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>{contactPhone}</div>
         </div>
         <button onClick={() => onReply(contactPhone, thread.ourNumber)} style={{
-          padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: D.white,
+          padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff',
           fontSize: 13, fontWeight: 600, cursor: 'pointer',
         }}>Reply</button>
       </div>
@@ -324,14 +325,15 @@ function ConversationView({ thread, messages, onReply, onBack }) {
             <div key={m.id} style={{ display: 'flex', justifyContent: isOutbound ? 'flex-end' : 'flex-start' }}>
               <div style={{
                 maxWidth: '75%', padding: '10px 14px', borderRadius: 12,
-                background: isOutbound ? D.teal + '22' : D.card,
-                border: `1px solid ${isOutbound ? D.teal + '44' : D.border}`,
+                background: isOutbound ? D.teal : '#F1F5F9',
+                border: `1px solid ${isOutbound ? D.teal : D.border}`,
+                color: isOutbound ? '#fff' : undefined,
                 borderBottomRightRadius: isOutbound ? 4 : 12,
                 borderBottomLeftRadius: isOutbound ? 12 : 4,
               }}>
-                <div style={{ fontSize: 13, color: D.text, lineHeight: 1.5, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>{m.body}</div>
+                <div style={{ fontSize: 13, color: isOutbound ? '#fff' : D.text, lineHeight: 1.5, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>{m.body}</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, justifyContent: isOutbound ? 'flex-end' : 'flex-start' }}>
-                  <span style={{ fontSize: 10, color: D.muted }}>{formatTimestamp(m.createdAt)}</span>
+                  <span style={{ fontSize: 10, color: isOutbound ? 'rgba(255,255,255,0.7)' : D.muted }}>{formatTimestamp(m.createdAt)}</span>
                   {m.messageType && <TypeBadge type={m.messageType} />}
                   <StatusBadge status={m.status} />
                 </div>
@@ -444,7 +446,7 @@ function CallLogTab() {
       {/* Stats */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         {[
-          { label: 'Total', value: calls.length, color: D.white, filter: 'all' },
+          { label: 'Total', value: calls.length, color: D.heading, filter: 'all' },
           { label: 'Answered', value: answered, color: D.green, filter: 'answered' },
           { label: 'AI Agent', value: aiHandled, color: D.teal, filter: 'ai_agent' },
           { label: 'Voicemail', value: voicemail, color: D.amber, filter: 'voicemail' },
@@ -487,7 +489,7 @@ function CallLogTab() {
               onChange={e => setCallFrom(e.target.value)}
               style={{
                 width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-                color: D.white, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box',
+                color: D.heading, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box',
                 WebkitAppearance: 'none', appearance: 'none',
                 backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
                 backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center', paddingRight: 32,
@@ -529,7 +531,7 @@ function CallLogTab() {
               }}
               style={{
                 width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-                color: D.white, fontSize: 14, fontFamily: callToSearch ? "'DM Sans', sans-serif" : "'JetBrains Mono', monospace", outline: 'none', boxSizing: 'border-box',
+                color: D.heading, fontSize: 14, fontFamily: callToSearch ? "'DM Sans', sans-serif" : "'JetBrains Mono', monospace", outline: 'none', boxSizing: 'border-box',
               }}
             />
             {callToResults.length > 0 && (
@@ -541,7 +543,7 @@ function CallLogTab() {
                     setCallToResults([]);
                   }} style={{
                     padding: '8px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`,
-                    fontSize: 13, color: D.white,
+                    fontSize: 13, color: D.heading,
                   }}>
                     <strong>{c.firstName} {c.lastName}</strong>
                     <span style={{ color: D.muted, marginLeft: 8 }}>{c.phone || 'no phone'}</span>
@@ -557,7 +559,7 @@ function CallLogTab() {
           disabled={calling || !callTo.trim()}
           style={{
             padding: '10px 24px', background: calling ? D.muted : D.green, border: 'none', borderRadius: 8,
-            color: D.white, fontSize: 14, fontWeight: 600, cursor: calling ? 'not-allowed' : 'pointer',
+            color: D.heading, fontSize: 14, fontWeight: 600, cursor: calling ? 'not-allowed' : 'pointer',
             fontFamily: 'DM Sans, sans-serif', opacity: !callTo.trim() ? 0.5 : 1,
           }}
         >
@@ -604,7 +606,7 @@ function CallLogTab() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <span style={{ fontSize: 16, width: 20, textAlign: 'center', color: c.direction === 'inbound' ? D.teal : D.green }}>{c.direction === 'inbound' ? '↓' : '↑'}</span>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
                         {c.first_name ? `${c.first_name} ${c.last_name || ''}` : c.from_phone || 'Unknown'}
                         <span style={{ fontSize: 11, color: D.muted, fontWeight: 400, marginLeft: 8 }}>{c.direction === 'inbound' ? 'Inbound' : 'Outbound'}</span>
                       </div>
@@ -639,7 +641,7 @@ function CallLogTab() {
                     {/* Missed call — Call Back button */}
                     {isMissed && c.from_phone && (
                       <button onClick={() => handleCallBack(c.from_phone)} style={{
-                        padding: '4px 12px', borderRadius: 6, border: 'none', background: D.red, color: D.white,
+                        padding: '4px 12px', borderRadius: 6, border: 'none', background: D.red, color: '#fff',
                         fontSize: 11, fontWeight: 600, cursor: 'pointer',
                       }}>Call Back</button>
                     )}
@@ -732,7 +734,7 @@ function CSRCoachTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       {/* Team Overview */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Team Overview (Last 30 Days)</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Team Overview (Last 30 Days)</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -771,9 +773,9 @@ function CSRCoachTab() {
       {/* Weekly Team Focus */}
       {weeklyRec && weeklyRec.recommendation && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 12 }}>{"📊"} This Week's Team Focus</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 12 }}>{"📊"} This Week's Team Focus</div>
           <div style={{ padding: 16, background: D.bg, borderRadius: 10, marginBottom: 12, borderLeft: `3px solid ${D.teal}` }}>
-            <div style={{ fontSize: 14, color: D.white, lineHeight: 1.6, marginBottom: 8 }}>{"🎯"} {weeklyRec.recommendation}</div>
+            <div style={{ fontSize: 14, color: D.heading, lineHeight: 1.6, marginBottom: 8 }}>{"🎯"} {weeklyRec.recommendation}</div>
             {weeklyRec.dataPoint && <div style={{ fontSize: 12, color: D.muted, marginBottom: 4 }}>{weeklyRec.dataPoint}</div>}
             {weeklyRec.estimatedImpact && <div style={{ fontSize: 12, color: D.green }}>{weeklyRec.estimatedImpact}</div>}
           </div>
@@ -787,7 +789,7 @@ function CSRCoachTab() {
       {/* Lead Quality vs CSR Performance */}
       {leadQuality && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 12 }}>Lead Quality vs CSR Performance</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Lead Quality vs CSR Performance</div>
           <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>Lost calls breakdown (last 30 days):</div>
           {(leadQuality.lossReasons || []).map((r, i) => {
             const reasonLabels = { bad_lead: 'Bad leads (CSR couldn\'t save)', csr_missed_script: 'CSR missed script', pricing: 'Price objection unhandled', no_availability: 'No availability', customer_shopping: 'Customer shopping', after_hours: 'After hours', no_answer: 'No answer' };
@@ -813,7 +815,7 @@ function CSRCoachTab() {
       {/* Follow-Up Tasks */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Follow-Up Tasks</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Follow-Up Tasks</div>
           <div style={{ fontSize: 12, color: D.muted }}>
             Pending: {tasks?.pending || 0} | Overdue: <span style={{ color: tasks?.overdue > 0 ? D.red : D.muted }}>{tasks?.overdue || 0}</span>
           </div>
@@ -825,7 +827,7 @@ function CSRCoachTab() {
           return (
             <div key={t.id} style={{ padding: '12px 14px', background: D.bg, borderRadius: 8, marginBottom: 8, borderLeft: `3px solid ${isOverdue ? D.red : D.amber}` }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
                   {isOverdue ? '🔴 OVERDUE' : '🟡 DUE'}: {t.assigned_to} — {t.task_type?.replace(/_/g, ' ')}
                   {t.first_name && ` ${t.first_name} ${t.last_name || ''}`}
                 </div>
@@ -833,7 +835,7 @@ function CSRCoachTab() {
               </div>
               <div style={{ fontSize: 12, color: D.text, marginBottom: 8, lineHeight: 1.5 }}>{t.recommended_action}</div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => handleTaskUpdate(t.id, 'completed')} style={{ padding: '4px 10px', borderRadius: 4, border: 'none', background: D.green, color: D.white, fontSize: 11, cursor: 'pointer' }}>Mark Done</button>
+                <button onClick={() => handleTaskUpdate(t.id, 'completed')} style={{ padding: '4px 10px', borderRadius: 4, border: 'none', background: D.green, color: '#fff', fontSize: 11, cursor: 'pointer' }}>Mark Done</button>
                 <button onClick={() => handleTaskUpdate(t.id, 'in_progress')} style={{ padding: '4px 10px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 11, cursor: 'pointer' }}>Reassign</button>
               </div>
             </div>
@@ -844,13 +846,13 @@ function CSRCoachTab() {
       {/* Bonus Leaderboard */}
       {leaderboard && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 4 }}>{"🏆"} Bonus Leaderboard</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>{"🏆"} Bonus Leaderboard</div>
           <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>Period: {leaderboard.periodLabel}</div>
           {(leaderboard.categories || []).map((cat, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: D.bg, borderRadius: 8, marginBottom: 6 }}>
               <span style={{ fontSize: 20 }}>{"🏆"}</span>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{cat.category}: {cat.winner || 'TBD'}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{cat.category}: {cat.winner || 'TBD'}</div>
                 <div style={{ fontSize: 12, color: D.teal }}>{cat.value}</div>
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: D.green, fontFamily: "'JetBrains Mono', monospace" }}>${cat.bonus}</div>
@@ -869,13 +871,13 @@ function CSRCoachTab() {
 // Health status helper: determines dot color and label based on last inbound date
 function getHealthStatus(lastInboundDate, isUnassigned) {
   if (isUnassigned) return { color: '#6b7280', label: 'Unassigned', key: 'gray' };
-  if (!lastInboundDate) return { color: '#ef4444', label: 'Dormant (no inbound)', key: 'red' };
+  if (!lastInboundDate) return { color: '#C0392B', label: 'Dormant (no inbound)', key: 'red' };
   const now = new Date();
   const last = new Date(lastInboundDate);
   const daysSince = Math.floor((now - last) / (1000 * 60 * 60 * 24));
   if (daysSince <= 30) return { color: '#10b981', label: `Active (${daysSince}d ago)`, key: 'green' };
   if (daysSince <= 60) return { color: '#f59e0b', label: `Low activity (${daysSince}d ago)`, key: 'amber' };
-  return { color: '#ef4444', label: `Dormant (${daysSince}d ago)`, key: 'red' };
+  return { color: '#C0392B', label: `Dormant (${daysSince}d ago)`, key: 'red' };
 }
 
 // Channel type metadata for expanded analytics
@@ -927,14 +929,14 @@ function SmsTemplatesTab() {
   const categories = [...new Set(templates.map(t => t.category))];
   const filtered = filter === 'all' ? templates : templates.filter(t => t.category === filter);
 
-  const catColors = { service: '#0ea5e9', billing: '#10b981', estimates: '#f59e0b', reviews: '#a855f7', referrals: '#3b82f6', retention: '#ef4444', onboarding: '#22c55e', internal: '#64748b', custom: '#94a3b8' };
+  const catColors = { service: '#0A7EC2', billing: '#16A34A', estimates: '#F0A500', reviews: '#7C3AED', referrals: '#0A7EC2', retention: '#C0392B', onboarding: '#16A34A', internal: '#64748B', custom: '#94a3b8' };
 
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading templates...</div>;
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.white }}>{filtered.length} SMS Templates</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{filtered.length} SMS Templates</div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <button onClick={() => setFilter('all')} style={{ padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer', background: filter === 'all' ? D.teal : D.card, color: filter === 'all' ? D.white : D.muted }}>All</button>
           {categories.map(c => (
@@ -947,7 +949,7 @@ function SmsTemplatesTab() {
         <div key={t.id} style={{ background: D.card, borderRadius: 10, padding: '14px 16px', border: `1px solid ${D.border}`, marginBottom: 8, borderLeft: `3px solid ${catColors[t.category] || D.muted}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
             <div>
-              <span style={{ fontSize: 13, fontWeight: 600, color: D.white }}>{t.name}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{t.name}</span>
               <span style={{ fontSize: 10, marginLeft: 8, padding: '2px 6px', borderRadius: 4, background: (catColors[t.category] || D.muted) + '22', color: catColors[t.category] || D.muted, textTransform: 'capitalize' }}>{t.category}</span>
               {t.is_internal && <span style={{ fontSize: 10, marginLeft: 6, padding: '2px 6px', borderRadius: 4, background: '#64748b22', color: '#64748b' }}>Internal</span>}
             </div>
@@ -964,7 +966,7 @@ function SmsTemplatesTab() {
               </button>
               {editing === t.id ? (
                 <>
-                  <button onClick={() => handleSave(t.id)} disabled={saving} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.green, color: D.white }}>{saving ? '...' : 'Save'}</button>
+                  <button onClick={() => handleSave(t.id)} disabled={saving} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.green, color: '#fff' }}>{saving ? '...' : 'Save'}</button>
                   <button onClick={() => setEditing(null)} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: 'transparent', color: D.muted, border: `1px solid ${D.border}` }}>Cancel</button>
                 </>
               ) : (
@@ -973,7 +975,7 @@ function SmsTemplatesTab() {
             </div>
           </div>
           {editing === t.id ? (
-            <textarea value={editBody} onChange={e => setEditBody(e.target.value)} rows={4} style={{ width: '100%', padding: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none', boxSizing: 'border-box' }} />
+            <textarea value={editBody} onChange={e => setEditBody(e.target.value)} rows={4} style={{ width: '100%', padding: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.heading, fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none', boxSizing: 'border-box' }} />
           ) : (
             <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{t.body}</div>
           )}
@@ -1055,9 +1057,9 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
         padding: '14px 20px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
       }}>
         <span style={{ fontSize: 13, color: D.text, fontFamily: 'DM Sans, sans-serif' }}>
-          <span style={{ fontWeight: 700, color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>{totalNumbers}</span> numbers
+          <span style={{ fontWeight: 700, color: D.heading, fontFamily: "'JetBrains Mono', monospace" }}>{totalNumbers}</span> numbers
           <span style={{ color: D.muted, margin: '0 6px' }}>{'\u00B7'}</span>
-          <span style={{ fontWeight: 700, color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>${estMonthlyCost.toFixed(2)}</span> est. monthly cost
+          <span style={{ fontWeight: 700, color: D.heading, fontFamily: "'JetBrains Mono', monospace" }}>${estMonthlyCost.toFixed(2)}</span> est. monthly cost
           {topLabel && <>
             <span style={{ color: D.muted, margin: '0 6px' }}>{'\u00B7'}</span>
             Top: <span style={{ fontWeight: 600, color: D.teal }}>{topLabel}</span> ({topCount} msgs)
@@ -1106,7 +1108,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
                       title={health.label}
                       style={{ width: 8, height: 8, borderRadius: '50%', background: health.color, flexShrink: 0 }}
                     />
-                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.white }}>{n.formatted}</span>
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 600, color: D.heading }}>{n.formatted}</span>
                     {/* SMS/Voice capability indicators */}
                     <span style={{ marginLeft: 'auto', display: 'flex', gap: 4, flexShrink: 0 }}>
                       <span title={smsEnabled ? 'SMS enabled' : 'SMS disabled'} style={{
@@ -1482,7 +1484,7 @@ export default function CommunicationsPage() {
       {/* --- Header --- */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexWrap: 'wrap', gap: 16 }}>
         <div>
-          <h1 style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 24, fontWeight: 700, color: D.white, margin: 0 }}>Communications</h1>
+          <h1 style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 24, fontWeight: 700, color: D.heading, margin: 0 }}>Communications</h1>
         </div>
       </div>
 
@@ -1491,7 +1493,7 @@ export default function CommunicationsPage() {
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
-        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Calls' }, { key: 'templates', label: 'SMS Templates' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }].map(t => (
+        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Calls' }, { key: 'templates', label: 'SMS Templates' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }, { key: 'notifications', label: 'Notifications' }].map(t => (
           <button key={t.key} onClick={() => { setCommsTab(t.key); if (t.key === 'sms') { setSmsView('threads'); setActiveThread(null); } }} style={{
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: commsTab === t.key ? D.teal : 'transparent',
@@ -1501,7 +1503,7 @@ export default function CommunicationsPage() {
         ))}
       </div>
 
-      {commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'templates' ? (
+      {commsTab === 'notifications' ? <PushSettings /> : commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'templates' ? (
         <SmsTemplatesTab />
       ) : <>
 
@@ -1529,7 +1531,7 @@ export default function CommunicationsPage() {
             onChange={e => setFromNumber(e.target.value)}
             style={{
               width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-              color: D.white, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', marginBottom: 12, boxSizing: 'border-box',
+              color: D.heading, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', marginBottom: 12, boxSizing: 'border-box',
               WebkitAppearance: 'none', appearance: 'none',
               backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
               backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center', paddingRight: 32,
@@ -1576,7 +1578,7 @@ export default function CommunicationsPage() {
             }}
             style={{
               width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-              color: D.white, fontSize: 14, fontFamily: 'DM Sans, sans-serif', outline: 'none', marginBottom: toResults.length ? 0 : 12, boxSizing: 'border-box',
+              color: D.heading, fontSize: 14, fontFamily: 'DM Sans, sans-serif', outline: 'none', marginBottom: toResults.length ? 0 : 12, boxSizing: 'border-box',
             }}
           />
           {toResults.length > 0 && (
@@ -1588,7 +1590,7 @@ export default function CommunicationsPage() {
                   setToResults([]);
                 }} style={{
                   padding: '8px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`,
-                  fontSize: 13, color: D.white,
+                  fontSize: 13, color: D.heading,
                 }}>
                   <strong>{c.firstName} {c.lastName}</strong>
                   <span style={{ color: D.muted, marginLeft: 8 }}>{c.phone || 'no phone'}</span>
@@ -1618,7 +1620,7 @@ export default function CommunicationsPage() {
             rows={3}
             style={{
               width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-              color: D.white, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', resize: 'vertical', marginBottom: 4, boxSizing: 'border-box',
+              color: D.heading, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', resize: 'vertical', marginBottom: 4, boxSizing: 'border-box',
             }}
           />
           <div style={{ textAlign: 'right', fontSize: 11, fontFamily: 'JetBrains Mono, monospace', color: D.muted, marginBottom: 12 }}>
@@ -1647,7 +1649,7 @@ export default function CommunicationsPage() {
             disabled={sending || !toNumber.trim() || !msgBody.trim()}
             style={{
               flex: 1, padding: '10px 0', background: sending ? D.muted : D.green, border: 'none', borderRadius: 8,
-              color: D.white, fontSize: 14, fontWeight: 600, cursor: sending ? 'not-allowed' : 'pointer', fontFamily: 'DM Sans, sans-serif',
+              color: D.heading, fontSize: 14, fontWeight: 600, cursor: sending ? 'not-allowed' : 'pointer', fontFamily: 'DM Sans, sans-serif',
               opacity: (!toNumber.trim() || !msgBody.trim()) ? 0.5 : 1,
             }}
           >
@@ -1704,7 +1706,7 @@ export default function CommunicationsPage() {
             Unanswered
             {unansweredCount > 0 && (
               <span style={{
-                background: D.red, color: D.white, fontSize: 10, fontWeight: 700,
+                background: D.red, color: '#fff', fontSize: 10, fontWeight: 700,
                 padding: '1px 7px', borderRadius: 10, minWidth: 18, textAlign: 'center',
               }}>{unansweredCount}</span>
             )}
@@ -1765,7 +1767,7 @@ export default function CommunicationsPage() {
 
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
-                        <span style={{ fontSize: 14, fontWeight: 600, color: D.white }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
                           {t.customerName || t.contactPhone}
                         </span>
                         <span style={{ fontSize: 10, color: D.muted, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>

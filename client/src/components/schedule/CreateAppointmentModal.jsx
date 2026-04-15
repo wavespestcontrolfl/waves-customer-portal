@@ -2,10 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155', input: '#0f172a',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444',
-  blue: '#3b82f6', purple: '#a855f7', gray: '#64748b',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
+  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', input: '#FFFFFF',
+  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B',
+  blue: '#3b82f6', purple: '#7C3AED', gray: '#64748b',
+  text: '#334155', muted: '#64748B', white: '#fff',
 };
 
 function adminFetch(path, options = {}) {
@@ -19,7 +19,7 @@ function adminFetch(path, options = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0ea5e9' };
+const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0A7EC2' };
 
 // All services default 1hr / $0 unless noted. WaveGuard Membership = 0hr.
 const S = (name, dur = 60, pMin = 0, pMax = 0) => ({ name, duration: dur, priceMin: pMin, priceMax: pMax });
@@ -91,7 +91,7 @@ const FREQUENCIES = [
   { value: 'quarterly', label: 'Quarterly' }, { value: 'triannual', label: 'Every 4 Months' },
 ];
 
-const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 14, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
+const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid #CBD5E1`, borderRadius: 8, color: '#0F172A', fontSize: 14, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
 const labelStyle = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 12, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 
@@ -263,7 +263,7 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
 
   const overlayStyle = {
     position: 'fixed', inset: 0, zIndex: 1000,
-    background: isMobile ? D.bg : 'rgba(0,0,0,0.6)',
+    background: isMobile ? D.bg : 'rgba(0,0,0,0.3)',
     display: 'flex', alignItems: isMobile ? 'stretch' : 'center', justifyContent: 'center',
     overflow: 'auto', padding: isMobile ? 0 : 20,
   };
@@ -280,7 +280,7 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
       <div style={modalStyle}>
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: D.white }}>New Appointment</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#0F172A' }}>New Appointment</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
         </div>
 
@@ -289,14 +289,14 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
 
         {/* Section 1: Customer */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: D.white, marginBottom: 10 }}>Customer</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Customer</div>
           {!selectedCustomer ? (
             <div style={{ position: 'relative' }}>
               <input ref={searchRef} type="text" value={customerSearch} onChange={(e) => doSearch(e.target.value)} placeholder="Search by name or phone..." style={inputStyle} />
               {customerResults.length > 0 && (
                 <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', zIndex: 20 }}>
                   {customerResults.map(c => (
-                    <div key={c.id} onClick={() => selectCustomer(c)} style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: D.white, minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div key={c.id} onClick={() => selectCustomer(c)} style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#0F172A', minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
                       <strong>{c.firstName} {c.lastName}</strong>
                       <span style={{ color: D.muted, fontSize: 12 }}>{c.phone || ''}</span>
                       {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
@@ -306,7 +306,7 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
               )}
               <button onClick={() => setShowQuickAdd(!showQuickAdd)} style={{ background: 'none', border: 'none', color: D.teal, fontSize: 12, cursor: 'pointer', marginTop: 6, padding: '4px 0', minHeight: 44, display: 'inline-flex', alignItems: 'center' }}>+ New Customer</button>
               {showQuickAdd && (
-                <div style={{ marginTop: 8, padding: 12, background: D.input, borderRadius: 10, border: `1px solid ${D.border}` }}>
+                <div style={{ marginTop: 8, padding: 12, background: '#F8FAFC', borderRadius: 10, border: `1px solid #CBD5E1` }}>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
                     <div><label style={labelStyle}>First Name</label><input value={quickAdd.firstName} onChange={e => setQuickAdd(q => ({ ...q, firstName: e.target.value }))} style={inputStyle} /></div>
                     <div><label style={labelStyle}>Last Name</label><input value={quickAdd.lastName} onChange={e => setQuickAdd(q => ({ ...q, lastName: e.target.value }))} style={inputStyle} /></div>
@@ -322,9 +322,9 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
               )}
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: D.input, borderRadius: 10, padding: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#F8FAFC', borderRadius: 10, padding: 12, border: `1px solid #CBD5E1` }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, color: D.white, fontSize: 14 }}>{selectedCustomer.firstName} {selectedCustomer.lastName}</div>
+                <div style={{ fontWeight: 600, color: '#0F172A', fontSize: 14 }}>{selectedCustomer.firstName} {selectedCustomer.lastName}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{selectedCustomer.address || `${selectedCustomer.city || ''}`}</div>
                 {selectedCustomer.phone && <div style={{ fontSize: 12, color: D.muted }}>{selectedCustomer.phone}</div>}
               </div>
@@ -336,7 +336,7 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
 
         {/* Section 2: Service */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: D.white, marginBottom: 10 }}>Service</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Service</div>
           {!selectedService ? (
             <div>
               {[...serviceGroups]
@@ -348,7 +348,7 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
                   <div key={gi} style={{ marginBottom: 6, border: `1px solid ${D.border}`, borderRadius: 8, overflow: 'hidden' }}>
                     <button
                       onClick={() => setExpandedCategory(isOpen ? null : group.category)}
-                      style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', background: isOpen ? `${D.teal}11` : D.input, border: 'none', color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', minHeight: 44 }}
+                      style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', background: isOpen ? `${D.teal}11` : D.input, border: 'none', color: '#0F172A', fontSize: 13, fontWeight: 600, cursor: 'pointer', minHeight: 44 }}
                     >
                       <span>{CATEGORY_EMOJI[group.category] || '📦'} {CATEGORY_LABELS[group.category] || group.category} <span style={{ color: D.muted, fontWeight: 400, marginLeft: 6 }}>({group.items.length})</span></span>
                       <span style={{ color: D.muted, fontSize: 12 }}>{isOpen ? '▾' : '▸'}</span>
@@ -367,9 +367,9 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
               })}
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: D.input, borderRadius: 10, padding: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#F8FAFC', borderRadius: 10, padding: 12, border: `1px solid #CBD5E1` }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, color: D.white, fontSize: 14 }}>{selectedService.name}</div>
+                <div style={{ fontWeight: 600, color: '#0F172A', fontSize: 14 }}>{selectedService.name}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
                   {selectedService.duration || selectedService.default_duration_minutes || 60} min
                   {(selectedService.priceMin || selectedService.base_price) ? ` — $${selectedService.priceMin || selectedService.base_price}${selectedService.priceMax && selectedService.priceMax !== selectedService.priceMin ? `–$${selectedService.priceMax}` : ''}` : ''}
@@ -388,7 +388,7 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
 
         {/* Section 3: Date, Time & Tech */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: D.white, marginBottom: 10 }}>Date, Time & Tech</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Date, Time & Tech</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
             <div>
               <label style={labelStyle}>Date</label>
@@ -453,14 +453,14 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
 
         {/* Section 4: Notes & Confirm */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: D.white, marginBottom: 10 }}>Notes & Confirm</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Notes & Confirm</div>
           <div style={{ marginBottom: 10 }}>
             <label style={labelStyle}>Customer Notes</label>
             <textarea value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} placeholder="Notes visible to customer..." style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
           <div style={{ marginBottom: 10 }}>
             <label style={{ ...labelStyle, color: D.amber }}>Internal Notes (Admin only)</label>
-            <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} placeholder="Internal notes..." style={{ ...inputStyle, resize: 'vertical', minHeight: 60, borderColor: `${D.amber}33` }} />
+            <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} placeholder="Internal notes..." style={{ ...inputStyle, resize: 'vertical', minHeight: 60, borderColor: `${D.amber}55` }} />
           </div>
           <div style={{ marginBottom: 12 }}>
             <label style={labelStyle}>Price</label>

@@ -3,7 +3,7 @@ import RevenueIntelligenceBar from '../../components/admin/RevenueIntelligenceBa
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path) {
@@ -70,7 +70,7 @@ function AdAttributionSection({ period }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24, marginBottom: 28 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Ad Attribution</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Ad Attribution</div>
         {attr.blendedROAS && <div style={{ fontSize: 13, color: D.muted }}>Blended ROAS: <span style={{ color: D.teal, fontFamily: MONO, fontWeight: 700 }}>{attr.blendedROAS}x</span></div>}
       </div>
       <div style={{ overflowX: 'auto' }}>
@@ -149,7 +149,7 @@ export default function RevenuePage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: D.white }}>Revenue</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Revenue</div>
           {data.period?.label && <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>{data.period.label}</div>}
         </div>
         <div style={{ display: 'flex', gap: 6, background: D.card, borderRadius: 8, padding: 4, border: `1px solid ${D.border}` }}>
@@ -174,10 +174,10 @@ export default function RevenuePage() {
       {/* Revenue Chart */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24, marginBottom: 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white }}>Daily Revenue</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>Daily Revenue</div>
           <div style={{ display: 'flex', gap: 20, fontSize: 13 }}>
             <span style={{ color: D.muted }}>MRR: <span style={{ color: D.teal, fontFamily: MONO }}>{fmt(t.mrr)}</span></span>
-            <span style={{ color: D.muted }}>Services: <span style={{ color: D.white, fontFamily: MONO }}>{t.totalServices}</span></span>
+            <span style={{ color: D.muted }}>Services: <span style={{ color: D.heading, fontFamily: MONO }}>{t.totalServices}</span></span>
           </div>
         </div>
         {chartData.length > 0 ? (
@@ -200,7 +200,7 @@ export default function RevenuePage() {
 
       {/* Service Line Table */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24, marginBottom: 28 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Service Line Breakdown</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Service Line Breakdown</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -240,7 +240,7 @@ export default function RevenuePage() {
 
       {/* Tier Analysis Table */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24, marginBottom: 28 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Tier Analysis</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Tier Analysis</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -269,7 +269,7 @@ export default function RevenuePage() {
 
       {/* Technician Performance Table */}
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24, marginBottom: 28 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Technician Performance</div>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Technician Performance</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -301,7 +301,7 @@ export default function RevenuePage() {
       {/* Alerts */}
       {data.alerts && data.alerts.length > 0 && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.white, marginBottom: 16 }}>Alerts</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Alerts</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {data.alerts.map((a, i) => {
               const sevColor = a.severity === 'critical' ? D.red : a.severity === 'warning' ? D.amber : D.muted;
