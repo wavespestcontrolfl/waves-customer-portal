@@ -58,6 +58,7 @@ const RatePage = lazy(() => import('./pages/RatePage'));
 const AdminSocialMediaPage = lazy(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazy(() => import('./pages/admin/TaxPage'));
 const AdminPricingPage = lazy(() => import('./pages/admin/PricingStrategyPage'));
+const AdminToolHealthPage = lazy(() => import('./pages/admin/ToolHealthPage'));
 const AdminLawnAssessmentPage = lazy(() => import('./pages/admin/LawnAssessmentPanel'));
 const AdminEquipmentPage = lazy(() => import('./pages/admin/EquipmentPage'));
 const AdminKnowledgeBasePage = lazy(() => import('./pages/admin/KnowledgeBasePage'));
@@ -172,6 +173,7 @@ export default function App() {
             <Route path="email" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading email...</div>}><AdminEmailPage /></Suspense>} />
             <Route path="banking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading banking...</div>}><AdminBankingPage /></Suspense>} />
             <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingLogicPage /></Suspense>} />
+            <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
           </Route>
           <Route
             path="/*"

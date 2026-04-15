@@ -47,6 +47,7 @@ const NAV_SECTIONS = [
   ]},
   { section: 'System', items: [
     { path: '/admin/badges', icon: '🏅', label: 'Badges' },
+    { path: '/admin/tool-health', icon: '🩺', label: 'Tool Health' },
     { path: '/admin/settings', icon: '⚙️', label: 'Settings' },
   ]},
 ];

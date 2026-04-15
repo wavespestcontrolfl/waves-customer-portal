@@ -89,6 +89,14 @@ Save a detailed report to the dashboard after sending the SMS.`,
       input_schema: { type: 'object', properties: {} },
     },
 
+    // ── AI Tool Health ───────────────────────────────────────────
+    {
+      type: 'custom',
+      name: 'get_tool_health_snapshot',
+      description: `Get a weekly snapshot of AI tool reliability across the admin Intelligence Bar, voice agent, and lead response agent. Returns total calls, success rate, top failing tools (with counts and sample error messages), circuit breaker trips, and per-agent status. Use this in the weekly briefing — either "All 104 tools operating normally" or call out specific degraded tools so Adam knows what broke and when.`,
+      input_schema: { type: 'object', properties: {} },
+    },
+
     // ── Alerts ───────────────────────────────────────────────────
     {
       type: 'custom',

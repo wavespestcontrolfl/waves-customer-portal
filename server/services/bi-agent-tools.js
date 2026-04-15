@@ -283,6 +283,60 @@ async function executeBITool(toolName, input) {
       return { anomalies, total: anomalies.length };
     }
 
+    case 'get_tool_health_snapshot': {
+      const since = new Date(Date.now() - 7 * 86400000);
+      try {
+        const [totals, bySource, failingTools] = await Promise.all([
+          db('tool_health_events').where('created_at', '>=', since).select(
+            db.raw('COUNT(*)::int as total'),
+            db.raw('SUM(CASE WHEN success THEN 1 ELSE 0 END)::int as succeeded'),
+            db.raw('SUM(CASE WHEN NOT success THEN 1 ELSE 0 END)::int as failed'),
+            db.raw('SUM(CASE WHEN circuit_open THEN 1 ELSE 0 END)::int as circuit_trips'),
+            db.raw('COUNT(DISTINCT tool_name)::int as unique_tools'),
+          ).first(),
+          db('tool_health_events').where('created_at', '>=', since)
+            .select('source')
+            .count('* as total')
+            .sum(db.raw('CASE WHEN NOT success THEN 1 ELSE 0 END as failed'))
+            .groupBy('source'),
+          db('tool_health_events').where('created_at', '>=', since).where('success', false)
+            .select('tool_name', 'context', 'source')
+            .count('* as failures')
+            .max('error_message as sample_error')
+            .groupBy('tool_name', 'context', 'source')
+            .orderBy('failures', 'desc')
+            .limit(8),
+        ]);
+
+        const total = parseInt(totals?.total || 0);
+        const failed = parseInt(totals?.failed || 0);
+        return {
+          windowDays: 7,
+          totalCalls: total,
+          succeeded: parseInt(totals?.succeeded || 0),
+          failed,
+          successRate: total > 0 ? Math.round((1 - failed / total) * 100) : 100,
+          circuitTrips: parseInt(totals?.circuit_trips || 0),
+          uniqueToolsUsed: parseInt(totals?.unique_tools || 0),
+          byAgent: bySource.map(r => ({
+            source: r.source,
+            total: parseInt(r.total),
+            failed: parseInt(r.failed || 0),
+          })),
+          topFailingTools: failingTools.map(r => ({
+            toolName: r.tool_name,
+            context: r.context,
+            source: r.source,
+            failures: parseInt(r.failures),
+            sampleError: r.sample_error,
+          })),
+          allHealthy: failed === 0 && parseInt(totals?.circuit_trips || 0) === 0,
+        };
+      } catch (err) {
+        return { error: `Tool health query failed: ${err.message}` };
+      }
+    }
+
     case 'send_briefing_sms': {
       const TwilioService = require('./twilio');
       if (!process.env.ADAM_PHONE) return { error: 'ADAM_PHONE not set' };
