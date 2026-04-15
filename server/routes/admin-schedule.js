@@ -519,6 +519,7 @@ router.post('/', async (req, res, next) => {
     // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
     const plannedCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 4)) : 0;
     if (isRecurring && recurringPattern && plannedCount > 1) {
+     try {
       const cols = await db('scheduled_services').columnInfo();
       const rOpts = { nth: recurringNth, weekday: recurringWeekday, intervalDays: recurringIntervalDays };
       for (let i = 1; i < plannedCount; i++) {
@@ -542,6 +543,7 @@ router.post('/', async (req, res, next) => {
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = !!createInvoice;
         await db('scheduled_services').insert(childData);
       }
+     } catch (e) { logger.error(`[schedule] Recurring spawn failed (non-blocking): ${e.message}`); }
     }
 
     // Register for appointment reminders (handles confirmation SMS for admin_manual)

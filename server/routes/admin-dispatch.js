@@ -210,7 +210,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const invoiceAmount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
       ? Number(svc.estimated_price)
       : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
-    const shouldInvoice = (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
+    // Skip invoice creation if a paid invoice already exists for this service record
+    // (covers the "customer paid prior to service report" case)
+    let alreadyPaid = false;
+    try {
+      const existingPaid = await db('invoices')
+        .where({ service_record_id: record.id, status: 'paid' })
+        .first();
+      if (existingPaid) alreadyPaid = true;
+    } catch (e) { /* non-blocking */ }
+    const shouldInvoice = !alreadyPaid && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     const portalUrl = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
 
     let invoiceCreated = false;
