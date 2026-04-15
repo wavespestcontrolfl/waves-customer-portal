@@ -58,7 +58,7 @@ export default function EmailAutomationsPanel() {
         <div>
           <div style={{ fontSize: 20, fontWeight: 700, color: D.white }}>Email Automations</div>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-            Beehiiv + SMS — manual triggers (auto-triggers coming with Square integration)
+            Beehiiv + SMS — manual triggers
             {beehiivConfigured
               ? <span style={{ ...sBadge(`${D.green}22`, D.green), marginLeft: 8 }}>Beehiiv Connected</span>
               : <span style={{ ...sBadge(`${D.amber}22`, D.amber), marginLeft: 8 }}>Beehiiv Not Configured</span>

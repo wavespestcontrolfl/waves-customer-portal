@@ -133,7 +133,7 @@ export default function SettingsPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {[
             { name: 'Twilio', icon: '📱', status: gates.twilioSms, keys: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN'], desc: 'SMS notifications, OTP login, voice calls' },
-            { name: 'Square', icon: '💳', status: gates.squarePayments, keys: ['SQUARE_ACCESS_TOKEN'], desc: 'Payment processing, invoicing' },
+            { name: 'Stripe', icon: '💳', status: true, keys: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'], desc: 'Payment processing, invoicing' },
             { name: 'Anthropic (Claude)', icon: '🤖', status: true, keys: ['ANTHROPIC_API_KEY'], desc: 'AI assistant, blog writer, CSR coach, voice agent' },
             { name: 'Google APIs', icon: '🔍', status: true, keys: ['GOOGLE_API_KEY'], desc: 'Maps, Search Console, PageSpeed, Places Autocomplete' },
             { name: 'DataForSEO', icon: '📊', status: gates.seoIntelligence, keys: ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD'], desc: 'Rank tracking, SERP analysis, backlink monitoring' },

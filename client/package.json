@@ -9,7 +9,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@square/web-payments-sdk-types": "^1.0.0",
     "date-fns": "^3.2.0",
     "lucide-react": "^0.303.0",
     "react": "^18.2.0",

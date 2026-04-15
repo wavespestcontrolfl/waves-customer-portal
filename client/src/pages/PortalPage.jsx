@@ -6733,7 +6733,7 @@ function ReferTab({ customer, onSwitchTab }) {
           { step: '1', text: 'Share your code or send an invite from above' },
           { step: '2', text: 'Your friend gets a text with your referral and $25 off' },
           { step: '3', text: 'When they sign up for any WaveGuard plan, you both get credited' },
-          { step: '4', text: '$25 auto-applied to your next monthly bill via Square' },
+          { step: '4', text: '$25 auto-applied to your next monthly bill' },
         ].map(s => (
           <div key={s.step} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
             <div style={{

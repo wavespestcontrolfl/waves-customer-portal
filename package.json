@@ -1,7 +1,7 @@
 {
   "name": "waves-customer-portal",
   "version": "1.0.0",
-  "description": "Customer portal for Waves Pest Control — Twilio SMS + Square Payments",
+  "description": "Customer portal for Waves Pest Control — Twilio SMS + Stripe Payments",
   "private": true,
   "workspaces": [
     "server",
