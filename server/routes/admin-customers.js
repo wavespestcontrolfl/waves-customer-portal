@@ -10,11 +10,6 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 // --- Static POST routes (must be registered before /:id handlers to avoid route shadowing) ---
 
-// POST /api/admin/customers/sync-square — DEPRECATED (Square removed)
-router.post('/sync-square', (req, res) => {
-  res.json({ message: 'Square sync disabled — migrated to Stripe', synced: 0 });
-});
-
 // POST /api/admin/customers/fix-tiers — Recalculate tiers from service count
 router.post('/fix-tiers', async (req, res, next) => {
   try {
@@ -214,11 +209,6 @@ router.get('/pipeline/view', async (req, res, next) => {
 
     res.json({ pipeline: result });
   } catch (err) { next(err); }
-});
-
-// POST /api/admin/customers/:id/sync-square — DEPRECATED (Square removed)
-router.post('/:id/sync-square', (req, res) => {
-  res.json({ message: 'Square sync disabled — migrated to Stripe', synced: 0 });
 });
 
 // GET /api/admin/customers/:id/timeline — unified customer timeline

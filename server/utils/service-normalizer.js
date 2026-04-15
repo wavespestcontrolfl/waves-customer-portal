@@ -1,12 +1,10 @@
 /**
- * Square Data Cleaner & Service Type Normalizer
+ * Service Type Normalizer & Legacy Notes Cleaner
  * server/utils/service-normalizer.js
  *
- * Fixes:
- * 1. "New customer — first visit" showing for existing customers
- * 2. Raw Square service names not mapped to Waves types
- * 3. Invalid Date from null/malformed date fields
- * 4. Square boilerplate text in appointment notes
+ * Normalizes raw service type labels to clean Waves service names,
+ * and strips legacy boilerplate from historical appointment notes that
+ * were imported from the prior Square Appointments system.
  */
 
 // ─── SERVICE TYPE NORMALIZATION ──────────────────────────────────

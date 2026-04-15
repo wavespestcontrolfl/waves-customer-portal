@@ -67,14 +67,11 @@ router.get('/', async (req, res, next) => {
         .where({ customer_id: s.customer_id, status: 'completed' })
         .orderBy('service_date', 'desc').first();
 
-      // BUG FIX #1: Compute isNewCustomer from actual service records, not Square notes
       const genuinelyNew = await isNewCustomer(db, s.customer_id);
 
-      // BUG FIX #2: Normalize raw Square service type to clean Waves label
       const normalizedType = normalizeServiceType(s.service_type);
       const category = detectServiceCategory(normalizedType);
 
-      // BUG FIX #4: Clean Square boilerplate from notes before adding to alerts
       const cleanedNotes = cleanSquareNotes(s.notes);
 
       const alerts = [];
@@ -495,8 +492,6 @@ router.post('/', async (req, res, next) => {
       const AppointmentTagger = require('../services/appointment-tagger');
       await AppointmentTagger.onServiceScheduled(svc.id);
     } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
-
-    // Square booking sync removed — migrated to Stripe
 
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
   } catch (err) { next(err); }
@@ -933,20 +928,7 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/schedule/sync-square — kept for backwards compat, redirects to sync-calendar
-router.post('/sync-square', async (req, res, next) => {
-  try {
-    const CalendarSync = require('../services/calendar-sync');
-    const days = parseInt(req.body.days) || 14;
-    const result = await CalendarSync.syncAll(days);
-    res.json(result);
-  } catch (err) {
-    logger.error(`[cal-sync] ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /api/admin/schedule/sync-calendar — unified sync from Square + Google Calendar
+// POST /api/admin/schedule/sync-calendar — unified sync from Google Calendar
 router.post('/sync-calendar', async (req, res, next) => {
   try {
     const CalendarSync = require('../services/calendar-sync');
@@ -1084,7 +1066,7 @@ router.post('/cleanup-duplicates', async (req, res, next) => {
   }
 });
 
-// POST /api/admin/schedule/fix-service-types — replace Square catalog IDs with "Service"
+// POST /api/admin/schedule/fix-service-types — replace legacy catalog IDs with "Service"
 router.post('/fix-service-types', async (req, res, next) => {
   try {
     const result = await db.raw(`
@@ -1093,7 +1075,7 @@ router.post('/fix-service-types', async (req, res, next) => {
       WHERE service_type ~ '^[A-Z0-9]{15,}$'
     `);
     const fixed = result.rowCount || 0;
-    logger.info(`[cleanup] Fixed ${fixed} Square ID service_types`);
+    logger.info(`[cleanup] Fixed ${fixed} legacy ID service_types`);
     res.json({ success: true, fixed });
   } catch (err) {
     logger.error(`[cleanup] fix-service-types failed: ${err.message}`);

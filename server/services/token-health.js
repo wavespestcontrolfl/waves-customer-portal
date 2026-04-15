@@ -8,7 +8,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const config = require('../config');
 
 const GBP_LOCATION_KEYS = ['LWR', 'PARRISH', 'SARASOTA', 'VENICE'];
 
@@ -311,7 +310,6 @@ const TokenHealthService = {
       case 'gbp_parrish': return checkGBP('PARRISH');
       case 'gbp_sarasota': return checkGBP('SARASOTA');
       case 'gbp_venice': return checkGBP('VENICE');
-      case 'square': return checkSquare();
       case 'bouncie': return checkBouncie();
       case 'beehiiv': return checkBeehiiv();
       case 'dataforseo': return checkDataForSEO();
@@ -336,7 +334,6 @@ const TokenHealthService = {
       results.push(await checkGBP(key));
     }
 
-    results.push(await checkSquare());
     results.push(await checkBouncie());
     results.push(await checkBeehiiv());
     results.push(await checkDataForSEO());

@@ -122,7 +122,7 @@ const AppointmentReminders = {
   /**
    * Register an appointment for reminders.
    * Sources: 'booking_new', 'admin_manual' => insert + send confirmation
-   *          'square_sync', 'gcal_sync'    => insert only (no confirmation)
+   *          'gcal_sync'                   => insert only (no confirmation)
    */
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source) {
     try {
@@ -189,7 +189,7 @@ const AppointmentReminders = {
             .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
         }
       } else {
-        // square_sync / gcal_sync — mark confirmation as "sent" (not applicable)
+        // gcal_sync — mark confirmation as "sent" (not applicable)
         await db('appointment_reminders')
           .where({ id: record.id })
           .update({ confirmation_sent: true, confirmation_sent_at: new Date() });

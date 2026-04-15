@@ -142,11 +142,6 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/dashboard/square-bookings — legacy endpoint, Square is phased out
-router.get('/square-bookings', (req, res) => {
-  res.json({ bookings: [], count: 0 });
-});
-
 // GET /api/admin/dashboard/forecast — revenue forecasting
 router.get('/forecast', async (req, res, next) => {
   try {

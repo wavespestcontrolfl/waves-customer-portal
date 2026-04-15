@@ -57,11 +57,8 @@ export default function DashboardPage() {
   const [dashTab, setDashTab] = useState('overview');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [weekBookings, setWeekBookings] = useState([]);
-  const [bookingsLoading, setBookingsLoading] = useState(true);
   useEffect(() => {
     adminFetch('/admin/dashboard').then(d => { setData(d); setLoading(false); }).catch(err => { console.error('[dashboard] load failed', err); setLoading(false); });
-    adminFetch('/admin/dashboard/square-bookings?days=7').then(d => { setWeekBookings(d.bookings || []); setBookingsLoading(false); }).catch(err => { console.error('[dashboard] bookings failed', err); setBookingsLoading(false); });
   }, []);
 
   if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center', fontSize: 15 }}>Loading dashboard...</div>;
@@ -144,61 +141,6 @@ export default function DashboardPage() {
             </BarChart>
           </ResponsiveContainer>
         </div>
-      </div>
-
-      {/* Upcoming Week — Square Appointments */}
-      <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}`, marginBottom: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.white }}>Upcoming Week</div>
-          <span style={{ fontSize: 11, fontWeight: 600, padding: '3px 10px', borderRadius: 10, background: `${D.teal}20`, color: D.teal }}>
-            {bookingsLoading ? '...' : `${weekBookings.length} appointments`}
-          </span>
-        </div>
-        {bookingsLoading ? (
-          <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>Loading Square appointments...</div>
-        ) : weekBookings.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: 30, color: D.muted }}>
-            <div style={{ fontSize: 13 }}>No upcoming Square appointments this week. Appointments will appear here once Square Bookings is active.</div>
-          </div>
-        ) : (
-          <div>
-            {/* Group by day */}
-            {(() => {
-              const byDay = {};
-              weekBookings.forEach(b => {
-                const key = b.date;
-                if (!byDay[key]) byDay[key] = { date: key, dayOfWeek: b.dayOfWeek, bookings: [] };
-                byDay[key].bookings.push(b);
-              });
-              return Object.values(byDay).map(day => (
-                <div key={day.date} style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: D.teal, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${D.border}` }}>
-                    {day.dayOfWeek} — {new Date(day.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                    <span style={{ fontWeight: 500, color: D.muted, marginLeft: 8 }}>({day.bookings.length})</span>
-                  </div>
-                  {day.bookings.map(b => {
-                    const sc = b.status === 'ACCEPTED' ? D.green : b.status === 'PENDING' ? D.amber : b.status?.includes('CANCEL') ? D.red : D.muted;
-                    return (
-                      <div key={b.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '8px 0', borderBottom: `1px solid ${D.border}33` }}>
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: D.teal }}>{b.time}</span>
-                            {b.durationMinutes && <span style={{ fontSize: 11, color: D.muted }}>({b.durationMinutes} min)</span>}
-                          </div>
-                          <div style={{ fontSize: 14, fontWeight: 600, color: D.white, marginTop: 2 }}>{b.customerName}</div>
-                          {b.note && <div style={{ fontSize: 11, color: D.muted, marginTop: 2, fontStyle: 'italic' }}>{b.note}</div>}
-                        </div>
-                        <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '3px 8px', borderRadius: 8, background: `${sc}20`, color: sc, flexShrink: 0 }}>
-                          {(b.status || '').replace(/_/g, ' ')}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              ));
-            })()}
-          </div>
-        )}
       </div>
 
       {/* Two columns: Schedule + Activity */}

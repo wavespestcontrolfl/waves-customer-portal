@@ -71,19 +71,18 @@ const SKIP_REASONS = [
 
 /* ── Helpers ──────────────────────────────────────────── */
 
-function stripSquareBoilerplate(notes) {
+// Strips legacy boilerplate from historical imported appointment notes.
+function stripLegacyBoilerplate(notes) {
   if (!notes) return '';
   return notes
     .replace(/\*{3}\s*Please make changes.*?(?:\*{3}|$)/gis, '')
-    .replace(/Please make changes to this appointment in the Square Appointments calendar[\s\S]*?next sync\./gi, '')
+    .replace(/Please make changes to this appointment in the [\s\S]*?next sync\./gi, '')
     .replace(/https?:\/\/app\.squareup\.com\S*/g, '')
     .replace(/https?:\/\/squareup\.com\S*/g, '')
     .replace(/New customer\s*[-\u2013\u2014]\s*first visit/gi, '')
     .replace(/New customer\s*[-\u2013\u2014]\s*first time/gi, '')
     .replace(/First[-\s]time customer/gi, '')
-    .replace(/Booked via Square Online/gi, '')
     .replace(/Booked online/gi, '')
-    .replace(/Created by Square/gi, '')
     .replace(/Any changes made here will be overwritten.*$/gim, '')
     .replace(/\|\s*$/g, '').replace(/^\s*\|/g, '')
     .replace(/\n{3,}/g, '\n\n')
@@ -94,7 +93,7 @@ function stripSquareBoilerplate(notes) {
 function sanitizeServiceTypeClient(serviceType) {
   if (!serviceType) return 'General Service';
   if (/^[A-Z0-9]{5,}$/.test(serviceType)) return 'General Service';
-  // Strip common Square suffixes: " - 1 hour", " - $117", " - 45 min"
+  // Strip common legacy suffixes: " - 1 hour", " - $117", " - 45 min"
   return serviceType
     .replace(/\s*[-\u2013]\s*\d+\s*(hour|hr|min|minute)s?\b/gi, '')
     .replace(/\s*[-\u2013]\s*\$[\d,.]+/g, '')
@@ -413,7 +412,7 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
           })()}
           {service.lastServiceType && <> {'\u2014'} {service.lastServiceType}</>}
           {service.lastServiceNotes && (() => {
-            const cleaned = stripSquareBoilerplate(service.lastServiceNotes);
+            const cleaned = stripLegacyBoilerplate(service.lastServiceNotes);
             if (!cleaned) return null;
             return <> {'\u2014'} {cleaned.substring(0, 100)}{cleaned.length > 100 ? '...' : ''}</>;
           })()}
@@ -816,10 +815,10 @@ function ProtocolPanel({ service, onClose }) {
                 )}
 
                 {/* Last service notes */}
-                {service.lastServiceNotes && stripSquareBoilerplate(service.lastServiceNotes) && (
+                {service.lastServiceNotes && stripLegacyBoilerplate(service.lastServiceNotes) && (
                   <div style={{ background: D.bg, borderRadius: 10, padding: 12, border: `1px solid ${D.border}` }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Last Visit Notes</div>
-                    <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>{stripSquareBoilerplate(service.lastServiceNotes)}</div>
+                    <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>{stripLegacyBoilerplate(service.lastServiceNotes)}</div>
                   </div>
                 )}
               </div>
@@ -1833,9 +1832,9 @@ function CurrentVisitCard({ visit, trackName }) {
         </div>
 
         {/* Notes/SOP */}
-        {visit.notes && stripSquareBoilerplate(visit.notes) && (
+        {visit.notes && stripLegacyBoilerplate(visit.notes) && (
           <div style={{ marginTop: 10, fontSize: 12, color: D.muted, lineHeight: 1.5, padding: '8px 10px', background: D.bg + '88', borderRadius: 6 }}>
-            {stripSquareBoilerplate(visit.notes)}
+            {stripLegacyBoilerplate(visit.notes)}
           </div>
         )}
       </div>
@@ -2042,7 +2041,7 @@ function ProtocolReferenceTab() {
                           <td style={tdSt}>
                             <TierDots tiers={v.tiers} tier4x={v.tier_4x} tier6x={v.tier_6x} />
                           </td>
-                          <td style={{ ...tdSt, fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap' }}>{stripSquareBoilerplate(v.notes) || '\u2014'}</td>
+                          <td style={{ ...tdSt, fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap' }}>{stripLegacyBoilerplate(v.notes) || '\u2014'}</td>
                         </tr>
                       );
                     })}
@@ -2200,15 +2199,11 @@ export default function SchedulePage() {
       if (!r.ok) {
         alert(`Sync error: ${result.error || r.status}`);
       } else {
-        const sq = result.square || {};
         const gc = result.google || {};
-        const lines = [];
-        lines.push(`Square: ${sq.found || 0} found, ${sq.created || 0} new, ${sq.updated || 0} updated`);
-        if (sq.error) lines.push(`  ⚠ ${sq.error}`);
-        lines.push(`Google Calendar: ${gc.found || 0} found, ${gc.created || 0} new`);
+        const lines = [`Google Calendar: ${gc.found || 0} found, ${gc.created || 0} new`];
         if (gc.error) lines.push(`  ⚠ ${gc.error}`);
         alert(lines.join('\n'));
-        if (sq.created > 0 || gc.created > 0) fetchSchedule(date);
+        if (gc.created > 0) fetchSchedule(date);
       }
     } catch (e) {
       alert('Calendar sync failed: ' + e.message);

@@ -2,7 +2,6 @@
  * Email Automation Service — replaces 7 Zapier zaps.
  *
  * ALL TRIGGERS ARE MANUAL for now — admin clicks a button to send.
- * Future: auto-trigger based on Square service bookings.
  *
  * Each automation:
  *   1. Beehiiv: upsert subscriber → add tags → enroll in automation

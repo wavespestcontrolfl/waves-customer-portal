@@ -1,8 +1,7 @@
 /**
  * Admin iCal Appointment History Routes
  *
- * View historical and future appointments imported from Square Appointments
- * via .ics calendar exports.
+ * View historical and future appointments imported from legacy .ics calendar exports.
  */
 const express = require('express');
 const router = express.Router();

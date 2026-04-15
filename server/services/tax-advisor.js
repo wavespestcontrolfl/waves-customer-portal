@@ -78,7 +78,7 @@ BUSINESS CONTEXT:
 - Primary supplier: SiteOne Landscape Supply (Branch #238 Lakewood Ranch)
 - Has a Florida Annual Resale Certificate for product purchases used in taxable services
 - Employees: owner + technician (Adam Benetti)
-- Software stack: Square (POS/invoicing), Twilio (SMS), Railway (hosting), various SaaS
+- Software stack: Stripe (payments/invoicing), Twilio (SMS), Railway (hosting), various SaaS
 
 YOUR WEEKLY TASKS:
 1. SEARCH for new FL DOR bulletins, tax rate changes, federal tax law changes affecting small businesses, and IRS updates for self-employed/Schedule C filers

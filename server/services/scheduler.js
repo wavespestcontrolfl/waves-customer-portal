@@ -2,7 +2,6 @@ const cron = require('node-cron');
 const db = require('../models/db');
 const TwilioService = require('./twilio');
 const logger = require('./logger');
-// Square removed — lazy-load if needed by any legacy cron
 
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
@@ -92,12 +91,8 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // Square calendar sync removed — migrated to Stripe
-  // Google Calendar sync still available via manual trigger
-
-  // =========================================================================
-  // DAILY 10AM (weekdays) — 7-Day Late Payment SMS (#24)
-  // Checks Square for unpaid invoices 7+ days overdue, sends reminder SMS
+  // DAILY 10AM (weekdays) — 7-Day Late Payment SMS
+  // Checks invoices 7+ days overdue, sends tiered reminder SMS
   // =========================================================================
   cron.schedule('0 10 * * 1-5', async () => {
     logger.info('Running: late payment check');
@@ -109,9 +104,6 @@ function initScheduledJobs() {
       logger.error(`Late payment check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
-
-  // Old Square monthly billing removed — replaced by Stripe billing cron (billing-cron.js)
-  // which runs at 8 AM on the 1st via the scheduler entry below
 
   // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
@@ -774,7 +766,7 @@ function initScheduledJobs() {
   // STRIPE BILLING — Monthly autopay + payment retries
   // =========================================================================
   cron.schedule('0 8 1 * *', async () => {
-    logger.info('Running: monthly billing (Stripe/Square)');
+    logger.info('Running: monthly billing (Stripe)');
     try {
       const BillingCron = require('./billing-cron');
       const result = await BillingCron.processMonthlyBilling();

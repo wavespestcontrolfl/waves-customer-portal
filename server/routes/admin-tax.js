@@ -746,7 +746,7 @@ router.get('/mileage/stats', async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// REVENUE RECONCILIATION (Square Integration)
+// REVENUE RECONCILIATION
 // ═══════════════════════════════════════════════════════════════
 
 // GET /revenue/reconcile?month=2026-04 — Stripe/native tax reconciliation

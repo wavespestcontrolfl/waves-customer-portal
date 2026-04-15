@@ -866,8 +866,6 @@ export default function CustomersPage() {
   const [sortBy, setSortBy] = useState('lastName');
   const [sortDir, setSortDir] = useState('asc');
   const [showAddModal, setShowAddModal] = useState(false);
-  const [syncingSquare, setSyncingSquare] = useState(false);
-  const [squareSyncInfo, setSquareSyncInfo] = useState(null);
   const [filterCity, setFilterCity] = useState('all');
   const [filterHasBalance, setFilterHasBalance] = useState(false);
   const [selected360Id, setSelected360Id] = useState(null);

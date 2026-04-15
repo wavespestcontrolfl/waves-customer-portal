@@ -6,7 +6,7 @@
  *  - Tool-use based: Claude decides when to look up data, escalate, or respond
  *  - Escalation-first: schedule changes, cancellations, complaints → escalate to human
  *  - 30-min conversation timeout: context resets after inactivity
- *  - Uses ALL portal data: SMS history, call transcripts, Square billing, service records
+ *  - Uses ALL portal data: SMS history, call transcripts, Stripe billing, service records
  */
 
 const db = require('../../models/db');
