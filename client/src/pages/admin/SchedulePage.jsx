@@ -786,6 +786,7 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurringFreq, setRecurringFreq] = useState(service.recurringPattern || 'quarterly');
   const [recurringCount, setRecurringCount] = useState(4);
+  const [recurringOngoing, setRecurringOngoing] = useState(true);
 
   useEffect(() => {
     (async () => {
@@ -820,7 +821,8 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
           ...form,
           isRecurring,
           recurringPattern: isRecurring ? recurringFreq : undefined,
-          recurringCount: isRecurring ? recurringCount : undefined,
+          recurringCount: isRecurring ? (recurringOngoing ? 4 : recurringCount) : undefined,
+          recurringOngoing: isRecurring ? recurringOngoing : undefined,
         }),
       });
       onSaved?.();
@@ -945,24 +947,42 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
           </label>
           {isRecurring && (
             <div>
-              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 8, marginBottom: 8 }}>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                <button type="button" onClick={() => setRecurringOngoing(true)} style={{
+                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                  background: recurringOngoing ? D.teal : 'transparent',
+                  color: recurringOngoing ? '#fff' : D.muted,
+                  border: `1px solid ${recurringOngoing ? D.teal : D.border}`,
+                }}>Ongoing (auto-extend)</button>
+                <button type="button" onClick={() => setRecurringOngoing(false)} style={{
+                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                  background: !recurringOngoing ? D.teal : 'transparent',
+                  color: !recurringOngoing ? '#fff' : D.muted,
+                  border: `1px solid ${!recurringOngoing ? D.teal : D.border}`,
+                }}>Fixed count</button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: recurringOngoing ? '1fr' : '2fr 1fr', gap: 8, marginBottom: 8 }}>
                 <div>
                   <label style={labelStyle}>Frequency</label>
                   <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)} style={inputStyle}>
                     {EDIT_FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
                   </select>
                 </div>
-                <div>
-                  <label style={labelStyle}>Count</label>
-                  <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} style={inputStyle} />
-                </div>
+                {!recurringOngoing && (
+                  <div>
+                    <label style={labelStyle}>Count</label>
+                    <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} style={inputStyle} />
+                  </div>
+                )}
               </div>
               {recurringPreview() && (
                 <div style={{ fontSize: 11, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {recurringPreview().map((d, i) => (
                     <span key={i} style={{ padding: '2px 6px', background: `${D.teal}15`, borderRadius: 4, color: D.teal, fontWeight: 600 }}>{d}</span>
                   ))}
-                  {recurringCount > 6 && <span style={{ padding: '2px 6px', color: D.muted }}>+{recurringCount - 6} more</span>}
+                  {recurringOngoing
+                    ? <span style={{ padding: '2px 6px', color: D.muted }}>… then auto-extends</span>
+                    : (recurringCount > 6 && <span style={{ padding: '2px 6px', color: D.muted }}>+{recurringCount - 6} more</span>)}
                 </div>
               )}
             </div>
@@ -2355,6 +2375,78 @@ function ProtocolReferenceTab() {
   );
 }
 
+/* ── Recurring Plan Alerts Banner ──────────────────────── */
+
+function RecurringAlertsBanner() {
+  const [alerts, setAlerts] = useState([]);
+  const [expanded, setExpanded] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await adminFetch('/admin/schedule/recurring-alerts');
+      setAlerts(r.alerts || []);
+    } catch { /* non-critical */ }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const act = async (row, action) => {
+    setBusyId(row.id);
+    try {
+      await adminFetch(`/admin/schedule/recurring-alerts/${row.id}/action`, {
+        method: 'POST', body: JSON.stringify({ action, count: 4 }),
+      });
+      await load();
+    } catch (e) { window.alert('Failed: ' + e.message); }
+    setBusyId(null);
+  };
+
+  if (!alerts.length) return null;
+
+  return (
+    <div style={{ background: `${D.amber}15`, border: `1px solid ${D.amber}55`, borderRadius: 10, padding: 12, marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }} onClick={() => setExpanded(e => !e)}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 16 }}>⚠️</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>
+            {alerts.length} recurring plan{alerts.length === 1 ? '' : 's'} ending soon
+          </span>
+        </div>
+        <span style={{ fontSize: 11, color: D.muted }}>{expanded ? '▾ hide' : '▸ review'}</span>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {alerts.map(a => (
+            <div key={a.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+              <div style={{ flex: '1 1 220px', minWidth: 200 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{a.customerName || 'Customer'}</div>
+                <div style={{ fontSize: 11, color: D.muted }}>
+                  {a.serviceType} · {a.pattern} · last visit {a.lastVisitDate || '—'} · {a.remainingVisits ?? 0} pending
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button disabled={busyId === a.id} onClick={() => act(a, 'extend')} style={{
+                  padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.teal}`, background: `${D.teal}15`,
+                  color: D.teal, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}>+4 visits</button>
+                <button disabled={busyId === a.id} onClick={() => act(a, 'convert_ongoing')} style={{
+                  padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.green}`, background: `${D.green}15`,
+                  color: D.green, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}>Convert to ongoing</button>
+                <button disabled={busyId === a.id} onClick={() => act(a, 'let_lapse')} style={{
+                  padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent',
+                  color: D.muted, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}>Let lapse</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Main Schedule Page ───────────────────────────────── */
 
 export default function SchedulePage() {
@@ -2665,6 +2757,9 @@ export default function SchedulePage() {
           ))}
         </HorizontalScroll>
       </div>}
+
+      {/* Recurring plan alerts */}
+      {viewMode === 'day' && <RecurringAlertsBanner />}
 
       {/* Intelligence Bar — schedule context */}
       {viewMode === 'day' && (

@@ -372,7 +372,7 @@ router.post('/', async (req, res, next) => {
   try {
     const {
       customerId, technicianId, scheduledDate, windowStart, windowEnd,
-      serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount,
+      serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
       sendConfirmation, serviceId, serviceAddons, assignmentMode,
       estimatedPrice, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification,
@@ -439,6 +439,7 @@ router.post('/', async (req, res, next) => {
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = isCallback || false;
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
+      if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
     } catch (e) { logger.warn(`[schedule] Column check failed (non-blocking): ${e.message}`); }
 
     const [svc] = await db('scheduled_services').insert(insertData).returning('*');
@@ -457,15 +458,16 @@ router.post('/', async (req, res, next) => {
       } catch (e) { logger.warn(`[schedule] Addon insert failed (non-blocking): ${e.message}`); }
     }
 
-    // Create recurring instances
-    if (isRecurring && recurringPattern && recurringCount > 1) {
+    // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
+    const plannedCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 4)) : 0;
+    if (isRecurring && recurringPattern && plannedCount > 1) {
       const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
       const interval = intervals[recurringPattern] || 91;
 
-      for (let i = 1; i < (recurringCount || 4); i++) {
+      for (let i = 1; i < plannedCount; i++) {
         const nextDate = new Date(scheduledDate + 'T12:00:00');
         nextDate.setDate(nextDate.getDate() + interval * i);
-        await db('scheduled_services').insert({
+        const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDate.toISOString().split('T')[0],
           window_start: windowStart, window_end: computedEnd,
@@ -473,7 +475,12 @@ router.post('/', async (req, res, next) => {
           time_window: timeWindow, zone, estimated_duration_minutes: duration,
           is_recurring: true, recurring_pattern: recurringPattern,
           recurring_parent_id: svc.id,
-        });
+        };
+        try {
+          const cols = await db('scheduled_services').columnInfo();
+          if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
+        } catch {}
+        await db('scheduled_services').insert(childData);
       }
     }
 
@@ -503,7 +510,7 @@ router.put('/:id/update-details', async (req, res, next) => {
     const {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
-      isRecurring, recurringPattern, recurringCount,
+      isRecurring, recurringPattern, recurringCount, recurringOngoing,
     } = req.body;
     const updates = {};
     if (serviceType !== undefined) updates.service_type = serviceType;
@@ -518,20 +525,25 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (isRecurring) {
       updates.is_recurring = true;
       if (recurringPattern) updates.recurring_pattern = recurringPattern;
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        if (cols.recurring_ongoing) updates.recurring_ongoing = !!recurringOngoing;
+      } catch {}
     }
     if (Object.keys(updates).length) {
       await db('scheduled_services').where({ id: req.params.id }).update(updates);
     }
 
-    // Spawn recurring children if requested
+    // Spawn recurring children if requested (Ongoing seeds 4; Fixed uses recurringCount)
     let recurringCreated = 0;
-    if (isRecurring && recurringPattern && recurringCount > 1) {
+    const spawnCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
+    if (isRecurring && recurringPattern && spawnCount > 1) {
       const parent = await db('scheduled_services').where({ id: req.params.id }).first();
       if (parent) {
         const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
         const interval = intervals[recurringPattern] || 91;
         const baseDate = parent.scheduled_date ? new Date(String(parent.scheduled_date).split('T')[0] + 'T12:00:00') : new Date();
-        for (let i = 1; i < (recurringCount || 4); i++) {
+        for (let i = 1; i < spawnCount; i++) {
           const nextDate = new Date(baseDate);
           nextDate.setDate(nextDate.getDate() + interval * i);
           const childData = {
@@ -553,6 +565,7 @@ router.put('/:id/update-details', async (req, res, next) => {
             if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
             if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
             if (cols.estimated_price && parent.estimated_price != null) childData.estimated_price = parent.estimated_price;
+            if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
           } catch { /* non-blocking */ }
           await db('scheduled_services').insert(childData);
           recurringCreated++;
@@ -708,6 +721,67 @@ router.put('/:id/status', async (req, res, next) => {
           }, TWENTY_FOUR_HOURS);
         }
       } catch (e) { logger.error(`[post-service] Upsell trigger require failed: ${e.message}`); }
+
+      // 4b. Recurring plan: auto-extend (Ongoing) or flag end-of-plan (Fixed)
+      try {
+        const parentId = svc.recurring_parent_id || svc.id;
+        const cols = await db('scheduled_services').columnInfo();
+        const parent = await db('scheduled_services').where({ id: parentId }).first();
+        if (parent && parent.is_recurring && parent.recurring_pattern) {
+          const pendingCount = parseInt((await db('scheduled_services')
+            .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+            .where('status', 'pending')
+            .count('* as c').first())?.c || 0);
+
+          const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+          const interval = intervals[parent.recurring_pattern] || 91;
+          const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
+
+          if (isOngoing && pendingCount < 2) {
+            // Find latest visit (pending or completed) to calculate next date
+            const latest = await db('scheduled_services')
+              .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+              .orderBy('scheduled_date', 'desc').first();
+            if (latest) {
+              const base = new Date(String(latest.scheduled_date).split('T')[0] + 'T12:00:00');
+              base.setDate(base.getDate() + interval);
+              const nextData = {
+                customer_id: parent.customer_id,
+                technician_id: parent.technician_id,
+                scheduled_date: base.toISOString().split('T')[0],
+                window_start: parent.window_start, window_end: parent.window_end,
+                service_type: parent.service_type, status: 'pending',
+                time_window: parent.time_window, zone: parent.zone,
+                estimated_duration_minutes: parent.estimated_duration_minutes,
+                is_recurring: true, recurring_pattern: parent.recurring_pattern,
+                recurring_parent_id: parentId,
+              };
+              if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
+              if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
+              if (cols.estimated_price && parent.estimated_price != null) nextData.estimated_price = parent.estimated_price;
+              await db('scheduled_services').insert(nextData);
+              logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
+            }
+          } else if (!isOngoing && pendingCount === 0) {
+            // Fixed plan just finished — queue an alert if table exists and not already open
+            try {
+              const existing = await db('recurring_plan_alerts')
+                .where({ recurring_parent_id: parentId }).whereNull('resolved_at').first();
+              if (!existing) {
+                await db('recurring_plan_alerts').insert({
+                  recurring_parent_id: parentId,
+                  customer_id: parent.customer_id,
+                  alert_type: 'plan_ending',
+                  last_visit_date: String(svc.scheduled_date).split('T')[0],
+                  recurring_pattern: parent.recurring_pattern,
+                  remaining_visits: 0,
+                });
+                logger.info(`[recurring] Flagged end-of-plan alert for parent=${parentId}`);
+              }
+            } catch (e) { logger.warn(`[recurring] Alert insert skipped: ${e.message}`); }
+          }
+        }
+      } catch (e) { logger.error(`[recurring] Auto-extend/flag failed: ${e.message}`); }
 
       // 5. Check for WaveGuard conversion opportunity (2+ one-time services, no WaveGuard tier)
       try {
@@ -1457,6 +1531,217 @@ router.get('/recommend-slots', async (req, res, next) => {
     });
 
     res.json({ slots });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/recurring-alerts — end-of-plan alerts + upcoming fixed plans ending soon
+router.get('/recurring-alerts', async (req, res, next) => {
+  try {
+    const alerts = [];
+
+    // 1. Open alerts in the queue
+    try {
+      const open = await db('recurring_plan_alerts as a')
+        .leftJoin('customers as c', 'a.customer_id', 'c.id')
+        .leftJoin('scheduled_services as s', 'a.recurring_parent_id', 's.id')
+        .whereNull('a.resolved_at')
+        .select(
+          'a.id', 'a.recurring_parent_id', 'a.customer_id', 'a.alert_type',
+          'a.last_visit_date', 'a.recurring_pattern', 'a.remaining_visits', 'a.created_at',
+          'c.first_name', 'c.last_name', 'c.phone', 'c.email',
+          's.service_type',
+        )
+        .orderBy('a.created_at', 'desc');
+      alerts.push(...open.map(a => ({
+        id: a.id,
+        source: 'queue',
+        parentId: a.recurring_parent_id,
+        customerId: a.customer_id,
+        customerName: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
+        phone: a.phone, email: a.email,
+        serviceType: a.service_type,
+        alertType: a.alert_type,
+        lastVisitDate: a.last_visit_date,
+        pattern: a.recurring_pattern,
+        remainingVisits: a.remaining_visits,
+        createdAt: a.created_at,
+      })));
+    } catch (e) { logger.warn(`[recurring-alerts] queue read failed: ${e.message}`); }
+
+    // 2. Derived: fixed plans with ≤1 pending visit in next 14 days (pre-emptive)
+    try {
+      const cols = await db('scheduled_services').columnInfo();
+      if (cols.recurring_ongoing) {
+        const soon = new Date(); soon.setDate(soon.getDate() + 14);
+        const today = new Date().toISOString().split('T')[0];
+        const soonStr = soon.toISOString().split('T')[0];
+        const ending = await db('scheduled_services as s')
+          .leftJoin('customers as c', 's.customer_id', 'c.id')
+          .where('s.is_recurring', true)
+          .where(function () { this.where('s.recurring_ongoing', false).orWhereNull('s.recurring_ongoing'); })
+          .whereNull('s.recurring_parent_id')
+          .select(
+            's.id', 's.customer_id', 's.service_type', 's.recurring_pattern', 's.scheduled_date',
+            'c.first_name', 'c.last_name', 'c.phone', 'c.email',
+          );
+
+        for (const plan of ending) {
+          const pending = await db('scheduled_services')
+            .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
+            .where('status', 'pending')
+            .where('scheduled_date', '>=', today)
+            .orderBy('scheduled_date', 'desc').limit(1);
+          const latestPending = pending[0];
+          if (!latestPending) continue;
+          if (latestPending.scheduled_date && String(latestPending.scheduled_date).split('T')[0] > soonStr) continue;
+
+          const pendingCount = parseInt((await db('scheduled_services')
+            .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
+            .where('status', 'pending')
+            .count('* as c').first())?.c || 0);
+          if (pendingCount > 1) continue;
+
+          // Skip if already queued
+          const q = await db('recurring_plan_alerts')
+            .where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first();
+          if (q) continue;
+
+          alerts.push({
+            id: `derived-${plan.id}`,
+            source: 'derived',
+            parentId: plan.id,
+            customerId: plan.customer_id,
+            customerName: `${plan.first_name || ''} ${plan.last_name || ''}`.trim(),
+            phone: plan.phone, email: plan.email,
+            serviceType: plan.service_type,
+            alertType: 'plan_ending_soon',
+            lastVisitDate: String(latestPending.scheduled_date).split('T')[0],
+            pattern: plan.recurring_pattern,
+            remainingVisits: pendingCount,
+            createdAt: null,
+          });
+        }
+      }
+    } catch (e) { logger.warn(`[recurring-alerts] derived scan failed: ${e.message}`); }
+
+    res.json({ alerts, total: alerts.length });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/recurring-alerts/:id/action
+// body: { action: 'extend' | 'convert_ongoing' | 'let_lapse', count?: number }
+router.post('/recurring-alerts/:id/action', async (req, res, next) => {
+  try {
+    const { action, count } = req.body;
+    const idParam = String(req.params.id);
+    if (!['extend', 'convert_ongoing', 'let_lapse'].includes(action)) {
+      return res.status(400).json({ error: 'invalid action' });
+    }
+
+    // Resolve alert row (may be derived id)
+    let alert = null;
+    let parentId = null;
+    if (idParam.startsWith('derived-')) {
+      parentId = parseInt(idParam.replace('derived-', ''));
+    } else {
+      alert = await db('recurring_plan_alerts').where({ id: parseInt(idParam) }).first();
+      if (!alert) return res.status(404).json({ error: 'alert not found' });
+      parentId = alert.recurring_parent_id;
+    }
+
+    const parent = await db('scheduled_services').where({ id: parentId }).first();
+    if (!parent) return res.status(404).json({ error: 'parent service not found' });
+
+    const cols = await db('scheduled_services').columnInfo();
+    const intervals = { weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+    const interval = intervals[parent.recurring_pattern] || 91;
+
+    const latest = await db('scheduled_services')
+      .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+      .orderBy('scheduled_date', 'desc').first();
+    const baseDate = latest?.scheduled_date
+      ? new Date(String(latest.scheduled_date).split('T')[0] + 'T12:00:00')
+      : new Date();
+
+    let created = 0;
+    if (action === 'extend') {
+      const n = Math.min(Math.max(parseInt(count) || 4, 1), 12);
+      for (let i = 1; i <= n; i++) {
+        const nd = new Date(baseDate);
+        nd.setDate(nd.getDate() + interval * i);
+        const data = {
+          customer_id: parent.customer_id,
+          technician_id: parent.technician_id,
+          scheduled_date: nd.toISOString().split('T')[0],
+          window_start: parent.window_start, window_end: parent.window_end,
+          service_type: parent.service_type, status: 'pending',
+          time_window: parent.time_window, zone: parent.zone,
+          estimated_duration_minutes: parent.estimated_duration_minutes,
+          is_recurring: true, recurring_pattern: parent.recurring_pattern,
+          recurring_parent_id: parentId,
+        };
+        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+        if (cols.estimated_price && parent.estimated_price != null) data.estimated_price = parent.estimated_price;
+        await db('scheduled_services').insert(data);
+        created++;
+      }
+    } else if (action === 'convert_ongoing') {
+      if (cols.recurring_ongoing) {
+        await db('scheduled_services')
+          .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+          .update({ recurring_ongoing: true });
+      }
+      // Also ensure at least 3 pending visits scheduled ahead
+      const pendingCount = parseInt((await db('scheduled_services')
+        .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+        .where('status', 'pending').count('* as c').first())?.c || 0);
+      const need = Math.max(0, 3 - pendingCount);
+      for (let i = 1; i <= need; i++) {
+        const nd = new Date(baseDate);
+        nd.setDate(nd.getDate() + interval * i);
+        const data = {
+          customer_id: parent.customer_id,
+          technician_id: parent.technician_id,
+          scheduled_date: nd.toISOString().split('T')[0],
+          window_start: parent.window_start, window_end: parent.window_end,
+          service_type: parent.service_type, status: 'pending',
+          time_window: parent.time_window, zone: parent.zone,
+          estimated_duration_minutes: parent.estimated_duration_minutes,
+          is_recurring: true, recurring_pattern: parent.recurring_pattern,
+          recurring_parent_id: parentId,
+        };
+        if (cols.recurring_ongoing) data.recurring_ongoing = true;
+        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+        if (cols.estimated_price && parent.estimated_price != null) data.estimated_price = parent.estimated_price;
+        await db('scheduled_services').insert(data);
+        created++;
+      }
+    }
+    // 'let_lapse' just resolves the alert — no spawn
+
+    // Resolve/insert alert row
+    if (alert) {
+      await db('recurring_plan_alerts').where({ id: alert.id }).update({
+        resolved_at: db.fn.now(),
+        resolved_action: action,
+        resolved_by: req.adminUserId || null,
+      });
+    } else {
+      // Derived — insert a resolved record for audit
+      try {
+        await db('recurring_plan_alerts').insert({
+          recurring_parent_id: parentId,
+          customer_id: parent.customer_id,
+          alert_type: 'plan_ending_soon',
+          recurring_pattern: parent.recurring_pattern,
+          resolved_at: db.fn.now(),
+          resolved_action: action,
+          resolved_by: req.adminUserId || null,
+        });
+      } catch {}
+    }
+
+    res.json({ success: true, action, created });
   } catch (err) { next(err); }
 });
 

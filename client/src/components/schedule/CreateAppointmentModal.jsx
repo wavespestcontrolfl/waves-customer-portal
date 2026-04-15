@@ -136,6 +136,7 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurringFreq, setRecurringFreq] = useState('quarterly');
   const [recurringCount, setRecurringCount] = useState(4);
+  const [recurringOngoing, setRecurringOngoing] = useState(true);
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
@@ -285,7 +286,8 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
         sendTechNotification: notifyTech,
         isRecurring,
         recurringPattern: isRecurring ? recurringFreq : undefined,
-        recurringCount: isRecurring ? recurringCount : undefined,
+        recurringCount: isRecurring ? (recurringOngoing ? 4 : recurringCount) : undefined,
+        recurringOngoing: isRecurring ? recurringOngoing : undefined,
         sendConfirmation: sendSms,
       };
       const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
@@ -539,24 +541,42 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
           </label>
           {isRecurring && (
             <div>
-              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 8, marginBottom: 8 }}>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                <button type="button" onClick={() => setRecurringOngoing(true)} style={{
+                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                  background: recurringOngoing ? D.teal : 'transparent',
+                  color: recurringOngoing ? '#fff' : D.muted,
+                  border: `1px solid ${recurringOngoing ? D.teal : D.border}`,
+                }}>Ongoing (auto-extend)</button>
+                <button type="button" onClick={() => setRecurringOngoing(false)} style={{
+                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                  background: !recurringOngoing ? D.teal : 'transparent',
+                  color: !recurringOngoing ? '#fff' : D.muted,
+                  border: `1px solid ${!recurringOngoing ? D.teal : D.border}`,
+                }}>Fixed count</button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: recurringOngoing ? '1fr' : '2fr 1fr', gap: 8, marginBottom: 8 }}>
                 <div>
                   <label style={labelStyle}>Frequency</label>
                   <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)} style={inputStyle}>
                     {FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
                   </select>
                 </div>
-                <div>
-                  <label style={labelStyle}>Count</label>
-                  <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} style={inputStyle} />
-                </div>
+                {!recurringOngoing && (
+                  <div>
+                    <label style={labelStyle}>Count</label>
+                    <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} style={inputStyle} />
+                  </div>
+                )}
               </div>
               {recurringPreview() && (
                 <div style={{ fontSize: 11, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {recurringPreview().map((d, i) => (
                     <span key={i} style={{ padding: '2px 6px', background: `${D.teal}15`, borderRadius: 4 }}>{d}</span>
                   ))}
-                  {recurringCount > 6 && <span style={{ padding: '2px 6px' }}>+{recurringCount - 6} more</span>}
+                  {recurringOngoing
+                    ? <span style={{ padding: '2px 6px' }}>… then auto-extends</span>
+                    : (recurringCount > 6 && <span style={{ padding: '2px 6px' }}>+{recurringCount - 6} more</span>)}
                 </div>
               )}
             </div>
