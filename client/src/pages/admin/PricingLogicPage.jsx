@@ -149,7 +149,7 @@ function SpecServicesPanel() {
     { key: 'termiteFoam',           fn: 'calculateFoamPrice',             name: 'Termite Foam',             desc: 'Termidor Foam spot treatment per app point + cans (~$30/can). $125 min. 15% bundle discount with liquid barrier.' },
     { key: 'stingingV2',            fn: 'calculateStingingPrice',         name: 'Stinging Insect',          desc: 'Multiplier stack: nest type × location × urgency / after-hours. Mins: $95 / $125 / $175.' },
     { key: 'exclusionV2',           fn: 'calculateExclusionPrice',        name: 'Exclusion (Full)',         desc: 'sqft tiers $395 / $595 / $895 / $1,295. Tile roof 1.4×, 2-story 1.3×. multiVisit flag at >4hr.' },
-    { key: 'rodentGuaranteeCombo',  fn: 'calculateRodentGuaranteeCombo',  name: 'Rodent Guarantee Combo',   desc: 'Exclusion + Bait Stations + 12/24-mo guarantee. 10% bundle discount, 15–25% guarantee premium. Min $695 / $995.' },
+    { key: 'rodentGuaranteeCombo',  fn: 'calculateRodentGuaranteeCombo',  name: 'Rodent Guarantee Combo',   desc: 'Exclusion + Bait Stations + 12/24-mo guarantee. 10% bundle discount, 15–25% guarantee premium. Min $695 / $995. Auto-applies postExclusion modifier on bait stations (~28% off standalone, $55/mo floor).' },
   ];
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>

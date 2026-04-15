@@ -445,7 +445,7 @@ function priceTermiteBait(property, options = {}) {
 // RODENT BAIT STATIONS
 // ============================================================
 function priceRodentBait(property, options = {}) {
-  const { modifiers = {} } = options;
+  const { modifiers = {}, postExclusion = false } = options;
   const footprint = property.footprint;
   const lotSqFt = property.lotSqFt;
   const f = property.features || {};
@@ -467,12 +467,28 @@ function priceRodentBait(property, options = {}) {
 
   // Add roof-type adjustment (annual) for additional stations on tile/metal roofs
   const roofAnnualAdj = (modifiers.rodentRoofAdj || 0);
-  const annual = monthly * 12 + roofAnnualAdj;
+  let annual = monthly * 12 + roofAnnualAdj;
   monthly = Math.round(annual / 12 * 100) / 100;
 
   // Cost estimate: 12 visits/year
-  const onSiteMin = size === 'small' ? 15 : size === 'medium' ? 20 : 25;
-  const materialPerVisit = size === 'small' ? 10 : size === 'medium' ? 12 : 15;
+  let onSiteMin = size === 'small' ? 15 : size === 'medium' ? 20 : 25;
+  let materialPerVisit = size === 'small' ? 10 : size === 'medium' ? 12 : 15;
+
+  // POST-EXCLUSION MODIFIER — sealed structure = lighter scope
+  // Three independent levers (per post-exclusion-modifier-spec.md):
+  //   1. Station count   ~ -35% (perimeter only, floor 4 stations) → revenue-side ~0.65×
+  //   2. Bait cost       ~ -20% (lower uptake on sealed structure)
+  //   3. Labor           ~ -40% (no diagnostic, ~24min vs ~40min visits)
+  // Net combined revenue impact ≈ 0.72× (25–30% off). Floor: $55/mo.
+  if (postExclusion) {
+    const POST_EXCL_MULT = 0.72;
+    const POST_EXCL_FLOOR_MONTHLY = 55;
+    monthly = Math.max(POST_EXCL_FLOOR_MONTHLY, Math.round(monthly * POST_EXCL_MULT * 100) / 100);
+    annual = Math.round(monthly * 12);
+    materialPerVisit = Math.round(materialPerVisit * 0.80 * 100) / 100;
+    onSiteMin = Math.round(onSiteMin * 0.60);
+  }
+
   const laborPerVisitCost = laborCost(onSiteMin);
   const annualCost = (materialPerVisit + laborPerVisitCost) * 12 + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
@@ -481,6 +497,7 @@ function priceRodentBait(property, options = {}) {
     service: 'rodent_bait',
     score, size, monthly, annual,
     visitsPerYear: 12,
+    postExclusion,
     costs: { materialPerVisit, laborPerVisit: Math.round(laborPerVisitCost * 100) / 100, annualCost: Math.round(annualCost) },
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
@@ -1049,9 +1066,13 @@ function calculateRodentGuaranteeCombo(config = {}) {
     sqft, stories, roofType, entryPointsFound, includesScreening, constructionType,
   });
 
-  // Reuse legacy bait-station pricer (monthly) → quarterly
+  // Reuse legacy bait-station pricer (monthly) → quarterly.
+  // Auto-flag postExclusion: combo context = sealed structure, lighter scope.
   const stations = stationCount || (Math.ceil(sqft / 500) + 2);
-  const bait = priceRodentBait({ footprint: sqft, lawnSqFt: 0, lotSqFt: sqft, features: {} }, {});
+  const bait = priceRodentBait(
+    { footprint: sqft, lawnSqFt: 0, lotSqFt: sqft, features: {}, roofType },
+    { postExclusion: true }
+  );
   const baitQuarterly = (bait.monthly || 0) * 3;
 
   const GUARANTEE_PREMIUM = { 12: 0.15, 24: 0.25 };
