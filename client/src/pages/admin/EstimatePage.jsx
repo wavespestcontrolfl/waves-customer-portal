@@ -620,12 +620,14 @@ function EstimateToolView() {
           else add('pest', 'No pool: $0/visit', 0, 'info');
           const sd = p.shrubDensity || p.shrubs;
           if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$10/visit', 10, 'up');
-          else if (sd === 'MODERATE') add('pest', 'MODERATE shrubs: +$5/visit', 5, 'up');
-          else add('pest', 'Light shrubs: $0/visit', 0, 'info');
+          else if (sd === 'MODERATE') add('pest', 'Moderate shrubs: +$5/visit', 5, 'up');
+          else if (sd === 'LIGHT') add('pest', 'Light shrubs: -$5/visit', -5, 'down');
+          else add('pest', 'Shrubs: not specified', 0, 'info');
           const td = p.treeDensity || p.trees;
           if (td === 'HEAVY') add('pest', 'Heavy trees: +$10/visit', 10, 'up');
-          else if (td === 'MODERATE') add('pest', 'MODERATE trees: +$5/visit', 5, 'up');
-          else add('pest', 'Light trees: $0/visit', 0, 'info');
+          else if (td === 'MODERATE') add('pest', 'Moderate trees: +$5/visit', 5, 'up');
+          else if (td === 'LIGHT') add('pest', 'Light trees: -$5/visit', -5, 'down');
+          else add('pest', 'Trees: not specified', 0, 'info');
           const lc = p.landscapeComplexity || p.complexity;
           if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$5/visit', 5, 'up');
           else add('pest', `${lc || 'Simple'} landscape: $0/visit`, 0, 'info');
