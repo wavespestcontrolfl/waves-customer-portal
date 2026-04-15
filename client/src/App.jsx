@@ -44,40 +44,74 @@ import AdminCustomersPage from './pages/admin/CustomersPage';
 import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';
 import { lazy, Suspense } from 'react';
-const AdminEstimatePage = lazy(() => import('./pages/admin/EstimatePage'));
-const TechHomePage = lazy(() => import('./pages/tech/TechHomePage'));
-const TechEstimatorPage = lazy(() => import('./pages/tech/TechEstimatorPage'));
-const AdminAdsPage = lazy(() => import('./pages/admin/AdsPage'));
-const AdminSEOPage = lazy(() => import('./pages/admin/SEOPage'));
-const AdminVoiceAgentPage = lazy(() => import('./pages/admin/VoiceAgentPage'));
-const AdminBlogPage = lazy(() => import('./pages/admin/BlogPage'));
-const AdminKnowledgePage = lazy(() => import('./pages/admin/KnowledgePage'));
-const AdminSettingsPage = lazy(() => import('./pages/admin/SettingsPage'));
-const AdminWordPressSitesPage = lazy(() => import('./pages/admin/WordPressSitesPage'));
-const RatePage = lazy(() => import('./pages/RatePage'));
-const AdminSocialMediaPage = lazy(() => import('./pages/admin/SocialMediaPage'));
-const AdminTaxPage = lazy(() => import('./pages/admin/TaxPage'));
-const AdminPricingPage = lazy(() => import('./pages/admin/PricingStrategyPage'));
-const AdminToolHealthPage = lazy(() => import('./pages/admin/ToolHealthPage'));
-const AdminLawnAssessmentPage = lazy(() => import('./pages/admin/LawnAssessmentPanel'));
-const AdminEquipmentPage = lazy(() => import('./pages/admin/EquipmentPage'));
-const AdminKnowledgeBasePage = lazy(() => import('./pages/admin/KnowledgeBasePage'));
-const AdminInvoicesPage = lazy(() => import('./pages/admin/AdminInvoicesPage'));
-const PayPage = lazy(() => import('./pages/PayPage'));
-const ReviewPage = lazy(() => import('./pages/ReviewPage'));
-const CustomerHealthPage = lazy(() => import('./pages/admin/CustomerHealthPage'));
-const TimeTrackingPage = lazy(() => import('./pages/admin/TimeTrackingPage'));
-const LeadsPage = lazy(() => import('./pages/admin/LeadsPage'));
-const EquipmentMaintenancePage = lazy(() => import('./pages/admin/EquipmentMaintenancePage'));
-const ServiceLibraryPage = lazy(() => import('./pages/admin/ServiceLibraryPage'));
-const DiscountsPage = lazy(() => import('./pages/admin/DiscountsPage'));
-const CompliancePage = lazy(() => import('./pages/admin/CompliancePage'));
-const BadgesPage = lazy(() => import('./pages/admin/BadgesPage'));
-const PricingLogicPage = lazy(() => import('./pages/admin/PricingLogicPage'));
-const AdminEmailPage = lazy(() => import('./pages/admin/EmailPage'));
-const AdminBankingPage = lazy(() => import('./pages/admin/BankingPage'));
+
+function showReloadToast() {
+  if (document.getElementById('chunk-reload-toast')) return;
+  const el = document.createElement('div');
+  el.id = 'chunk-reload-toast';
+  el.textContent = 'New version available — reloading…';
+  Object.assign(el.style, {
+    position: 'fixed', top: '20px', left: '50%', transform: 'translateX(-50%)',
+    background: '#0ea5e9', color: '#fff', padding: '10px 20px', borderRadius: '8px',
+    fontSize: '14px', fontWeight: '600', fontFamily: "'DM Sans', sans-serif",
+    boxShadow: '0 4px 12px rgba(0,0,0,0.25)', zIndex: '99999',
+  });
+  document.body.appendChild(el);
+}
+
+function lazyWithRetry(factory) {
+  return lazy(async () => {
+    try {
+      const mod = await factory();
+      sessionStorage.removeItem('chunk-reload-attempted');
+      return mod;
+    } catch (err) {
+      const msg = String(err?.message || '');
+      const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError/i.test(msg);
+      if (isChunkError && !sessionStorage.getItem('chunk-reload-attempted')) {
+        sessionStorage.setItem('chunk-reload-attempted', '1');
+        showReloadToast();
+        setTimeout(() => window.location.reload(), 1200);
+        return { default: () => null };
+      }
+      throw err;
+    }
+  });
+}
+const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatePage'));
+const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
+const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
+const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
+const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
+const AdminVoiceAgentPage = lazyWithRetry(() => import('./pages/admin/VoiceAgentPage'));
+const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
+const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePage'));
+const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
+const AdminWordPressSitesPage = lazyWithRetry(() => import('./pages/admin/WordPressSitesPage'));
+const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
+const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
+const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
+const AdminPricingPage = lazyWithRetry(() => import('./pages/admin/PricingStrategyPage'));
+const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealthPage'));
+const AdminLawnAssessmentPage = lazyWithRetry(() => import('./pages/admin/LawnAssessmentPanel'));
+const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
+const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/KnowledgeBasePage'));
+const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
+const PayPage = lazyWithRetry(() => import('./pages/PayPage'));
+const ReviewPage = lazyWithRetry(() => import('./pages/ReviewPage'));
+const CustomerHealthPage = lazyWithRetry(() => import('./pages/admin/CustomerHealthPage'));
+const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
+const LeadsPage = lazyWithRetry(() => import('./pages/admin/LeadsPage'));
+const EquipmentMaintenancePage = lazyWithRetry(() => import('./pages/admin/EquipmentMaintenancePage'));
+const ServiceLibraryPage = lazyWithRetry(() => import('./pages/admin/ServiceLibraryPage'));
+const DiscountsPage = lazyWithRetry(() => import('./pages/admin/DiscountsPage'));
+const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
+const BadgesPage = lazyWithRetry(() => import('./pages/admin/BadgesPage'));
+const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
+const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
+const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
 import BookingPage from './pages/BookingPage';
-const PublicBookingPage = lazy(() => import('./pages/PublicBookingPage'));
+const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();

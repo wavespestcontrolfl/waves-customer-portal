@@ -329,6 +329,7 @@ if (config.nodeEnv === 'production') {
   // SPA fallback — serve index.html for all non-API routes
   app.get('*', (req, res) => {
     if (!req.path.startsWith('/api')) {
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(clientBuild, 'index.html'));
     }
   });

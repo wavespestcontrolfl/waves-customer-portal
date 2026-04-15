@@ -122,13 +122,6 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, on
             applePay: 'auto',
             googlePay: 'auto',
           },
-          fields: {
-            billingDetails: {
-              address: {
-                country: 'never',
-              },
-            },
-          },
         });
 
         paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
@@ -155,11 +148,6 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, on
         elements: elementsRef.current,
         confirmParams: {
           return_url: window.location.href,
-          payment_method_data: {
-            billing_details: {
-              address: { country: 'US' },
-            },
-          },
         },
         redirect: 'if_required',
       });
