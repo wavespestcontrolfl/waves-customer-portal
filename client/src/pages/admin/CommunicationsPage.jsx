@@ -1315,7 +1315,16 @@ export default function CommunicationsPage() {
   // Conversation threading state
   const [smsView, setSmsView] = useState('threads'); // 'threads' | 'log' | 'conversation'
   const [activeThread, setActiveThread] = useState(null);
-  const [viewedThreads, setViewedThreads] = useState(new Set()); // tracks threads user has opened
+  // Tracks when each thread was last read: { [phoneKey]: ISO timestamp of the latest
+  // message at the moment the user opened the thread }. Persisted to localStorage so
+  // the unread dot doesn't reappear when navigating away and back. A new inbound
+  // message after that timestamp will flip the dot back on.
+  const [threadReadAt, setThreadReadAt] = useState(() => {
+    try {
+      const raw = localStorage.getItem('waves_sms_thread_read_at');
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
   const [smsSearch, setSmsSearch] = useState('');
 
   const loadData = useCallback((search = '') => {
@@ -1762,11 +1771,23 @@ export default function CommunicationsPage() {
               filteredThreads.map((t, i) => {
                 const preview = t.lastMessage ? (t.lastMessage.length > 60 ? t.lastMessage.slice(0, 60) + '...' : t.lastMessage) : '';
                 const threadKey = t.contactPhone?.replace(/\D/g, '').slice(-10);
-                const showDot = t.unanswered && !viewedThreads.has(threadKey);
+                const lastReadAt = threadReadAt[threadKey];
+                const hasUnseenInbound = t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
+                const showDot = hasUnseenInbound;
                 return (
                   <div
                     key={i}
-                    onClick={() => { setActiveThread(t); setSmsView('conversation'); setToNumber(t.contactPhone); if (t.ourNumber) setFromNumber(t.ourNumber); setViewedThreads(prev => new Set(prev).add(threadKey)); }}
+                    onClick={() => {
+                      setActiveThread(t);
+                      setSmsView('conversation');
+                      setToNumber(t.contactPhone);
+                      if (t.ourNumber) setFromNumber(t.ourNumber);
+                      setThreadReadAt(prev => {
+                        const next = { ...prev, [threadKey]: t.lastTimestamp };
+                        try { localStorage.setItem('waves_sms_thread_read_at', JSON.stringify(next)); } catch {}
+                        return next;
+                      });
+                    }}
                     style={{
                       padding: '12px 14px', borderBottom: `1px solid ${D.border}`, cursor: 'pointer',
                       display: 'flex', alignItems: 'center', gap: 12,
