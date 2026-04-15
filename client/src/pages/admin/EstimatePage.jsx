@@ -1559,47 +1559,6 @@ function EstimateToolView() {
       </div>
     </div>
 
-    {/* ── Sticky bottom bar — live pricing preview ──────── */}
-    {livePreview.anySelected && !estimate && (
-      <div style={{
-        position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 1000,
-        background: 'linear-gradient(135deg, #FFFFFF 0%, #F1F5F9 100%)',
-        borderTop: `2px solid ${C.teal}`,
-        padding: '12px 24px',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 20, flexWrap: 'wrap',
-        fontFamily: "'JetBrains Mono', monospace",
-        boxShadow: '0 -4px 20px rgba(0,0,0,0.1)',
-      }}>
-        <div style={{ fontSize: 11, color: C.gray, textTransform: 'uppercase', letterSpacing: 1 }}>Approx</div>
-        {livePreview.recurringCount > 0 && (
-          <>
-            <div style={{ fontSize: 15, color: C.heading }}>
-              Monthly: <strong style={{ color: C.green }}>${livePreview.recurringMonthly}</strong>
-            </div>
-            <div style={{ fontSize: 13, color: C.gray }}>{'\u00B7'}</div>
-            <div style={{ fontSize: 15, color: C.heading }}>
-              Annual: <strong style={{ color: C.green }}>${livePreview.annualRecurring.toLocaleString()}</strong>
-            </div>
-            {livePreview.annualSavings > 0 && (
-              <>
-                <div style={{ fontSize: 13, color: C.gray }}>{'\u00B7'}</div>
-                <div style={{ fontSize: 14, color: C.green }}>
-                  Savings: <strong>${livePreview.annualSavings}/yr</strong> ({livePreview.tier.name} {Math.round(livePreview.tier.discount * 100)}%)
-                </div>
-              </>
-            )}
-          </>
-        )}
-        {livePreview.recurringCount === 0 && livePreview.onetimeCount > 0 && (
-          <div style={{ fontSize: 14, color: C.gray }}>{livePreview.onetimeCount} one-time service{livePreview.onetimeCount > 1 ? 's' : ''} selected</div>
-        )}
-        <button onClick={doGenerate} style={{
-          marginLeft: 10, padding: '8px 20px', background: C.teal, color: '#fff',
-          border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer',
-          fontFamily: "'DM Sans', sans-serif",
-        }}>Generate</button>
-      </div>
-    )}
     </FormCtx.Provider>
   );
 }
