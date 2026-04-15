@@ -177,6 +177,36 @@ async function syncConstantsFromDB(dbInstance) {
       if (ex.advanced) constants.SPECIALTY.exclusion.perPoint.advanced = r(ex.advanced);
     }
 
+    // ── Lawn Care Brackets (all 4 grass tracks) ──────────────
+    // Table: lawn_pricing_brackets (grass_track, sqft_bracket, tier, monthly_price)
+    // Edited via Pricing Logic UI → GET/PUT /admin/pricing-config/lawn-brackets
+    if (await db.schema.hasTable('lawn_pricing_brackets')) {
+      const lawnRows = await db('lawn_pricing_brackets')
+        .orderBy('grass_track').orderBy('sqft_bracket').orderBy('tier');
+      if (lawnRows.length) {
+        const TIER_INDEX = { basic: 0, standard: 1, enhanced: 2, premium: 3 };
+        const byTrack = {};
+        for (const row of lawnRows) {
+          const track = row.grass_track;
+          const sqft = Number(row.sqft_bracket);
+          const idx = TIER_INDEX[row.tier];
+          if (idx === undefined) continue;
+          if (!byTrack[track]) byTrack[track] = new Map();
+          if (!byTrack[track].has(sqft)) {
+            byTrack[track].set(sqft, [sqft, 0, 0, 0, 0]);
+          }
+          byTrack[track].get(sqft)[idx + 1] = r(Number(row.monthly_price));
+        }
+        for (const [track, bracketMap] of Object.entries(byTrack)) {
+          if (!constants.LAWN_BRACKETS[track]) continue;
+          const sorted = [...bracketMap.values()].sort((a, b) => a[0] - b[0]);
+          // Drop the sqft=0 seed row (lookup uses first bracket ≥ target)
+          const filtered = sorted[0]?.[0] === 0 ? sorted.slice(1) : sorted;
+          if (filtered.length) constants.LAWN_BRACKETS[track] = filtered;
+        }
+      }
+    }
+
     _lastSync = Date.now();
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
