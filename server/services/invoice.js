@@ -320,7 +320,10 @@ const InvoiceService = {
     const cardLine = (invoice.card_brand && invoice.card_last_four)
       ? `\nPaid with: ${invoice.card_brand} ****${invoice.card_last_four}` : '';
     const amount = Number(invoice.total).toFixed(2);
-    const fallback = `Payment received — thank you, ${customer.first_name}!\n\nInvoice: ${invoice.invoice_number}\nAmount: $${amount}${cardLine}\n\nYour property is protected. See you at your next service!\n\n— Waves Pest Control`;
+    const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
+    const receiptUrl = invoice.token ? `${domain}/pay/${invoice.token}` : '';
+    const receiptLine = receiptUrl ? `\n\nView receipt: ${receiptUrl}` : '';
+    const fallback = `Payment received — thank you, ${customer.first_name}!\n\nInvoice: ${invoice.invoice_number}\nAmount: $${amount}${cardLine}${receiptLine}\n\nYour property is protected. See you at your next service!\n\n— Waves Pest Control`;
     let body = fallback;
     try {
       const templates = require('../routes/admin-sms-templates');
@@ -329,6 +332,7 @@ const InvoiceService = {
         invoice_number: invoice.invoice_number,
         amount,
         card_line: cardLine,
+        receipt_url: receiptUrl,
       });
       if (rendered && !rendered.includes('{first_name}')) body = rendered;
     } catch (err) {

@@ -13,8 +13,8 @@ exports.up = async function (knex) {
       template_key: 'invoice_receipt',
       name: 'Payment Receipt',
       category: 'billing',
-      body: 'Payment received — thank you, {first_name}!\n\nInvoice: {invoice_number}\nAmount: ${amount}{card_line}\n\nYour property is protected. See you at your next service!\n\n— Waves Pest Control',
-      variables: ['first_name', 'invoice_number', 'amount', 'card_line'],
+      body: 'Payment received — thank you, {first_name}!\n\nInvoice: {invoice_number}\nAmount: ${amount}{card_line}\n\nView receipt: {receipt_url}\n\nYour property is protected. See you at your next service!\n\n— Waves Pest Control',
+      variables: ['first_name', 'invoice_number', 'amount', 'card_line', 'receipt_url'],
       sort_order: 17,
     },
 
