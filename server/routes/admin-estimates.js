@@ -3,8 +3,19 @@ const router = express.Router();
 const crypto = require('crypto');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
+const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+
+async function renderTemplate(templateKey, vars, fallback) {
+  try {
+    if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      if (body) return body;
+    }
+  } catch { /* fall through */ }
+  return fallback;
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -74,7 +85,8 @@ async function sendEstimateNow(estimate, sendMethod) {
   // Send SMS
   if ((sendMethod === 'sms' || sendMethod === 'both') && estimate.customer_phone) {
     try {
-      const smsBody = `Hi ${firstName}! Your Waves Pest Control estimate is ready.${priceLine ? `\n\n${priceLine}` : ''}\n\n${viewUrl}\n\nQuestions? Reply to this text or call (941) 318-7612.`;
+      const fallback = `Hello ${firstName}! Your Waves estimate is ready: ${viewUrl}\n\nQuestions or requests? Reply to this message. Thank you for considering Waves!`;
+      const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl }, fallback);
       await TwilioService.sendSMS(estimate.customer_phone, smsBody);
     } catch (e) { logger.error(`Estimate SMS failed: ${e.message}`); }
   }
