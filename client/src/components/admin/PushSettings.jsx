@@ -44,6 +44,7 @@ export default function PushSettings() {
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
+  const [pushError, setPushError] = useState('');
 
   useEffect(() => {
     isPushEnabled().then(setPushOn);
@@ -56,10 +57,11 @@ export default function PushSettings() {
 
   const togglePush = async () => {
     setBusy(true);
+    setPushError('');
     try {
       if (pushOn) { await disablePush(); setPushOn(false); showToast('Push disabled on this device'); }
       else { await ensurePushSubscription(); setPushOn(true); showToast('Push enabled on this device'); }
-    } catch (e) { alert(e.message); }
+    } catch (e) { setPushError(e.message || 'Failed to enable push notifications'); }
     finally { setBusy(false); }
   };
 
@@ -142,6 +144,22 @@ export default function PushSettings() {
           {busy ? '…' : pushOn ? 'Disable' : 'Enable'}
         </button>
       </div>
+
+      {pushError && (
+        <div style={{
+          padding: 12, marginBottom: 18, background: '#FDECEA', border: `1px solid ${D.red}44`,
+          borderRadius: 8, color: D.red, fontSize: 13, lineHeight: 1.5,
+          display: 'flex', alignItems: 'flex-start', gap: 10,
+        }}>
+          <span style={{ fontSize: 16, lineHeight: 1 }}>⚠️</span>
+          <div style={{ flex: 1 }}>{pushError}</div>
+          <button
+            onClick={() => setPushError('')}
+            style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 16, lineHeight: 1 }}
+            title="Dismiss"
+          >×</button>
+        </div>
+      )}
 
       {/* Header row */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px 60px', gap: 12, padding: '8px 12px', fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>

@@ -52,27 +52,52 @@ export async function isPushEnabled() {
 
 export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    throw new Error('Push notifications are not supported in this browser');
+    throw new Error('Push notifications are not supported in this browser. Try Chrome, Firefox, Edge, or Safari 16+.');
+  }
+
+  // Push requires a secure context (HTTPS or localhost)
+  if (!window.isSecureContext) {
+    throw new Error('Push requires HTTPS. This page is loaded over HTTP — use the production URL.');
+  }
+
+  // If the user previously blocked notifications, requestPermission resolves
+  // immediately as 'denied' without re-prompting. Tell them how to recover.
+  if (Notification.permission === 'denied') {
+    throw new Error('Notifications are blocked in your browser. Click the lock/site-info icon in the URL bar → Notifications → Allow, then reload.');
   }
 
   const permission = await Notification.requestPermission();
-  if (permission !== 'granted') throw new Error('Permission denied');
+  if (permission !== 'granted') {
+    throw new Error('You did not allow notifications. Click Enable again and choose "Allow" when the browser prompts.');
+  }
 
   const reg = await getRegistration();
 
   const authToken = token || localStorage.getItem('waves_admin_token');
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` };
 
-  const keyRes = await fetch(`${apiBase}/admin/push/vapid-key`, { headers });
-  const { publicKey } = await keyRes.json();
-  if (!publicKey) throw new Error('Server has no VAPID key configured');
+  let publicKey;
+  try {
+    const keyRes = await fetch(`${apiBase}/admin/push/vapid-key`, { headers });
+    if (!keyRes.ok) throw new Error(`vapid-key HTTP ${keyRes.status}`);
+    publicKey = (await keyRes.json()).publicKey;
+  } catch (e) {
+    throw new Error(`Could not fetch VAPID key from server: ${e.message}`);
+  }
+  if (!publicKey) {
+    throw new Error('Server has no VAPID keys configured. Set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in Railway env vars (run `npx web-push generate-vapid-keys` to create a pair), then redeploy.');
+  }
 
   let sub = await reg.pushManager.getSubscription();
   if (!sub) {
-    sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(publicKey),
-    });
+    try {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+    } catch (e) {
+      throw new Error(`Browser refused subscription: ${e.message}. (If on iOS, the site must be installed to home screen first.)`);
+    }
   }
 
   const subRes = await fetch(`${apiBase}/admin/push/subscribe`, {
@@ -80,7 +105,11 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
     headers,
     body: JSON.stringify({ subscription: sub.toJSON(), deviceInfo: describeDevice() }),
   });
-  if (!subRes.ok) throw new Error(`Subscribe failed: ${subRes.status}`);
+  if (!subRes.ok) {
+    let detail = '';
+    try { detail = (await subRes.json()).error || ''; } catch {}
+    throw new Error(`Server rejected subscription (HTTP ${subRes.status}). ${detail}`);
+  }
 
   return { ok: true, endpoint: sub.endpoint };
 }
