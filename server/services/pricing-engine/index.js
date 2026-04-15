@@ -7,6 +7,7 @@ const servicePricing = require('./service-pricing');
 const discountEngine = require('./discount-engine');
 const { generateEstimate, quickQuote } = require('./estimate-engine');
 const { syncConstantsFromDB, needsSync } = require('./db-bridge');
+const modifiers = require('./modifiers');
 
 module.exports = {
   // Main entry points
@@ -25,6 +26,11 @@ module.exports = {
   // DB bridge — syncs admin-edited pricing config into engine constants
   syncConstantsFromDB,
   needsSync,
+
+  // Property-driven modifiers (v2 port) — expose for admin tools
+  modifiers,
+  deriveModifiers: modifiers.deriveModifiers,
+  deriveNotes: modifiers.deriveNotes,
 
   // Constants (for admin UI editing)
   constants,

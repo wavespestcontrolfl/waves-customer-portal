@@ -323,9 +323,13 @@ function generateEstimate(input) {
     // Warnings
     marginWarnings,
 
+    // Property-driven modifiers & structural notes (v2 port)
+    modifiers,
+    structuralNotes,
+
     // Metadata
     generatedAt: new Date().toISOString(),
-    pricingVersion: 'v4.1',
+    pricingVersion: 'v4.2',
     notes: [],
   };
 }
