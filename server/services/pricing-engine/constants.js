@@ -93,8 +93,8 @@ const PEST = {
     trees_moderate: r(5),
     trees_heavy: r(10),
     complexity_complex: r(5),
-    nearWater: r(5),
-    largeDriveway: r(5),
+    nearWater: 2.5,
+    largeDriveway: 2.5,
   },
   roachModifier: { german: 0.25, regular: 0.10, none: 0 },
   frequencyDiscounts: {
