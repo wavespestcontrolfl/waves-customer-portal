@@ -1349,33 +1349,37 @@ function HeroSlider({ onSwitchTab }) {
   const touchDeltaX = useRef(0);
 
   const slides = [
-    { type: 'image', src: '/waves-ford-1.png', alt: 'Waves Pest Control & Lawn Care truck' },
-    { type: 'image', src: '/waves-ford-2.png', alt: 'Waves Pest Control & Lawn Care truck' },
-    { type: 'image', src: '/waves-ford-3.png', alt: 'Waves Pest Control & Lawn Care truck' },
-    { type: 'image', src: '/waves-ford-4.png', alt: 'Waves Pest Control & Lawn Care truck' },
     {
-      type: 'promo',
-      bg: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
+      image: '/waves-ford-1.png',
+      alt: 'Waves Pest Control & Lawn Care truck',
       icon: '🛡️',
       title: 'Wave Goodbye to Pests!',
       subtitle: 'Full-service pest control, lawn care & mosquito protection for your home.',
       cta: { label: 'View My Plan', tab: 'plan' },
     },
     {
-      type: 'promo',
-      bg: `linear-gradient(135deg, #FF6F00, #E65100)`,
+      image: '/waves-ford-2.png',
+      alt: 'Waves Pest Control & Lawn Care truck',
       icon: '🎁',
       title: 'Refer a Friend, Earn Cash!',
       subtitle: 'Share your referral link and earn rewards for every neighbor who signs up.',
       cta: { label: 'Start Referring', tab: 'refer' },
     },
     {
-      type: 'promo',
-      bg: `linear-gradient(135deg, #2E7D32, #1B5E20)`,
+      image: '/waves-ford-3.png',
+      alt: 'Waves Pest Control & Lawn Care truck',
       icon: '🌿',
       title: 'Lawn Care Programs',
       subtitle: 'St. Augustine, Bermuda, Zoysia & Bahia — customized fertilization & weed control.',
       cta: { label: 'Learn More', tab: 'learn' },
+    },
+    {
+      image: '/waves-ford-4.png',
+      alt: 'Waves Pest Control & Lawn Care truck',
+      icon: '🌊',
+      title: 'Trusted SWFL Service',
+      subtitle: 'Family-owned & operated across Manatee, Sarasota & Charlotte counties.',
+      cta: { label: 'View My Plan', tab: 'plan' },
     },
   ];
 
@@ -1423,41 +1427,44 @@ function HeroSlider({ onSwitchTab }) {
               pointerEvents: i === active ? 'auto' : 'none',
             }}
           >
-            {slide.type === 'image' ? (
-              <img
-                src={slide.src}
-                alt={slide.alt}
-                style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-              />
-            ) : (
+            <img
+              src={slide.image}
+              alt={slide.alt}
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+            />
+            <div style={{
+              position: 'absolute', inset: 0,
+              background: 'linear-gradient(90deg, rgba(0,0,0,0.65) 0%, rgba(0,0,0,0.45) 55%, rgba(0,0,0,0.25) 100%)',
+            }} />
+            <div style={{
+              position: 'absolute', inset: 0,
+              display: 'flex', flexDirection: 'column', justifyContent: 'center',
+              padding: '24px 28px 24px 44px', boxSizing: 'border-box',
+              ...(i === active ? { animation: 'heroFadeIn 0.6s ease' } : {}),
+            }}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>{slide.icon}</div>
               <div style={{
-                width: '100%', height: '100%', background: slide.bg,
-                display: 'flex', flexDirection: 'column', justifyContent: 'center',
-                padding: '24px 28px 24px 44px', boxSizing: 'border-box',
-                ...(i === active ? { animation: 'heroFadeIn 0.6s ease' } : {}),
-              }}>
-                <div style={{ fontSize: 32, marginBottom: 8 }}>{slide.icon}</div>
-                <div style={{
-                  fontSize: 20, fontWeight: 800, color: '#fff',
-                  fontFamily: FONTS.heading, lineHeight: 1.2, marginBottom: 6,
-                }}>{slide.title}</div>
-                <div style={{
-                  fontSize: 13, color: 'rgba(255,255,255,0.85)', lineHeight: 1.4,
-                  maxWidth: 320, marginBottom: 14,
-                }}>{slide.subtitle}</div>
-                {slide.cta && (
-                  <button
-                    onClick={() => onSwitchTab(slide.cta.tab)}
-                    style={{
-                      ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
-                      background: 'rgba(255,255,255,0.2)', color: '#fff',
-                      backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.3)',
-                      alignSelf: 'flex-start',
-                    }}
-                  >{slide.cta.label}</button>
-                )}
-              </div>
-            )}
+                fontSize: 20, fontWeight: 800, color: '#fff',
+                fontFamily: FONTS.heading, lineHeight: 1.2, marginBottom: 6,
+                textShadow: '0 2px 8px rgba(0,0,0,0.5)',
+              }}>{slide.title}</div>
+              <div style={{
+                fontSize: 13, color: 'rgba(255,255,255,0.95)', lineHeight: 1.4,
+                maxWidth: 320, marginBottom: 14,
+                textShadow: '0 1px 4px rgba(0,0,0,0.5)',
+              }}>{slide.subtitle}</div>
+              {slide.cta && (
+                <button
+                  onClick={() => onSwitchTab(slide.cta.tab)}
+                  style={{
+                    ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
+                    background: 'rgba(255,255,255,0.2)', color: '#fff',
+                    backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.3)',
+                    alignSelf: 'flex-start',
+                  }}
+                >{slide.cta.label}</button>
+              )}
+            </div>
           </div>
         ))}
       </div>
