@@ -28,11 +28,68 @@ function capitalizeName(name) {
     .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
 }
 
+// HARD-CODED Waves-owned numbers — do NOT remove. Loopback guard for missed-call SMS
+// so we never text ourselves (Adam's phone, location lines, tracking lines, etc.).
+// If a Twilio number is added, append it here AND to server/config/twilio-numbers.js.
+const WAVES_OWNED_NUMBERS = new Set([
+  '+19413187612', // Lakewood Ranch HQ / Adam
+  '+19412972817', // Parrish
+  '+19412972606', // Sarasota
+  '+19412973337', // Venice
+  '+19412975749', // wavespestcontrol.com general
+  '+19412838194', // bradentonflexterminator.com
+  '+19413265011', // bradentonflpestcontrol.com
+  '+19412972671', // sarasotaflpestcontrol.com
+  '+19412135203', // palmettoexterminator.com
+  '+19412943355', // palmettoflpestcontrol.com
+  '+19419098995', // parrishexterminator.com
+  '+19413187765', // sarasotaflexterminator.com
+  '+19412998937', // veniceexterminator.com
+  '+19412589109', // portcharlotteflpestcontrol.com
+  '+19412402066', // North Port
+  '+19413041850', // bradentonfllawncare.com
+  '+19412691692', // sarasotafllawncare.com
+  '+19412077456', // parrishfllawncare.com
+  '+19414131227', // venicelawncare.com
+  '+19412413824', // waveslawncare.com
+  '+19412412459', // Van wrap
+  '+18559260203', // Toll-free
+  '+19412535279', // Unassigned
+  '+19412411388', // Unassigned
+  '+19415993489', // Ring-first dial target
+  '+17206334021', // Ring-first dial target
+]);
+
 // ── Missed call SMS — fires when call goes to voicemail ──
 // Rate limited: max 1 per customer per day
 async function sendMissedCallSMS(callerPhone, callerName, callSid) {
   try {
     const TwilioService = require('../services/twilio');
+
+    // Resolve the original inbound caller from call_log (set during ring-first).
+    // Twilio's <Dial action> callback retains the parent From, but fall back to
+    // call_log.from_phone if callerPhone is missing or looks like one of our own numbers.
+    let linkedCustomer = null;
+    try {
+      if (callSid) {
+        const logRow = await db('call_log')
+          .where(function () { this.where('twilio_call_sid', callSid).orWhere('call_sid', callSid); })
+          .select('customer_id', 'from_phone')
+          .first();
+        if (logRow?.from_phone && (!callerPhone || WAVES_OWNED_NUMBERS.has(callerPhone))) {
+          callerPhone = logRow.from_phone;
+        }
+        if (logRow?.customer_id) {
+          linkedCustomer = await db('customers').where({ id: logRow.customer_id }).first();
+        }
+      }
+    } catch { /* non-critical */ }
+
+    // Loopback guard (HARD-CODED): never SMS one of our own Twilio numbers
+    if (!callerPhone || WAVES_OWNED_NUMBERS.has(callerPhone)) {
+      console.log(`[VoiceAgent] Skip missed-call SMS — callerPhone ${callerPhone || 'missing'} is missing or owned by Waves`);
+      return;
+    }
 
     // Rate limit: check if we already sent a missed call SMS to this number today
     try {
@@ -60,14 +117,10 @@ async function sendMissedCallSMS(callerPhone, callerName, callSid) {
       }
     }
 
-    // Also try to get name from customer DB
-    if (!firstName) {
-      try {
-        const customer = await db('customers').where({ phone: callerPhone }).first();
-        if (customer?.first_name) {
-          firstName = customer.first_name.charAt(0).toUpperCase() + customer.first_name.slice(1).toLowerCase();
-        }
-      } catch { /* no customer match */ }
+    // Prefer the customer already linked to this call_log row (set during ring-first)
+    // so we use the exact caller, not a stale phone-match that could hit the wrong record.
+    if (!firstName && linkedCustomer?.first_name) {
+      firstName = linkedCustomer.first_name.charAt(0).toUpperCase() + linkedCustomer.first_name.slice(1).toLowerCase();
     }
 
     // Pull editable body from sms_templates.missed_call. Fall back to inline.
