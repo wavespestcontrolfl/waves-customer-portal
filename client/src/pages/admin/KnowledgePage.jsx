@@ -319,7 +319,6 @@ export default function KnowledgePage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <div>
           <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Knowledge Base</div>
-          <div style={{ fontSize: 13, color: D.muted }}>{totalArticles} articles across {Object.keys(categoryCounts).length} categories</div>
         </div>
         <button onClick={() => setShowQA(true)} style={{
           padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',

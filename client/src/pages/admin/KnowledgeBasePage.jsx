@@ -49,7 +49,6 @@ export default function KnowledgeBasePage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: D.heading }}>Knowledge Base</div>
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>Claudeopedia — living knowledge for AI assistant, pricing engines & SOPs</div>
         </div>
       </div>
 

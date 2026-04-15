@@ -1074,7 +1074,6 @@ export default function TaxPage() {
     <div style={{ maxWidth: 1200 }}>
       <div style={{ marginBottom: 20 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0, fontFamily: "'DM Sans', sans-serif" }}>Tax Center</h1>
-        <p style={{ fontSize: 13, color: D.muted, margin: '4px 0 0' }}>Tax rates, filing calendar, expenses, depreciation & AI tax advisor</p>
       </div>
 
       {/* Intelligence Bar */}
