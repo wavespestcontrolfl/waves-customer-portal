@@ -145,14 +145,31 @@ ${(post.content || '').substring(0, 5000)}
 
 EXISTING INTERNAL LINKS: ${(post.content_html || '').match(/href="https?:\/\/wavespestcontrol\.com/g)?.length || 0}
 
-Available internal link targets:
-- wavespestcontrol.com/pest-control-bradenton-fl/
-- wavespestcontrol.com/pest-control-sarasota-fl/
-- wavespestcontrol.com/lawn-care/
-- wavespestcontrol.com/mosquito-control/
-- wavespestcontrol.com/termite-control/
-- wavespestcontrol.com/rodent-control/
-- wavespestcontrol.com/tree-and-shrub/
+Available internal link targets (ONLY link to URLs that actually exist — match the post's city when possible):
+
+Hubs:
+- wavespestcontrol.com/pest-control-services/
+- wavespestcontrol.com/service-areas/
+- wavespestcontrol.com/waveguard-memberships/
+- wavespestcontrol.com/pest-library/
+- wavespestcontrol.com/pest-control-deals/
+- wavespestcontrol.com/pest-control-quote/
+- wavespestcontrol.com/pest-inspection/
+- wavespestcontrol.com/termite-inspection/
+- wavespestcontrol.com/waves-guarantee/
+- wavespestcontrol.com/faqs/
+
+City service pages — pattern: /{service}-{city}-fl/
+- Cities: bradenton, lakewood-ranch, sarasota, venice, north-port, parrish, palmetto, port-charlotte
+- Services: pest-control, lawn-care, mosquito-control, termite-control, rodent-control, bed-bug-control, termite-inspection, commercial-pest-control, pest-control-services, pest-control-quote
+- Examples: /lawn-care-bradenton-fl/, /mosquito-control-sarasota-fl/, /termite-control-venice-fl/, /rodent-control-parrish-fl/
+
+Lawn/tree specialty (Bradenton only for these exact slugs):
+- /tree-and-shrub-care-bradenton-fl/
+- /palm-tree-injections-bradenton-fl/
+- /lawn-aeration-bradenton-fl/, /lawn-aeration-lakewood-ranch-fl/
+
+Rules: Never invent URLs. Never link to bare categories like /lawn-care/ or /termite-control/ — they do not exist. Always use the city-suffixed slug matching the post's target city.
 
 Return JSON: {
   "suggested_title": "better title in Waves voice (or null if good)",

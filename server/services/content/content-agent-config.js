@@ -36,8 +36,11 @@ CONTENT STANDARDS:
 
 CITIES: Bradenton, Lakewood Ranch, Sarasota, Venice, North Port, Parrish, Palmetto, Port Charlotte
 
-INTERNAL LINKS (include 2-3):
-wavespestcontrol.com/pest-control-bradenton-fl/, /pest-control-sarasota-fl/, /lawn-care/, /mosquito-control/, /termite-control/, /rodent-control/, /tree-and-shrub/
+INTERNAL LINKS (include 2-3 — ONLY real URLs, match the post's city):
+Hubs: /pest-control-services/, /service-areas/, /waveguard-memberships/, /pest-library/, /pest-control-deals/, /pest-control-quote/, /pest-inspection/, /termite-inspection/
+City pages follow /{service}-{city}-fl/ (cities: bradenton, lakewood-ranch, sarasota, venice, north-port, parrish, palmetto, port-charlotte; services: pest-control, lawn-care, mosquito-control, termite-control, rodent-control, bed-bug-control, commercial-pest-control, pest-control-services, pest-control-quote, termite-inspection)
+Examples: /lawn-care-bradenton-fl/, /mosquito-control-sarasota-fl/, /termite-control-venice-fl/
+Never use bare categories like /lawn-care/ or /termite-control/ — they do not exist.
 
 Publish to WordPress as draft. Distribute to all social channels. Report: title, word count, QA score, WordPress URL.`,
 
