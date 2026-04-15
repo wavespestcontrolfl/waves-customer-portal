@@ -1381,6 +1381,14 @@ function HeroSlider({ onSwitchTab }) {
       subtitle: 'Family-owned & operated across Manatee, Sarasota & Charlotte counties.',
       cta: { label: 'View My Plan', tab: 'plan' },
     },
+    {
+      image: '/waves-ford-1.png',
+      alt: 'Waves Pest Control & Lawn Care truck',
+      icon: '📚',
+      title: 'Stay in the Know',
+      subtitle: 'SWFL pest & lawn tips, expert advice from UF/IFAS, and our monthly newsletter — all in the Learn tab.',
+      cta: { label: 'Open Learn', tab: 'learn' },
+    },
   ];
 
   const count = slides.length;
