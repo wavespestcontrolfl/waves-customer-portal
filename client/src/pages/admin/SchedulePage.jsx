@@ -827,6 +827,7 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
   const [recurringIntervalDays, setRecurringIntervalDays] = useState(30);
   const [discountType, setDiscountType] = useState('');
   const [discountAmount, setDiscountAmount] = useState('');
+  const [createInvoice, setCreateInvoice] = useState(!!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete));
 
   useEffect(() => {
     (async () => {
@@ -867,6 +868,7 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
           recurringIntervalDays: isRecurring && recurringFreq === 'custom' ? recurringIntervalDays : undefined,
           discountType: isRecurring && discountType ? discountType : undefined,
           discountAmount: isRecurring && discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
+          createInvoice,
         }),
       });
       onSaved?.();
@@ -1075,6 +1077,12 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
           <label style={labelStyle}>Notes</label>
           <textarea value={form.notes} onChange={e => update('notes', e.target.value)} rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
         </div>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16, padding: '10px 12px', background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
+          <input type="checkbox" checked={createInvoice} onChange={e => setCreateInvoice(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.green }} />
+          <span style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>Create invoice on completion</span>
+          <span style={{ fontSize: 11, color: D.muted }}>— invoice + pay link sent in the service-complete SMS</span>
+        </label>
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button onClick={onClose} disabled={saving} style={{

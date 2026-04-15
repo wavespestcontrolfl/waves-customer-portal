@@ -162,7 +162,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
-      .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.city', 'customers.property_type', 'customers.monthly_rate as cust_monthly_rate', 'technicians.name as tech_name')
+      .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.city', 'customers.property_type', 'customers.monthly_rate as cust_monthly_rate', 'customers.waveguard_tier as cust_waveguard_tier', 'technicians.name as tech_name')
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
@@ -202,34 +202,50 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     await db('service_status_log').insert({ scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId });
 
-    // Auto-generate invoice + send SMS (combined service report + invoice)
-    let invoiceCreated = false;
-    try {
-      const InvoiceService = require('../services/invoice');
-      const invoice = await InvoiceService.createFromService(record.id, {
-        amount: svc.cust_monthly_rate || 0,
-        description: svc.service_type,
-        taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
-      });
-      invoiceCreated = true;
+    // Invoice + completion SMS:
+    //   - If the appointment was flagged `create_invoice_on_complete` (scheduler's
+    //     "Create invoice" checkbox) OR the customer is WaveGuard with a monthly_rate,
+    //     generate an invoice and send a single combined SMS (report + pay link).
+    //   - Otherwise send the plain service-complete SMS (report link only).
+    const invoiceAmount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
+      ? Number(svc.estimated_price)
+      : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    const shouldInvoice = (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
+    const portalUrl = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
 
-      // Send invoice SMS (includes service type, date, and pay link)
-      if (sendCompletionSms && svc.cust_phone) {
-        try {
-          await InvoiceService.sendViaSMS(invoice.id);
-        } catch (smsErr) {
-          logger.error(`[dispatch] Invoice SMS failed (non-blocking): ${smsErr.message}`);
-        }
+    let invoiceCreated = false;
+    let payUrl = null;
+    if (shouldInvoice) {
+      try {
+        const InvoiceService = require('../services/invoice');
+        const invoice = await InvoiceService.createFromService(record.id, {
+          amount: invoiceAmount,
+          description: svc.service_type,
+          taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
+        });
+        invoiceCreated = true;
+        payUrl = `${portalUrl}/pay/${invoice.token}`;
+      } catch (invErr) {
+        logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
       }
-    } catch (invErr) {
-      logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
     }
 
-    if (!invoiceCreated && sendCompletionSms && svc.cust_phone) {
+    if (sendCompletionSms && svc.cust_phone) {
       try {
-        const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: portal.wavespestcontrol.com\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-        const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
-        await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete' });
+        if (invoiceCreated && payUrl) {
+          const fallback = `Hello ${svc.first_name}! Your ${svc.service_type} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+          const body = await renderTemplate('service_complete_with_invoice', {
+            first_name: svc.first_name || '',
+            service_type: svc.service_type || 'your service',
+            portal_url: portalUrl,
+            pay_url: payUrl,
+          }, fallback);
+          await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
+        } else {
+          const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+          const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
+          await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete' });
+        }
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
     }
 

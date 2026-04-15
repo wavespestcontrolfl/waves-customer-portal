@@ -411,6 +411,7 @@ router.post('/', async (req, res, next) => {
       serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
       discountType, discountAmount,
+      createInvoice,
       sendConfirmation, serviceId, serviceAddons, assignmentMode,
       estimatedPrice, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification,
@@ -489,6 +490,7 @@ router.post('/', async (req, res, next) => {
       }
       if (cols.discount_type && discountType) insertData.discount_type = discountType;
       if (cols.discount_amount && discountAmount != null && discountAmount !== '') insertData.discount_amount = Number(discountAmount);
+      if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = !!createInvoice;
     } catch (e) { logger.warn(`[schedule] Column check failed (non-blocking): ${e.message}`); }
 
     const [svc] = await db('scheduled_services').insert(insertData).returning('*');
@@ -530,6 +532,7 @@ router.post('/', async (req, res, next) => {
         if (cols.estimated_price && finalPrice != null) childData.estimated_price = finalPrice;
         if (cols.discount_type && discountType) childData.discount_type = discountType;
         if (cols.discount_amount && discountAmount != null && discountAmount !== '') childData.discount_amount = Number(discountAmount);
+        if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = !!createInvoice;
         await db('scheduled_services').insert(childData);
       }
     }
@@ -563,6 +566,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
       discountType, discountAmount,
+      createInvoice,
     } = req.body;
     const updates = {};
     if (serviceType !== undefined) updates.service_type = serviceType;
@@ -585,6 +589,13 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.recurring_interval_days) updates.recurring_interval_days = recurringIntervalDays != null ? parseInt(recurringIntervalDays) : null;
         if (cols.discount_type) updates.discount_type = discountType || null;
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (cols.create_invoice_on_complete && createInvoice !== undefined) updates.create_invoice_on_complete = !!createInvoice;
+      } catch {}
+    }
+    if (!isRecurring && createInvoice !== undefined) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        if (cols.create_invoice_on_complete) updates.create_invoice_on_complete = !!createInvoice;
       } catch {}
     }
     if (Object.keys(updates).length) {
@@ -638,6 +649,8 @@ router.put('/:id/update-details', async (req, res, next) => {
             if (cols.estimated_price && childPrice != null) childData.estimated_price = childPrice;
             if (cols.discount_type && dType) childData.discount_type = dType;
             if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
+            const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
+            if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
           } catch { /* non-blocking */ }
           await db('scheduled_services').insert(childData);
           recurringCreated++;
