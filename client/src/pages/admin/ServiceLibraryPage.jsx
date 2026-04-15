@@ -49,7 +49,7 @@ const EMPTY_SVC = {
   default_duration_minutes: 60,
   scheduling_buffer_minutes: 0, requires_follow_up: false, follow_up_interval_days: '',
   frequency: '', visits_per_year: '',
-  pricing_type: 'variable', base_price: '', price_range_min: '', price_range_max: '', pricing_model_key: '',
+  pricing_type: 'variable', base_price: '', pricing_model_key: '',
   is_taxable: false, tax_service_key: '', requires_license: false, license_category: '',
   min_tech_skill_level: 1, customer_visible: true, booking_enabled: true,
   sort_order: 100, icon: '', color: '#0ea5e9', is_active: true,
@@ -117,9 +117,7 @@ function ServiceForm({ svc, onSave, onCancel }) {
         <Field label="Pricing Type" half>
           {sel('pricing_type', [{ value: 'variable', label: 'Variable' }, { value: 'fixed', label: 'Fixed' }, { value: 'quoted', label: 'Quoted' }])}
         </Field>
-        <Field label="Base Price" half>{inp('base_price', 'number')}</Field>
-        <Field label="Price Min" half>{inp('price_range_min', 'number')}</Field>
-        <Field label="Price Max" half>{inp('price_range_max', 'number')}</Field>
+        <Field label="Price" half>{inp('base_price', 'number')}</Field>
         <Field label="Pricing Model Key" half>{inp('pricing_model_key')}</Field>
         <Field label="Sort Order" half>{inp('sort_order', 'number')}</Field>
       </div>
@@ -167,7 +165,7 @@ function ServiceForm({ svc, onSave, onCancel }) {
 function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
   const billingColor = billingColors[svc.billing_type] || '#64748b';
   const catColor = catColors[svc.category] || '#64748b';
-  const price = svc.base_price ? `$${Number(svc.base_price).toFixed(0)}` : svc.price_range_min ? `$${Number(svc.price_range_min).toFixed(0)}-$${Number(svc.price_range_max).toFixed(0)}` : '--';
+  const price = svc.base_price ? `$${Number(svc.base_price).toFixed(0)}` : '--';
 
   const handleToggleActive = async (e) => {
     e.stopPropagation();
