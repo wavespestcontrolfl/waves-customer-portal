@@ -110,6 +110,7 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
   const [serviceGroups, setServiceGroups] = useState(FALLBACK_SERVICES);
   const [selectedService, setSelectedService] = useState(null);
   const [isCallback, setIsCallback] = useState(false);
+  const [expandedCategory, setExpandedCategory] = useState(null);
 
   // Date/Time/Tech state
   const [apptDate, setApptDate] = useState(defaultDate || new Date().toISOString().split('T')[0]);
@@ -328,20 +329,29 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
           <div style={{ fontSize: 13, fontWeight: 700, color: D.white, marginBottom: 10 }}>Service</div>
           {!selectedService ? (
             <div>
-              {serviceGroups.map((group, gi) => (
-                <div key={gi} style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 11, color: D.muted, fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                    {CATEGORY_EMOJI[group.category] || '📦'} {CATEGORY_LABELS[group.category] || group.category}
+              {serviceGroups.map((group, gi) => {
+                const isOpen = expandedCategory === group.category;
+                return (
+                  <div key={gi} style={{ marginBottom: 6, border: `1px solid ${D.border}`, borderRadius: 8, overflow: 'hidden' }}>
+                    <button
+                      onClick={() => setExpandedCategory(isOpen ? null : group.category)}
+                      style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', background: isOpen ? `${D.teal}11` : D.input, border: 'none', color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', minHeight: 44 }}
+                    >
+                      <span>{CATEGORY_EMOJI[group.category] || '📦'} {CATEGORY_LABELS[group.category] || group.category} <span style={{ color: D.muted, fontWeight: 400, marginLeft: 6 }}>({group.items.length})</span></span>
+                      <span style={{ color: D.muted, fontSize: 12 }}>{isOpen ? '▾' : '▸'}</span>
+                    </button>
+                    {isOpen && (
+                      <div style={{ display: 'flex', flexDirection: 'column', padding: 8, gap: 4, background: D.bg }}>
+                        {group.items.map((svc, si) => (
+                          <button key={si} onClick={() => setSelectedService(svc)} style={{ padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, cursor: 'pointer', minHeight: 40, textAlign: 'left' }}>
+                            {svc.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    {group.items.map((svc, si) => (
-                      <button key={si} onClick={() => setSelectedService(svc)} style={{ padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center' }}>
-                        {svc.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: D.input, borderRadius: 10, padding: 12 }}>

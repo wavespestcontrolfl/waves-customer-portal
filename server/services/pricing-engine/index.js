@@ -6,6 +6,7 @@ const propertyCalculator = require('./property-calculator');
 const servicePricing = require('./service-pricing');
 const discountEngine = require('./discount-engine');
 const { generateEstimate, quickQuote } = require('./estimate-engine');
+const { syncConstantsFromDB, needsSync } = require('./db-bridge');
 
 module.exports = {
   // Main entry points
@@ -20,6 +21,10 @@ module.exports = {
 
   // Discount engine
   ...discountEngine,
+
+  // DB bridge — syncs admin-edited pricing config into engine constants
+  syncConstantsFromDB,
+  needsSync,
 
   // Constants (for admin UI editing)
   constants,

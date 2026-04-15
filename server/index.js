@@ -411,6 +411,14 @@ const server = app.listen(PORT, () => {
       initScheduledJobs();
     }
 
+    // Sync pricing engine constants from admin-edited DB values
+    try {
+      const { syncConstantsFromDB } = require('./services/pricing-engine');
+      await syncConstantsFromDB();
+    } catch (err) {
+      logger.warn(`[pricing-engine] Initial DB sync skipped: ${err.message}`);
+    }
+
     // Sync Stripe payouts every 15 minutes
     setInterval(async () => {
       try {
