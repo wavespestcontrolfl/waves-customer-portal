@@ -18,14 +18,96 @@
  * or pricing-engine/service-pricing.js.
  */
 
-const LABOR_RATE = 35;    // $/hr loaded rate
-const DRIVE_TIME = 20;    // minutes average drive (Zone A)
-const ADMIN_ANNUAL = 51;  // annual admin overhead per service
+const DEFAULT_LABOR_RATE = 35;    // $/hr loaded rate
+const DEFAULT_DRIVE_TIME = 20;    // minutes average drive (Zone A)
+const DEFAULT_ADMIN_ANNUAL = 51;  // annual admin overhead per service
+
+let LABOR_RATE = DEFAULT_LABOR_RATE;
+let DRIVE_TIME = DEFAULT_DRIVE_TIME;
+let ADMIN_ANNUAL = DEFAULT_ADMIN_ANNUAL;
+
+// ─────────────────────────────────────────────
+// PRICING CONFIG LOADER — pulls admin-editable values
+// from pricing_config + lawn_pricing_brackets. Cached 60s so
+// edits in /📐 Pricing Logic flow through to estimates.
+// ─────────────────────────────────────────────
+let _cfgCache = null;
+let _cfgCacheAt = 0;
+const CFG_TTL_MS = 60_000;
+
+async function loadPricingConfig() {
+  if (_cfgCache && Date.now() - _cfgCacheAt < CFG_TTL_MS) return _cfgCache;
+  const cfg = {
+    pestBase: null, pestFloor: null,
+    pestFootprint: null, pestFeatures: {}, pestPropertyType: {},
+    lawnBrackets: null,
+  };
+  try {
+    const db = require('../models/db');
+    if (await db.schema.hasTable('pricing_config')) {
+      const rows = await db('pricing_config').select('config_key', 'data');
+      const byKey = {};
+      for (const r of rows) {
+        byKey[r.config_key] = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+      }
+      if (byKey.global_labor_rate?.value) LABOR_RATE = byKey.global_labor_rate.value;
+      else LABOR_RATE = DEFAULT_LABOR_RATE;
+      if (byKey.global_drive_time?.value) DRIVE_TIME = byKey.global_drive_time.value;
+      else DRIVE_TIME = DEFAULT_DRIVE_TIME;
+      if (byKey.global_admin_annual?.value) ADMIN_ANNUAL = byKey.global_admin_annual.value;
+      else ADMIN_ANNUAL = DEFAULT_ADMIN_ANNUAL;
+
+      if (byKey.pest_base) {
+        if (byKey.pest_base.base != null) cfg.pestBase = byKey.pest_base.base;
+        if (byKey.pest_base.floor != null) cfg.pestFloor = byKey.pest_base.floor;
+      }
+      if (byKey.pest_footprint?.breakpoints?.length) {
+        cfg.pestFootprint = byKey.pest_footprint.breakpoints.map(bp => [bp.sqft, bp.adj]);
+      }
+      if (byKey.pest_features) cfg.pestFeatures = byKey.pest_features;
+      if (byKey.pest_property_type) cfg.pestPropertyType = byKey.pest_property_type;
+    }
+
+    if (await db.schema.hasTable('lawn_pricing_brackets')) {
+      const lawnRows = await db('lawn_pricing_brackets')
+        .orderBy('grass_track').orderBy('sqft_bracket').orderBy('tier');
+      if (lawnRows.length) {
+        const TIER_INDEX = { basic: 0, standard: 1, enhanced: 2, premium: 3 };
+        const TRACK_TO_GRASS = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
+        const byTrack = {};
+        for (const row of lawnRows) {
+          const grass = TRACK_TO_GRASS[row.grass_track] || row.grass_track;
+          const sqft = Number(row.sqft_bracket);
+          const idx = TIER_INDEX[row.tier];
+          if (idx === undefined) continue;
+          if (!byTrack[grass]) byTrack[grass] = new Map();
+          if (!byTrack[grass].has(sqft)) byTrack[grass].set(sqft, [sqft, 0, 0, 0, 0]);
+          byTrack[grass].get(sqft)[idx + 1] = Number(row.monthly_price);
+        }
+        cfg.lawnBrackets = {};
+        for (const [grass, bracketMap] of Object.entries(byTrack)) {
+          cfg.lawnBrackets[grass] = [...bracketMap.values()].sort((a, b) => a[0] - b[0]);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[pricing-engine-v2] config load failed, using defaults:', err.message);
+  }
+  _cfgCache = cfg;
+  _cfgCacheAt = Date.now();
+  return cfg;
+}
+
+function invalidatePricingConfigCache() {
+  _cfgCache = null;
+  _cfgCacheAt = 0;
+}
 
 // ─────────────────────────────────────────────
 // MAIN ENTRY POINT
 // ─────────────────────────────────────────────
 async function calculateEstimate(profile, selectedServices, options = {}) {
+  const PRICING_CFG = await loadPricingConfig();
   const {
     grassType: _grassType = 'st_augustine',
     pestFreq = 4,
@@ -294,12 +376,12 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
 
   // ── LAWN CARE ──
   if (selectedServices.includes('LAWN') && turfSf > 0) {
-    result.recurring.lawn = calcLawn(turfSf, grassType, p);
+    result.recurring.lawn = calcLawn(turfSf, grassType, p, PRICING_CFG);
   }
 
   // ── PEST CONTROL ──
   if (selectedServices.includes('PEST') && footprint > 0) {
-    result.recurring.pest = calcPest(footprint, p, mods, pestFreq, roachModifier, zoneMult);
+    result.recurring.pest = calcPest(footprint, p, mods, pestFreq, roachModifier, zoneMult, PRICING_CFG);
   }
 
   // ── TREE & SHRUB ──
@@ -328,7 +410,7 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
   // ═══════════════════════════════════════════
 
   if (selectedServices.includes('OT_PEST') && footprint > 0) {
-    const basePP = result.recurring.pest?.perApp || calcPestBase(footprint, p, mods);
+    const basePP = result.recurring.pest?.perApp || calcPestBase(footprint, p, mods, PRICING_CFG);
     result.oneTime.pest = { name: 'One-Time Pest', price: applyOT(Math.max(150, Math.round(basePP * 1.30))) };
   }
 
@@ -459,17 +541,21 @@ function interpolate(v, breakpoints) {
 // ─────────────────────────────────────────────
 // LAWN CARE
 // ─────────────────────────────────────────────
-function calcLawn(turfSf, grassType, p) {
-  // Pricing lookup from Lawn_Pricing_v4_TimeScaled.xlsx
-  // Lawn pricing brackets — 3% increase applied (payment model restructure)
-  const LAWN_PRICES = {
+function calcLawn(turfSf, grassType, p, cfg = null) {
+  // Default lawn brackets — overridden at runtime by lawn_pricing_brackets table (edited in 📐 Pricing Logic)
+  const DEFAULT_LAWN_PRICES = {
     st_augustine: { name: 'St. Augustine', pts: [[0,36,46,57,67],[3000,36,46,57,67],[3500,36,46,57,70],[4000,36,46,57,75],[5000,36,46,61,87],[6000,36,47,68,99],[7000,39,52,75,110],[8000,42,57,82,122],[10000,48,66,97,144],[12000,56,75,112,167],[15000,65,89,134,201],[20000,82,111,170,258]] },
     bermuda: { name: 'Bermuda', pts: [[0,41,52,62,77],[4000,41,52,62,77],[5000,41,52,62,89],[6000,41,52,69,100],[7000,41,53,76,111],[8000,43,58,84,124],[10000,49,67,99,146],[12000,57,76,114,170],[15000,67,91,136,205],[20000,83,114,174,264]] },
     zoysia: { name: 'Zoysia', pts: [[0,41,52,62,77],[4000,41,52,62,77],[5000,41,52,63,90],[6000,41,52,70,101],[7000,41,54,77,113],[8000,43,58,85,125],[10000,50,68,100,148],[12000,58,77,115,172],[15000,68,92,138,208],[20000,85,115,176,267]] },
     bahia: { name: 'Bahia', pts: [[0,31,41,52,62],[3000,31,41,52,62],[3500,31,41,52,65],[4000,31,41,52,70],[5000,31,41,57,80],[6000,33,43,63,90],[7000,36,47,69,100],[8000,38,52,75,110],[10000,44,60,89,130],[12000,49,68,101,149],[15000,59,79,121,179],[20000,73,100,152,230]] }
   };
 
-  const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
+  const C = cfg || _cfgCache || {};
+  const GRASS_NAMES = { st_augustine: 'St. Augustine', bermuda: 'Bermuda', zoysia: 'Zoysia', bahia: 'Bahia' };
+  let lp = DEFAULT_LAWN_PRICES[grassType] || DEFAULT_LAWN_PRICES.st_augustine;
+  if (C.lawnBrackets?.[grassType]?.length) {
+    lp = { name: GRASS_NAMES[grassType] || lp.name, pts: C.lawnBrackets[grassType] };
+  }
 
   function lawnLookup(sf, freqIdx) {
     const pts = lp.pts;
@@ -515,53 +601,59 @@ function calcLawn(turfSf, grassType, p) {
 // ─────────────────────────────────────────────
 // PEST CONTROL
 // ─────────────────────────────────────────────
-function calcPestBase(footprint, p, mods) {
+function calcPestBase(footprint, p, mods, cfg = null) {
+  const C = cfg || _cfgCache || {};
+  const F = C.pestFeatures || {};
+  const PT = C.pestPropertyType || {};
   let adj = 0;
   const adjItems = [];
 
-  // Footprint adjustment — based on actual chemical cost + labor data
-  // Footprint adjustments — 3% increase applied
-  const fpAdj = interpolate(footprint, [
-    { at: 800, adj: -21 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
-    { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 },
-    { at: 4000, adj: 21 }, { at: 5500, adj: 29 }
-  ]);
+  // Footprint adjustment — admin-editable brackets (pest_footprint)
+  const fpBrackets = (C.pestFootprint && C.pestFootprint.length)
+    ? C.pestFootprint.map(([at, a]) => ({ at, adj: a }))
+    : [
+        { at: 800, adj: -21 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
+        { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 },
+        { at: 4000, adj: 21 }, { at: 5500, adj: 29 },
+      ];
+  const fpAdj = interpolate(footprint, fpBrackets);
   adj += fpAdj;
   adjItems.push({ name: `Footprint (${footprint.toLocaleString()} sf)`, value: fpAdj });
 
+  const pick = (k, d) => (F[k] != null ? Number(F[k]) : d);
+
   // Shrub density
   let shrAdj = 0;
-  if (p.shrubDensity === 'LIGHT') shrAdj = -5;
-  else if (p.shrubDensity === 'MODERATE') shrAdj = 5;
-  else if (p.shrubDensity === 'HEAVY') shrAdj = 10;
+  if (p.shrubDensity === 'LIGHT') shrAdj = pick('shrubs_light', -5);
+  else if (p.shrubDensity === 'MODERATE') shrAdj = pick('shrubs_moderate', 5);
+  else if (p.shrubDensity === 'HEAVY') shrAdj = pick('shrubs_heavy', 10);
   adj += shrAdj;
   adjItems.push({ name: `Shrubs (${p.shrubDensity})`, value: shrAdj });
 
   // Pool
   let poolAdj = 0;
-  if (p.poolCage === 'YES') poolAdj = 10;
-  else if (p.pool === 'YES') poolAdj = 5;
+  if (p.poolCage === 'YES') poolAdj = pick('pool_cage', 10);
+  else if (p.pool === 'YES') poolAdj = pick('pool_no_cage', 5);
   adj += poolAdj;
   adjItems.push({ name: `Pool`, value: poolAdj });
 
-
   // Tree density
   let treeAdj = 0;
-  if (p.treeDensity === 'LIGHT') treeAdj = -5;
-  else if (p.treeDensity === 'MODERATE') treeAdj = 5;
-  else if (p.treeDensity === 'HEAVY') treeAdj = 10;
+  if (p.treeDensity === 'LIGHT') treeAdj = pick('trees_light', -5);
+  else if (p.treeDensity === 'MODERATE') treeAdj = pick('trees_moderate', 5);
+  else if (p.treeDensity === 'HEAVY') treeAdj = pick('trees_heavy', 10);
   adj += treeAdj;
   adjItems.push({ name: `Trees (${p.treeDensity})`, value: treeAdj });
 
   // Complexity
   let compAdj = 0;
-  if (p.landscapeComplexity === 'COMPLEX') compAdj = 5;
+  if (p.landscapeComplexity === 'COMPLEX') compAdj = pick('landscape_complex', 5);
   adj += compAdj;
   adjItems.push({ name: `Complexity (${p.landscapeComplexity})`, value: compAdj });
 
   // Near water
   let waterAdj = 0;
-  if (p.nearWater && p.nearWater !== 'NONE' && p.nearWater !== 'NO') waterAdj = 2.5;
+  if (p.nearWater && p.nearWater !== 'NONE' && p.nearWater !== 'NO') waterAdj = pick('near_water', 2.5);
   if (waterAdj > 0) {
     adj += waterAdj;
     adjItems.push({ name: 'Near water', value: waterAdj });
@@ -569,36 +661,43 @@ function calcPestBase(footprint, p, mods) {
 
   // Large driveway
   if (p.hasLargeDriveway) {
-    adj += 2.5;
-    adjItems.push({ name: 'Large driveway', value: 2.5 });
+    const v = pick('large_driveway', 2.5);
+    adj += v;
+    adjItems.push({ name: 'Large driveway', value: v });
   }
 
   // Indoor treatment
   if (p.indoor) {
-    adj += 10;
-    adjItems.push({ name: 'Indoor treatment', value: 10 });
+    const v = pick('indoor', 10);
+    adj += v;
+    adjItems.push({ name: 'Indoor treatment', value: v });
   }
 
-  // ── Property type adjustment ──
+  // ── Property type adjustment (admin-editable via pest_property_type) ──
   const ptLower = (p.propertyType || '').toLowerCase();
+  const ptKey = (k, d) => (PT[k] != null ? Number(PT[k]) : d);
   let propTypeAdj = 0;
   if (ptLower.includes('townhome') || ptLower.includes('town home') || ptLower.includes('townhouse')) {
-    propTypeAdj = ptLower.includes('interior') || ptLower.includes('inner') ? -15 : -8;
-  } else if (ptLower.includes('duplex')) { propTypeAdj = -10; }
+    propTypeAdj = ptLower.includes('interior') || ptLower.includes('inner')
+      ? ptKey('townhome_interior', -15) : ptKey('townhome', -8);
+  } else if (ptLower.includes('duplex')) { propTypeAdj = ptKey('duplex', -10); }
   else if (ptLower.includes('condo')) {
-    propTypeAdj = ptLower.includes('upper') || ptLower.includes('2nd') || ptLower.includes('3rd') ? -25 : -20;
+    propTypeAdj = ptLower.includes('upper') || ptLower.includes('2nd') || ptLower.includes('3rd')
+      ? ptKey('condo_upper', -25) : ptKey('condo', -20);
   }
   if (propTypeAdj !== 0) {
     adj += propTypeAdj;
     adjItems.push({ name: `Property type (${p.propertyType})`, value: propTypeAdj });
   }
 
-  const basePrice = Math.max(92, 121 + adj);
+  const base = C.pestBase != null ? Number(C.pestBase) : 121;
+  const floor = C.pestFloor != null ? Number(C.pestFloor) : 92;
+  const basePrice = Math.max(floor, base + adj);
   return basePrice;
 }
 
-function calcPest(footprint, p, mods, pestFreq, roachMod, zoneMult) {
-  const basePrice = calcPestBase(footprint, p, mods);
+function calcPest(footprint, p, mods, pestFreq, roachMod, zoneMult, cfg = null) {
+  const basePrice = calcPestBase(footprint, p, mods, cfg);
 
   // Roach modifier
   let rOG = 0;
@@ -1308,4 +1407,4 @@ function calcTotals(result) {
 }
 
 
-module.exports = { calculateEstimate };
+module.exports = { calculateEstimate, invalidatePricingConfigCache };

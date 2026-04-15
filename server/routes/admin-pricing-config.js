@@ -114,6 +114,13 @@ router.put('/lawn-brackets/:track', async (req, res, next) => {
         .where({ grass_track: req.params.track, sqft_bracket: b.sqft_bracket, tier: b.tier })
         .update({ monthly_price: b.monthly_price, updated_at: new Date() });
     }
+    // Invalidate estimator caches so lawn edits flow through on next /calculate-estimate
+    try {
+      const v2 = require('../services/pricing-engine-v2');
+      if (v2.invalidatePricingConfigCache) v2.invalidatePricingConfigCache();
+      const modular = require('../services/pricing-engine');
+      if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
+    } catch { /* non-fatal */ }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -248,6 +255,14 @@ router.put('/:key', async (req, res, next) => {
     if (description !== undefined) updates.description = description;
 
     await db('pricing_config').where({ config_key: req.params.key }).update(updates);
+
+    // Invalidate estimator caches so edits flow through on next /calculate-estimate
+    try {
+      const v2 = require('../services/pricing-engine-v2');
+      if (v2.invalidatePricingConfigCache) v2.invalidatePricingConfigCache();
+      const modular = require('../services/pricing-engine');
+      if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
+    } catch { /* non-fatal */ }
 
     // Audit log
     if (data !== undefined) {
