@@ -93,7 +93,9 @@ All credentials in Railway environment variables. Key ones:
 
 ## Design System
 
-All admin pages use inline styles with this color palette:
+### Current Palette (existing admin pages)
+
+All existing admin pages use inline styles with the `D` dark palette object. **Match this in existing pages:**
 ```js
 const D = {
   bg: '#0f1923', card: '#1e293b', border: '#334155',
@@ -103,6 +105,100 @@ const D = {
 };
 ```
 Fonts: `'DM Sans', sans-serif` (body), `'JetBrains Mono', monospace` (numbers/code), `'Montserrat', sans-serif` (headings in tech portal).
+
+### Brand Palette (extracted from van wrap, mascot, favicon)
+
+When restyling or building new admin pages, use these brand-accurate colors:
+```js
+const BRAND = {
+  // Primary
+  blue:         '#0A7EC2',   // Primary brand blue (van wrap, mascot)
+  blueDark:     '#065A8C',   // Sidebar bg, active states
+  blueDeeper:   '#04395E',   // Sidebar dark mode, headings
+  blueLight:    '#E8F4FC',   // Table row hover, card bg
+  blue50:       '#F0F7FC',   // Barely-there blue — page backgrounds
+  // Accent
+  red:          '#C0392B',   // Brand red (cap, overalls, favicon bg)
+  redLight:     '#FDECEA',   // Error/danger backgrounds
+  gold:         '#F0A500',   // Brand gold (thumbs up, phone number on van)
+  goldLight:    '#FEF7E0',   // Warning backgrounds
+  // Neutrals
+  slate900:     '#0F172A',   // Primary text
+  slate700:     '#334155',   // Secondary text
+  slate500:     '#64748B',   // Muted text, placeholders
+  slate300:     '#CBD5E1',   // Borders, dividers
+  slate100:     '#F1F5F9',   // Table stripes, subtle backgrounds
+  white:        '#FFFFFF',
+  // Semantic
+  success:      '#16A34A',
+  successLight: '#DCFCE7',
+};
+```
+
+### Admin UX Model — Jobber-Inspired, Waves-Owned
+
+Use Jobber as the **structural** reference — not a visual clone. Borrow information architecture and usability patterns, apply Waves branding, go deeper on features Jobber can't touch.
+
+**Take from Jobber:**
+- Sidebar nav with icon + label, collapsible on desktop, slide-out drawer on mobile
+- Section grouping in sidebar (Operations, Customers, Financial, Settings)
+- Page structure: page title -> action bar (filters + primary button) -> content area
+- Clean tables with consistent column alignment, sortable headers, row hover states
+- Card-based dashboards with single-metric focus per card
+- 3-tap rule: any common daily task reachable in <=3 clicks from dashboard
+
+**Do differently from Jobber:**
+- Deeper data density — Customer 360, Health Scores, Procurement Intelligence. Use progressive disclosure (summary -> expand -> detail page)
+- AI-native surfaces — agent status cards, AI-generated insights, inline AI actions
+- Brand warmth — `blue` as the anchor color throughout, not grayscale-neutral
+- Contextual density — Virginia at office needs info-dense views; Adam/Jose/Jacob in the field need big tap targets. Support both via responsive layout
+
+### Component Standards
+
+**Sidebar:** Desktop 240px wide, `blueDeeper` bg, white text, `blue` active highlight with left border accent. Collapsed: 64px icon-only. Mobile: full-screen slide-out drawer.
+
+**Top Bar:** 56px desktop, 48px mobile. Page title left, search center, user avatar + notifications right. White bg, `slate300` bottom border.
+
+**Dashboard Cards:** CSS Grid `repeat(auto-fill, minmax(280px, 1fr))`. Label (muted, 14px) -> Value (bold, 24px) -> Trend indicator. White bg, subtle shadow, 8px radius. Don't cram charts — a number with context > a tiny chart.
+
+**Tables:** Header `slate100` bg, 14px semibold uppercase. Rows alternating white/`blue50`, hover -> `blueLight`. Mobile: convert to card-stack below 768px.
+
+**Buttons:** Primary: `blue` bg, white text, 6px radius, hover -> `blueDark`. Secondary: white bg, `slate700` text, `slate300` border. Danger: `red` bg, white text — destructive actions only. Default 36px height, compact 32px for table actions.
+
+**Status Badges:** Inline pill, 12px radius, 12px font. Active: `success` on `successLight`. Warning: `gold` on `goldLight`. Danger: `red` on `redLight`. Neutral: `slate700` on `slate100`. Info: `blue` on `blueLight`.
+
+**Modals:** 480px default, 640px forms, 800px complex. Max 90vw mobile. Fade + scale 95%->100% animation.
+
+**Forms:** Labels above input, 14px medium, `slate700`. Inputs 40px height, 6px radius, `slate300` border, focus -> `blue` border + ring. Single column default, two-column >768px for related fields.
+
+### Layout Rules
+
+```
+Page Template:
++------------------------------------------------+
+|  Top Bar (56px)                                |
++------+-----------------------------------------+
+|      |  Page Title          [Primary Action]   |
+| Side |  ---------------------------------------  |
+| bar  |  Filters / Tabs                         |
+|      |  ---------------------------------------  |
+| 240  |  Content Area                           |
+|  px  |  (table, cards, form, detail view)      |
++------+-----------------------------------------+
+```
+
+**Breakpoints:** Desktop >=1024px (sidebar visible). Tablet 768-1023px (sidebar collapsed/hidden). Mobile <768px (sidebar hidden, single-column, tables -> card stacks).
+
+**Content width:** Max 1280px centered. Padding 24px desktop, 16px mobile.
+
+### What NOT To Do
+
+- **No purple gradients.** We're a pest control company, not a fintech startup.
+- **No chart overload.** Every chart must answer a specific question. If it doesn't, use a number + trend arrow.
+- **No excessive animations.** Page transitions and hover states only. No bouncing, no parallax.
+- **No tiny text.** Minimum 14px for anything a user needs to read. Virginia uses this 8 hours a day.
+- **No mystery icons.** Every icon gets a text label in the sidebar and a tooltip elsewhere.
+- **No gratuitous mascot usage.** The mascot is for customer-facing marketing. Admin gets the "W" mark or wordmark, sparingly. This is a tool, not a billboard.
 
 ---
 
