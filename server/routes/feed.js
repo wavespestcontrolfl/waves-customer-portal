@@ -1,12 +1,68 @@
 const express = require('express');
 const router = express.Router();
 const xml2js = require('xml2js');
+const rateLimit = require('express-rate-limit');
 const { authenticate } = require('../middleware/auth');
+const logger = require('../services/logger');
 
 router.use(authenticate);
 
+// Fetching upstream RSS/JSON is expensive and reaches third parties; cap
+// per-customer traffic so a compromised token can't hammer the upstreams.
+const feedLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customerId || req.ip,
+  message: { error: 'Too many feed requests. Please wait a bit.' },
+});
+router.use(feedLimiter);
+
 const cache = {};
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+// Only allow links/images from trusted sources. javascript:/data:/file: and
+// arbitrary third-party domains are rejected, closing the open-redirect and
+// CSS-injection holes that malformed upstream feeds could exploit.
+const ALLOWED_LINK_HOSTS = new Set([
+  'wavespestcontrol.com', 'www.wavespestcontrol.com',
+  'beehiiv.com', 'www.beehiiv.com', 'rss.beehiiv.com', 'mag.beehiiv.com',
+  'blogs.ifas.ufl.edu', 'ifas.ufl.edu', 'www.ifas.ufl.edu',
+  'mysuncoast.com', 'www.mysuncoast.com',
+  'weather.gov', 'api.weather.gov',
+]);
+
+function hostAllowed(host) {
+  if (!host) return false;
+  const h = host.toLowerCase();
+  if (ALLOWED_LINK_HOSTS.has(h)) return true;
+  // Allow immediate subdomains of known publishers (e.g. *.beehiiv.com, *.ifas.ufl.edu).
+  for (const allowed of ALLOWED_LINK_HOSTS) {
+    if (h.endsWith('.' + allowed)) return true;
+  }
+  return false;
+}
+
+function safeLink(url) {
+  if (typeof url !== 'string' || !url) return null;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    if (!hostAllowed(u.hostname)) return null;
+    return u.toString();
+  } catch { return null; }
+}
+
+function safeImage(url) {
+  // Images render in CSS `background: url(...)` on the client, so we must
+  // reject anything that isn't a plain http(s) URL to a trusted host.
+  const link = safeLink(url);
+  if (!link) return null;
+  // Belt-and-suspenders: refuse characters that could break out of url(...)
+  if (/[\s"'<>\\)]/.test(link)) return null;
+  return link;
+}
 
 async function fetchWithCache(key, url) {
   const now = Date.now();
@@ -14,28 +70,52 @@ async function fetchWithCache(key, url) {
 
   try {
     const res = await fetch(url);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      logger.warn(`[feed] Upstream ${key} returned ${res.status}`);
+      return null;
+    }
     const text = await res.text();
     const parsed = await xml2js.parseStringPromise(text, { explicitArray: false });
     cache[key] = { data: parsed, ts: now };
     return parsed;
-  } catch { return null; }
+  } catch (err) {
+    logger.warn(`[feed] Failed to fetch/parse ${key}: ${err.message}`);
+    return null;
+  }
+}
+
+const HTML_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', hellip: '…',
+  mdash: '—', ndash: '–', copy: '©', reg: '®', trade: '™',
+};
+
+function decodeEntities(s) {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&([a-z]+);/gi, (m, name) => HTML_ENTITIES[name.toLowerCase()] ?? m);
 }
 
 function stripHtml(html) {
-  return (html || '').replace(/<[^>]*>/g, '').replace(/&[^;]+;/g, ' ').trim();
+  if (!html) return '';
+  return decodeEntities(String(html).replace(/<[^>]*>/g, ''))
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function extractImage(item) {
   // Try media:content, media:thumbnail, enclosure, or content:encoded img
-  if (item['media:content']?.$?.url) return item['media:content'].$.url;
-  if (item['media:thumbnail']?.$?.url) return item['media:thumbnail'].$.url;
-  if (item.enclosure?.$?.url && item.enclosure.$.type?.startsWith('image')) return item.enclosure.$.url;
-  // Try to find first img in content
-  const content = item['content:encoded'] || item.description || '';
-  const imgMatch = content.match(/<img[^>]+src=["']([^"']+)["']/);
-  if (imgMatch) return imgMatch[1];
-  return null;
+  let candidate = null;
+  if (item['media:content']?.$?.url) candidate = item['media:content'].$.url;
+  else if (item['media:thumbnail']?.$?.url) candidate = item['media:thumbnail'].$.url;
+  else if (item.enclosure?.$?.url && item.enclosure.$.type?.startsWith('image')) candidate = item.enclosure.$.url;
+  else {
+    const content = item['content:encoded'] || item.description || '';
+    const imgMatch = content.match(/<img[^>]+src=["']([^"']+)["']/);
+    if (imgMatch) candidate = imgMatch[1];
+  }
+  return safeImage(candidate);
 }
 
 function parseItems(channel) {
@@ -61,7 +141,7 @@ router.get('/blog', async (req, res, next) => {
 
     const posts = items.slice(0, 6).map(item => ({
       title: item.title || '',
-      link: item.link || '',
+      link: safeLink(item.link) || '',
       pubDate: item.pubDate || '',
       description: stripHtml(item.description || '').slice(0, 200),
       image: extractImage(item),
@@ -84,7 +164,7 @@ router.get('/newsletter', async (req, res, next) => {
 
     const posts = items.slice(0, 6).map(item => ({
       title: item.title || '',
-      link: item.link || '',
+      link: safeLink(item.link) || '',
       pubDate: item.pubDate || '',
       description: stripHtml(item.description || '').slice(0, 200),
       image: extractImage(item),
@@ -122,7 +202,7 @@ router.get('/experts', async (req, res, next) => {
 
     const posts = relevant.slice(0, 4).map(item => ({
       title: item.title || '',
-      link: item.link || '',
+      link: safeLink(item.link) || '',
       pubDate: item.pubDate || '',
       description: stripHtml(item.description || '').slice(0, 180),
       image: extractImage(item),
@@ -149,7 +229,7 @@ router.get('/local', async (req, res, next) => {
 
     const posts = relevant.slice(0, 3).map(item => ({
       title: item.title || '',
-      link: item.link || '',
+      link: safeLink(item.link) || '',
       pubDate: item.pubDate || '',
       description: stripHtml(item.description || '').slice(0, 150),
       image: extractImage(item),

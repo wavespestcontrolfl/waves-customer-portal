@@ -5092,23 +5092,44 @@ function ContentCard({ post, large }) {
   const sourceColors = { blog: B.wavesBlue, newsletter: B.yellow, ifas: B.green, local: B.grayMid };
   const srcColor = sourceColors[post.source] || B.grayMid;
 
+  // Defense in depth — server already filters, but never trust a URL
+  // coming off an external RSS feed. Only http(s) links are rendered, and
+  // images used in CSS backgrounds must not contain url(...) breakouts.
+  const safeHref = (() => {
+    try {
+      const u = new URL(post.link, window.location.origin);
+      return (u.protocol === 'http:' || u.protocol === 'https:') ? u.toString() : null;
+    } catch { return null; }
+  })();
+  const safeImg = (() => {
+    if (!post.image) return null;
+    try {
+      const u = new URL(post.image, window.location.origin);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      const s = u.toString();
+      return /[\s"'<>\\)]/.test(s) ? null : s;
+    } catch { return null; }
+  })();
+
+  if (!safeHref) return null;
+
   return (
-    <a href={post.link} target="_blank" rel="noopener noreferrer" style={{
+    <a href={safeHref} target="_blank" rel="noopener noreferrer" style={{
       background: B.white, borderRadius: 14, overflow: 'hidden',
       border: `1px solid ${B.bluePale}`, textDecoration: 'none',
       display: 'block', transition: 'box-shadow 0.2s',
     }}>
-      {post.image && large && (
+      {safeImg && large && (
         <div style={{
-          height: 140, background: `url(${post.image}) center/cover no-repeat`,
+          height: 140, background: `url("${safeImg}") center/cover no-repeat`,
           borderBottom: `1px solid ${B.grayLight}`,
         }} />
       )}
       <div style={{ padding: large ? '14px 16px' : '12px 14px', display: 'flex', gap: 12 }}>
-        {post.image && !large && (
+        {safeImg && !large && (
           <div style={{
             width: 56, height: 56, borderRadius: 10, flexShrink: 0,
-            background: `url(${post.image}) center/cover no-repeat, ${B.blueSurface}`,
+            background: `url("${safeImg}") center/cover no-repeat, ${B.blueSurface}`,
           }} />
         )}
         <div style={{ flex: 1, minWidth: 0 }}>

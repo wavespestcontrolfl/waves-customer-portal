@@ -66,13 +66,29 @@ router.get('/queries', async (req, res) => {
 // POST /api/knowledge/queries/:id/rate
 router.post('/queries/:id/rate', async (req, res) => {
   try {
-    const { rating } = req.body; // 1-5
+    const rating = parseInt(req.body?.rating, 10);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'rating must be an integer between 1 and 5' });
+    }
     await getDb()('knowledge_queries').where('id', req.params.id).update({ response_quality: rating });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Markdown structural tokens that would let a user-supplied Q/A break out
+// of the intended block (headings, fences, HTML tags). Strip/escape them
+// before the text is appended to a published article.
+function sanitizeMarkdown(input, max = 2000) {
+  if (!input) return '';
+  let s = String(input).slice(0, max);
+  s = s.replace(/<[^>]*>/g, '');           // no raw HTML
+  s = s.replace(/```+/g, '`\u200B`\u200B`'); // break code fences
+  s = s.replace(/^(#{1,6})\s/gm, '$1\u200B '); // break headings
+  s = s.replace(/\r/g, '');
+  return s.trim();
+}
 
 // POST /api/knowledge/queries/:id/file-back
 // Files a Q&A answer back into the wiki as enrichment
@@ -85,10 +101,14 @@ router.post('/queries/:id/file-back', async (req, res) => {
     if (paths.length) {
       const first = await getDb()('knowledge_base').where('path', paths[0]).first();
       if (first) {
-        const appendText = `\n\n---\n## Q&A (filed ${new Date().toLocaleDateString()})\n**Q:** ${query.query}\n\n**A:** ${query.answer}`;
+        const q = sanitizeMarkdown(query.query, 1000);
+        const a = sanitizeMarkdown(query.answer, 4000);
+        const appendText = `\n\n---\n## Q&A (filed ${new Date().toLocaleDateString()})\n**Q:** ${q}\n\n**A:** ${a}`;
+        // Cap word_count contribution so an oversized answer can't poison the column.
+        const addedWords = Math.min(appendText.split(/\s+/).length, 1000);
         await getDb()('knowledge_base').where('id', first.id).update({
           content: first.content + appendText,
-          word_count: (first.word_count || 0) + appendText.split(/\s+/).length,
+          word_count: (first.word_count || 0) + addedWords,
           updated_at: new Date(),
         });
       }
