@@ -231,11 +231,11 @@ export default function PublicBookingPage() {
         {step === 1 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
             <h2 style={{ fontSize: 22, fontWeight: 600, color: BRAND.navy, marginBottom: 8, letterSpacing: '-0.5px' }}>
-              Where's the service?
+              Find a date &amp; time that works for you
             </h2>
             <p style={{ fontSize: 14, color: BRAND.gray600, marginBottom: 24, lineHeight: 1.5 }}>
-              {service ? <>Booking <strong>{service.icon} {service.label}</strong> · </> : null}
-              We serve Manatee, Sarasota, and Charlotte counties.
+              {service ? <>Booking <strong>{service.icon} {service.label}</strong>. </> : null}
+              Drop your address and we'll show you the next available slots — see you soon!
             </p>
             <div style={{ display: 'grid', gap: 14, marginBottom: 24 }}>
               <div>
