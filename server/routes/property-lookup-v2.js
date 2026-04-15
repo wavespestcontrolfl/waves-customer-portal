@@ -42,6 +42,7 @@ router.post('/property-lookup', async (req, res) => {
   const result = {
     address: address.trim(),
     rentcast: null,
+    avm: null,
     satellite: null,
     aiAnalysis: null,
     enriched: null,
@@ -51,12 +52,15 @@ router.post('/property-lookup', async (req, res) => {
 
   const t0 = Date.now();
 
-  // ── STEP 1: RentCast Lookup ──
-  try {
-    result.rentcast = await fetchRentCast(address);
-  } catch (err) {
-    result.errors.push({ source: 'rentcast', message: err.message });
-  }
+  // ── STEP 1: RentCast Property + AVM Lookup (parallel) ──
+  const [rcResult, avmResult] = await Promise.allSettled([
+    fetchRentCast(address),
+    fetchRentCastAVM(address),
+  ]);
+  if (rcResult.status === 'fulfilled') result.rentcast = rcResult.value;
+  else result.errors.push({ source: 'rentcast', message: rcResult.reason?.message || String(rcResult.reason) });
+  if (avmResult.status === 'fulfilled') result.avm = avmResult.value;
+  else result.errors.push({ source: 'rentcast-avm', message: avmResult.reason?.message || String(avmResult.reason) });
 
   // ── STEP 2: Geocode + Satellite Images ──
   let lat, lng;
@@ -199,7 +203,7 @@ router.post('/property-lookup', async (req, res) => {
   }
 
   // ── STEP 4: Enrich — merge all data sources ──
-  result.enriched = buildEnrichedProfile(result.rentcast, result.aiAnalysis, lat, lng);
+  result.enriched = buildEnrichedProfile(result.rentcast, result.aiAnalysis, lat, lng, result.avm);
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
@@ -217,6 +221,23 @@ router.post('/property-lookup', async (req, res) => {
 // ─────────────────────────────────────────────
 // RENTCAST
 // ─────────────────────────────────────────────
+async function fetchRentCastAVM(address) {
+  if (!process.env.RENTCAST_API_KEY) throw new Error('RENTCAST_API_KEY not configured');
+  const url = `${RENTCAST_BASE}/avm/value?address=${encodeURIComponent(address)}`;
+  const resp = await fetch(url, {
+    headers: { 'X-Api-Key': process.env.RENTCAST_API_KEY, 'Accept': 'application/json' },
+  });
+  if (!resp.ok) throw new Error(`RentCast AVM ${resp.status}: ${resp.statusText}`);
+  const data = await resp.json();
+  if (!data || typeof data.price !== 'number') return null;
+  return {
+    price: data.price,
+    priceRangeLow: data.priceRangeLow || null,
+    priceRangeHigh: data.priceRangeHigh || null,
+    comparables: Array.isArray(data.comparables) ? data.comparables.length : 0,
+  };
+}
+
 async function fetchRentCast(address) {
   const url = `${RENTCAST_BASE}/properties?address=${encodeURIComponent(address)}`;
   const resp = await fetch(url, {
@@ -541,7 +562,7 @@ Return a JSON object with exactly these fields:
 // ─────────────────────────────────────────────
 // ENRICHED PROFILE — merges all data sources
 // ─────────────────────────────────────────────
-function buildEnrichedProfile(rc, ai, lat, lng) {
+function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
   const profile = {
     // ── ADDRESS ──
     address: rc?.formattedAddress || '',
@@ -628,6 +649,12 @@ function buildEnrichedProfile(rc, ai, lat, lng) {
     lastSalePrice: rc?.lastSalePrice || null,
     isNewHomeowner: isRecentPurchase(rc?.lastSaleDate, 6),
     yearsOwned: yearsFromDate(rc?.lastSaleDate),
+
+    // ── AVM (RentCast estimated value) ──
+    estimatedValue: avm?.price || null,
+    estimatedValueLow: avm?.priceRangeLow || null,
+    estimatedValueHigh: avm?.priceRangeHigh || null,
+    avmComparables: avm?.comparables || 0,
 
     // ── HOA ──
     hoaFee: rc?.hoaFee || null,
