@@ -266,4 +266,41 @@ router.put('/:key', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /estimate — run the pricing engine with live DB-synced constants
+// This is the single entry point estimators should use. Body schema matches
+// the modular engine's generateEstimate input.
+router.post('/estimate', async (req, res, next) => {
+  try {
+    const pricingEngine = require('../services/pricing-engine');
+    if (!pricingEngine?.generateEstimate) {
+      return res.status(500).json({ error: 'Pricing engine not available' });
+    }
+    // Sync DB-edited constants into the engine before calculating
+    try {
+      if (pricingEngine.needsSync && pricingEngine.needsSync()) {
+        await pricingEngine.syncConstantsFromDB();
+      }
+    } catch { /* non-fatal — fall back to in-memory constants */ }
+
+    const estimate = pricingEngine.generateEstimate(req.body || {});
+    res.json({ estimate });
+  } catch (err) { next(err); }
+});
+
+// POST /quick-quote — compact version for lightweight surfaces (tech portal, AI agents)
+router.post('/quick-quote', async (req, res, next) => {
+  try {
+    const pricingEngine = require('../services/pricing-engine');
+    if (!pricingEngine?.quickQuote) {
+      return res.status(500).json({ error: 'Pricing engine not available' });
+    }
+    try {
+      if (pricingEngine.needsSync && pricingEngine.needsSync()) {
+        await pricingEngine.syncConstantsFromDB();
+      }
+    } catch { /* non-fatal */ }
+    res.json({ quote: pricingEngine.quickQuote(req.body || {}) });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
