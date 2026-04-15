@@ -84,14 +84,6 @@ const FALLBACK_SERVICES = [
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
 const CATEGORY_EMOJI = { recurring: '🔄', one_time: '🎯', assessment: '📋', pest_control: '🐛', lawn_care: '🌿', mosquito: '🦟', termite: '🪵', rodent: '🐀', tree_shrub: '🌳', inspection: '🔍', specialty: '⚡', other: '📦' };
 
-const TIME_SLOTS = Array.from({ length: 21 }, (_, i) => {
-  const totalMin = 7 * 60 + i * 30;
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  const val = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  const label = `${h > 12 ? h - 12 : h}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
-  return { value: val, label };
-});
 
 const FREQUENCIES = [
   { value: 'weekly', label: 'Weekly' }, { value: 'biweekly', label: 'Every 2 Weeks' },
@@ -122,8 +114,6 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
   // Date/Time/Tech state
   const [apptDate, setApptDate] = useState(defaultDate || new Date().toISOString().split('T')[0]);
   const [windowStart, setWindowStart] = useState('09:00');
-  const [recommendedSlots, setRecommendedSlots] = useState([]);
-  const [loadingSlots, setLoadingSlots] = useState(false);
   const [techMode, setTechMode] = useState('auto');
   const [techId, setTechId] = useState('');
   const [techs, setTechs] = useState([]);
@@ -157,26 +147,6 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
       } catch { /* techs not critical */ }
     })();
   }, []);
-
-  // Fetch recommended slots when customer + service + date are set
-  useEffect(() => {
-    if (!selectedCustomer || !selectedService || !apptDate) return;
-    let cancelled = false;
-    setLoadingSlots(true);
-    (async () => {
-      try {
-        const params = new URLSearchParams({
-          customerId: selectedCustomer.id,
-          serviceType: selectedService.name,
-          date: apptDate,
-        });
-        const r = await adminFetch(`/admin/schedule/recommend-slots?${params}`);
-        if (!cancelled && r.slots) setRecommendedSlots(r.slots);
-      } catch { /* non-critical */ }
-      if (!cancelled) setLoadingSlots(false);
-    })();
-    return () => { cancelled = true; };
-  }, [selectedCustomer?.id, selectedService?.name, apptDate]);
 
   // Set price when service changes
   useEffect(() => {
@@ -403,37 +373,9 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
             </div>
             <div>
               <label style={labelStyle}>Start Time</label>
-              <select value={windowStart} onChange={e => setWindowStart(e.target.value)} style={inputStyle}>
-                {TIME_SLOTS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
-              </select>
+              <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} style={inputStyle} />
             </div>
           </div>
-
-          {/* Recommended Slots */}
-          {selectedCustomer && selectedService && (
-            <div style={{ marginBottom: 10 }}>
-              <label style={labelStyle}>Recommended Slots</label>
-              {loadingSlots ? (
-                <div style={{ fontSize: 12, color: D.muted, padding: 8 }}>Finding best slots...</div>
-              ) : recommendedSlots.length > 0 ? (
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  {recommendedSlots.map((slot, i) => (
-                    <button key={i} onClick={() => setWindowStart(slot.start)} style={{
-                      flex: 1, minWidth: isMobile ? '100%' : 140, padding: '10px 12px',
-                      background: windowStart === slot.start ? `${D.teal}22` : D.input,
-                      border: `1px solid ${windowStart === slot.start ? D.teal : D.border}`,
-                      borderRadius: 10, cursor: 'pointer', minHeight: 48, textAlign: 'left',
-                    }}>
-                      <div style={{ fontWeight: 600, color: D.white, fontSize: 14 }}>{fmtTime(slot.start)}</div>
-                      <div style={{ fontSize: 11, color: D.muted }}>{slot.label || `${slot.conflicts || 0} conflicts`}</div>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ fontSize: 12, color: D.muted, padding: 4 }}>No slot data for this date</div>
-              )}
-            </div>
-          )}
 
           {/* Tech Assignment */}
           <div style={{ marginBottom: 10 }}>
