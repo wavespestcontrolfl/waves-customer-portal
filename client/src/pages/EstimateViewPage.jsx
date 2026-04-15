@@ -439,6 +439,75 @@ function DetailSection({ title, sub, text }) {
   );
 }
 
+// Renders a "Your selection" tier/frequency matrix for a service.
+// rows: [{ label, perApp, perAppUnit, freqLabel, monthly, recommended }]
+// summary: short string shown above the grid (e.g. "8,000 sq ft turf · St. Augustine")
+function TierMatrix({ summary, rows, bottomNote }) {
+  if (!rows || !rows.length) return null;
+  return (
+    <div style={{ marginBottom: 18, background: `${B.wavesBlue}08`, border: `1px solid ${B.wavesBlue}26`, borderRadius: 12, padding: 12 }}>
+      {summary && (
+        <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8, letterSpacing: 0.2 }}>
+          {summary}
+        </div>
+      )}
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(rows.length, 4)}, 1fr)`, gap: 6 }}>
+        {rows.map((r, i) => {
+          const sel = !!r.recommended;
+          return (
+            <div key={i} style={{
+              borderRadius: 10, padding: '10px 8px', textAlign: 'center',
+              background: sel ? B.wavesBlue : '#fff',
+              border: `1px solid ${sel ? B.wavesBlue : `${B.wavesBlue}33`}`,
+              color: sel ? '#fff' : B.navy,
+              boxShadow: sel ? `0 2px 6px ${B.wavesBlue}55` : 'none',
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 800, fontFamily: FONTS.heading, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                {r.label}{sel ? ' ✓' : ''}
+              </div>
+              {r.perApp != null && (
+                <div style={{ fontSize: 11, marginTop: 2, opacity: sel ? 0.95 : 0.8 }}>
+                  ${Number(r.perApp).toFixed(2)}/{r.perAppUnit || 'app'}{r.freqLabel ? ` × ${r.freqLabel}` : ''}
+                </div>
+              )}
+              {r.monthly != null && (
+                <div style={{ fontSize: 13, fontWeight: 800, marginTop: 4, fontFamily: FONTS.ui }}>
+                  ${Number(r.monthly).toFixed(2)}/mo
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {bottomNote && <div style={{ fontSize: 11, color: B.grayDark, marginTop: 8, fontStyle: 'italic' }}>{bottomNote}</div>}
+    </div>
+  );
+}
+
+// Renders a one-time / specialty service line with name, price, and optional detail text.
+function OneTimeBreakdown({ items }) {
+  if (!items || !items.length) return null;
+  return (
+    <div style={{ marginBottom: 14, background: '#fff', border: `1px solid ${SAND_DARK}`, borderRadius: 12, overflow: 'hidden' }}>
+      {items.map((it, i) => (
+        <div key={i} style={{
+          padding: '12px 14px',
+          borderBottom: i < items.length - 1 ? `1px solid ${SAND_DARK}` : 'none',
+          display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'start',
+        }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{it.name}</div>
+            {it.detail && <div style={{ fontSize: 12, color: '#455A64', lineHeight: 1.55, marginTop: 3 }}>{it.detail}</div>}
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: B.wavesBlue, fontFamily: FONTS.ui, whiteSpace: 'nowrap' }}>
+            {it.price > 0 ? `$${Number(it.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'Included'}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PerksTable({ tier }) {
   return (
     <div style={{ borderRadius: 14, overflow: 'hidden', border: `2px solid ${B.wavesBlue}33` }}>
@@ -957,6 +1026,63 @@ export default function EstimateViewPage() {
   // Determine which service dropdown opens first
   const firstOpenService = hasLawn ? 'lawn' : hasPest ? 'pest' : hasMosquito ? 'mosquito' : hasTS ? 'treeShrub' : hasTermite ? 'termite' : null;
 
+  // ── Per-service tier/frequency breakdowns (pulled from pricing engine result) ──
+  const R = ed.results || {};
+  const lawnRows = (R.lawn || []).map(t => ({
+    label: `${t.v}x`,
+    perApp: t.pa,
+    perAppUnit: 'app',
+    freqLabel: t.v,
+    monthly: t.mo,
+    recommended: !!t.recommended,
+  }));
+  const lawnSummary = (() => {
+    const sf = R.lawnMeta?.lsf || property.lawnSqFt || property.estimatedTurfSqFt;
+    const grass = property.grassType ? String(property.grassType).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
+    const parts = [];
+    if (sf) parts.push(`${Number(sf).toLocaleString()} sq ft turf`);
+    if (grass) parts.push(grass);
+    return parts.join(' · ');
+  })();
+
+  const pestRows = (R.pestTiers || []).map(t => ({
+    label: t.label || (t.apps === 12 ? 'Monthly' : t.apps === 6 ? 'Bi-Monthly' : 'Quarterly'),
+    perApp: t.pa,
+    perAppUnit: 'visit',
+    freqLabel: `${t.apps}/yr`,
+    monthly: t.mo,
+    recommended: !!t.recommended,
+  }));
+  const pestSummary = property.homeSqFt ? `${Number(property.homeSqFt).toLocaleString()} sq ft home · full interior + exterior` : 'Full interior + exterior protection';
+
+  const tsRows = (R.ts || []).map(t => ({
+    label: `${t.v}x`,
+    perApp: t.pa,
+    perAppUnit: 'app',
+    freqLabel: t.v,
+    monthly: t.mo,
+    recommended: !!t.recommended,
+  }));
+  const tsSummary = R.tsMeta?.eb ? `${Number(R.tsMeta.eb).toLocaleString()} sq ft of beds${R.tsMeta.et ? ` · ${R.tsMeta.et} trees` : ''}` : '';
+
+  const mqRows = (R.mq || []).map(t => ({
+    label: t.n || `${t.v}x`,
+    perApp: t.pv,
+    perAppUnit: 'visit',
+    freqLabel: `${t.v}/yr`,
+    monthly: t.mo,
+    recommended: !!t.recommended,
+  }));
+
+  // One-time & specialty items (enriched with detail text if available)
+  const oneTimeItemsEnriched = (oneTime.items || []).map(it => ({
+    name: it.name, price: it.price,
+    detail: it.detail || it.tierName || '',
+  }));
+  const specialtyItemsEnriched = ((oneTime.specItems) || []).map(it => ({
+    name: it.name, price: it.price, detail: it.det || it.detail || '',
+  }));
+
   const firstName = (e.customerName || '').split(' ')[0] || 'there';
   const monthlyTotal = Number(e.monthlyTotal) || 0;
   const preDiscountMonthly = recurring.savings > 0 ? monthlyTotal + (recurring.savings / 12) : 0;
@@ -1280,6 +1406,7 @@ export default function EstimateViewPage() {
           {hasLawn && (
             <ServiceDropdown title="🌿 Lawn Care Program" defaultOpen={firstOpenService === 'lawn'}>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 14 }}>{SERVICE_DETAILS.lawn.subheader}</div>
+              <TierMatrix summary={lawnSummary} rows={lawnRows} bottomNote="Select a frequency — ✓ marks your current plan." />
               {SERVICE_DETAILS.lawn.sections.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
               <div style={{ borderTop: `1px solid ${SAND_DARK}`, marginTop: 10, paddingTop: 10 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Additional Services</div>
@@ -1292,6 +1419,7 @@ export default function EstimateViewPage() {
             <ServiceDropdown title="🐛 Pest Control" defaultOpen={firstOpenService === 'pest'}>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pest.subheader}</div>
               <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pest.intro}</div>
+              <TierMatrix summary={pestSummary} rows={pestRows} bottomNote="Quarterly, bi-monthly, or monthly — ✓ marks your current plan." />
               {SERVICE_DETAILS.pest.sections.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
             </ServiceDropdown>
           )}
@@ -1301,6 +1429,7 @@ export default function EstimateViewPage() {
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.mosquito.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.mosquito.subheader}</div>
               <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.mosquito.intro}</div>
+              <TierMatrix rows={mqRows} bottomNote="✓ marks your current plan." />
               {SERVICE_DETAILS.mosquito.sections.map((s, i) => (
                 <div key={i} style={{ marginBottom: 14 }}>
                   <DetailSection title={s.title} text={s.text} />
@@ -1321,6 +1450,7 @@ export default function EstimateViewPage() {
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.treeShrub.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.treeShrub.subheader}</div>
               <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.treeShrub.intro}</div>
+              <TierMatrix summary={tsSummary} rows={tsRows} bottomNote="✓ marks your current plan." />
               {SERVICE_DETAILS.treeShrub.sections.map((s, i) => (
                 <div key={i} style={{ marginBottom: 14 }}>
                   <DetailSection title={s.title} text={s.text} />
@@ -1404,6 +1534,7 @@ export default function EstimateViewPage() {
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.lawnOneTime.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.lawnOneTime.subheader}</div>
               <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.lawnOneTime.intro}</div>
+              <OneTimeBreakdown items={oneTimeItemsEnriched} />
               {SERVICE_DETAILS.lawnOneTime.groups.map((g, gi) => (
                 <div key={gi}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
@@ -1456,6 +1587,7 @@ export default function EstimateViewPage() {
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.pestOneTime.header}</div>
               <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pestOneTime.subheader}</div>
               <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pestOneTime.intro}</div>
+              <OneTimeBreakdown items={specialtyItemsEnriched} />
               {SERVICE_DETAILS.pestOneTime.groups.map((g, gi) => (
                 <div key={gi}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
