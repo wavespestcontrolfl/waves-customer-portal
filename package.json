@@ -16,7 +16,9 @@
     "db:migrate": "cd server && npx knex migrate:latest",
     "db:rollback": "cd server && npx knex migrate:rollback",
     "db:seed": "cd server && npx knex seed:run",
-    "test": "cd server && npm test"
+    "test": "cd server && npm test",
+    "test:contracts": "node server/contract-tests/index.js",
+    "test:contracts:list": "node server/contract-tests/index.js --list"
   },
   "engines": {
     "node": ">=20"
