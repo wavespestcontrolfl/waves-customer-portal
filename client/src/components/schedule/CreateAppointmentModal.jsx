@@ -112,9 +112,19 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
   const [isCallback, setIsCallback] = useState(false);
   const [expandedCategory, setExpandedCategory] = useState(null);
 
-  // Date/Time/Tech state
-  const [apptDate, setApptDate] = useState(defaultDate || new Date().toISOString().split('T')[0]);
-  const [windowStart, setWindowStart] = useState('09:00');
+  // Date/Time/Tech state — default to today + next 15-min boundary in local time
+  const _now = new Date();
+  const _ymd = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}-${String(_now.getDate()).padStart(2, '0')}`;
+  const _rounded = new Date(_now);
+  _rounded.setSeconds(0, 0);
+  const _addMin = 15 - (_rounded.getMinutes() % 15 || 15);
+  _rounded.setMinutes(_rounded.getMinutes() + _addMin);
+  const _hhmm = `${String(_rounded.getHours()).padStart(2, '0')}:${String(_rounded.getMinutes()).padStart(2, '0')}`;
+  const _defaultDate = _rounded.toDateString() !== _now.toDateString()
+    ? `${_rounded.getFullYear()}-${String(_rounded.getMonth() + 1).padStart(2, '0')}-${String(_rounded.getDate()).padStart(2, '0')}`
+    : _ymd;
+  const [apptDate, setApptDate] = useState(defaultDate || _defaultDate);
+  const [windowStart, setWindowStart] = useState(_hhmm);
   const [techMode, setTechMode] = useState('auto');
   const [techId, setTechId] = useState('');
   const [techs, setTechs] = useState([]);
