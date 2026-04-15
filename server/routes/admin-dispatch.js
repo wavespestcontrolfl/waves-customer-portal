@@ -4,7 +4,18 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
+const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
+
+async function renderTemplate(templateKey, vars, fallback) {
+  try {
+    if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      if (body) return body;
+    }
+  } catch { /* fall through */ }
+  return fallback;
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -123,20 +134,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
     }
     await db('scheduled_services').where({ id: svc.id }).update(updates);
 
-    // Send en_route SMS — pulls editable body from sms_templates.tech_en_route.
     if (status === 'en_route' && svc.cust_phone) {
       try {
-        let body = null;
-        try {
-          const tpl = require('./admin-sms-templates');
-          body = await tpl.getTemplate('tech_en_route', {
-            first_name: svc.first_name || '',
-            eta_minutes: svc.eta_minutes || '30',
-          });
-        } catch { /* fall through */ }
-        if (!body) {
-          body = `Hello ${svc.first_name}! Your Waves technician is on the way. Log into the Waves Customer Portal at portal.wavespestcontrol.com to track your technician live.`;
-        }
+        const fallback = `Hello ${svc.first_name}! Your Waves technician is on the way. ETA: ~${svc.eta_minutes || '30'} minutes. Log into the Waves Customer Portal at portal.wavespestcontrol.com to track your technician live.\n\nQuestions or requests? Reply to this message.`;
+        const body = await renderTemplate('tech_en_route', {
+          first_name: svc.first_name || '',
+          eta_minutes: svc.eta_minutes || '30',
+        }, fallback);
         await TwilioService.sendSMS(svc.cust_phone, body);
       } catch (e) { logger.error(`En route SMS failed: ${e.message}`); }
     }
@@ -221,27 +225,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
     }
 
-    // Fallback completion SMS if invoice wasn't created but SMS was requested
     if (!invoiceCreated && sendCompletionSms && svc.cust_phone) {
       try {
-        const portalUrl = 'https://portal.wavespestcontrol.com';
-        await TwilioService.sendSMS(svc.cust_phone,
-          `Hello ${svc.first_name}! Your service report is ready. View it in your portal:\n${portalUrl}`,
-          { customerId: svc.customer_id, messageType: 'service_complete' }
-        );
+        const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: portal.wavespestcontrol.com\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+        const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
+        await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete' });
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
     }
 
-    // Review request (delayed)
     if (requestReview && svc.cust_phone) {
       const loc = resolveLocation(svc.city);
       setTimeout(async () => {
         try {
-          await TwilioService.sendSMS(svc.cust_phone,
-            `🌊 Hi ${svc.first_name}! Hope your service went well today. If you have a moment, a quick Google review would mean the world to our team:\n\n${loc.googleReviewUrl}\n\nThank you! — Adam & the Waves team`
-          );
+          const fallback = `Hello ${svc.first_name}! How was your service? We'd love your feedback: ${loc.googleReviewUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+          const body = await renderTemplate('review_request', {
+            first_name: svc.first_name || '',
+            review_url: loc.googleReviewUrl,
+          }, fallback);
+          await TwilioService.sendSMS(svc.cust_phone, body);
         } catch (e) { logger.error(`Review request SMS failed: ${e.message}`); }
-      }, 2 * 60 * 60 * 1000); // 2 hour delay
+      }, 2 * 60 * 60 * 1000);
     }
 
     await db('activity_log').insert({

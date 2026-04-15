@@ -206,17 +206,31 @@ async function executeAction(alertId, actionIndex) {
   if (action.type === 'sms') {
     try {
       const TwilioService = require('./twilio');
-      const templates = {
-        check_in: `Hi {first_name}, this is Adam from Waves Pest Control. Just checking in — everything going well with your service? Let us know if you need anything!`,
-        retention_offer: `Hi {first_name}, Adam here from Waves. We value your business and want to make sure you're getting the best experience. Would you be open to a quick call to discuss how we can better serve you?`,
-        rebook: `Hi {first_name}! It's been a while since your last service visit. We'd love to get you back on the schedule. Reply or call us to book your next treatment!`,
-        payment_reminder: `Hi {first_name}, this is Waves Pest Control. We noticed a billing issue on your account. Please give us a call at your convenience so we can get it sorted. Thank you!`,
-        apology: `Hi {first_name}, Adam from Waves here. I wanted to personally reach out — we always want you to be 100% satisfied. I'd love to hear your feedback. Mind if I give you a call?`,
-        welcome_followup: `Hi {first_name}! Adam from Waves Pest Control. Just wanted to follow up on your service and make sure everything met your expectations. We're here for you!`,
+      const smsTemplatesRouter = require('../routes/admin-sms-templates');
+      const TEMPLATE_KEY_MAP = {
+        check_in: 'health_check_in',
+        retention_offer: 'health_retention_offer',
+        rebook: 'health_rebook',
+        payment_reminder: 'health_payment_reminder',
+        apology: 'health_apology',
+        welcome_followup: 'health_welcome_followup',
       };
-
-      let msg = templates[action.template] || templates.check_in;
-      msg = msg.replace(/{first_name}/g, customer.first_name || 'there');
+      const FALLBACKS = {
+        check_in: `Hi ${customer.first_name || 'there'}, this is Adam from Waves Pest Control. Just checking in — everything going well with your service? Let us know if you need anything!`,
+        retention_offer: `Hi ${customer.first_name || 'there'}, Adam here from Waves. We value your business and want to make sure you're getting the best experience. Would you be open to a quick call to discuss how we can better serve you?`,
+        rebook: `Hi ${customer.first_name || 'there'}! It's been a while since your last service visit. We'd love to get you back on the schedule. Reply or call us to book your next treatment!`,
+        payment_reminder: `Hi ${customer.first_name || 'there'}, this is Waves Pest Control. We noticed a billing issue on your account. Please give us a call at your convenience so we can get it sorted. Thank you!`,
+        apology: `Hi ${customer.first_name || 'there'}, Adam from Waves here. I wanted to personally reach out — we always want you to be 100% satisfied. I'd love to hear your feedback. Mind if I give you a call?`,
+        welcome_followup: `Hi ${customer.first_name || 'there'}! Adam from Waves Pest Control. Just wanted to follow up on your service and make sure everything met your expectations. We're here for you!`,
+      };
+      const alertKey = action.template in TEMPLATE_KEY_MAP ? action.template : 'check_in';
+      let msg = FALLBACKS[alertKey];
+      try {
+        if (typeof smsTemplatesRouter.getTemplate === 'function') {
+          const rendered = await smsTemplatesRouter.getTemplate(TEMPLATE_KEY_MAP[alertKey], { first_name: customer.first_name || 'there' });
+          if (rendered && !rendered.includes('{first_name}')) msg = rendered;
+        }
+      } catch { /* use fallback */ }
 
       if (customer.phone) {
         await TwilioService.sendSMS(customer.phone, msg, {

@@ -416,8 +416,16 @@ const ReviewService = {
       const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
       const reviewUrl = `${domain}/review/${request.token}`;
 
-      const body = `No pressure at all, ${customer.first_name} — but if you get a sec, ` +
-        `your review helps other SWFL families find a pest company they can trust → ${reviewUrl} 🌊`;
+      const fallback = `No pressure at all, ${customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${reviewUrl} 🌊`;
+      let body = fallback;
+      try {
+        const templates = require('../routes/admin-sms-templates');
+        const rendered = await templates.getTemplate('review_request_followup', {
+          first_name: customer.first_name || '',
+          review_url: reviewUrl,
+        });
+        if (rendered && !rendered.includes('{first_name}')) body = rendered;
+      } catch { /* use fallback */ }
 
       try {
         const TwilioService = require('./twilio');

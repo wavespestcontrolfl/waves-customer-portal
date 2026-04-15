@@ -317,13 +317,23 @@ const InvoiceService = {
     const customer = await db('customers').where({ id: invoice.customer_id }).first();
     if (!customer?.phone) return;
 
-    const body = `Payment received — thank you, ${customer.first_name}!\n\n` +
-      `Invoice: ${invoice.invoice_number}\n` +
-      `Amount: $${invoice.total.toFixed(2)}\n` +
-      (invoice.card_brand && invoice.card_last_four
-        ? `Paid with: ${invoice.card_brand} ****${invoice.card_last_four}\n` : '') +
-      `\nYour property is protected. See you at your next service!\n\n` +
-      `— Waves Pest Control`;
+    const cardLine = (invoice.card_brand && invoice.card_last_four)
+      ? `\nPaid with: ${invoice.card_brand} ****${invoice.card_last_four}` : '';
+    const amount = Number(invoice.total).toFixed(2);
+    const fallback = `Payment received — thank you, ${customer.first_name}!\n\nInvoice: ${invoice.invoice_number}\nAmount: $${amount}${cardLine}\n\nYour property is protected. See you at your next service!\n\n— Waves Pest Control`;
+    let body = fallback;
+    try {
+      const templates = require('../routes/admin-sms-templates');
+      const rendered = await templates.getTemplate('invoice_receipt', {
+        first_name: customer.first_name || '',
+        invoice_number: invoice.invoice_number,
+        amount,
+        card_line: cardLine,
+      });
+      if (rendered && !rendered.includes('{first_name}')) body = rendered;
+    } catch (err) {
+      logger.warn(`[invoice] Receipt template lookup failed: ${err.message}`);
+    }
 
     try {
       const TwilioService = require('./twilio');

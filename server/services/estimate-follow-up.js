@@ -11,7 +11,18 @@
 
 const db = require('../models/db');
 const TwilioService = require('./twilio');
+const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('./logger');
+
+async function renderTemplate(templateKey, vars, fallback) {
+  try {
+    if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      if (body && !body.includes('{first_name}')) return body;
+    }
+  } catch { /* fall through */ }
+  return fallback;
+}
 
 const EstimateFollowUp = {
   async checkAll() {
@@ -31,9 +42,11 @@ const EstimateFollowUp = {
         try {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          await TwilioService.sendSMS(est.customer_phone,
+          const body = await renderTemplate('estimate_followup_unviewed',
+            { first_name: firstName, estimate_url: url },
             `Hey ${firstName}! Just wanted to make sure you saw your Waves Pest Control estimate 🌊\n\n${url}\n\nTake a look when you get a chance — we're here if you have any questions! (941) 318-7612`
           );
+          await TwilioService.sendSMS(est.customer_phone, body);
           await db('estimates').where({ id: est.id }).update({
             follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
             last_follow_up_at: db.fn.now(),
@@ -57,9 +70,11 @@ const EstimateFollowUp = {
         try {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          await TwilioService.sendSMS(est.customer_phone,
+          const body = await renderTemplate('estimate_followup_viewed',
+            { first_name: firstName, estimate_url: url },
             `Hi ${firstName}! I noticed you checked out your Waves estimate — any questions I can answer? 🌊\n\n${url}\n\nI'm happy to walk through it with you. Just reply here or call (941) 318-7612.\n\n— Adam, Waves Pest Control`
           );
+          await TwilioService.sendSMS(est.customer_phone, body);
           await db('estimates').where({ id: est.id }).update({
             follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
             last_follow_up_at: db.fn.now(),
@@ -83,9 +98,11 @@ const EstimateFollowUp = {
         try {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          await TwilioService.sendSMS(est.customer_phone,
+          const body = await renderTemplate('estimate_followup_final',
+            { first_name: firstName, estimate_url: url },
             `Hey ${firstName} — last check-in from me! Your Waves estimate is still available:\n\n${url}\n\nWe'd love to earn your business. No pressure at all — just reply if you'd like to move forward or have any questions.\n\n— Adam 🌊`
           );
+          await TwilioService.sendSMS(est.customer_phone, body);
           await db('estimates').where({ id: est.id }).update({
             follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
             last_follow_up_at: db.fn.now(),
@@ -112,9 +129,11 @@ const EstimateFollowUp = {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const expDate = new Date(est.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
-          await TwilioService.sendSMS(est.customer_phone,
+          const body = await renderTemplate('estimate_followup_expiring',
+            { first_name: firstName, estimate_url: url, expires_at: expDate },
             `Hi ${firstName}! Just a heads up — your Waves Pest Control estimate expires on ${expDate}.\n\n${url}\n\nLet us know if you'd like to move forward! (941) 318-7612 🌊`
           );
+          await TwilioService.sendSMS(est.customer_phone, body);
           await db('estimates').where({ id: est.id }).update({
             follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
             last_follow_up_at: db.fn.now(),
