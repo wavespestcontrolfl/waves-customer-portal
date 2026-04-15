@@ -1339,6 +1339,170 @@ function PromotionCards() {
 }
 
 // =========================================================================
+// HERO SLIDER — van + branded promotional slides
+// =========================================================================
+function HeroSlider({ onSwitchTab }) {
+  const [active, setActive] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const touchStartX = useRef(0);
+  const touchDeltaX = useRef(0);
+
+  const slides = [
+    { type: 'image', src: '/waves-van.jpg', alt: 'Waves Pest Control & Lawn Care van' },
+    {
+      type: 'promo',
+      bg: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
+      icon: '🛡️',
+      title: 'Wave Goodbye to Pests!',
+      subtitle: 'Full-service pest control, lawn care & mosquito protection for your home.',
+      cta: { label: 'View My Plan', tab: 'plan' },
+    },
+    {
+      type: 'promo',
+      bg: `linear-gradient(135deg, #FF6F00, #E65100)`,
+      icon: '🎁',
+      title: 'Refer a Friend, Earn Cash!',
+      subtitle: 'Share your referral link and earn rewards for every neighbor who signs up.',
+      cta: { label: 'Start Referring', tab: 'refer' },
+    },
+    {
+      type: 'promo',
+      bg: `linear-gradient(135deg, #2E7D32, #1B5E20)`,
+      icon: '🌿',
+      title: 'Lawn Care Programs',
+      subtitle: 'St. Augustine, Bermuda, Zoysia & Bahia — customized fertilization & weed control.',
+      cta: { label: 'Learn More', tab: 'learn' },
+    },
+  ];
+
+  const count = slides.length;
+
+  useEffect(() => {
+    if (paused) return;
+    const timer = setInterval(() => setActive(p => (p + 1) % count), 5000);
+    return () => clearInterval(timer);
+  }, [paused, count]);
+
+  const goTo = (i) => setActive(i);
+  const prev = () => setActive(p => (p - 1 + count) % count);
+  const next = () => setActive(p => (p + 1) % count);
+
+  const handleTouchStart = (e) => { touchStartX.current = e.touches[0].clientX; touchDeltaX.current = 0; };
+  const handleTouchMove = (e) => { touchDeltaX.current = e.touches[0].clientX - touchStartX.current; };
+  const handleTouchEnd = () => {
+    if (touchDeltaX.current > 50) prev();
+    else if (touchDeltaX.current < -50) next();
+  };
+
+  return (
+    <div
+      style={{ position: 'relative', borderRadius: 16, overflow: 'hidden', boxShadow: '0 4px 20px rgba(0,0,0,0.10)' }}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+    >
+      <style>{`
+        @keyframes heroFadeIn { from { opacity: 0; transform: scale(1.02); } to { opacity: 1; transform: scale(1); } }
+      `}</style>
+
+      {/* Slides */}
+      <div style={{ position: 'relative', width: '100%', aspectRatio: '16 / 7', minHeight: 160 }}>
+        {slides.map((slide, i) => (
+          <div
+            key={i}
+            style={{
+              position: 'absolute', inset: 0,
+              opacity: i === active ? 1 : 0,
+              transition: 'opacity 0.6s ease',
+              pointerEvents: i === active ? 'auto' : 'none',
+            }}
+          >
+            {slide.type === 'image' ? (
+              <img
+                src={slide.src}
+                alt={slide.alt}
+                style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+              />
+            ) : (
+              <div style={{
+                width: '100%', height: '100%', background: slide.bg,
+                display: 'flex', flexDirection: 'column', justifyContent: 'center',
+                padding: '24px 28px', boxSizing: 'border-box',
+                ...(i === active ? { animation: 'heroFadeIn 0.6s ease' } : {}),
+              }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>{slide.icon}</div>
+                <div style={{
+                  fontSize: 20, fontWeight: 800, color: '#fff',
+                  fontFamily: FONTS.heading, lineHeight: 1.2, marginBottom: 6,
+                }}>{slide.title}</div>
+                <div style={{
+                  fontSize: 13, color: 'rgba(255,255,255,0.85)', lineHeight: 1.4,
+                  maxWidth: 320, marginBottom: 14,
+                }}>{slide.subtitle}</div>
+                {slide.cta && (
+                  <button
+                    onClick={() => onSwitchTab(slide.cta.tab)}
+                    style={{
+                      ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
+                      background: 'rgba(255,255,255,0.2)', color: '#fff',
+                      backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.3)',
+                      alignSelf: 'flex-start',
+                    }}
+                  >{slide.cta.label}</button>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Arrow buttons */}
+      {[
+        { dir: 'left', onClick: prev, char: '\u2039' },
+        { dir: 'right', onClick: next, char: '\u203A' },
+      ].map(({ dir, onClick, char }) => (
+        <button
+          key={dir}
+          onClick={onClick}
+          style={{
+            position: 'absolute', top: '50%', [dir]: 8, transform: 'translateY(-50%)',
+            width: 32, height: 32, borderRadius: '50%',
+            background: 'rgba(0,0,0,0.35)', color: '#fff', border: 'none',
+            fontSize: 20, fontWeight: 700, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            backdropFilter: 'blur(4px)', transition: 'background 0.2s',
+            lineHeight: 1,
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.55)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'rgba(0,0,0,0.35)'}
+        >{char}</button>
+      ))}
+
+      {/* Dot indicators */}
+      <div style={{
+        position: 'absolute', bottom: 10, left: '50%', transform: 'translateX(-50%)',
+        display: 'flex', gap: 6,
+      }}>
+        {slides.map((_, i) => (
+          <button
+            key={i}
+            onClick={() => goTo(i)}
+            style={{
+              width: i === active ? 20 : 8, height: 8, borderRadius: 4,
+              background: i === active ? '#fff' : 'rgba(255,255,255,0.5)',
+              border: 'none', cursor: 'pointer', padding: 0,
+              transition: 'all 0.3s ease',
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// =========================================================================
 // DASHBOARD TAB — with referral, review prompt, irrigation recs
 // =========================================================================
 function DashboardTab({ customer, onSwitchTab }) {
@@ -1443,6 +1607,9 @@ function DashboardTab({ customer, onSwitchTab }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Hero Slider */}
+      <HeroSlider onSwitchTab={onSwitchTab} />
+
       {/* Satisfaction Pulse — above everything */}
       {pendingSatisfaction && !satDismissed && (() => {
         const svcDate = parseDate(pendingSatisfaction.service_date || pendingSatisfaction.serviceDate);
