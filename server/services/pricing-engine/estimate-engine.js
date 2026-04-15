@@ -13,6 +13,7 @@ const {
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
   priceGermanRoach, priceBedBug, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
+  pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
 } = require('./service-pricing');
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, validateEstimateDiscounts,
@@ -225,6 +226,51 @@ function generateEstimate(input) {
   if (services.dethatching) {
     const result = priceDethatching(property.lawnSqFt);
     lineItems.push(result);
+  }
+  if (services.plugging) {
+    const result = pricePlugging(
+      services.plugging.area || property.lawnSqFt,
+      services.plugging.spacing || 12
+    );
+    result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
+  }
+  if (services.foam) {
+    const result = priceFoamDrill(services.foam.points || 5);
+    result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
+  }
+  if (services.stinging) {
+    const result = priceStingingInsect({
+      species: services.stinging.species || 'PAPER_WASP',
+      tier: services.stinging.tier || 2,
+      removal: services.stinging.removal || 'NONE',
+      aggressive: services.stinging.aggressive || 'NO',
+      height: services.stinging.height || 'GROUND',
+      confined: services.stinging.confined || 'NO',
+      urgency: services.stinging.urgency || 'ROUTINE',
+      afterHours: services.stinging.afterHours || false,
+      hasRecurringPest: !!services.pest,
+    });
+    if (!result.includedOnProgram) result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
+  }
+  if (services.exclusion) {
+    const result = priceExclusion({
+      simple: services.exclusion.simple || 0,
+      moderate: services.exclusion.moderate || 0,
+      advanced: services.exclusion.advanced || 0,
+      waiveInspection: services.exclusion.waiveInspection || false,
+    });
+    result.price = Math.round(result.price * zoneMult);
+    lineItems.push(result);
+  }
+  // Rodent Guarantee fires automatically when BOTH trap + exclusion are present
+  if (services.rodentTrapping && services.exclusion) {
+    const exc = services.exclusion;
+    if ((exc.simple || 0) + (exc.moderate || 0) + (exc.advanced || 0) > 0) {
+      lineItems.push(priceRodentGuarantee());
+    }
   }
 
   // ── 4. Determine WaveGuard tier ────────────────────────────

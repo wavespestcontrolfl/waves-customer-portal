@@ -727,6 +727,142 @@ function priceDethatching(lawnSqFt) {
   return { service: 'dethatching', lawnSqFt, price };
 }
 
+// ============================================================
+// PLUGGING (sod plug install by spacing)
+// ============================================================
+function pricePlugging(lawnSqFt, spacing = 12) {
+  const cfg = SPECIALTY.plugging;
+  const ppsf = cfg.spacingRates[`${spacing}inch`] || cfg.spacingRates['12inch'];
+  const label = spacing === 6 ? '6" Premium' : spacing === 9 ? '9" Standard' : '12" Economy';
+  const totalPlugs = Math.ceil(lawnSqFt * ppsf);
+  const trays = Math.ceil(totalPlugs / cfg.plugsPerTray);
+  const cost = totalPlugs * cfg.costPerPlug + (totalPlugs / cfg.laborPerPlugs) * GLOBAL.LABOR_RATE;
+  const price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
+  const perSf = Math.round(price / Math.max(1, lawnSqFt) * 100) / 100;
+  return {
+    service: 'plugging',
+    name: 'Lawn Plugging',
+    price,
+    detail: `${label} | ${lawnSqFt.toLocaleString()} sf | ${totalPlugs.toLocaleString()} plugs | $${perSf}/sf`,
+    lawnSqFt, spacing, totalPlugs, trays, perSf, label,
+    sodWarning: spacing === 6,
+  };
+}
+
+// ============================================================
+// FOAM & DRILL (termite perimeter injection)
+// ============================================================
+function priceFoamDrill(points = 5) {
+  const cfg = SPECIALTY.foamDrill;
+  const tier = cfg.tiers.find(t => points <= t.maxPoints) || cfg.tiers[0];
+  const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
+  const price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
+  return {
+    service: 'foam_drill',
+    name: 'Drill-and-Foam Termite',
+    price,
+    detail: `${tier.label} | ${tier.cans} can${tier.cans > 1 ? 's' : ''}`,
+    points, tier: tier.label, cans: tier.cans,
+  };
+}
+
+// ============================================================
+// STINGING INSECT (wasps, hornets, bees)
+// ============================================================
+function priceStingingInsect(options = {}) {
+  const {
+    species = 'PAPER_WASP', tier = 2, removal = 'NONE',
+    aggressive = 'NO', height = 'GROUND', confined = 'NO',
+    urgency = 'ROUTINE', afterHours = false,
+    hasRecurringPest = false,
+  } = options;
+  const cfg = SPECIALTY.wasp;
+  const speciesNames = {
+    PAPER_WASP: 'Paper Wasps', YJ_AERIAL: 'Yellow Jackets (aerial)',
+    YJ_GROUND: 'Yellow Jackets (ground)', MUD_DAUBER: 'Mud Daubers',
+    HONEYBEE_NEW: 'Honeybees (new)', HONEYBEE_EST: 'Honeybees (established)',
+    CARPENTER: 'Carpenter Bees', BALDFACED: 'Baldfaced Hornets',
+    AFRICANIZED: 'Africanized Bees',
+  };
+
+  let price = cfg.tiers[Math.max(0, Math.min(cfg.tiers.length - 1, tier - 1))];
+  const mods = [];
+  const [aMild, aHigh, aExt] = cfg.addons.aggressiveness;
+  if (aggressive === 'MILD') { price += aMild; mods.push(`+$${aMild} aggressive`); }
+  else if (aggressive === 'HIGH') { price += aHigh; mods.push(`+$${aHigh} aggressive`); }
+  else if (aggressive === 'EXTREME') { price += aExt; mods.push(`+$${aExt} aggressive`); }
+
+  const [hMid, hHigh] = cfg.addons.height;
+  if (height === 'MID') { price += hMid; mods.push(`+$${hMid} height`); }
+  else if (height === 'HIGH') { price += hHigh; mods.push(`+$${hHigh} height`); }
+
+  if (confined === 'YES') {
+    const [cLow, cHigh] = cfg.addons.confinedSpace;
+    const add = tier >= 3 ? cHigh : cLow;
+    price += add; mods.push(`+$${add} confined`);
+  }
+
+  if (urgency === 'SOON') { price += cfg.addons.sameDay; mods.push(`+$${cfg.addons.sameDay} same-day`); }
+  else if (urgency === 'URGENT') { price = Math.round(price * cfg.addons.urgent); mods.push(`+${Math.round((cfg.addons.urgent - 1) * 100)}% emergency`); }
+  if (afterHours) { price += cfg.addons.afterHours; mods.push(`+$${cfg.addons.afterHours} after-hours`); }
+
+  let removalPrice = 0, removalLabel = '';
+  const R = cfg.removal;
+  if (removal === 'SMALL') { removalPrice = R.small; removalLabel = 'Small nest'; }
+  else if (removal === 'LARGE') { removalPrice = R.large; removalLabel = 'Large comb'; }
+  else if (removal === 'HONEYCOMB') { removalPrice = R.honeycomb; removalLabel = 'Honeycomb extraction'; }
+  else if (removal === 'RELOCATE') { removalPrice = R.relocate; removalLabel = 'Live bee relocation'; }
+
+  const total = price + removalPrice;
+  const includedOnProgram = cfg.freeWithRecurringPest && hasRecurringPest
+    && (species === 'PAPER_WASP' || species === 'MUD_DAUBER') && tier <= 1;
+
+  return {
+    service: 'stinging_insect',
+    name: `Stinging Insect — ${speciesNames[species] || species}`,
+    price: includedOnProgram ? 0 : total,
+    detail: `Tier ${tier} — ${speciesNames[species] || species}${mods.length ? ' | ' + mods.join(', ') : ''}`,
+    species, tier, mods,
+    removal: removalPrice > 0 ? { name: removalLabel, price: removalPrice } : null,
+    includedOnProgram,
+  };
+}
+
+// ============================================================
+// EXCLUSION (rodent entry-point sealing)
+// ============================================================
+function priceExclusion(options = {}) {
+  const { simple = 0, moderate = 0, advanced = 0, waiveInspection = false } = options;
+  const cfg = SPECIALTY.exclusion;
+  const sc = simple * cfg.perPoint.simple + moderate * cfg.perPoint.moderate + advanced * cfg.perPoint.advanced;
+  const ep = Math.max(cfg.floor, Math.round(sc));
+  const insp = waiveInspection ? 0 : cfg.inspectionFee;
+  const total = ep + insp;
+  let tier = 'Basic';
+  if (advanced > 0) tier = 'Advanced (Roof)';
+  else if (moderate > 0) tier = 'Moderate';
+  return {
+    service: 'exclusion',
+    name: 'Rodent Exclusion',
+    price: total,
+    detail: `${tier} — ${simple + moderate + advanced} points${insp > 0 ? ` + $${insp} inspect` : ' (inspect waived)'}`,
+    points: { simple, moderate, advanced }, inspectionFee: insp, tier,
+  };
+}
+
+// ============================================================
+// RODENT GUARANTEE (combo bundle: trap + exclusion)
+// ============================================================
+function priceRodentGuarantee() {
+  const price = SPECIALTY.exclusion.rodentGuarantee;
+  return {
+    service: 'rodent_guarantee',
+    name: 'Rodent Guarantee',
+    price,
+    detail: `$${price}/yr — unlimited callbacks + re-sealing for 12 months`,
+  };
+}
+
 module.exports = {
   pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
@@ -734,5 +870,6 @@ module.exports = {
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
   priceGermanRoach, priceBedBug, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
+  pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   interpolate, laborCost,
 };
