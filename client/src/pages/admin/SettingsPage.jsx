@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import GeofenceSettings from '../../components/admin/GeofenceSettings';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
@@ -55,6 +56,7 @@ export default function SettingsPage() {
   const TABS = [
     { key: 'general', label: 'General' },
     { key: 'integrations', label: 'Integrations' },
+    { key: 'geofence', label: 'Geofence Timers' },
     { key: 'gates', label: 'Feature Gates' },
     { key: 'team', label: 'Team' },
     { key: 'system', label: 'System' },
@@ -164,6 +166,9 @@ export default function SettingsPage() {
           ))}
         </div>
       )}
+
+      {/* ── GEOFENCE TIMERS ── */}
+      {tab === 'geofence' && <GeofenceSettings />}
 
       {/* ── FEATURE GATES ── */}
       {tab === 'gates' && (

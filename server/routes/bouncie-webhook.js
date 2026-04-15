@@ -10,6 +10,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
+const geofenceHandler = require('../services/geofence-handler');
 
 // POST /api/bouncie/webhook
 router.post('/', async (req, res) => {
@@ -56,6 +57,19 @@ router.post('/', async (req, res) => {
           await db('bouncie_webhook_log')
             .where('id', logId)
             .update({ error: processErr.message });
+        }
+      }
+    } else if (eventType === 'userGeozone' || eventType === 'geozone' || eventType === 'user.geozone') {
+      try {
+        await geofenceHandler.handleGeozoneEvent(payload);
+        if (logId) {
+          await db('bouncie_webhook_log').where('id', logId).update({ processed: true });
+        }
+        logger.info(`[bouncie-webhook] Processed userGeozone for ${imei}`);
+      } catch (processErr) {
+        logger.error(`[bouncie-webhook] Error processing userGeozone: ${processErr.message}`);
+        if (logId) {
+          await db('bouncie_webhook_log').where('id', logId).update({ error: processErr.message });
         }
       }
     } else {

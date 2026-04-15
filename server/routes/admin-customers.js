@@ -406,6 +406,11 @@ router.post('/', async (req, res, next) => {
     await PipelineManager.onEvent(customer.id, 'lead_created');
     await LeadScorer.calculateScore(customer.id);
 
+    // Fire-and-forget geocoding (don't block the create response)
+    if (addressLine1) {
+      require('../services/geocoder').ensureCustomerGeocoded(customer.id).catch(() => {});
+    }
+
     res.status(201).json({ id: customer.id, referralCode: code });
   } catch (err) { next(err); }
 });
@@ -424,6 +429,13 @@ router.put('/:id', async (req, res, next) => {
       }
     }
     if (Object.keys(updates).length) await db('customers').where({ id: req.params.id }).update(updates);
+
+    // If address changed, re-geocode (clear lat/lng first so ensureCustomerGeocoded refreshes)
+    const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
+    if (addressChanged) {
+      await db('customers').where({ id: req.params.id }).update({ latitude: null, longitude: null });
+      require('../services/geocoder').ensureCustomerGeocoded(req.params.id).catch(() => {});
+    }
 
     // Fire-and-forget: trigger cancellation save when deactivating a customer
     if (updates.active === false) {

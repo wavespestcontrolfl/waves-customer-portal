@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
+import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 
 const DARK = {
   bg: '#0f1923',
@@ -64,6 +65,7 @@ export default function TechHomePage() {
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
+      <GeofenceArrivalPrompt />
       {/* Greeting */}
       <h1 style={{
         fontSize: 22, fontWeight: 700, margin: '0 0 4px',
