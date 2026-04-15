@@ -702,7 +702,14 @@ function EstimateToolView() {
     const useId = id || savedId;
     if (!useId) { alert('Save the estimate first.'); return; }
     const sendMethod = method || 'both';
-    const scheduled = form.scheduleSend && form.scheduledAt ? form.scheduledAt : null;
+    let scheduled = null;
+    if (form.scheduleSend) {
+      if (!form.scheduledAt) { alert('Pick a send time.'); return; }
+      const when = new Date(form.scheduledAt);
+      if (isNaN(when.getTime())) { alert('Invalid send time.'); return; }
+      if (when <= new Date()) { alert('Send time must be in the future.'); return; }
+      scheduled = form.scheduledAt;
+    }
     setSending(true);
     try {
       const r = await fetch(`/api/admin/estimates/${useId}/send`, {
@@ -720,6 +727,21 @@ function EstimateToolView() {
       }
     } catch (e) { alert(e.message); }
     setSending(false);
+  }
+
+  /* ── one-shot save + send (used by SMS/Email/Both buttons) ── */
+  async function saveAndSend(method) {
+    if (!estimate) { alert('Click "Generate Estimate" first.'); return; }
+    if (form.scheduleSend) {
+      if (!form.scheduledAt) { alert('Pick a send time.'); return; }
+      const when = new Date(form.scheduledAt);
+      if (isNaN(when.getTime()) || when <= new Date()) {
+        alert('Send time must be a valid future date/time.');
+        return;
+      }
+    }
+    const id = savedId || await doSave();
+    if (id) await doSend(id, method);
   }
 
   const E = estimate; // shorthand
@@ -1094,24 +1116,15 @@ function EstimateToolView() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
                   <button style={{ ...sBtn(C.green, 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerPhone) { alert('Enter a phone number.'); return; }
-                    if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
-                    if (!estimate) { doGenerate(); }
-                    const id = await doSave();
-                    if (id) await doSend(id, 'sms');
+                    await saveAndSend('sms');
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule SMS' : 'SMS Only'}</button>
                   <button style={{ ...sBtn(C.blue, '#fff'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerEmail) { alert('Enter an email.'); return; }
-                    if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
-                    if (!estimate) { doGenerate(); }
-                    const id = await doSave();
-                    if (id) await doSend(id, 'email');
+                    await saveAndSend('email');
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule Email' : 'Email Only'}</button>
                   <button style={{ ...sBtn(C.teal, 'white'), fontSize: 13, padding: '12px 10px' }} onClick={async () => {
                     if (!form.customerPhone && !form.customerEmail) { alert('Enter phone or email.'); return; }
-                    if (form.scheduleSend && !form.scheduledAt) { alert('Pick a send time.'); return; }
-                    if (!estimate) { doGenerate(); }
-                    const id = await doSave();
-                    if (id) await doSend(id, 'both');
+                    await saveAndSend('both');
                   }} disabled={sending}>{sending ? '...' : form.scheduleSend ? 'Schedule Both' : 'Both'}</button>
                 </div>
                 <button style={{ ...sBtn('transparent', C.gray), fontSize: 13, padding: '10px 16px', border: `1px solid ${C.border}` }} onClick={() => setShowSendForm(false)}>Cancel</button>

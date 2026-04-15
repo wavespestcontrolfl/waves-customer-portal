@@ -41,17 +41,20 @@ router.post('/:id/send', async (req, res, next) => {
     const sendMethod = req.body?.sendMethod || 'both';
     const scheduledAt = req.body?.scheduledAt || null;
 
-    // If scheduled for the future, store and return
     if (scheduledAt) {
       const scheduledTime = new Date(scheduledAt);
-      if (scheduledTime > new Date()) {
-        await db('estimates').where({ id: estimate.id }).update({
-          status: 'scheduled',
-          scheduled_at: scheduledTime,
-          send_method: sendMethod,
-        });
-        return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
+      if (isNaN(scheduledTime.getTime())) {
+        return res.status(400).json({ error: 'Invalid scheduledAt' });
       }
+      if (scheduledTime <= new Date()) {
+        return res.status(400).json({ error: 'scheduledAt must be in the future' });
+      }
+      await db('estimates').where({ id: estimate.id }).update({
+        status: 'scheduled',
+        scheduled_at: scheduledTime,
+        send_method: sendMethod,
+      });
+      return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
     }
 
     // Send immediately
