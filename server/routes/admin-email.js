@@ -1,12 +1,28 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const gmailClient = require('../services/email/gmail-client');
 const { syncEmails } = require('../services/email/email-sync');
 const { classifyEmail } = require('../services/email/email-classifier');
 const { executeAutoAction } = require('../services/email/email-actions');
-const { blockSpamSender, unblockSender } = require('../services/email/spam-blocker');
+const { unblockSender } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
+
+const MAX_PAGE_LIMIT = 200;
+
+// Gate everything except the browser-initiated OAuth endpoints.
+// /oauth/start is hit via <a href> (no Authorization header possible)
+// /oauth/callback is hit by Google's redirect (no Authorization header possible)
+// All other routes require admin auth.
+const OAUTH_PUBLIC_PATHS = new Set(['/oauth/start', '/oauth/callback']);
+router.use((req, res, next) => {
+  if (OAUTH_PUBLIC_PATHS.has(req.path)) return next();
+  return adminAuthenticate(req, res, (err) => {
+    if (err) return next(err);
+    return requireTechOrAdmin(req, res, next);
+  });
+});
 
 // ============================================
 // OAuth flow
@@ -87,7 +103,9 @@ router.post('/sync', async (req, res) => {
 router.get('/inbox', async (req, res) => {
   try {
     const { category, is_read, is_archived, search, page = 1, limit = 50 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const parsedLimit = Math.min(Math.max(parseInt(limit) || 50, 1), MAX_PAGE_LIMIT);
+    const parsedPage = Math.max(parseInt(page) || 1, 1);
+    const offset = (parsedPage - 1) * parsedLimit;
 
     let query = db('emails').where('is_archived', is_archived === 'true');
 
@@ -114,12 +132,12 @@ router.get('/inbox', async (req, res) => {
     const emails = await query
       .orderBy('received_at', 'desc')
       .offset(offset)
-      .limit(parseInt(limit))
+      .limit(parsedLimit)
       .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'to_address',
         'subject', 'snippet', 'has_attachments', 'received_at', 'is_read', 'is_starred',
         'is_archived', 'classification', 'extracted_data', 'customer_id');
 
-    res.json({ emails, total: parseInt(count), page: parseInt(page), limit: parseInt(limit) });
+    res.json({ emails, total: parseInt(count), page: parsedPage, limit: parsedLimit });
   } catch (err) {
     logger.error(`[email] Inbox error: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -187,7 +205,10 @@ router.get('/message/:id/attachment/:attachmentId', async (req, res) => {
     if (!att) return res.status(404).json({ error: 'Attachment not found' });
 
     const data = await gmailClient.getAttachment(email.gmail_id, req.params.attachmentId);
-    res.setHeader('Content-Disposition', `attachment; filename="${att.filename}"`);
+    const safeName = (att.filename || 'attachment').replace(/[\r\n"\\]/g, '_');
+    const actor = req.technician?.email || req.technician?.name || req.technicianId || 'unknown';
+    logger.info(`[email] Attachment downloaded: actor=${actor} email=${email.id} file="${safeName}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
     res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
     res.send(data);
   } catch (err) {

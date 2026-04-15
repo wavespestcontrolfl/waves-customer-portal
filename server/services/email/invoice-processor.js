@@ -34,6 +34,16 @@ async function processVendorInvoice(email, classification) {
     try {
       const attachmentData = await gmailClient.getAttachment(email.gmail_id, pdfAttachment.gmail_attachment_id);
 
+      // Verify real PDF by magic bytes (%PDF) — filename/MIME can be spoofed
+      if (
+        !Buffer.isBuffer(attachmentData) ||
+        attachmentData.length < 4 ||
+        attachmentData.slice(0, 4).toString('ascii') !== '%PDF'
+      ) {
+        logger.warn(`[invoice-processor] Attachment ${pdfAttachment.id} claimed PDF but magic bytes mismatched — skipping parse`);
+        throw new Error('Attachment is not a valid PDF');
+      }
+
       await db('email_attachments').where({ id: pdfAttachment.id }).update({
         is_invoice: true,
       });
@@ -84,7 +94,13 @@ async function processVendorInvoice(email, classification) {
   // Create expense record
   const amount = parsedInvoice?.total || parseFloat(classification.extracted?.invoice_amount) || 0;
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
-  const invoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date || new Date().toISOString().split('T')[0];
+  const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
+  const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
+  const invoiceDateValid = parsedDate && !Number.isNaN(parsedDate.getTime());
+  const invoiceDate = invoiceDateValid
+    ? parsedDate.toISOString().split('T')[0]
+    : new Date().toISOString().split('T')[0];
+  const taxYear = (invoiceDateValid ? parsedDate : new Date()).getFullYear().toString();
 
   if (amount > 0) {
     try {
@@ -97,7 +113,7 @@ async function processVendorInvoice(email, classification) {
         category_id: categoryRow?.id || null,
         vendor_name: vendorName,
         expense_date: invoiceDate,
-        tax_year: new Date(invoiceDate).getFullYear().toString(),
+        tax_year: taxYear,
         payment_method: 'invoice',
         notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.`,
       }).returning('*');

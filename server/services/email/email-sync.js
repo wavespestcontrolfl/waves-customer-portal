@@ -3,17 +3,24 @@ const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const { isBlocked } = require('./spam-blocker');
 
+// Prevent concurrent syncs from racing on email_sync_state counters.
+let SYNC_IN_FLIGHT = null;
+
 async function syncEmails() {
-  const connected = await gmailClient.isConnected();
-  if (!connected) return { newEmails: 0, error: 'Gmail not connected' };
+  if (SYNC_IN_FLIGHT) return SYNC_IN_FLIGHT;
+  SYNC_IN_FLIGHT = (async () => {
+    const connected = await gmailClient.isConnected();
+    if (!connected) return { newEmails: 0, error: 'Gmail not connected' };
 
-  const state = await db('email_sync_state').first();
+    const state = await db('email_sync_state').first();
 
-  if (state?.last_history_id) {
-    return incrementalSync(state);
-  } else {
-    return fullSync(state);
-  }
+    if (state?.last_history_id) {
+      return incrementalSync(state);
+    } else {
+      return fullSync(state);
+    }
+  })().finally(() => { SYNC_IN_FLIGHT = null; });
+  return SYNC_IN_FLIGHT;
 }
 
 async function fullSync(state) {
@@ -39,9 +46,11 @@ async function fullSync(state) {
     await db('email_sync_state').where('id', state.id).update({
       last_history_id: lastHistoryId,
       last_sync_at: new Date(),
-      emails_synced: (state.emails_synced || 0) + newEmails,
       errors: null,
     });
+    if (newEmails > 0) {
+      await db('email_sync_state').where('id', state.id).increment('emails_synced', newEmails);
+    }
 
     logger.info(`[email-sync] Full sync complete: ${newEmails} emails stored`);
     return { newEmails, fullSync: true };
@@ -105,11 +114,10 @@ async function incrementalSync(state) {
     await db('email_sync_state').where('id', state.id).update({
       last_history_id: latestHistoryId,
       last_sync_at: new Date(),
-      emails_synced: (state.emails_synced || 0) + newEmails,
       errors: null,
     });
-
     if (newEmails > 0) {
+      await db('email_sync_state').where('id', state.id).increment('emails_synced', newEmails);
       logger.info(`[email-sync] Incremental sync: ${newEmails} new, ${messageIds.size} checked`);
     }
     return { newEmails };
@@ -229,13 +237,13 @@ async function upsertEmail(parsed) {
 
   // Classify in background (don't block sync)
   if (!email.classification || email.classification === 'vendor') {
-    setImmediate(async () => {
-      try {
+    setImmediate(() => {
+      (async () => {
         const { classifyEmail } = require('./email-classifier');
         await classifyEmail(email);
-      } catch (err) {
-        logger.error(`[email-sync] Classification failed for ${email.id}: ${err.message}`);
-      }
+      })().catch((err) => {
+        logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+      });
     });
   }
 

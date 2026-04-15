@@ -1,6 +1,25 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 
+// Reject internal/private hosts to prevent SSRF on unsubscribe fetches
+function isSafePublicUrl(rawUrl) {
+  let u;
+  try { u = new URL(rawUrl); } catch { return false; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+  const host = u.hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal')) return false;
+  // IPv4 private / loopback / link-local / metadata ranges
+  if (/^127\./.test(host)) return false;
+  if (/^10\./.test(host)) return false;
+  if (/^192\.168\./.test(host)) return false;
+  if (/^169\.254\./.test(host)) return false;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false;
+  if (host === '0.0.0.0' || host === '::1' || host === '[::1]') return false;
+  // IPv6 unique-local / link-local
+  if (/^\[?(fc|fd|fe80)/i.test(host)) return false;
+  return true;
+}
+
 async function autoUnsubscribe(email) {
   const fromDomain = email.from_address?.split('@')[1] || '';
 
@@ -12,6 +31,10 @@ async function autoUnsubscribe(email) {
     const urlMatch = listUnsub.match(/<(https?:\/\/[^>]+)>/);
 
     if (urlMatch) {
+      if (!isSafePublicUrl(urlMatch[1])) {
+        logger.warn(`[unsubscribe] Refused unsafe List-Unsubscribe URL: ${urlMatch[1]}`);
+        return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
+      }
       try {
         // Try POST first (RFC 8058 one-click)
         let res = await fetch(urlMatch[1], {
@@ -50,6 +73,10 @@ async function autoUnsubscribe(email) {
 
   if (matches && matches.length > 0) {
     const unsubUrl = matches[0].replace(/["'>]+$/, ''); // Clean trailing chars
+    if (!isSafePublicUrl(unsubUrl)) {
+      logger.warn(`[unsubscribe] Refused unsafe body unsubscribe URL: ${unsubUrl}`);
+      return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
+    }
     try {
       await fetch(unsubUrl, {
         method: 'GET',

@@ -18,11 +18,12 @@
 const logger = require('./logger');
 
 const API_BASE = 'https://api.beehiiv.com/v2';
-const PUB_ID = (process.env.BEEHIIV_PUB_ID || 'pub_dac693f8-2507-4213-9987-e9d6a2a90374').trim();
+const PUB_ID = (process.env.BEEHIIV_PUB_ID || '').trim();
 
 function getHeaders() {
   const key = process.env.BEEHIIV_API_KEY;
   if (!key) throw new Error('BEEHIIV_API_KEY not configured');
+  if (!PUB_ID) throw new Error('BEEHIIV_PUB_ID not configured');
   return { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
 }
 

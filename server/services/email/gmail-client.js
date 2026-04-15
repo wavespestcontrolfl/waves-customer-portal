@@ -101,9 +101,9 @@ function parseMessage(msg) {
   const getHeader = (name) => headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
 
   const fromRaw = getHeader('From');
-  const fromMatch = fromRaw.match(/^"?([^"<]*)"?\s*<?([^>]*)>?$/);
-  const fromName = fromMatch ? fromMatch[1].trim() : '';
-  const fromAddress = fromMatch ? fromMatch[2].trim() : fromRaw.trim();
+  const fromMatch = fromRaw ? fromRaw.match(/^"?([^"<]*)"?\s*<?([^>]*)>?$/) : null;
+  const fromName = fromMatch && fromMatch[1] ? fromMatch[1].trim() : '';
+  const fromAddress = fromMatch && fromMatch[2] ? fromMatch[2].trim() : (fromRaw || '').trim();
 
   const listUnsubscribe = getHeader('List-Unsubscribe');
 
@@ -193,20 +193,38 @@ async function getAttachment(messageId, attachmentId) {
   return Buffer.from(res.data.data, 'base64url');
 }
 
+function sanitizeHeaderValue(val) {
+  if (val == null) return '';
+  // Strip CR/LF to prevent header injection (RFC 5322)
+  return String(val).replace(/[\r\n]+/g, ' ').trim();
+}
+
+function encodeHeaderUtf8(val) {
+  // RFC 2047 encoded-word for non-ASCII subject lines
+  const safe = sanitizeHeaderValue(val);
+  if (/^[\x20-\x7E]*$/.test(safe)) return safe;
+  return `=?UTF-8?B?${Buffer.from(safe, 'utf-8').toString('base64')}?=`;
+}
+
 async function sendMessage(to, subject, body, threadId = null, inReplyTo = null) {
   const gmail = await getGmail();
-  const fromEmail = process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com';
+  const fromEmail = sanitizeHeaderValue(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  const safeTo = sanitizeHeaderValue(to);
+  const safeSubject = encodeHeaderUtf8(subject);
+  const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
+
+  if (!safeTo) throw new Error('Recipient (to) is required');
 
   const headers = [
     `From: Waves Pest Control <${fromEmail}>`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    `To: ${safeTo}`,
+    `Subject: ${safeSubject}`,
     'MIME-Version: 1.0',
     'Content-Type: text/html; charset=utf-8',
   ];
-  if (inReplyTo) {
-    headers.push(`In-Reply-To: ${inReplyTo}`);
-    headers.push(`References: ${inReplyTo}`);
+  if (safeInReplyTo) {
+    headers.push(`In-Reply-To: ${safeInReplyTo}`);
+    headers.push(`References: ${safeInReplyTo}`);
   }
 
   const raw = Buffer.from(headers.join('\r\n') + '\r\n\r\n' + body).toString('base64url');

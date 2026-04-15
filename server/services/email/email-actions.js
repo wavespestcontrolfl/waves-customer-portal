@@ -83,8 +83,15 @@ async function handleLeadInquiry(email, classification) {
   if (extracted.email || extracted.phone) {
     existingLead = await db('leads')
       .where(function () {
-        if (extracted.email) this.orWhere('email', extracted.email);
-        if (extracted.phone) this.orWhere('phone', extracted.phone);
+        let first = true;
+        if (extracted.email) {
+          first ? this.where('email', extracted.email) : this.orWhere('email', extracted.email);
+          first = false;
+        }
+        if (extracted.phone) {
+          first ? this.where('phone', extracted.phone) : this.orWhere('phone', extracted.phone);
+          first = false;
+        }
       })
       .whereNotIn('status', ['won', 'lost'])
       .first();
