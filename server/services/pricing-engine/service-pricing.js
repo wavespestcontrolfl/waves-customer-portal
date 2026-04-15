@@ -83,11 +83,30 @@ function pricePestControl(property, options = {}) {
   const annualCost = fullyAllocatedCost * visitsPerYear + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
+  // ── Tier array: quarterly / bimonthly / monthly pre-priced ──
+  // Consumed by property-lookup-v2 /calculate-estimate and future tier UIs.
+  const tiers = Object.keys(PEST.frequencies).map((freqKey) => {
+    const v = PEST.frequencies[freqKey];
+    const fm = freqDiscounts[freqKey] || 1.0;
+    const pa = Math.round(basePrice * fm + roachAddOn);
+    const ann = pa * v;
+    return {
+      frequency: freqKey,
+      freq: v,
+      perApp: pa,
+      annual: ann,
+      monthly: Math.round(ann / 12 * 100) / 100,
+      label: freqKey === 'monthly' ? 'Monthly' : freqKey === 'bimonthly' ? 'Bi-Monthly' : 'Quarterly',
+      recommended: freqKey === frequency,
+    };
+  });
+
   return {
     service: 'pest_control',
     basePrice, footprintAdj: Math.round(footprintAdj), additionalAdj, propAdj,
     roachAddOn, freqMult, frequency, visitsPerYear, pricingVersion,
     perApp, annual, monthly,
+    tiers,
     costs: {
       materialPerVisit: Math.round(materialPerVisit * 100) / 100,
       onSiteLaborCost: Math.round(onSiteLaborCost * 100) / 100,
@@ -165,11 +184,32 @@ function priceLawnCare(property, options = {}) {
   const annualCost = scaledMaterial + annualLabor + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
+  // ── Tier array: basic / standard / enhanced / premium pre-priced ──
+  const TIER_LIST = ['basic', 'standard', 'enhanced', 'premium'];
+  const tiers = TIER_LIST.map((t) => {
+    const tc = LAWN_TIERS[t];
+    if (!tc) return null;
+    const mo = lookupLawnBracket(lawnSqFt, tc.index, track);
+    const ann = mo * 12;
+    return {
+      tier: t,
+      index: tc.index,
+      visits: tc.freq,
+      freq: tc.freq,
+      perApp: Math.round(ann / tc.freq * 100) / 100,
+      annual: ann,
+      monthly: mo,
+      label: `${t.charAt(0).toUpperCase()}${t.slice(1)} (${tc.freq}/yr)`,
+      recommended: t === tier,
+    };
+  }).filter(Boolean);
+
   return {
     service: 'lawn_care',
     track, tier, shadeClassification,
     lawnSqFt, frequency: tierConfig.freq,
     monthly, annual, perApp,
+    tiers,
     costs: { annualMaterial: scaledMaterial, annualLabor: Math.round(annualLabor), annualAdmin: GLOBAL.ADMIN_ANNUAL, total: Math.round(annualCost) },
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
@@ -310,14 +350,34 @@ function priceMosquito(property, options = {}) {
   const annualCost = (materialPerVisit + laborPerVisitCost) * visits + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
+  // ── Tier array: bronze / silver / gold / platinum pre-priced ──
+  const TIER_NAMES = ['bronze', 'silver', 'gold', 'platinum'];
+  const recommendedTier = f.nearWater && pressure >= 1.60 ? 'platinum' : f.trees === 'heavy' ? 'gold' : 'silver';
+  const tiers = TIER_NAMES.map((name, idx) => {
+    const bp = basePrices[idx];
+    const pv = Math.round(bp * pressure);
+    const v = MOSQUITO.tierVisits[name];
+    const ann = pv * v;
+    return {
+      tier: name,
+      perVisit: pv,
+      visits: v,
+      annual: ann,
+      monthly: Math.round(ann / 12 * 100) / 100,
+      name: name.charAt(0).toUpperCase() + name.slice(1),
+      recommended: name === recommendedTier,
+    };
+  });
+
   return {
     service: 'mosquito',
     tier, lotCategory, basePrice, pressureMultiplier: pressure,
     perVisit, visits, annual, monthly,
+    tiers,
     costs: { materialPerVisit, laborPerVisit: Math.round(laborPerVisitCost * 100) / 100, annualCost: Math.round(annualCost) },
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
-    recommendedTier: f.nearWater && pressure >= 1.60 ? 'platinum' : f.trees === 'heavy' ? 'gold' : 'silver',
+    recommendedTier,
   };
 }
 
