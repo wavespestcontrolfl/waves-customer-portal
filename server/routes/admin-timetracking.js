@@ -617,13 +617,21 @@ router.put('/technicians/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /technicians/:id — deactivate (soft delete)
+// DELETE /technicians/:id — hard delete the technician row.
+// If related records exist (time entries, assignments) the DB FK
+// will error; the client surfaces that message.
 router.delete('/technicians/:id', async (req, res, next) => {
   try {
-    await db('technicians').where({ id: req.params.id }).update({ active: false, updated_at: new Date() });
-    logger.info(`[team] Deactivated technician: ${req.params.id}`);
+    const deleted = await db('technicians').where({ id: req.params.id }).del();
+    if (!deleted) return res.status(404).json({ error: 'Technician not found' });
+    logger.info(`[team] Deleted technician: ${req.params.id}`);
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(409).json({ error: 'Technician has linked records (time entries or jobs). Deactivate instead.' });
+    }
+    next(err);
+  }
 });
 
 // =============================================================================

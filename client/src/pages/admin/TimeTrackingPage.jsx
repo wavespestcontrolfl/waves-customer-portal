@@ -49,7 +49,7 @@ export default function TimeTrackingPage() {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Time Tracking & Labor</div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Time Tracking</div>
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Clock management, timesheets, payroll, and labor analytics</div>
       </div>
 
@@ -947,6 +947,15 @@ function TeamTab({ showToast }) {
     } catch (e) { showToast('Failed: ' + e.message); }
   };
 
+  const handleDelete = async (tech) => {
+    if (!confirm(`Permanently delete ${tech.name}? This cannot be undone. If they have time entries or assigned jobs, deactivate them instead.`)) return;
+    try {
+      await adminFetch(`/admin/timetracking/technicians/${tech.id}`, { method: 'DELETE' });
+      showToast(`${tech.name} deleted`);
+      load();
+    } catch (e) { showToast('Failed: ' + e.message); }
+  };
+
   const startEdit = (tech) => {
     setEditingId(tech.id);
     setForm({ name: tech.name, phone: tech.phone || '', email: tech.email || '' });
@@ -1011,9 +1020,10 @@ function TeamTab({ showToast }) {
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}` }}>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button onClick={() => startEdit(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 11, cursor: 'pointer' }}>Edit</button>
-                    <button onClick={() => handleToggleActive(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: t.active ? D.red : D.green, fontSize: 11, cursor: 'pointer' }}>
+                    <button onClick={() => handleToggleActive(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: t.active ? D.amber : D.green, fontSize: 11, cursor: 'pointer' }}>
                       {t.active ? 'Deactivate' : 'Activate'}
                     </button>
+                    <button onClick={() => handleDelete(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.red}55`, borderRadius: 6, color: D.red, fontSize: 11, cursor: 'pointer' }}>Delete</button>
                   </div>
                 </td>
               </tr>
