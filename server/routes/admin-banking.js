@@ -91,7 +91,11 @@ router.get('/payouts/:id', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 router.post('/payouts/instant', async (req, res) => {
   try {
-    const result = await StripeBanking.createInstantPayout(req.body.amount);
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount — must be a positive number' });
+    }
+    const result = await StripeBanking.createInstantPayout(amount);
     res.json(result);
   } catch (err) {
     logger.error('[banking] Instant payout failed:', err);
@@ -119,8 +123,10 @@ router.get('/cash-flow', async (req, res) => {
   try {
     const { period, start_date, end_date } = req.query;
     const now = new Date();
-    const startDate = start_date || new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-    const endDate = end_date || now.toISOString().split('T')[0];
+    const pad = (n) => String(n).padStart(2, '0');
+    const localDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const startDate = start_date || `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
+    const endDate = end_date || localDate(now);
 
     const cashFlow = await StripeBanking.getCashFlow(startDate, endDate);
 
@@ -163,15 +169,24 @@ router.get('/cash-flow', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 router.get('/reconciliation', async (req, res) => {
   try {
+    // Use a LATERAL-style subquery to pick the latest reconciliation row per payout,
+    // preventing duplicate rows when multiple bank_reconciliation records exist.
+    const latest = db('bank_reconciliation as br')
+      .select('br.payout_id', 'br.actual_amount', 'br.reconciled_at', 'br.reconciled_by', 'br.notes')
+      .whereRaw(
+        'br.id = (SELECT id FROM bank_reconciliation WHERE payout_id = br.payout_id ORDER BY reconciled_at DESC NULLS LAST, id DESC LIMIT 1)',
+      )
+      .as('br');
+
     const rows = await db('stripe_payouts')
       .where('stripe_payouts.status', 'paid')
-      .leftJoin('bank_reconciliation', 'stripe_payouts.id', 'bank_reconciliation.payout_id')
+      .leftJoin(latest, 'stripe_payouts.id', 'br.payout_id')
       .select(
         'stripe_payouts.*',
-        'bank_reconciliation.actual_amount',
-        'bank_reconciliation.reconciled_at',
-        'bank_reconciliation.reconciled_by',
-        'bank_reconciliation.notes as reconciliation_notes',
+        'br.actual_amount',
+        'br.reconciled_at',
+        'br.reconciled_by',
+        'br.notes as reconciliation_notes',
       )
       .orderBy('stripe_payouts.arrival_date', 'desc');
 
@@ -187,8 +202,14 @@ router.get('/reconciliation', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 router.post('/reconciliation/:payoutId', async (req, res) => {
   try {
-    const { actual_amount, notes } = req.body;
-    const result = await StripeBanking.reconcilePayout(req.params.payoutId, actual_amount, notes, 'admin');
+    const { actual_amount, notes, status } = req.body;
+    const result = await StripeBanking.reconcilePayout(
+      req.params.payoutId,
+      actual_amount,
+      notes,
+      'admin',
+      status || 'confirmed',
+    );
     res.json(result);
   } catch (err) {
     logger.error('[banking] Reconciliation failed:', err);
@@ -202,6 +223,11 @@ router.post('/reconciliation/:payoutId', async (req, res) => {
 router.get('/export', async (req, res) => {
   try {
     const { format = 'csv', start_date, end_date } = req.query;
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const rangeStart = start_date || `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
+    const rangeEnd = end_date || todayStr;
 
     let query = db('stripe_payouts');
     if (start_date) query = query.where('created_at_stripe', '>=', start_date);
@@ -209,10 +235,10 @@ router.get('/export', async (req, res) => {
     const payouts = await query.orderBy('created_at_stripe', 'desc');
 
     if (format === 'ofx') {
-      const ofx = BankingExport.generateOFX(payouts);
-      res.set('Content-Type', 'application/x-ofx');
-      res.set('Content-Disposition', 'attachment; filename="payouts.ofx"');
-      return res.send(ofx);
+      const ofx = BankingExport.generateOFX(payouts, rangeStart, rangeEnd);
+      res.set('Content-Type', ofx.content_type || 'application/x-ofx');
+      res.set('Content-Disposition', `attachment; filename="${ofx.filename}"`);
+      return res.send(ofx.content);
     }
 
     // CSV — include transaction detail
@@ -222,9 +248,9 @@ router.get('/export', async (req, res) => {
       : [];
 
     const csv = BankingExport.generateCSV(payouts, transactions);
-    res.set('Content-Type', 'text/csv');
-    res.set('Content-Disposition', 'attachment; filename="payouts.csv"');
-    res.send(csv);
+    res.set('Content-Type', csv.content_type || 'text/csv');
+    res.set('Content-Disposition', `attachment; filename="${csv.filename}"`);
+    res.send(csv.content);
   } catch (err) {
     logger.error('[banking] Export failed:', err);
     res.status(500).json({ error: err.message });
@@ -237,7 +263,8 @@ router.get('/export', async (req, res) => {
 router.get('/stats', async (req, res) => {
   try {
     const now = new Date();
-    const mtdStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+    const pad = (n) => String(n).padStart(2, '0');
+    const mtdStart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
 
     const stats = await db('stripe_payouts')
       .where('status', 'paid')

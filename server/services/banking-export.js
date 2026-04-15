@@ -87,12 +87,12 @@ function generateOFX(payouts, startDate, endDate) {
       const memo = `Stripe payout: ${txnCount} txn${txnCount !== 1 ? 's' : ''}, $${feeTotal.toFixed(2)} fees`;
 
       ofx += '<STMTTRN>\n';
-      ofx += '<TRNTYPE>CREDIT\n';
+      ofx += `<TRNTYPE>${amount < 0 ? 'DEBIT' : 'CREDIT'}\n`;
       ofx += `<DTPOSTED>${arrivalDate}\n`;
       ofx += `<TRNAMT>${amount.toFixed(2)}\n`;
-      ofx += `<FITID>${p.stripe_payout_id}\n`;
+      ofx += `<FITID>${sgmlEscape(p.stripe_payout_id)}\n`;
       ofx += '<NAME>Stripe Payout\n';
-      ofx += `<MEMO>${memo}\n`;
+      ofx += `<MEMO>${sgmlEscape(memo)}\n`;
       ofx += '</STMTTRN>\n';
     }
 
@@ -118,7 +118,7 @@ function generateOFX(payouts, startDate, endDate) {
       total_amount: Math.round(ledgerBal * 100) / 100,
     };
   } catch (err) {
-    logger.error('[banking-export] OFX generation failed:', err.message);
+    logger.error('[banking-export] OFX generation failed:', err);
     throw err;
   }
 }
@@ -217,7 +217,7 @@ function generateCSV(payouts, transactions) {
       total_amount: Math.round(totalAmount * 100) / 100,
     };
   } catch (err) {
-    logger.error('[banking-export] CSV generation failed:', err.message);
+    logger.error('[banking-export] CSV generation failed:', err);
     throw err;
   }
 }
@@ -235,11 +235,25 @@ function formatOFXDate(dateStr) {
 }
 
 /**
+ * Escape SGML entities for OFX element values. OFX 1.x is SGML-based, so
+ * unescaped < > & in memos/names can break bank-side parsers.
+ */
+function sgmlEscape(val) {
+  if (val == null) return '';
+  return String(val).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
  * Escape a value for CSV (wrap in quotes if it contains commas or quotes).
  */
 function csvEscape(val) {
   if (val == null) return '';
-  const str = String(val);
+  let str = String(val);
+  // Neutralize spreadsheet formula injection: prepend apostrophe when a cell
+  // starts with a formula-trigger character. Excel/Sheets/Numbers all respect this.
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
   if (str.includes(',') || str.includes('"') || str.includes('\n')) {
     return `"${str.replace(/"/g, '""')}"`;
   }

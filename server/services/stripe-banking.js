@@ -10,6 +10,7 @@ const Stripe = require('stripe');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
+const BankingExport = require('./banking-export');
 
 // ═══════════════════════════════════════════════════════════════
 // Lazy-init Stripe client — don't crash if key is missing
@@ -21,7 +22,7 @@ function getStripe() {
     logger.warn('[stripe-banking] STRIPE_SECRET_KEY not set — banking features disabled');
     return null;
   }
-  _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: '2024-12-18.acacia' });
+  _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: stripeConfig.apiVersion });
   return _stripe;
 }
 
@@ -97,97 +98,102 @@ async function syncPayouts(limit = 50) {
   if (!stripe) throw new Error('Stripe not configured');
 
   try {
-    // Check last sync cursor
-    let cursor = null;
+    // Watermark: only fetch payouts newer than what we've already seen.
+    // (Stripe returns newest-first, so `starting_after` is the wrong tool here —
+    // it walks backwards in time and skips new payouts forever.)
+    let watermark = 0;
     try {
       const syncState = await db('stripe_sync_state')
         .where('sync_type', 'payouts')
         .first();
-      if (syncState) cursor = syncState.cursor;
+      if (syncState?.last_created_at) {
+        watermark = Math.floor(new Date(syncState.last_created_at).getTime() / 1000);
+      }
     } catch { /* table may not exist yet */ }
 
-    const listParams = { limit };
-    if (cursor) listParams.starting_after = cursor;
-
-    const payouts = await stripe.payouts.list(listParams);
     let synced = 0;
     let lastPayoutId = null;
+    let newestCreated = watermark;
+    let hasMore = true;
+    let startingAfter = null;
+    const MAX_PAGES = 20; // Safety cap: 20 × limit payouts per sync run
 
-    for (const p of payouts.data) {
-      lastPayoutId = p.id;
+    for (let pageIdx = 0; pageIdx < MAX_PAGES && hasMore; pageIdx++) {
+      const listParams = { limit };
+      if (watermark > 0) listParams.created = { gt: watermark };
+      if (startingAfter) listParams.starting_after = startingAfter;
 
-      // Check if payout already exists
-      const existing = await db('stripe_payouts')
-        .where('stripe_payout_id', p.id)
-        .first();
+      const page = await stripe.payouts.list(listParams);
+      hasMore = page.has_more;
+      startingAfter = page.data.length ? page.data[page.data.length - 1].id : null;
+      if (!page.data.length) break;
 
-      const record = {
-        stripe_payout_id: p.id,
-        amount: p.amount / 100,
-        currency: p.currency,
-        status: p.status,
-        arrival_date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString() : null,
-        created_at_stripe: p.created ? new Date(p.created * 1000).toISOString() : null,
-        method: p.method,
-        type: p.type,
-        description: p.description,
-        failure_message: p.failure_message || null,
-        bank_name: p.destination ? (typeof p.destination === 'object' ? p.destination.bank_name : null) : null,
-        bank_last_four: p.destination ? (typeof p.destination === 'object' ? p.destination.last4 : null) : null,
-        metadata: JSON.stringify(p.metadata || {}),
-        synced_at: new Date().toISOString(),
-      };
+      for (const p of page.data) {
+        lastPayoutId = p.id;
+        if (p.created && p.created > newestCreated) newestCreated = p.created;
 
-      if (existing) {
+        const record = {
+          stripe_payout_id: p.id,
+          amount: p.amount / 100,
+          currency: p.currency,
+          status: p.status,
+          arrival_date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString() : null,
+          created_at_stripe: p.created ? new Date(p.created * 1000).toISOString() : null,
+          method: p.method,
+          type: p.type,
+          description: p.description,
+          failure_message: p.failure_message || null,
+          bank_name: p.destination ? (typeof p.destination === 'object' ? p.destination.bank_name : null) : null,
+          bank_last_four: p.destination ? (typeof p.destination === 'object' ? p.destination.last4 : null) : null,
+          metadata: JSON.stringify(p.metadata || {}),
+          synced_at: new Date().toISOString(),
+        };
+
+        // Atomic upsert — eliminates race between webhook and periodic sync.
         await db('stripe_payouts')
-          .where('stripe_payout_id', p.id)
-          .update(record);
-      } else {
-        await db('stripe_payouts').insert(record);
-      }
+          .insert(record)
+          .onConflict('stripe_payout_id')
+          .merge();
 
-      // Sync transactions for this payout (only for paid payouts)
-      if (p.status === 'paid') {
-        try {
-          await syncPayoutTransactions(p.id);
-        } catch (err) {
-          logger.warn(`[stripe-banking] Transaction sync failed for ${p.id}:`, err.message);
+        if (p.status === 'paid') {
+          try {
+            await syncPayoutTransactions(p.id);
+          } catch (err) {
+            logger.warn(`[stripe-banking] Transaction sync failed for ${p.id}:`, err.message);
+          }
         }
-      }
 
-      synced++;
+        synced++;
+      }
     }
 
-    // Update sync cursor
-    if (lastPayoutId) {
+    // Persist watermark (highest `created` timestamp seen)
+    if (newestCreated > watermark) {
       try {
         const existing = await db('stripe_sync_state')
           .where('sync_type', 'payouts')
           .first();
 
+        const newestISO = new Date(newestCreated * 1000).toISOString();
+        const patch = {
+          last_sync_at: new Date().toISOString(),
+          last_payout_id: lastPayoutId,
+          last_created_at: newestISO,
+          cursor: newestISO,
+        };
+
         if (existing) {
-          await db('stripe_sync_state')
-            .where('sync_type', 'payouts')
-            .update({
-              last_sync_at: new Date().toISOString(),
-              last_payout_id: lastPayoutId,
-              cursor: lastPayoutId,
-            });
+          await db('stripe_sync_state').where('sync_type', 'payouts').update(patch);
         } else {
-          await db('stripe_sync_state').insert({
-            sync_type: 'payouts',
-            last_sync_at: new Date().toISOString(),
-            last_payout_id: lastPayoutId,
-            cursor: lastPayoutId,
-          });
+          await db('stripe_sync_state').insert({ sync_type: 'payouts', ...patch });
         }
       } catch (err) {
         logger.warn('[stripe-banking] Could not update sync state:', err.message);
       }
     }
 
-    logger.info(`[stripe-banking] Synced ${synced} payouts`);
-    return { synced, has_more: payouts.has_more };
+    logger.info(`[stripe-banking] Synced ${synced} payouts across ${Math.min(MAX_PAGES, Math.ceil(synced / limit) || 1)} page(s)`);
+    return { synced, has_more: hasMore };
   } catch (err) {
     logger.error('[stripe-banking] syncPayouts failed:', err.message);
     throw err;
@@ -215,7 +221,8 @@ async function syncPayoutTransactions(stripePayoutId) {
   if (!payout) throw new Error(`Payout not found: ${stripePayoutId}`);
 
   try {
-    // Fetch all balance transactions for this payout
+    // Fetch all balance transactions from Stripe BEFORE touching local DB.
+    // If the API call fails, the existing local rows are left intact.
     const transactions = await stripe.balanceTransactions.list({
       payout: stripePayoutId,
       limit: 100,
@@ -224,55 +231,61 @@ async function syncPayoutTransactions(stripePayoutId) {
     let totalFees = 0;
     let txnCount = 0;
 
-    // Clear existing transactions for this payout before re-syncing
-    await db('stripe_payout_transactions')
-      .where('payout_id', payout.id)
-      .del();
+    // Batch-resolve local payments/customers to avoid N+1.
+    const chargeSources = transactions.data
+      .map(t => (typeof t.source === 'string' && t.source.startsWith('ch_')) ? t.source : null)
+      .filter(Boolean);
 
+    let paymentsBySource = new Map();
+    let customersById = new Map();
+    if (chargeSources.length) {
+      try {
+        const payments = await db('payments')
+          .whereIn('stripe_charge_id', chargeSources)
+          .orWhereIn('stripe_payment_intent_id', chargeSources);
+        for (const pay of payments) {
+          if (pay.stripe_charge_id) paymentsBySource.set(pay.stripe_charge_id, pay);
+          if (pay.stripe_payment_intent_id) paymentsBySource.set(pay.stripe_payment_intent_id, pay);
+        }
+
+        const customerIds = [...new Set(payments.map(p => p.customer_id).filter(Boolean))];
+        if (customerIds.length) {
+          const customers = await db('customers')
+            .whereIn('id', customerIds)
+            .select('id', 'first_name', 'last_name');
+          for (const c of customers) customersById.set(c.id, c);
+        }
+      } catch (err) {
+        logger.warn('[stripe-banking] Batch payment/customer lookup failed:', err.message);
+      }
+    }
+
+    const txnInserts = [];
     for (const txn of transactions.data) {
-      // Attempt to match to local records
       let customerId = null;
       let customerName = null;
       let invoiceId = null;
       let paymentId = null;
 
-      // If this is a charge, try to find the matching local payment
-      if (txn.source && typeof txn.source === 'string' && txn.source.startsWith('ch_')) {
+      const payment = (typeof txn.source === 'string') ? paymentsBySource.get(txn.source) : null;
+      if (payment) {
+        paymentId = payment.id;
+        customerId = payment.customer_id;
+
+        if (customerId) {
+          const customer = customersById.get(customerId);
+          if (customer) customerName = `${customer.first_name} ${customer.last_name}`;
+        }
+
         try {
-          const payment = await db('payments')
-            .where('stripe_charge_id', txn.source)
-            .orWhere('stripe_payment_intent_id', txn.source)
-            .first();
-
-          if (payment) {
-            paymentId = payment.id;
-            customerId = payment.customer_id;
-
-            // Get customer name
-            if (customerId) {
-              const customer = await db('customers')
-                .where('id', customerId)
-                .select('first_name', 'last_name')
-                .first();
-              if (customer) {
-                customerName = `${customer.first_name} ${customer.last_name}`;
-              }
-            }
-
-            // Check if payment is linked to an invoice
-            try {
-              const meta = typeof payment.metadata === 'string'
-                ? JSON.parse(payment.metadata)
-                : payment.metadata;
-              if (meta && meta.invoice_id) {
-                invoiceId = meta.invoice_id;
-              }
-            } catch { /* metadata parse failure — non-critical */ }
-          }
-        } catch { /* matching failure — non-critical */ }
+          const meta = typeof payment.metadata === 'string'
+            ? JSON.parse(payment.metadata)
+            : payment.metadata;
+          if (meta && meta.invoice_id) invoiceId = meta.invoice_id;
+        } catch { /* metadata parse failure — non-critical */ }
       }
 
-      await db('stripe_payout_transactions').insert({
+      txnInserts.push({
         payout_id: payout.id,
         stripe_txn_id: txn.id,
         type: txn.type,
@@ -292,13 +305,19 @@ async function syncPayoutTransactions(stripePayoutId) {
       txnCount++;
     }
 
-    // Update payout with fee total and transaction count
-    await db('stripe_payouts')
-      .where('id', payout.id)
-      .update({
-        fee_total: totalFees,
-        transaction_count: txnCount,
-      });
+    // Atomic swap: delete + insert + update payout inside a single DB transaction
+    await db.transaction(async (trx) => {
+      await trx('stripe_payout_transactions').where('payout_id', payout.id).del();
+      if (txnInserts.length) {
+        await trx('stripe_payout_transactions').insert(txnInserts);
+      }
+      await trx('stripe_payouts')
+        .where('id', payout.id)
+        .update({
+          fee_total: totalFees,
+          transaction_count: txnCount,
+        });
+    });
 
     logger.info(`[stripe-banking] Synced ${txnCount} transactions for payout ${stripePayoutId}`);
     return { transaction_count: txnCount, fee_total: totalFees };
@@ -394,11 +413,15 @@ async function createInstantPayout(amountDollars) {
   try {
     const amountCents = Math.round(amountDollars * 100);
 
-    const payout = await stripe.payouts.create({
-      amount: amountCents,
-      currency: 'usd',
-      method: 'instant',
-    });
+    // Idempotency key: collapses retries within the same minute for the same amount.
+    // Stripe honors this for 24h; duplicate submissions in that window return the original payout.
+    const minuteBucket = Math.floor(Date.now() / 60000);
+    const idempotencyKey = `ipo_${amountCents}_${minuteBucket}`;
+
+    const payout = await stripe.payouts.create(
+      { amount: amountCents, currency: 'usd', method: 'instant' },
+      { idempotencyKey },
+    );
 
     // Store in local DB
     await db('stripe_payouts').insert({
@@ -453,7 +476,7 @@ async function getCashFlow(startDate, endDate) {
       )
       .groupBy('payment_date')
       .orderBy('payment_date')
-      .catch(() => []);
+      .catch((e) => { logger.error('[stripe-banking] cash-flow revenue query failed:', e); return []; });
 
     // Expenses
     const expenseRows = await db('expenses')
@@ -465,26 +488,28 @@ async function getCashFlow(startDate, endDate) {
       )
       .groupBy('expense_date')
       .orderBy('expense_date')
-      .catch(() => []);
+      .catch((e) => { logger.error('[stripe-banking] cash-flow expense query failed:', e); return []; });
 
     // Stripe fees from payout transactions
     const feeRows = await db('stripe_payout_transactions')
       .whereBetween('created_at_stripe', [startDate, endDate + 'T23:59:59'])
       .select(db.raw('COALESCE(SUM(fee), 0) as total_fees'))
       .first()
-      .catch(() => ({ total_fees: 0 }));
+      .catch((e) => { logger.error('[stripe-banking] cash-flow fee query failed:', e); return { total_fees: 0 }; });
 
-    // Payouts
+    // Payouts — bucket by business-local day (ET) so late-evening payouts
+    // don't roll into "tomorrow" under a UTC session timezone.
+    const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || 'America/New_York';
     const payoutRows = await db('stripe_payouts')
       .whereBetween('arrival_date', [startDate, endDate + 'T23:59:59'])
       .select(
-        db.raw("DATE(arrival_date) as date"),
+        db.raw("DATE(arrival_date AT TIME ZONE ?) as date", [BUSINESS_TZ]),
         db.raw('SUM(amount) as total'),
         db.raw('COUNT(*) as count'),
       )
-      .groupBy(db.raw('DATE(arrival_date)'))
+      .groupBy(db.raw("DATE(arrival_date AT TIME ZONE ?)", [BUSINESS_TZ]))
       .orderBy('date')
-      .catch(() => []);
+      .catch((e) => { logger.error('[stripe-banking] cash-flow payout query failed:', e); return []; });
 
     // Build daily aggregates
     const dailyMap = {};
@@ -506,11 +531,41 @@ async function getCashFlow(startDate, endDate) {
 
     const daily = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
 
-    // Summary totals
-    const totalRevenue = revenueRows.reduce((s, r) => s + parseFloat(r.total || 0), 0);
-    const totalExpenses = expenseRows.reduce((s, r) => s + parseFloat(r.total || 0), 0);
-    const totalFees = parseFloat(feeRows?.total_fees || 0);
-    const totalPayouts = payoutRows.reduce((s, r) => s + parseFloat(r.total || 0), 0);
+    // Summary totals — compute in SQL with NUMERIC to avoid float accumulation drift,
+    // then parse once at the edge.
+    const [revTot, expTot, payTot] = await Promise.all([
+      db('payments')
+        .where('status', 'paid')
+        .whereBetween('payment_date', [startDate, endDate])
+        .select(db.raw("COALESCE(SUM(amount)::text, '0') as total, COUNT(*)::int as count"))
+        .first()
+        .catch(() => ({ total: '0', count: 0 })),
+      db('expenses')
+        .whereBetween('expense_date', [startDate, endDate])
+        .select(db.raw("COALESCE(SUM(amount)::text, '0') as total"))
+        .first()
+        .catch(() => ({ total: '0' })),
+      db('stripe_payouts')
+        .whereBetween('arrival_date', [startDate, endDate + 'T23:59:59'])
+        .select(db.raw("COALESCE(SUM(amount)::text, '0') as total, COUNT(*)::int as count"))
+        .first()
+        .catch(() => ({ total: '0', count: 0 })),
+    ]);
+
+    const totalRevenue = parseFloat(revTot?.total ?? '0');
+    const totalExpenses = parseFloat(expTot?.total ?? '0');
+    const totalFees = parseFloat(feeRows?.total_fees ?? 0);
+    const totalPayouts = parseFloat(payTot?.total ?? '0');
+    const paymentCount = parseInt(revTot?.count ?? 0);
+    const payoutCount = parseInt(payTot?.count ?? 0);
+
+    // Two views of "cash flow":
+    //   operating_cash_flow = revenue earned − expenses paid − Stripe fees
+    //     (how much the business generated this period, ignoring bank-transfer timing)
+    //   bank_balance_delta  = payouts deposited − expenses paid
+    //     (how much the bank balance actually changed this period)
+    const operatingCashFlow = totalRevenue - totalExpenses - totalFees;
+    const bankBalanceDelta = totalPayouts - totalExpenses;
 
     return {
       period: { start: startDate, end: endDate },
@@ -519,9 +574,12 @@ async function getCashFlow(startDate, endDate) {
         total_expenses: Math.round(totalExpenses * 100) / 100,
         stripe_fees: Math.round(totalFees * 100) / 100,
         total_payouts: Math.round(totalPayouts * 100) / 100,
-        net_cash_flow: Math.round((totalRevenue - totalExpenses - totalFees) * 100) / 100,
-        payment_count: revenueRows.reduce((s, r) => s + parseInt(r.count || 0), 0),
-        payout_count: payoutRows.reduce((s, r) => s + parseInt(r.count || 0), 0),
+        operating_cash_flow: Math.round(operatingCashFlow * 100) / 100,
+        bank_balance_delta: Math.round(bankBalanceDelta * 100) / 100,
+        // Back-compat alias — prefer the two explicit fields above.
+        net_cash_flow: Math.round(operatingCashFlow * 100) / 100,
+        payment_count: paymentCount,
+        payout_count: payoutCount,
       },
       daily,
     };
@@ -543,54 +601,48 @@ async function getCashFlow(startDate, endDate) {
  * @param {string} notes — reconciliation notes
  * @param {string} reconciledBy — who reconciled
  */
-async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy) {
+async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, status = 'confirmed') {
   try {
     const payout = await db('stripe_payouts').where('id', payoutId).first();
     if (!payout) throw new Error('Payout not found');
+
+    const allowedStatuses = ['draft', 'confirmed', 'rejected'];
+    if (!allowedStatuses.includes(status)) {
+      throw new Error(`Invalid reconciliation status: ${status}`);
+    }
 
     const expectedAmount = parseFloat(payout.amount || 0);
     const discrepancy = Math.round((actualAmount - expectedAmount) * 100) / 100;
     const matched = Math.abs(discrepancy) < 0.01;
     const now = new Date().toISOString();
 
-    // Check if reconciliation record exists
-    const existing = await db('bank_reconciliation').where('payout_id', payoutId).first();
-
-    if (existing) {
-      await db('bank_reconciliation')
-        .where('payout_id', payoutId)
-        .update({
-          expected_amount: expectedAmount,
-          actual_amount: actualAmount,
-          matched,
-          discrepancy,
-          notes,
-          reconciled_at: now,
-          reconciled_by: reconciledBy,
-        });
-    } else {
-      await db('bank_reconciliation').insert({
-        payout_id: payoutId,
+    await db.transaction(async (trx) => {
+      const existing = await trx('bank_reconciliation').where('payout_id', payoutId).first();
+      const reconRow = {
         expected_amount: expectedAmount,
         actual_amount: actualAmount,
         matched,
         discrepancy,
         notes,
+        status,
         reconciled_at: now,
         reconciled_by: reconciledBy,
-      });
-    }
+      };
+      if (existing) {
+        await trx('bank_reconciliation').where('payout_id', payoutId).update(reconRow);
+      } else {
+        await trx('bank_reconciliation').insert({ payout_id: payoutId, ...reconRow });
+      }
 
-    // Mark payout as reconciled
-    await db('stripe_payouts')
-      .where('id', payoutId)
-      .update({
-        reconciled: true,
-        reconciled_at: now,
-        reconciled_by: reconciledBy,
+      // Only 'confirmed' flips the payout flag; 'rejected' un-reconciles it.
+      await trx('stripe_payouts').where('id', payoutId).update({
+        reconciled: status === 'confirmed',
+        reconciled_at: status === 'confirmed' ? now : null,
+        reconciled_by: status === 'confirmed' ? reconciledBy : null,
       });
+    });
 
-    logger.info(`[stripe-banking] Payout ${payoutId} reconciled: expected=$${expectedAmount}, actual=$${actualAmount}, matched=${matched}`);
+    logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status}: expected=$${expectedAmount}, actual=$${actualAmount}, matched=${matched}`);
 
     return {
       payout_id: payoutId,
@@ -598,6 +650,7 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy) {
       actual_amount: actualAmount,
       discrepancy,
       matched,
+      status,
       reconciled_at: now,
       reconciled_by: reconciledBy,
     };
@@ -629,8 +682,6 @@ async function generateExport(format, startDate, endDate) {
       .whereIn('payout_id', payouts.map(p => p.id))
       .orderBy('created_at_stripe');
 
-    const BankingExport = require('./banking-export');
-
     if (format === 'ofx') {
       return BankingExport.generateOFX(payouts, startDate, endDate);
     } else {
@@ -643,10 +694,46 @@ async function generateExport(format, startDate, endDate) {
 }
 
 
+/**
+ * Upsert a single payout directly from a Stripe webhook event object.
+ * Used by webhook handler to guarantee the specific payout is recorded
+ * without depending on page ordering in a generic sync.
+ */
+async function upsertPayoutFromEvent(p) {
+  if (!p || !p.id) throw new Error('upsertPayoutFromEvent: missing payout');
+
+  const record = {
+    stripe_payout_id: p.id,
+    amount: p.amount / 100,
+    currency: p.currency,
+    status: p.status,
+    arrival_date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString() : null,
+    created_at_stripe: p.created ? new Date(p.created * 1000).toISOString() : null,
+    method: p.method,
+    type: p.type,
+    description: p.description,
+    failure_message: p.failure_message || null,
+    bank_name: p.destination && typeof p.destination === 'object' ? p.destination.bank_name : null,
+    bank_last_four: p.destination && typeof p.destination === 'object' ? p.destination.last4 : null,
+    metadata: JSON.stringify(p.metadata || {}),
+    synced_at: new Date().toISOString(),
+  };
+
+  await db('stripe_payouts').insert(record).onConflict('stripe_payout_id').merge();
+
+  if (p.status === 'paid') {
+    try { await syncPayoutTransactions(p.id); }
+    catch (err) { logger.warn(`[stripe-banking] Txn sync failed for ${p.id}:`, err.message); }
+  }
+
+  return { stripe_payout_id: p.id, status: p.status };
+}
+
 module.exports = {
   getBalance,
   syncPayouts,
   syncPayoutTransactions,
+  upsertPayoutFromEvent,
   getPayoutDetails,
   createInstantPayout,
   getCashFlow,

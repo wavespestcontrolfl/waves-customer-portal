@@ -60,7 +60,9 @@ function PayoutsTab() {
     try {
       const d = await adminFetch(`/admin/banking/payouts?limit=20&page=${p}`);
       setPayouts(d.payouts || []);
-      setHasMore((d.payouts || []).length === 20);
+      // Use the authoritative `pages` field from the backend instead of guessing
+      // from page length (a short first page would otherwise disable Next).
+      setHasMore(typeof d.pages === 'number' ? p < d.pages : (d.payouts || []).length === 20);
     } catch (e) { /* no-op */ }
     setLoading(false);
   }, []);
@@ -673,15 +675,15 @@ export default function BankingPage() {
         {/* Next Payout */}
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px' }}>
           <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Next Payout</div>
-          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.teal }}>{fmtM(balance?.next_payout_amount)}</div>
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{balance?.next_payout_date ? fmtD(balance.next_payout_date) : 'No payout scheduled'}</div>
+          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.teal }}>{fmtM(balance?.next_payout?.amount)}</div>
+          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{balance?.next_payout?.arrival_date ? fmtD(balance.next_payout.arrival_date) : 'No payout scheduled'}</div>
         </div>
 
         {/* MTD Deposited */}
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px' }}>
           <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>MTD Deposited</div>
           <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.purple }}>{fmtM(stats?.mtd_deposited)}</div>
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{stats?.mtd_payout_count ?? 0} payout{(stats?.mtd_payout_count ?? 0) !== 1 ? 's' : ''} this month</div>
+          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{stats?.payout_count ?? 0} payout{(stats?.payout_count ?? 0) !== 1 ? 's' : ''} this month</div>
         </div>
       </div>
 

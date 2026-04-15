@@ -276,9 +276,11 @@ async function handlePayoutEvent(payout, eventType) {
 
   try {
     const StripeBanking = require('../services/stripe-banking');
-    await StripeBanking.syncPayouts(5);
+    // Upsert the specific payout from this event — don't rely on a generic sync
+    // that might not include this payout in its first page of results.
+    await StripeBanking.upsertPayoutFromEvent(payout);
   } catch (err) {
-    logger.error(`[stripe-webhook] Payout sync failed: ${err.message}`);
+    logger.error(`[stripe-webhook] Payout upsert failed: ${err.message}`);
   }
 
   try {
