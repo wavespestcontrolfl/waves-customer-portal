@@ -61,47 +61,159 @@ export default function EquipmentPage() {
 }
 
 // ── Equipment Tab ──
+const CATEGORIES = ['sprayer', 'pump', 'reel', 'spreader', 'dethatcher', 'backpack', 'vehicle', 'other'];
+const STATUSES = ['active', 'maintenance', 'retired', 'pending'];
+const EMPTY_EQUIP = {
+  name: '', category: 'other', make: '', model: '', serial_number: '',
+  purchase_date: '', purchase_price: '', current_hours: '',
+  next_service_hours: '', next_service_type: '', assigned_to: '',
+  status: 'active', book_value: '', notes: '',
+};
+
 function EquipmentTab({ showToast }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null); // equipment object or EMPTY_EQUIP for new
+  const [saving, setSaving] = useState(false);
+
+  const reload = () => adminFetch('/admin/equipment/equipment').then(d => setItems(d.equipment || [])).catch(() => {});
 
   useEffect(() => {
-    adminFetch('/admin/equipment/equipment').then(d => setItems(d.equipment || [])).catch(() => {}).finally(() => setLoading(false));
+    reload().finally(() => setLoading(false));
   }, []);
+
+  const save = async () => {
+    if (!editing.name?.trim()) return showToast('Name is required');
+    setSaving(true);
+    try {
+      const payload = { ...editing };
+      ['purchase_price', 'current_hours', 'next_service_hours', 'book_value'].forEach(k => {
+        payload[k] = payload[k] === '' || payload[k] == null ? null : Number(payload[k]);
+      });
+      if (!payload.purchase_date) payload.purchase_date = null;
+      if (editing.id) {
+        await adminFetch(`/admin/equipment/equipment/${editing.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+        showToast('Equipment updated');
+      } else {
+        await adminFetch('/admin/equipment/equipment', { method: 'POST', body: JSON.stringify(payload) });
+        showToast('Equipment added');
+      }
+      setEditing(null);
+      await reload();
+    } catch (e) {
+      showToast(`Failed: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading equipment...</div>;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
-      {items.map(e => {
-        const hoursLeft = e.next_service_hours ? e.next_service_hours - (e.current_hours || 0) : null;
-        const needsService = hoursLeft !== null && hoursLeft <= 10;
-        return (
-          <div key={e.id} style={{ ...sCard, marginBottom: 0, borderLeft: `3px solid ${STATUS_COLORS[e.status] || D.muted}` }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{CAT_ICONS[e.category] || '🔧'} {e.name}</div>
-                <div style={{ fontSize: 11, color: D.muted }}>{e.make} {e.model}</div>
+    <>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button onClick={() => setEditing({ ...EMPTY_EQUIP })} style={sBtn(D.teal, '#fff')}>+ Add Equipment</button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
+        {items.map(e => {
+          const hoursLeft = e.next_service_hours ? e.next_service_hours - (e.current_hours || 0) : null;
+          const needsService = hoursLeft !== null && hoursLeft <= 10;
+          return (
+            <div key={e.id} style={{ ...sCard, marginBottom: 0, borderLeft: `3px solid ${STATUS_COLORS[e.status] || D.muted}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8, gap: 8 }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{CAT_ICONS[e.category] || '🔧'} {e.name}</div>
+                  <div style={{ fontSize: 11, color: D.muted }}>{[e.make, e.model].filter(Boolean).join(' ')}</div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                  <span style={sBadge(`${STATUS_COLORS[e.status]}22`, STATUS_COLORS[e.status])}>{e.status}</span>
+                  <button onClick={() => setEditing({
+                    ...e,
+                    purchase_date: e.purchase_date ? String(e.purchase_date).split('T')[0] : '',
+                    purchase_price: e.purchase_price ?? '',
+                    current_hours: e.current_hours ?? '',
+                    next_service_hours: e.next_service_hours ?? '',
+                    book_value: e.book_value ?? '',
+                  })} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.muted, fontSize: 11, cursor: 'pointer' }}>Edit</button>
+                </div>
               </div>
-              <span style={sBadge(`${STATUS_COLORS[e.status]}22`, STATUS_COLORS[e.status])}>{e.status}</span>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 11 }}>
-              {e.current_hours > 0 && <div><span style={{ color: D.muted }}>Hours:</span> <span style={{ color: D.heading, fontFamily: MONO }}>{e.current_hours}</span></div>}
-              {e.purchase_price > 0 && <div><span style={{ color: D.muted }}>Cost:</span> <span style={{ color: D.green, fontFamily: MONO }}>{fmt(e.purchase_price)}</span></div>}
-              {e.book_value > 0 && <div><span style={{ color: D.muted }}>Book:</span> <span style={{ fontFamily: MONO }}>{fmt(e.book_value)}</span></div>}
-              {e.last_service_date && <div><span style={{ color: D.muted }}>Last Svc:</span> <span>{new Date(e.last_service_date).toLocaleDateString()}</span></div>}
-            </div>
-            {e.specs && (
-              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 8 }}>
-                {Object.entries(typeof e.specs === 'string' ? JSON.parse(e.specs) : e.specs).map(([k, v]) => (
-                  <span key={k} style={sBadge(`${D.teal}22`, D.teal)}>{k.replace(/_/g, ' ')}: {v}</span>
-                ))}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 11 }}>
+                {e.current_hours > 0 && <div><span style={{ color: D.muted }}>Hours:</span> <span style={{ color: D.heading, fontFamily: MONO }}>{e.current_hours}</span></div>}
+                {e.purchase_price > 0 && <div><span style={{ color: D.muted }}>Cost:</span> <span style={{ color: D.green, fontFamily: MONO }}>{fmt(e.purchase_price)}</span></div>}
+                {e.book_value > 0 && <div><span style={{ color: D.muted }}>Book:</span> <span style={{ fontFamily: MONO }}>{fmt(e.book_value)}</span></div>}
+                {e.last_service_date && <div><span style={{ color: D.muted }}>Last Svc:</span> <span>{new Date(e.last_service_date).toLocaleDateString()}</span></div>}
               </div>
-            )}
-            {needsService && <div style={{ marginTop: 8, fontSize: 11, color: D.amber, fontWeight: 600 }}>⚠ Service due in {Math.round(hoursLeft)} hours — {e.next_service_type}</div>}
-          </div>
-        );
-      })}
+              {e.specs && (
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 8 }}>
+                  {Object.entries(typeof e.specs === 'string' ? JSON.parse(e.specs) : e.specs).map(([k, v]) => (
+                    <span key={k} style={sBadge(`${D.teal}22`, D.teal)}>{k.replace(/_/g, ' ')}: {v}</span>
+                  ))}
+                </div>
+              )}
+              {needsService && <div style={{ marginTop: 8, fontSize: 11, color: D.amber, fontWeight: 600 }}>⚠ Service due in {Math.round(hoursLeft)} hours — {e.next_service_type}</div>}
+            </div>
+          );
+        })}
+      </div>
+
+      {editing && (
+        <EquipmentEditModal
+          equipment={editing}
+          onChange={setEditing}
+          onClose={() => setEditing(null)}
+          onSave={save}
+          saving={saving}
+        />
+      )}
+    </>
+  );
+}
+
+function EquipmentEditModal({ equipment: e, onChange, onClose, onSave, saving }) {
+  const field = (key, label, type = 'text', opts = null) => (
+    <label style={{ display: 'block' }}>
+      <div style={{ fontSize: 11, color: D.muted, fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+      {opts ? (
+        <select value={e[key] ?? ''} onChange={ev => onChange({ ...e, [key]: ev.target.value })} style={sInput}>
+          {opts.map(o => <option key={o} value={o}>{o}</option>)}
+        </select>
+      ) : type === 'textarea' ? (
+        <textarea value={e[key] ?? ''} onChange={ev => onChange({ ...e, [key]: ev.target.value })} rows={3} style={{ ...sInput, resize: 'vertical', fontFamily: 'inherit' }} />
+      ) : (
+        <input type={type} value={e[key] ?? ''} onChange={ev => onChange({ ...e, [key]: ev.target.value })} style={sInput} />
+      )}
+    </label>
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, zIndex: 400 }}>
+      <div onClick={ev => ev.stopPropagation()} style={{ background: D.card, borderRadius: 12, padding: 24, width: '100%', maxWidth: 640, maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 16 }}>
+          {e.id ? 'Edit Equipment' : 'Add Equipment'}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
+          {field('name', 'Name *')}
+          {field('category', 'Category', 'text', CATEGORIES)}
+          {field('make', 'Make')}
+          {field('model', 'Model')}
+          {field('serial_number', 'Serial #')}
+          {field('status', 'Status', 'text', STATUSES)}
+          {field('purchase_date', 'Purchase Date', 'date')}
+          {field('purchase_price', 'Purchase Price ($)', 'number')}
+          {field('current_hours', 'Current Hours', 'number')}
+          {field('book_value', 'Book Value ($)', 'number')}
+          {field('next_service_hours', 'Next Service @ Hours', 'number')}
+          {field('next_service_type', 'Next Service Type')}
+          {field('assigned_to', 'Assigned To')}
+        </div>
+        <div style={{ marginTop: 12 }}>
+          {field('notes', 'Notes', 'textarea')}
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 20 }}>
+          <button onClick={onClose} disabled={saving} style={{ ...sBtn('transparent', D.muted), border: `1px solid ${D.border}` }}>Cancel</button>
+          <button onClick={onSave} disabled={saving} style={sBtn(D.teal, '#fff')}>{saving ? 'Saving...' : 'Save'}</button>
+        </div>
+      </div>
     </div>
   );
 }
