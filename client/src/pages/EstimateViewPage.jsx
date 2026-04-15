@@ -479,26 +479,51 @@ function TierMatrix({ summary, rows, bottomNote }) {
   );
 }
 
-// Renders a one-time / specialty service line with name, price, and optional detail text.
+// Map a one-time item name to a booking service id (matches SERVICES in PublicBookingPage)
+function bookingServiceFor(name) {
+  const n = String(name || '').toLowerCase();
+  if (n.includes('lawn') || n.includes('turf') || n.includes('aeration') || n.includes('seed') || n.includes('weed')) return 'lawn_care';
+  if (n.includes('mosquito')) return 'mosquito';
+  if (n.includes('tree') || n.includes('shrub') || n.includes('palm') || n.includes('ornamental')) return 'tree_shrub';
+  if (n.includes('termite') || n.includes('wdo')) return 'termite';
+  if (n.includes('rodent') || n.includes('rat') || n.includes('mouse')) return 'rodent';
+  return 'pest_control';
+}
+
+// Renders a one-time / specialty service line with name, price, optional detail, and booking link.
 function OneTimeBreakdown({ items }) {
   if (!items || !items.length) return null;
   return (
     <div style={{ marginBottom: 14, background: '#fff', border: `1px solid ${SAND_DARK}`, borderRadius: 12, overflow: 'hidden' }}>
-      {items.map((it, i) => (
-        <div key={i} style={{
-          padding: '12px 14px',
-          borderBottom: i < items.length - 1 ? `1px solid ${SAND_DARK}` : 'none',
-          display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'start',
-        }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{it.name}</div>
-            {it.detail && <div style={{ fontSize: 12, color: '#455A64', lineHeight: 1.55, marginTop: 3 }}>{it.detail}</div>}
+      {items.map((it, i) => {
+        const svc = bookingServiceFor(it.name);
+        return (
+          <div key={i} style={{
+            padding: '12px 14px',
+            borderBottom: i < items.length - 1 ? `1px solid ${SAND_DARK}` : 'none',
+            display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'start',
+          }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{it.name}</div>
+              {it.detail && <div style={{ fontSize: 12, color: '#455A64', lineHeight: 1.55, marginTop: 3 }}>{it.detail}</div>}
+              <a
+                href={`/book?service=${svc}&source=estimate`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: 'inline-block', marginTop: 6, fontSize: 11, fontWeight: 700,
+                  color: B.wavesBlue, textDecoration: 'none',
+                  padding: '4px 10px', borderRadius: 999,
+                  border: `1px solid ${B.wavesBlue}55`, background: `${B.wavesBlue}0d`,
+                }}
+              >📅 Book this service →</a>
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: B.wavesBlue, fontFamily: FONTS.ui, whiteSpace: 'nowrap' }}>
+              {it.price > 0 ? `$${Number(it.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'Included'}
+            </div>
           </div>
-          <div style={{ fontSize: 14, fontWeight: 800, color: B.wavesBlue, fontFamily: FONTS.ui, whiteSpace: 'nowrap' }}>
-            {it.price > 0 ? `$${Number(it.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'Included'}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

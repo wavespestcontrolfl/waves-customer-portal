@@ -8,6 +8,17 @@ const logger = require('../services/logger');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
+// Map a one-time service name to the booking page's service id (matches PublicBookingPage SERVICES)
+function bookingServiceFor(name) {
+  const n = String(name || '').toLowerCase();
+  if (n.includes('lawn') || n.includes('turf') || n.includes('aeration') || n.includes('seed') || n.includes('weed')) return { id: 'lawn_care', label: 'Lawn Care' };
+  if (n.includes('mosquito')) return { id: 'mosquito', label: 'Mosquito Control' };
+  if (n.includes('tree') || n.includes('shrub') || n.includes('palm') || n.includes('ornamental')) return { id: 'tree_shrub', label: 'Tree & Shrub Service' };
+  if (n.includes('termite') || n.includes('wdo')) return { id: 'termite', label: 'Termite Inspection' };
+  if (n.includes('rodent') || n.includes('rat') || n.includes('mouse')) return { id: 'rodent', label: 'Rodent Control' };
+  return { id: 'pest_control', label: 'Pest Control' };
+}
+
 async function renderTemplate(templateKey, vars, fallback) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -151,15 +162,21 @@ router.put('/:token/accept', async (req, res, next) => {
       await db('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
     }
 
-    // Trigger onboarding
+    // Parse estimate data + detect one-time-only vs recurring
+    const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    const estResult = estData?.result || estData || {};
+    const recurringSvcList = estResult?.recurring?.services || [];
+    const oneTimeList = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+    const isOneTimeOnly = recurringSvcList.length === 0 && oneTimeList.length > 0;
+
+    // Trigger onboarding — recurring customers only
     let onboardingToken = null;
-    if (customerId) {
+    if (customerId && !isOneTimeOnly) {
       const obToken = crypto.randomUUID();
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + 7);
 
-      const data = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
-      const svcType = data?.recurring?.services?.map(s => s.name).join(' + ') || 'Pest Control';
+      const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
 
       const [ob] = await db('onboarding_sessions').insert({
         customer_id: customerId,
@@ -173,8 +190,10 @@ router.put('/:token/accept', async (req, res, next) => {
 
       await db('estimates').where({ id: estimate.id }).update({ onboarding_session_id: ob.id });
       onboardingToken = obToken;
+    }
 
-      // Notify office
+    // Notify office
+    if (customerId) {
       try {
         const officeVars = {
           customer_name: estimate.customer_name || '',
@@ -182,28 +201,42 @@ router.put('/:token/accept', async (req, res, next) => {
           waveguard_tier: estimate.waveguard_tier || 'Bronze',
           monthly_total: estimate.monthly_total || 0,
         };
-        const officeBody = await renderTemplate(
-          'estimate_accepted_office',
-          officeVars,
-          `🎉 Estimate accepted! ${officeVars.customer_name} at ${officeVars.address} — ${officeVars.waveguard_tier} WaveGuard $${officeVars.monthly_total}/mo. Onboarding link sent.`
-        );
+        const officeFallback = isOneTimeOnly
+          ? `🎉 One-time booking! ${officeVars.customer_name} at ${officeVars.address} — ${oneTimeList[0]?.name || 'service'}. Booking link sent.`
+          : `🎉 Estimate accepted! ${officeVars.customer_name} at ${officeVars.address} — ${officeVars.waveguard_tier} WaveGuard $${officeVars.monthly_total}/mo. Onboarding link sent.`;
+        const officeBody = await renderTemplate('estimate_accepted_office', officeVars, officeFallback);
         await TwilioService.sendSMS(WAVES_OFFICE_PHONE, officeBody);
       } catch (e) { logger.error(`Estimate accept SMS failed: ${e.message}`); }
     }
 
-    // Send acceptance SMS to customer with onboarding link
+    // Send acceptance SMS to customer
+    let bookingUrl = null;
     if (estimate.customer_phone) {
       try {
-        const obUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
-        const customerBody = await renderTemplate(
-          'estimate_accepted_customer',
-          { first_name: firstName, onboarding_url: obUrl },
-          `Hello ${firstName}! Thanks for approving your estimate. Complete your setup here so we can get you on the schedule: ${obUrl}`
-        );
-        await TwilioService.sendSMS(estimate.customer_phone, customerBody,
-          { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png' }
-        );
-        logger.info(`[estimate-accept] Acceptance SMS sent to ${firstName} (${estimate.customer_phone})`);
+        if (isOneTimeOnly) {
+          const primarySvc = bookingServiceFor(oneTimeList[0]?.name || '');
+          bookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=estimate-accept`;
+          const customerBody = await renderTemplate(
+            'estimate_accepted_onetime',
+            { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
+            `Hey ${firstName}! Thanks for booking your ${primarySvc.label} with Waves. Pick your time here — we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`
+          );
+          await TwilioService.sendSMS(estimate.customer_phone, customerBody,
+            { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png' }
+          );
+          logger.info(`[estimate-accept] One-time booking SMS sent to ${firstName} (${estimate.customer_phone}) — ${primarySvc.label}`);
+        } else {
+          const obUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
+          const customerBody = await renderTemplate(
+            'estimate_accepted_customer',
+            { first_name: firstName, onboarding_url: obUrl },
+            `Hello ${firstName}! Thanks for approving your estimate. Complete your setup here so we can get you on the schedule: ${obUrl}`
+          );
+          await TwilioService.sendSMS(estimate.customer_phone, customerBody,
+            { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png' }
+          );
+          logger.info(`[estimate-accept] Acceptance SMS sent to ${firstName} (${estimate.customer_phone})`);
+        }
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 

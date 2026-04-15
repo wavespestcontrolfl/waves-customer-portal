@@ -36,6 +36,8 @@ const SERVICES = [
 export default function PublicBookingPage() {
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
+  const serviceParam = searchParams.get('service') || 'pest_control';
+  const initialService = SERVICES.find(s => s.id === serviceParam) || SERVICES[0];
   const isEmbedded = window !== window.parent;
 
   // Post height updates to parent when embedded in an iframe
@@ -51,8 +53,8 @@ export default function PublicBookingPage() {
     return () => ro.disconnect();
   }, [isEmbedded]);
 
-  const [step, setStep] = useState(0);
-  const [service, setService] = useState(null);
+  const [step, setStep] = useState(1);
+  const [service, setService] = useState(initialService);
   const [address, setAddress] = useState({ line1: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
@@ -212,52 +214,18 @@ export default function PublicBookingPage() {
         </div>
       </div>
 
-      {/* Progress bar */}
+      {/* Progress bar — steps 1 (address) → 2 (time) → 3 (contact) → 4 (done) */}
       {step < 4 && (
         <div style={{ background: BRAND.gray200, height: 3 }}>
           <div style={{
             height: 3, background: BRAND.teal,
-            width: `${((step + 1) / 4) * 100}%`,
+            width: `${(step / 3) * 100}%`,
             transition: 'width 0.5s cubic-bezier(.4,0,.2,1)',
           }} />
         </div>
       )}
 
       <div style={{ maxWidth: 480, margin: '0 auto', padding: '24px 20px 60px' }}>
-
-        {/* STEP 0 — Service */}
-        {step === 0 && (
-          <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: BRAND.navy, marginBottom: 8, letterSpacing: '-0.5px' }}>
-              What can we help with?
-            </h2>
-            <p style={{ fontSize: 14, color: BRAND.gray600, marginBottom: 24, lineHeight: 1.5 }}>
-              Pick a service and we'll show you times when a tech will already be in your area.
-            </p>
-            <div style={{ display: 'grid', gap: 10 }}>
-              {SERVICES.map(s => (
-                <button
-                  key={s.id}
-                  onClick={() => { setService(s); setStep(1); }}
-                  style={{
-                    textAlign: 'left', padding: '16px 18px', borderRadius: 12,
-                    background: BRAND.warmWhite,
-                    border: `1.5px solid ${service?.id === s.id ? BRAND.teal : BRAND.gray200}`,
-                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 14,
-                    transition: 'all 0.15s',
-                  }}
-                >
-                  <div style={{ fontSize: 28 }}>{s.icon}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 15, fontWeight: 600, color: BRAND.navy, marginBottom: 2 }}>{s.label}</div>
-                    <div style={{ fontSize: 12, color: BRAND.gray600 }}>{s.desc} · ~{s.duration} min</div>
-                  </div>
-                  <div style={{ color: BRAND.gray400, fontSize: 18 }}>→</div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
 
         {/* STEP 1 — Address */}
         {step === 1 && (
@@ -266,6 +234,7 @@ export default function PublicBookingPage() {
               Where's the service?
             </h2>
             <p style={{ fontSize: 14, color: BRAND.gray600, marginBottom: 24, lineHeight: 1.5 }}>
+              {service ? <>Booking <strong>{service.icon} {service.label}</strong> · </> : null}
               We serve Manatee, Sarasota, and Charlotte counties.
             </p>
             <div style={{ display: 'grid', gap: 14, marginBottom: 24 }}>
@@ -322,7 +291,6 @@ export default function PublicBookingPage() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => setStep(0)} style={btnSecondary}>← Back</button>
               <button
                 onClick={() => setStep(2)}
                 disabled={!address.line1 || !address.city || !address.zip}
