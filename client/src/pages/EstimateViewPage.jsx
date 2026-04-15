@@ -451,7 +451,7 @@ function TierMatrix({ summary, rows, bottomNote }) {
           {summary}
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(rows.length, 4)}, 1fr)`, gap: 6 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(rows.length, 5)}, 1fr)`, gap: 6 }}>
         {rows.map((r, i) => {
           const sel = !!r.recommended;
           return (
@@ -468,11 +468,6 @@ function TierMatrix({ summary, rows, bottomNote }) {
               {r.perApp != null && (
                 <div style={{ fontSize: 11, marginTop: 2, opacity: sel ? 0.95 : 0.8 }}>
                   ${Number(r.perApp).toFixed(2)}/{r.perAppUnit || 'app'}{r.freqLabel ? ` × ${r.freqLabel}` : ''}
-                </div>
-              )}
-              {r.monthly != null && (
-                <div style={{ fontSize: 13, fontWeight: 800, marginTop: 4, fontFamily: FONTS.ui }}>
-                  ${Number(r.monthly).toFixed(2)}/mo
                 </div>
               )}
             </div>
@@ -1028,12 +1023,11 @@ export default function EstimateViewPage() {
 
   // ── Per-service tier/frequency breakdowns (pulled from pricing engine result) ──
   const R = ed.results || {};
-  const lawnRows = (R.lawn || []).map(t => ({
+  const lawnRows = (R.lawn || []).filter(t => t.v !== 4).map(t => ({
     label: `${t.v}x`,
     perApp: t.pa,
     perAppUnit: 'app',
     freqLabel: t.v,
-    monthly: t.mo,
     recommended: !!t.recommended,
   }));
   const lawnSummary = (() => {
@@ -1045,14 +1039,30 @@ export default function EstimateViewPage() {
     return parts.join(' · ');
   })();
 
-  const pestRows = (R.pestTiers || []).map(t => ({
-    label: t.label || (t.apps === 12 ? 'Monthly' : t.apps === 6 ? 'Bi-Monthly' : 'Quarterly'),
-    perApp: t.pa,
-    perAppUnit: 'visit',
-    freqLabel: `${t.apps}/yr`,
-    monthly: t.mo,
-    recommended: !!t.recommended,
-  }));
+  // Expand pest to full 4–12 treatments/yr range (engine only emits 4/6/12).
+  // Discount curve anchors: 4→1.00, 6→0.92, 12→0.85 (linear between anchors).
+  const pestBaseTier = (R.pestTiers || []).find(t => t.apps === 4) || (R.pestTiers || [])[0];
+  const pestROG = pestBaseTier?.rOG || 0;
+  const pestBasePerApp = pestBaseTier ? Math.max(0, (pestBaseTier.pa || 0) - pestROG) : 0;
+  const pestCurrentApps = (ed.pest?.apps) || (R.pest?.apps) || pestBaseTier?.apps || 4;
+  function pestDiscAt(n) {
+    if (n <= 4) return 1.0;
+    if (n <= 6) return 1.0 - (n - 4) * 0.04;
+    if (n <= 12) return 0.92 - (n - 6) * (0.07 / 6);
+    return 0.85;
+  }
+  const pestRows = pestBasePerApp > 0 ? Array.from({ length: 9 }, (_, i) => {
+    const n = i + 4;
+    const disc = pestDiscAt(n);
+    const perApp = Math.round((pestBasePerApp * disc + pestROG) * 100) / 100;
+    return {
+      label: `${n}x`,
+      perApp,
+      perAppUnit: 'visit',
+      freqLabel: `${n}/yr`,
+      recommended: n === pestCurrentApps,
+    };
+  }) : [];
   const pestSummary = property.homeSqFt ? `${Number(property.homeSqFt).toLocaleString()} sq ft home · full interior + exterior` : 'Full interior + exterior protection';
 
   const tsRows = (R.ts || []).map(t => ({
