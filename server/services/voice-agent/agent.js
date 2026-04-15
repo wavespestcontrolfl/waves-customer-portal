@@ -23,6 +23,7 @@ const db = require("../../models/db");
 const { SYSTEM_PROMPT, buildDynamicPrompt } = require("./system-prompt");
 const { TOOLS, executeTool } = require("./tools");
 const { getBreaker } = require("../intelligence-bar/circuit-breaker");
+const { recordToolEvent } = require("../intelligence-bar/tool-events");
 
 const voiceToolBreaker = getBreaker("voice-agent");
 const VOICE_TOOL_TIMEOUT_MS = 8000;
@@ -384,9 +385,14 @@ async function aiResponseStream(sessionData, ws, depth = 0) {
       // rather than waiting on a stuck tool.
       let toolResult;
       let toolFailed = false;
+      let toolCircuitOpen = false;
+      let toolErrorMessage = null;
+      const toolStartedAt = Date.now();
       if (voiceToolBreaker.isTripped()) {
         toolResult = voiceToolBreaker.fastFailResult();
         toolFailed = true;
+        toolCircuitOpen = true;
+        toolErrorMessage = toolResult.message;
       } else {
         let fillerTimer = null;
         if (ws.readyState === 1) {
@@ -404,6 +410,7 @@ async function aiResponseStream(sessionData, ws, depth = 0) {
           );
           if (isToolFailure(toolResult)) {
             toolFailed = true;
+            toolErrorMessage = toolResult.error || 'tool returned error';
             voiceToolBreaker.recordFailure();
           } else {
             voiceToolBreaker.recordSuccess();
@@ -413,10 +420,21 @@ async function aiResponseStream(sessionData, ws, depth = 0) {
           voiceToolBreaker.recordFailure();
           toolResult = { error: err.message || "Tool failed" };
           toolFailed = true;
+          toolErrorMessage = err.message;
         } finally {
           if (fillerTimer) clearTimeout(fillerTimer);
         }
       }
+
+      recordToolEvent({
+        source: 'voice-agent',
+        context: 'voice',
+        toolName: currentToolUse.name,
+        success: !toolFailed,
+        durationMs: Date.now() - toolStartedAt,
+        circuitOpen: toolCircuitOpen,
+        errorMessage: toolErrorMessage,
+      });
 
       // Add tool use + result to conversation
       sessionData.conversation.push({

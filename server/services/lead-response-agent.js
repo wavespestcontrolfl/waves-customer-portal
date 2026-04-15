@@ -22,6 +22,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const { executeLeadTool } = require('./lead-response-tools');
 const { getBreaker } = require('./intelligence-bar/circuit-breaker');
+const { recordToolEvent } = require('./intelligence-bar/tool-events');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
 
@@ -183,6 +184,9 @@ const LeadResponseAgent = {
 
           let toolResult;
           let failed = false;
+          let circuitOpen = false;
+          let toolError = null;
+          const toolStartedAt = Date.now();
 
           // Pre-send quality check: if critical context is missing, don't
           // let the agent auto-send a personalized SMS. Swap to a safe
@@ -217,12 +221,15 @@ const LeadResponseAgent = {
           } else if (leadToolBreaker.isTripped()) {
             toolResult = leadToolBreaker.fastFailResult();
             failed = true;
+            circuitOpen = true;
+            toolError = toolResult.message;
             if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
           } else {
             try {
               toolResult = await executeLeadTool(toolName, toolInput);
               if (isToolFailure(toolResult)) {
                 failed = true;
+                toolError = toolResult.error || 'tool returned error';
                 leadToolBreaker.recordFailure();
                 if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
               } else {
@@ -233,11 +240,22 @@ const LeadResponseAgent = {
             } catch (err) {
               toolResult = { error: `Tool failed: ${err.message}` };
               failed = true;
+              toolError = err.message;
               leadToolBreaker.recordFailure();
               if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
               logger.error(`[lead-agent] Tool ${toolName} error: ${err.message}`);
             }
           }
+
+          recordToolEvent({
+            source: 'lead-response-agent',
+            context: 'lead-response',
+            toolName,
+            success: !failed,
+            durationMs: Date.now() - toolStartedAt,
+            circuitOpen,
+            errorMessage: toolError,
+          });
 
           toolsExecuted.push(toolName);
 

@@ -1,17 +1,26 @@
 const express = require('express');
 const router = express.Router();
+const Joi = require('joi');
 const db = require('../models/db');
 const PhotoService = require('../services/photos');
 const { authenticate } = require('../middleware/auth');
 
 router.use(authenticate);
 
+const listQuerySchema = Joi.object({
+  limit: Joi.number().integer().min(1).max(100).default(20),
+  offset: Joi.number().integer().min(0).default(0),
+  type: Joi.string().pattern(/^[A-Za-z0-9 _-]+$/).max(50).optional(),
+});
+
 // =========================================================================
 // GET /api/services — Service history for authenticated customer
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
-    const { limit = 20, offset = 0, type } = req.query;
+    const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const { limit, offset, type } = value;
 
     let query = db('service_records')
       .where({ 'service_records.customer_id': req.customerId })
@@ -21,8 +30,8 @@ router.get('/', async (req, res, next) => {
         'technicians.name as technician_name'
       )
       .orderBy('service_records.service_date', 'desc')
-      .limit(parseInt(limit))
-      .offset(parseInt(offset));
+      .limit(limit)
+      .offset(offset);
 
     if (type) {
       query = query.where('service_records.service_type', 'ilike', `%${type}%`);

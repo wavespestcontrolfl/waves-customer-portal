@@ -5451,6 +5451,7 @@ function MyPlanTab({ customer }) {
   const [nextService, setNextService] = useState(null);
   const [serviceHistory, setServiceHistory] = useState([]);
   const [addonRequested, setAddonRequested] = useState({});
+  const [addonSubmitting, setAddonSubmitting] = useState({});
   const [showPauseForm, setShowPauseForm] = useState(false);
   const [showCancelForm, setShowCancelForm] = useState(false);
   const [pauseDuration, setPauseDuration] = useState('1');
@@ -5459,7 +5460,10 @@ function MyPlanTab({ customer }) {
   const [cancelDetails, setCancelDetails] = useState('');
   const [pauseSubmitted, setPauseSubmitted] = useState(false);
   const [cancelSubmitted, setCancelSubmitted] = useState(false);
+  const [pauseSubmitting, setPauseSubmitting] = useState(false);
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [upgradeRequested, setUpgradeRequested] = useState({});
+  const [upgradeSubmitting, setUpgradeSubmitting] = useState({});
   const badgeData = useBadges();
   const lawnHealth = useLawnHealth(customer.id);
 
@@ -5612,7 +5616,7 @@ function MyPlanTab({ customer }) {
         <div style={{ display: 'flex', gap: 20, marginTop: 16, flexWrap: 'wrap' }}>
           <div>
             <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Monthly Rate</div>
-            <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui }}>${monthlyRate}</div>
+            <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui }}>${Number(monthlyRate || 0).toFixed(2)}</div>
           </div>
           <div>
             <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Bundle Discount</div>
@@ -5686,9 +5690,9 @@ function MyPlanTab({ customer }) {
                 </div>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: 11, color: B.grayMid, textDecoration: 'line-through' }}>${svc.basePrice * 12}/yr</div>
+                <div style={{ fontSize: 11, color: B.grayMid, textDecoration: 'line-through' }}>${(svc.basePrice * 12).toFixed(2)}/yr</div>
                 <div style={{ fontSize: 16, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
-                  ${annualSavingsForService > 0 ? `${annualSavingsForService.toFixed(0)}/yr saved` : `${svc.basePrice * 12}/yr`}
+                  ${annualSavingsForService > 0 ? `${annualSavingsForService.toFixed(2)}/yr saved` : `${(svc.basePrice * 12).toFixed(2)}/yr`}
                 </div>
               </div>
             </div>
@@ -5715,7 +5719,7 @@ function MyPlanTab({ customer }) {
                   ))}
                 </div>
                 <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: '#E8F5E9', fontSize: 12, color: B.green, fontWeight: 600 }}>
-                  💰 You save ${annualSavingsForService.toFixed(0)}/year on {svc.name} with your {tierName} discount
+                  💰 You save ${annualSavingsForService.toFixed(2)}/year on {svc.name} with your {tierName} discount
                 </div>
 
                 {/* What's Covered — collapsible */}
@@ -5851,7 +5855,7 @@ function MyPlanTab({ customer }) {
               </div>
             </div>
             <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>
-              ${discount > 0 && addon.id !== 'wdo_inspection' ? (addon.price * (1 - discount)).toFixed(0) : addon.price}{addon.unit}
+              ${discount > 0 && addon.id !== 'wdo_inspection' ? (addon.price * (1 - discount)).toFixed(2) : Number(addon.price).toFixed(2)}{addon.unit}
             </div>
           </div>
           {expandedAddon === addon.id && (
@@ -5859,7 +5863,7 @@ function MyPlanTab({ customer }) {
               <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7 }}>{addon.desc}</div>
               {discount > 0 && addon.id !== 'wdo_inspection' && (
                 <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 8 }}>
-                  Your price: ${(addon.price * (1 - discount)).toFixed(2)}{addon.unit} (was ${addon.price}{addon.unit})
+                  Your price: ${(addon.price * (1 - discount)).toFixed(2)}{addon.unit} (was ${Number(addon.price).toFixed(2)}{addon.unit})
                 </div>
               )}
               {addonRequested[addon.id] ? (
@@ -5872,14 +5876,27 @@ function MyPlanTab({ customer }) {
                   Request sent — we'll call to confirm
                 </div>
               ) : (
-                <button onClick={() => {
-                  api.createRequest?.({ category: 'add_service', subject: `Add ${addon.name} to my plan`, description: `Customer requested to add ${addon.name} via portal.` });
-                  setAddonRequested(prev => ({ ...prev, [addon.id]: true }));
-                  setExpandedAddon(null);
-                }} style={{
-                  ...BUTTON_BASE, marginTop: 12, padding: '9px 18px', fontSize: 13,
-                  background: B.red, color: '#fff',
-                }}>Add to My Plan</button>
+                <button
+                  disabled={addonSubmitting[addon.id]}
+                  onClick={async () => {
+                    if (addonSubmitting[addon.id]) return;
+                    setAddonSubmitting(prev => ({ ...prev, [addon.id]: true }));
+                    try {
+                      await api.createRequest?.({ category: 'add_service', subject: `Add ${addon.name} to my plan`, description: `Customer requested to add ${addon.name} via portal.` });
+                      setAddonRequested(prev => ({ ...prev, [addon.id]: true }));
+                      setExpandedAddon(null);
+                    } catch (err) {
+                      alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 318-7612.'}`);
+                    } finally {
+                      setAddonSubmitting(prev => ({ ...prev, [addon.id]: false }));
+                    }
+                  }}
+                  style={{
+                    ...BUTTON_BASE, marginTop: 12, padding: '9px 18px', fontSize: 13,
+                    background: B.red, color: '#fff',
+                    opacity: addonSubmitting[addon.id] ? 0.6 : 1,
+                    cursor: addonSubmitting[addon.id] ? 'wait' : 'pointer',
+                  }}>{addonSubmitting[addon.id] ? 'Sending…' : 'Add to My Plan'}</button>
               )}
             </div>
           )}
@@ -5916,7 +5933,7 @@ function MyPlanTab({ customer }) {
 
                 {/* Estimated monthly cost */}
                 <div style={{ fontSize: 13, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, marginTop: 6 }}>
-                  ~${tierMonthly.toFixed(0)}/mo
+                  ~${tierMonthly.toFixed(2)}/mo
                 </div>
 
                 {/* Service names list */}
@@ -5935,13 +5952,26 @@ function MyPlanTab({ customer }) {
                     </div>
                   ) : (
                     <div>
-                      <button onClick={() => {
-                        api.createRequest?.({ category: 'billing', subject: `Upgrade to ${tn} WaveGuard`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
-                        setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
-                      }} style={{
-                        ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 11,
-                        background: B.red, color: '#fff',
-                      }}>Upgrade</button>
+                      <button
+                        disabled={upgradeSubmitting[tn]}
+                        onClick={async () => {
+                          if (upgradeSubmitting[tn]) return;
+                          setUpgradeSubmitting(prev => ({ ...prev, [tn]: true }));
+                          try {
+                            await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to ${tn} WaveGuard`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
+                            setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
+                          } catch (err) {
+                            alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 318-7612.'}`);
+                          } finally {
+                            setUpgradeSubmitting(prev => ({ ...prev, [tn]: false }));
+                          }
+                        }}
+                        style={{
+                          ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 11,
+                          background: B.red, color: '#fff',
+                          opacity: upgradeSubmitting[tn] ? 0.6 : 1,
+                          cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
+                        }}>{upgradeSubmitting[tn] ? 'Sending…' : 'Upgrade'}</button>
                       {tierIdx >= 1 && i === tierIdx + 1 && (
                         <div style={{ fontSize: 9, color: B.green, fontWeight: 600, marginTop: 4, lineHeight: 1.3 }}>
                           Your {tierName} loyalty credit covers ${tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25} off your first {tn} month
@@ -5971,12 +6001,12 @@ function MyPlanTab({ customer }) {
           </div>
         </div>
         <div style={{ fontSize: 36, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
-          ${annualSavings.toFixed(0)}<span style={{ fontSize: 16 }}>/year</span>
+          ${annualSavings.toFixed(2)}<span style={{ fontSize: 16 }}>/year</span>
         </div>
         <div style={{ fontSize: 13, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
-          Full price for {numServices} service{numServices > 1 ? 's' : ''}: <strong>${totalFullPrice.toFixed(0)}/yr</strong><br/>
-          Your {Math.round(discount * 100)}% bundle rate: <strong>${(totalFullPrice - annualSavings).toFixed(0)}/yr</strong><br/>
-          You keep <strong style={{ color: B.green }}>${annualSavings.toFixed(0)}</strong> in your pocket.
+          Full price for {numServices} service{numServices > 1 ? 's' : ''}: <strong>${totalFullPrice.toFixed(2)}/yr</strong><br/>
+          Your {Math.round(discount * 100)}% bundle rate: <strong>${(totalFullPrice - annualSavings).toFixed(2)}/yr</strong> (~${((totalFullPrice - annualSavings) / 12).toFixed(2)}/mo)<br/>
+          You keep <strong style={{ color: B.green }}>${annualSavings.toFixed(2)}</strong> in your pocket.
         </div>
       </Card>
 
@@ -6129,18 +6159,31 @@ function MyPlanTab({ customer }) {
               />
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => {
-                api.createRequest?.({
-                  category: 'billing',
-                  subject: `Pause plan for ${pauseDuration} month(s)`,
-                  description: `Customer requested to pause their ${tierName} WaveGuard plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
-                });
-                setPauseSubmitted(true);
-                setShowPauseForm(false);
-              }} style={{
-                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
-                background: B.orange, color: '#fff',
-              }}>Submit Pause Request</button>
+              <button
+                disabled={pauseSubmitting}
+                onClick={async () => {
+                  if (pauseSubmitting) return;
+                  setPauseSubmitting(true);
+                  try {
+                    await api.createRequest?.({
+                      category: 'pause',
+                      subject: `Pause plan for ${pauseDuration} month(s)`,
+                      description: `Customer requested to pause their ${tierName} WaveGuard plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
+                    });
+                    setPauseSubmitted(true);
+                    setShowPauseForm(false);
+                  } catch (err) {
+                    alert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 318-7612.'}`);
+                  } finally {
+                    setPauseSubmitting(false);
+                  }
+                }}
+                style={{
+                  ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                  background: B.orange, color: '#fff',
+                  opacity: pauseSubmitting ? 0.6 : 1,
+                  cursor: pauseSubmitting ? 'wait' : 'pointer',
+                }}>{pauseSubmitting ? 'Sending…' : 'Submit Pause Request'}</button>
               <button onClick={() => setShowPauseForm(false)} style={{
                 ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
                 background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
@@ -6190,18 +6233,31 @@ function MyPlanTab({ customer }) {
               />
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => {
-                api.createRequest?.({
-                  category: 'cancellation',
-                  subject: `Cancel ${tierName} WaveGuard plan`,
-                  description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
-                });
-                setCancelSubmitted(true);
-                setShowCancelForm(false);
-              }} style={{
-                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
-                background: B.grayMid, color: '#fff',
-              }}>Submit Cancellation Request</button>
+              <button
+                disabled={cancelSubmitting}
+                onClick={async () => {
+                  if (cancelSubmitting) return;
+                  setCancelSubmitting(true);
+                  try {
+                    await api.createRequest?.({
+                      category: 'cancellation',
+                      subject: `Cancel ${tierName} WaveGuard plan`,
+                      description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
+                    });
+                    setCancelSubmitted(true);
+                    setShowCancelForm(false);
+                  } catch (err) {
+                    alert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 318-7612.'}`);
+                  } finally {
+                    setCancelSubmitting(false);
+                  }
+                }}
+                style={{
+                  ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                  background: B.grayMid, color: '#fff',
+                  opacity: cancelSubmitting ? 0.6 : 1,
+                  cursor: cancelSubmitting ? 'wait' : 'pointer',
+                }}>{cancelSubmitting ? 'Sending…' : 'Submit Cancellation Request'}</button>
               <button onClick={() => setShowCancelForm(false)} style={{
                 ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
                 background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,

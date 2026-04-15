@@ -30,6 +30,7 @@ const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
+const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const logger = require('../services/logger');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
@@ -588,14 +589,20 @@ router.post('/query', async (req, res, next) => {
 
         let result;
         let failed = false;
+        let circuitOpen = false;
+        let errorMessage = null;
+        const toolStartedAt = Date.now();
         if (adminToolBreaker.isTripped()) {
           result = adminToolBreaker.fastFailResult();
           failed = true;
+          circuitOpen = true;
+          errorMessage = result.message;
         } else {
           try {
             result = await executeToolByName(toolUse.name, toolUse.input, techContext);
             if (isToolFailure(result)) {
               failed = true;
+              errorMessage = result.error || result.message || 'tool returned error';
               adminToolBreaker.recordFailure();
             } else {
               adminToolBreaker.recordSuccess();
@@ -605,8 +612,18 @@ router.post('/query', async (req, res, next) => {
             adminToolBreaker.recordFailure();
             result = { error: err.message || 'Tool execution failed' };
             failed = true;
+            errorMessage = err.message;
           }
         }
+        recordToolEvent({
+          source: context === 'tech' ? 'tech-intelligence-bar' : 'intelligence-bar',
+          context: context || null,
+          toolName: toolUse.name,
+          success: !failed,
+          durationMs: Date.now() - toolStartedAt,
+          circuitOpen,
+          errorMessage,
+        });
 
         results.push({
           type: 'tool_result',
