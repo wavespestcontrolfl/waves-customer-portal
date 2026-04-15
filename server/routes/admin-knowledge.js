@@ -193,6 +193,26 @@ router.post('/rebuild-index', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/knowledge/seed-wiki-folder
+// Registers and compiles every .md file under /wiki at repo root.
+router.post('/seed-wiki-folder', async (req, res, next) => {
+  try {
+    const result = await WikiCompiler.seedFromWikiFolder();
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/knowledge/import-blog-posts
+// Body: { tagFilter?: string, limit?: number }
+// Groups blog posts by tag and compiles each cluster into a set of KB articles.
+router.post('/import-blog-posts', async (req, res, next) => {
+  try {
+    const { tagFilter, limit } = req.body || {};
+    const result = await WikiCompiler.importBlogPosts({ tagFilter, limit: limit ? parseInt(limit) : undefined });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // =========================================================================
 // HEALTH CHECK
 // =========================================================================

@@ -11,8 +11,22 @@ class WikiQA {
    * Two-step: route to relevant articles, then answer with full context.
    */
   async query(question, context = {}) {
-    // Load summaries for routing
-    const summaries = await db('knowledge_base').where('path', 'wiki/_summaries.md').first();
+    // Build live index directly from knowledge_base (not the compiled _summaries.md)
+    const indexRows = await db('knowledge_base')
+      .where('active', true)
+      .whereNot('path', 'like', 'wiki/_%')
+      .select('path', 'title', 'summary', 'category')
+      .orderBy('category');
+
+    if (indexRows.length === 0) {
+      const answer = 'The knowledge base is empty. Add articles via the compiler before asking questions.';
+      await this.logQuery(question, answer, [], context.source);
+      return { answer, articlesUsed: [] };
+    }
+
+    const liveIndex = indexRows
+      .map(r => `${r.path} [${r.category}]: ${r.title} — ${r.summary || ''}`)
+      .join('\n');
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       // Fallback: keyword search
@@ -34,7 +48,7 @@ class WikiQA {
 Question: ${question}
 
 Available articles:
-${summaries?.content || '(no articles yet)'}`
+${liveIndex}`
         }]
       });
 
