@@ -44,6 +44,7 @@ function pricePestControl(property, options = {}) {
 
   let additionalAdj = 0;
   const f = property.features || {};
+  if (f.indoor) additionalAdj += PEST.additionalAdjustments.indoor;
   if (f.shrubs === 'heavy') additionalAdj += PEST.additionalAdjustments.shrubs_heavy;
   else if (f.shrubs === 'moderate') additionalAdj += PEST.additionalAdjustments.shrubs_moderate;
   if (f.poolCage) additionalAdj += PEST.additionalAdjustments.poolCage;
@@ -68,11 +69,15 @@ function pricePestControl(property, options = {}) {
   const annual = perApp * visitsPerYear;
   const monthly = Math.round(annual / 12 * 100) / 100;
 
-  // Cost estimate
-  const materialPerVisit = roachType === 'german' ? 15 : roachType === 'regular' ? 10 : 5;
+  // Cost estimate — fully allocated (on-site + drive time + chemicals)
+  const chemCost = { talak: 1.30, taurus: 4.87, surfactant: 0.50 }; // per service
+  const materialPerVisit = (roachType === 'german' ? 15 : roachType === 'regular' ? 10 : chemCost.talak + chemCost.taurus + chemCost.surfactant);
   const onSiteMin = frequency === 'monthly' ? 20 : 25;
-  const laborPerVisit = laborCost(onSiteMin);
-  const annualCost = (materialPerVisit + laborPerVisit) * visitsPerYear + GLOBAL.ADMIN_ANNUAL;
+  const onSiteLaborCost = GLOBAL.LABOR_RATE * onSiteMin / 60;
+  const driveLaborCost = GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60;
+  const directServiceCost = onSiteLaborCost + materialPerVisit; // no drive
+  const fullyAllocatedCost = directServiceCost + driveLaborCost; // includes drive
+  const annualCost = fullyAllocatedCost * visitsPerYear + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
   return {
@@ -80,8 +85,16 @@ function pricePestControl(property, options = {}) {
     basePrice, footprintAdj: Math.round(footprintAdj), additionalAdj, propAdj,
     roachAddOn, freqMult, frequency, visitsPerYear, pricingVersion,
     perApp, annual, monthly,
-    costs: { materialPerVisit, laborPerVisit, annualCost },
-    margin, marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
+    costs: {
+      materialPerVisit: Math.round(materialPerVisit * 100) / 100,
+      onSiteLaborCost: Math.round(onSiteLaborCost * 100) / 100,
+      driveLaborCost: Math.round(driveLaborCost * 100) / 100,
+      directServiceCost: Math.round(directServiceCost * 100) / 100,
+      fullyAllocatedCost: Math.round(fullyAllocatedCost * 100) / 100,
+      annualCost: Math.round(annualCost),
+    },
+    margin: Math.round(margin * 1000) / 1000,
+    marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
     initialFee: PEST.initialFee,
   };
 }

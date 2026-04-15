@@ -184,7 +184,10 @@ export default function OnboardingPage() {
         elementsRef.current = elements;
         setTimeout(() => {
           if (cardMountRef.current) {
-            const pe = elements.create('payment');
+            const pe = elements.create('payment', {
+              layout: { type: 'tabs' },
+              paymentMethodOrder: ['us_bank_account', 'card', 'apple_pay', 'google_pay'],
+            });
             pe.mount(cardMountRef.current);
             paymentElementRef.current = pe;
             pe.on('ready', () => setStripeReady(true));

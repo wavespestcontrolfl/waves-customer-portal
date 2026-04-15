@@ -171,9 +171,9 @@ export function calculateEstimate(inputs) {
 
   // Footprint impact — based on actual chemical cost + labor data
   const fpAdj = interpolate(footprint, [
-    { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
-    { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 },
-    { at: 4000, adj: 20 }, { at: 5500, adj: 28 },
+    { at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 },
+    { at: 2000, adj: 0 }, { at: 2500, adj: 8 }, { at: 3000, adj: 14 },
+    { at: 4000, adj: 22 }, { at: 5500, adj: 32 },
   ]);
   addMod('pest', `Footprint: ${footprint.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
 
@@ -184,32 +184,30 @@ export function calculateEstimate(inputs) {
   else addMod('pest', 'No pool: $0/visit', 0, 'info');
 
   // Shrubs
-  if (shrubDensity === 'HEAVY') addMod('pest', 'Heavy shrubs: +$10/visit', 10, 'up');
-  else if (shrubDensity === 'MODERATE') addMod('pest', 'MODERATE shrubs: +$5/visit', 5, 'up');
-  else if (shrubDensity === 'LIGHT') addMod('pest', 'Light shrubs: -$5/visit', -5, 'down');
-  else addMod('pest', 'No shrubs: $0/visit', 0, 'info');
+  if (shrubDensity === 'HEAVY') addMod('pest', 'Heavy shrubs: +$12/visit', 12, 'up');
+  else if (shrubDensity === 'MODERATE') addMod('pest', 'Moderate shrubs: +$5/visit', 5, 'up');
+  else addMod('pest', 'No/light shrubs: $0/visit', 0, 'info');
 
   // Trees
-  if (treeDensity === 'HEAVY') addMod('pest', 'Heavy trees: +$10/visit', 10, 'up');
-  else if (treeDensity === 'MODERATE') addMod('pest', 'MODERATE trees: +$5/visit', 5, 'up');
-  else if (treeDensity === 'LIGHT') addMod('pest', 'Light trees: -$5/visit', -5, 'down');
-  else addMod('pest', 'No trees: $0/visit', 0, 'info');
+  if (treeDensity === 'HEAVY') addMod('pest', 'Heavy trees: +$12/visit', 12, 'up');
+  else if (treeDensity === 'MODERATE') addMod('pest', 'Moderate trees: +$5/visit', 5, 'up');
+  else addMod('pest', 'No/light trees: $0/visit', 0, 'info');
 
   // Complexity
-  if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$5/visit', 5, 'up');
+  if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$8/visit', 8, 'up');
   else addMod('pest', `${landscapeComplexity || 'Simple'} landscape: $0/visit`, 0, 'info');
 
   // Water proximity
-  const waterAdj = (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) ? 2.5 : 0;
-  if (waterAdj > 0) addMod('pest', `Near water: +$2.50/visit`, waterAdj, 'up');
+  const waterAdj = (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) ? 5 : 0;
+  if (waterAdj > 0) addMod('pest', `Near water: +$5/visit`, waterAdj, 'up');
   else addMod('pest', 'No water nearby: $0/visit', 0, 'info');
 
   // Driveway
-  if (hasLargeDriveway) addMod('pest', 'Large driveway: +$2.50/visit', 2.5, 'up');
+  if (hasLargeDriveway) addMod('pest', 'Large driveway: +$5/visit', 5, 'up');
   else addMod('pest', 'Standard driveway: $0/visit', 0, 'info');
 
   // Indoor treatment
-  if (indoor) addMod('pest', 'Indoor treatment: +$10/visit', 10, 'up');
+  if (indoor) addMod('pest', 'Indoor treatment: +$15/visit', 15, 'up');
   else addMod('pest', 'Exterior only: $0/visit', 0, 'info');
 
   // Urgency
@@ -222,12 +220,12 @@ export function calculateEstimate(inputs) {
   let propTypeAdj = 0;
   let propTypeLabel = 'Single Family';
   if (ptLower.includes('townhome') || ptLower.includes('town home') || ptLower.includes('townhouse')) {
-    if (ptLower.includes('interior') || ptLower.includes('inner')) { propTypeAdj = -15; propTypeLabel = 'Townhome (interior)'; }
+    if (ptLower.includes('interior') || ptLower.includes('inner')) { propTypeAdj = -12; propTypeLabel = 'Townhome (interior)'; }
     else { propTypeAdj = -8; propTypeLabel = 'Townhome (end unit)'; }
   } else if (ptLower.includes('duplex')) { propTypeAdj = -10; propTypeLabel = 'Duplex'; }
   else if (ptLower.includes('condo')) {
-    if (ptLower.includes('upper') || ptLower.includes('2nd') || ptLower.includes('3rd') || stories > 1) { propTypeAdj = -25; propTypeLabel = 'Condo (upper floor)'; }
-    else { propTypeAdj = -20; propTypeLabel = 'Condo (ground floor)'; }
+    if (ptLower.includes('upper') || ptLower.includes('2nd') || ptLower.includes('3rd') || stories > 1) { propTypeAdj = -22; propTypeLabel = 'Condo (upper floor)'; }
+    else { propTypeAdj = -18; propTypeLabel = 'Condo (ground floor)'; }
   }
   addMod('pest', `${propTypeLabel}: ${propTypeAdj >= 0 ? '+' : ''}$${propTypeAdj}/visit`, propTypeAdj, propTypeAdj < 0 ? 'down' : 'info');
 
@@ -332,22 +330,20 @@ export function calculateEstimate(inputs) {
     hasRec = true;
     let adj = 0;
     adj += interpolate(footprint, [
-      { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
-      { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 },
-      { at: 4000, adj: 20 }, { at: 5500, adj: 28 },
+      { at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 },
+      { at: 2000, adj: 0 }, { at: 2500, adj: 8 }, { at: 3000, adj: 14 },
+      { at: 4000, adj: 22 }, { at: 5500, adj: 32 },
     ]);
-    if (shrubDensity === 'LIGHT') adj -= 5;
-    else if (shrubDensity === 'MODERATE') adj += 5;
-    else if (shrubDensity === 'HEAVY') adj += 10;
+    if (shrubDensity === 'MODERATE') adj += 5;
+    else if (shrubDensity === 'HEAVY') adj += 12;
     if (hasPoolCage) adj += 10;
     else if (hasPool) adj += 5;
-    if (treeDensity === 'LIGHT') adj -= 5;
-    else if (treeDensity === 'MODERATE') adj += 5;
-    else if (treeDensity === 'HEAVY') adj += 10;
-    if (landscapeComplexity === 'COMPLEX') adj += 5;
-    if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 2.5;
-    if (hasLargeDriveway) adj += 2.5;
-    if (indoor) adj += 10;
+    if (treeDensity === 'MODERATE') adj += 5;
+    else if (treeDensity === 'HEAVY') adj += 12;
+    if (landscapeComplexity === 'COMPLEX') adj += 8;
+    if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 5;
+    if (hasLargeDriveway) adj += 5;
+    if (indoor) adj += 15;
     adj += propTypeAdj; // Property type adjustment
     let pp = Math.max(92, 121 + adj), rOG = 0;
     // Split roach modifier: German 25% (labor-intensive: gel bait, IGR, monitoring), Regular 10%
@@ -425,9 +421,9 @@ export function calculateEstimate(inputs) {
       palmEstimated = true;
       fieldVerify.push('injectable palm count');
     }
-    // v1.6: palm injection default is combo ($55/palm) for estimates, 3 apps/year
+    // v1.7: palm injection default is combo ($55/palm) for estimates, 2 apps/year
     const palmPerApp = 55;
-    const inja = ip * palmPerApp * 3, injMo = Math.round(inja / 12 * 100) / 100;
+    const inja = ip * palmPerApp * 2, injMo = Math.round(inja / 12 * 100) / 100;
     R.injection = { palms: ip, ann: inja, mo: injMo, estimated: palmEstimated, pricePerPalm: palmPerApp };
     wgServices.push({ name: 'Palm Injection', mo: injMo });
   }
@@ -451,8 +447,8 @@ export function calculateEstimate(inputs) {
     if (hasIrrigation) pr += 0.08;
     if (sz === 'ACRE') pr += 0.15;
     else if (sz === 'HALF') pr += 0.05;
-    // v1.5: raised cap from 1.50 to 1.60 — irrigation+water+trees can exceed old cap
-    pr = Math.min(1.60, Math.round(pr * 100) / 100);
+    // v1.7: pressure cap 1.80 (was 1.60 then 2.00; 2× doubles base price, too high)
+    pr = Math.min(1.80, Math.round(pr * 100) / 100);
     // Mosquito base prices — 3% increase applied
     const bp = {
       SMALL:   { b: 82, s: 93, g: 103, p: 113 },
@@ -466,7 +462,7 @@ export function calculateEstimate(inputs) {
       { n: 'Bronze', pv: Math.round(b.b * pr), v: 12 },
       { n: 'Silver', pv: Math.round(b.s * pr), v: 12 },
       { n: 'Gold', pv: Math.round(b.g * pr), v: 15 },
-      { n: 'Platinum', pv: Math.round(b.p * pr), v: 17 },
+      { n: 'Platinum', pv: Math.round(b.p * pr), v: 18 },
     ];
     let ri = 1;
     if (treeDensity === 'HEAVY') ri = 2;
@@ -558,9 +554,9 @@ export function calculateEstimate(inputs) {
     const standaloneFungBase = Math.max(enhPA, 95); // higher floor for standalone fungicide
     let bl = Math.max(85, Math.round((isFungicide && !R.lawn ? standaloneFungBase : enhPA) * 1.30));
     let tm = 1.0, tl = 'Fertilization';
-    if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }
+    if (otLawnType === 'WEED') { tm = 1.15; tl = 'Weed Control'; }
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
-    else if (otLawnType === 'FUNGICIDE') { tm = 1.55; tl = 'Fungicide'; }
+    else if (otLawnType === 'FUNGICIDE') { tm = 1.45; tl = 'Fungicide'; }
     const fp = otP(Math.max(85, Math.round(bl * tm)));
     otItems.push({ name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl });
   }
@@ -840,7 +836,7 @@ export function calculateEstimate(inputs) {
   if (R.tmBait) { ac++; ra += 36 * 12; lineItems.push({ name: 'Termite Bait', ann: 432 }); }
 
   let wt = 'Bronze', wd = 0;
-  if (ac >= 4) { wt = 'Platinum'; wd = 0.20; }
+  if (ac >= 4) { wt = 'Platinum'; wd = 0.18; }
   else if (ac === 3) { wt = 'Gold'; wd = 0.15; }
   else if (ac === 2) { wt = 'Silver'; wd = 0.10; }
   else if (ac === 1) { wt = 'Bronze'; wd = 0; }

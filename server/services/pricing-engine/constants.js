@@ -36,10 +36,10 @@ const URGENCY = {
 const PROPERTY_TYPE_ADJ = {
   single_family:    0,
   townhome_end:    -r(8),
-  townhome_interior: -r(15),
+  townhome_interior: -r(12),  // Was -r(15). Still has front/back perimeter.
   duplex:          -r(10),
-  condo_ground:    -r(20),
-  condo_upper:     -r(25),
+  condo_ground:    -r(18),    // Was -r(20). Ground floor has real exterior perimeter.
+  condo_upper:     -r(22),    // Was -r(25). Reduced to account for access time.
 };
 
 // ── Hardscape Estimation ──────────────────────────────────────
@@ -76,30 +76,31 @@ const PEST = {
   base: r(117),
   floor: r(89),
   footprintBrackets: [
-    { sqft: 800,  adj: -r(20) },
-    { sqft: 1200, adj: -r(12) },
-    { sqft: 1500, adj: -r(6) },
+    { sqft: 800,  adj: -r(15) },   // Was -r(20). Flattened — old value produced prices below floor.
+    { sqft: 1200, adj: -r(10) },   // Was -r(12).
+    { sqft: 1500, adj: -r(5) },    // Was -r(6).
     { sqft: 2000, adj: 0 },
-    { sqft: 2500, adj: r(6) },
-    { sqft: 3000, adj: r(12) },
-    { sqft: 4000, adj: r(20) },
-    { sqft: 5500, adj: r(28) },
+    { sqft: 2500, adj: r(8) },     // Was r(6). Properties 25% larger take 15-20% longer.
+    { sqft: 3000, adj: r(14) },    // Was r(12). Consistent scaling.
+    { sqft: 4000, adj: r(21) },    // Was r(20). Minor rounding.
+    { sqft: 5500, adj: r(31) },    // Was r(28). Large homes take 30-35 min, not 20.
   ],
   additionalAdjustments: {
+    indoor: r(15),              // NEW. Interior treatment adds 10-15 min + $3-5 in product.
     shrubs_moderate: r(5),
-    shrubs_heavy: r(10),
-    poolCage: r(10),
+    shrubs_heavy: r(12),        // Was r(10). Consistent with trees heavy.
+    poolCage: r(10),            // Was r(5). Cage is a separate treatment zone, adds 5-8 min.
     poolNoCage: r(5),
     trees_moderate: r(5),
-    trees_heavy: r(10),
-    complexity_complex: r(5),
-    nearWater: 2.5,
-    largeDriveway: 2.5,
+    trees_heavy: r(12),         // Was r(10). Slight increase for canopy spray coverage.
+    complexity_complex: r(8),   // Was r(5). Complex landscaping adds real navigation time.
+    nearWater: r(5),            // Was 2.5.
+    largeDriveway: r(5),        // Was 2.5.
   },
   roachModifier: { german: 0.25, regular: 0.10, none: 0 },
   frequencyDiscounts: {
     v1: { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 },
-    v2: { quarterly: 1.00, bimonthly: 0.85, monthly: 0.70 },
+    v2: { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 },  // Was 0.85/0.70. Test for one quarter.
   },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
   initialFee: r(99), // WaveGuard membership (waived with annual prepay)
@@ -239,14 +240,14 @@ const MOSQUITO = {
     HALF:    [r(110), r(125), r(145), r(155)],
     ACRE:    [r(140), r(155), r(180), r(200)],
   },
-  tierVisits: { bronze: 12, silver: 12, gold: 15, platinum: 17 },
+  tierVisits: { bronze: 12, silver: 12, gold: 15, platinum: 18 },  // Was 17. 18 = cleaner ~20-day intervals.
   pressureFactors: {
     trees_heavy: 0.15, trees_moderate: 0.05,
     complexity_complex: 0.10, complexity_moderate: 0.05,
     pool: 0.05, nearWater: 0.10, irrigation: 0.08,
     lot_acre: 0.15, lot_half: 0.05,
   },
-  pressureCap: 2.00,
+  pressureCap: 1.80,  // Was 2.00. 2× doubles base price, too high for quoting.
 };
 
 // ============================================================
@@ -309,9 +310,9 @@ const ONE_TIME = {
   lawn: {
     treatmentMultipliers: {
       fertilization: 1.00,
-      weed: 1.12,
+      weed: 1.15,       // Was 1.12. Slight increase for Celsius cost.
       pest: 1.30,
-      fungicide: 1.38, // v2 rate
+      fungicide: 1.45,  // Was 1.38. Fungicide products warrant higher premium on standalone.
     },
     floor: r(85),
     fungicideFloor: r(95),
@@ -444,7 +445,7 @@ const WAVEGUARD = {
     bronze:   { minServices: 1, discount: 0.00 },
     silver:   { minServices: 2, discount: 0.10 },
     gold:     { minServices: 3, discount: 0.15 },
-    platinum: { minServices: 4, discount: 0.20 },
+    platinum: { minServices: 4, discount: 0.18 },  // Was 0.20. Recovers 2pts on every Platinum line.
   },
   qualifyingServices: [
     'lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait',
@@ -455,6 +456,10 @@ const WAVEGUARD = {
     lawn_care_premium: 0.15,   // Capped at Gold
     rodent_bait: 0,            // Excluded entirely
     palm_injection: 0,         // Excluded — flat credit only
+    bed_bug_chemical: 0,       // Excluded — $50 flat member credit
+    bed_bug_heat: 0,           // Excluded — $50 flat member credit
+    bora_care: 0,              // Excluded from % discount
+    pre_slab_termidor: 0,      // Excluded from % discount
   },
   compositeDiscountCap: 0.25,  // Max total discount from all sources on any line
   recurringCustomerDiscount: 0.15, // 15% off one-time for recurring customers

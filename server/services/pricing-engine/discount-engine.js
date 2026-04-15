@@ -61,6 +61,15 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
       result.appliedDiscounts.push({ type: 'setup_credit', amount: RODENT.setupCredit, reason: `One-time $${RODENT.setupCredit} WaveGuard member credit` });
     }
 
+    // Bed bug flat member credit ($50 for Silver+)
+    if (serviceKey === 'bed_bug_chemical' || serviceKey === 'bed_bug_heat') {
+      const tierRank = { bronze: 0, silver: 1, gold: 2, platinum: 3 };
+      if (tierRank[waveGuardTier.tier] >= tierRank.silver) {
+        result.flatCredit = 50;
+        result.appliedDiscounts.push({ type: 'flat_credit', amount: 50, reason: '$50 WaveGuard member credit' });
+      }
+    }
+
     // ACH discount still applies to excluded services
     if (paymentMethod === ACH_DISCOUNT.paymentMethod) {
       result.achDiscount = ACH_DISCOUNT.percentage;

@@ -3204,7 +3204,10 @@ function BillingTab({ customer }) {
       // Mount after modal renders
       setTimeout(() => {
         if (cardMountRef.current) {
-          const pe = elements.create('payment');
+          const pe = elements.create('payment', {
+            layout: { type: 'tabs' },
+            paymentMethodOrder: ['us_bank_account', 'card', 'apple_pay', 'google_pay'],
+          });
           pe.mount(cardMountRef.current);
           paymentElementRef.current = pe;
           pe.on('ready', () => setStripeReady(true));
@@ -3511,6 +3514,9 @@ function BillingTab({ customer }) {
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Auto Pay Enrollment</div>
             <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Save 3% with bank payment.</div>
+            <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6, lineHeight: 1.5 }}>
+              By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. A 3% discount is applied automatically when you pay via bank transfer (ACH). To update your billing information or cancel automatic payments, contact us at (941) 318-7612 or billing@wavespestcontrol.com.
+            </div>
           </div>
           <span style={{
             fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
