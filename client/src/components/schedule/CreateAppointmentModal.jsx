@@ -177,6 +177,8 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
   const [recurringIntervalDays, setRecurringIntervalDays] = useState(30);
   const [discountType, setDiscountType] = useState('');
   const [discountAmount, setDiscountAmount] = useState('');
+  const [discountPresets, setDiscountPresets] = useState([]);
+  const [discountPresetId, setDiscountPresetId] = useState('');
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
@@ -203,7 +205,26 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
         else if (Array.isArray(r)) setTechs(r);
       } catch { /* techs not critical */ }
     })();
+    (async () => {
+      try {
+        const r = await adminFetch('/admin/discounts');
+        const list = Array.isArray(r) ? r : [];
+        const filtered = list.filter(d => d.is_active && !d.is_auto_apply
+          && (d.discount_type === 'percentage' || d.discount_type === 'fixed_amount'));
+        setDiscountPresets(filtered);
+      } catch { /* discounts optional */ }
+    })();
   }, []);
+
+  const applyDiscountPreset = (id) => {
+    setDiscountPresetId(id);
+    if (!id) { setDiscountType(''); setDiscountAmount(''); return; }
+    if (id === 'custom') return;
+    const d = discountPresets.find(x => String(x.id) === String(id));
+    if (!d) return;
+    setDiscountType(d.discount_type);
+    setDiscountAmount(String(d.amount ?? ''));
+  };
 
   // Set price when service changes
   useEffect(() => {
@@ -637,22 +658,36 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
                   <input type="number" min={1} max={365} value={recurringIntervalDays} onChange={e => setRecurringIntervalDays(parseInt(e.target.value) || 30)} style={inputStyle} />
                 </div>
               )}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-                <div>
-                  <label style={labelStyle}>Discount</label>
-                  <select value={discountType} onChange={e => setDiscountType(e.target.value)} style={inputStyle}>
-                    <option value="">None</option>
-                    <option value="percentage">Percentage (%)</option>
-                    <option value="fixed_amount">Amount ($)</option>
-                  </select>
-                </div>
-                {discountType && (
-                  <div>
-                    <label style={labelStyle}>{discountType === 'percentage' ? 'Amount (%)' : 'Amount ($)'}</label>
-                    <input type="number" min={0} step={discountType === 'percentage' ? 1 : 0.01} value={discountAmount} onChange={e => setDiscountAmount(e.target.value)} style={inputStyle} />
-                  </div>
-                )}
+              <div style={{ marginBottom: 8 }}>
+                <label style={labelStyle}>Manual Discount (optional)</label>
+                <select value={discountPresetId} onChange={e => applyDiscountPreset(e.target.value)} style={inputStyle}>
+                  <option value="">None</option>
+                  {discountPresets.map(d => (
+                    <option key={d.id} value={d.id}>
+                      {d.icon ? `${d.icon} ` : ''}{d.name} — {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
+                    </option>
+                  ))}
+                  <option value="custom">Custom…</option>
+                </select>
               </div>
+              {discountPresetId === 'custom' && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+                  <div>
+                    <label style={labelStyle}>Type</label>
+                    <select value={discountType} onChange={e => setDiscountType(e.target.value)} style={inputStyle}>
+                      <option value="">—</option>
+                      <option value="percentage">Percentage (%)</option>
+                      <option value="fixed_amount">Amount ($)</option>
+                    </select>
+                  </div>
+                  {discountType && (
+                    <div>
+                      <label style={labelStyle}>{discountType === 'percentage' ? 'Amount (%)' : 'Amount ($)'}</label>
+                      <input type="number" min={0} step={discountType === 'percentage' ? 1 : 0.01} value={discountAmount} onChange={e => setDiscountAmount(e.target.value)} style={inputStyle} />
+                    </div>
+                  )}
+                </div>
+              )}
               {recurringPreview() && (
                 <div style={{ fontSize: 11, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {recurringPreview().map((d, i) => (
