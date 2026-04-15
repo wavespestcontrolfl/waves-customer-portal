@@ -570,6 +570,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:30AM — Sync Google Business Profile performance metrics
+  // =========================================================================
+  cron.schedule('30 6 * * *', async () => {
+    logger.info('Running: GBP performance sync');
+    try {
+      const GoogleBusiness = require('./google-business');
+      await GoogleBusiness.syncPerformanceDaily(3);
+    } catch (err) {
+      logger.error(`GBP performance sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 8AM — AI Campaign Advisor (includes paid + organic)
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {

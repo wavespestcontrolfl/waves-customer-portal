@@ -396,6 +396,111 @@ class GoogleBusinessService {
   }
 
   // =========================================================================
+  // PERFORMANCE METRICS SYNC — daily GBP insights per location
+  // =========================================================================
+
+  /**
+   * Sync Google Business Profile Performance metrics into gbp_performance_daily.
+   * Uses the Business Profile Performance API v1:
+   *   https://businessprofileperformance.googleapis.com/v1/locations/{id}:fetchMultiDailyMetricsTimeSeries
+   *
+   * Data has a ~2-day reporting lag. Upserts by (location_id, date).
+   */
+  async syncPerformanceDaily(daysBack = 7) {
+    if (!this.configured) {
+      logger.warn('[gbp] No GBP credentials — skipping performance sync');
+      return { synced: false, reason: 'not_configured' };
+    }
+
+    const METRICS = [
+      'CALL_CLICKS',
+      'WEBSITE_CLICKS',
+      'BUSINESS_DIRECTION_REQUESTS',
+      'BUSINESS_BOOKINGS',
+      'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+      'BUSINESS_IMPRESSIONS_MOBILE_SEARCH',
+      'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+      'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
+    ];
+
+    const end = new Date(Date.now() - 2 * 86400000); // 2-day lag
+    const start = new Date(end.getTime() - daysBack * 86400000);
+    const pad = n => String(n).padStart(2, '0');
+    const dateRangeQS = [
+      `dailyRange.startDate.year=${start.getUTCFullYear()}`,
+      `dailyRange.startDate.month=${start.getUTCMonth() + 1}`,
+      `dailyRange.startDate.day=${start.getUTCDate()}`,
+      `dailyRange.endDate.year=${end.getUTCFullYear()}`,
+      `dailyRange.endDate.month=${end.getUTCMonth() + 1}`,
+      `dailyRange.endDate.day=${end.getUTCDate()}`,
+    ].join('&');
+    const metricsQS = METRICS.map(m => `dailyMetrics=${m}`).join('&');
+
+    let totalRows = 0;
+    const errors = [];
+
+    for (const loc of this.getConfiguredLocations()) {
+      try {
+        const headers = await this._getHeaders(loc.id);
+        const url = `https://businessprofileperformance.googleapis.com/v1/locations/${loc.googleLocationId}:fetchMultiDailyMetricsTimeSeries?${metricsQS}&${dateRangeQS}`;
+        const resp = await fetch(url, { headers });
+        if (!resp.ok) {
+          const body = await resp.text();
+          throw new Error(`${resp.status} ${body.slice(0, 200)}`);
+        }
+        const data = await resp.json();
+
+        // Aggregate metric values by date
+        const byDate = {}; // { 'YYYY-MM-DD': { metric: value } }
+        for (const series of (data.multiDailyMetricTimeSeries || [])) {
+          for (const entry of (series.dailyMetricTimeSeries || [])) {
+            const metric = entry.dailyMetric;
+            const points = entry.timeSeries?.datedValues || [];
+            for (const p of points) {
+              const d = `${p.date.year}-${pad(p.date.month)}-${pad(p.date.day)}`;
+              if (!byDate[d]) byDate[d] = {};
+              byDate[d][metric] = parseInt(p.value || 0, 10);
+            }
+          }
+        }
+
+        // Upsert per day
+        for (const [date, metrics] of Object.entries(byDate)) {
+          const row = {
+            location_id: loc.id,
+            location_name: loc.name,
+            date,
+            calls: metrics.CALL_CLICKS || 0,
+            website_clicks: metrics.WEBSITE_CLICKS || 0,
+            direction_requests: metrics.BUSINESS_DIRECTION_REQUESTS || 0,
+            bookings: metrics.BUSINESS_BOOKINGS || 0,
+            search_views:
+              (metrics.BUSINESS_IMPRESSIONS_DESKTOP_SEARCH || 0) +
+              (metrics.BUSINESS_IMPRESSIONS_MOBILE_SEARCH || 0),
+            maps_views:
+              (metrics.BUSINESS_IMPRESSIONS_DESKTOP_MAPS || 0) +
+              (metrics.BUSINESS_IMPRESSIONS_MOBILE_MAPS || 0),
+            metadata: metrics,
+            updated_at: db.fn.now(),
+          };
+          await db('gbp_performance_daily')
+            .insert(row)
+            .onConflict(['location_id', 'date'])
+            .merge();
+          totalRows++;
+        }
+
+        logger.info(`[gbp] Performance synced for ${loc.name}: ${Object.keys(byDate).length} days`);
+      } catch (err) {
+        logger.error(`[gbp] Performance sync failed for ${loc.name}: ${err.message}`);
+        errors.push({ location: loc.name, error: err.message });
+      }
+    }
+
+    return { synced: true, rows: totalRows, errors };
+  }
+
+  // =========================================================================
   // OAUTH HELPERS — for initial token setup
   // =========================================================================
   getAuthUrl(locationId) {

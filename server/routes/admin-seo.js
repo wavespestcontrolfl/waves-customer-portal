@@ -228,6 +228,15 @@ router.post('/sync', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/seo/sync-gbp — manually trigger GBP performance sync
+router.post('/sync-gbp', async (req, res, next) => {
+  try {
+    const GoogleBusiness = require('../services/google-business');
+    const result = await GoogleBusiness.syncPerformanceDaily(req.body.daysBack || 30);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // =========================================================================
 // PAGE 2 OPPORTUNITIES — queries in positions 4–15
 // =========================================================================
