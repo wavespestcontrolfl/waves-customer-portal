@@ -78,10 +78,12 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   const { compliance = [], invoice = null } = extra;
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
 
-  // Build filename: firstName-lastName-YYYY-MM-DD.pdf
+  // Build filename: firstName-lastName-YYYY-MM-DD.pdf (sanitized to prevent
+  // header injection / path traversal via customer-controlled name fields).
+  const safe = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'customer';
   const svcDate = new Date(typeof service.service_date === 'string' ? service.service_date + 'T12:00:00' : service.service_date);
   const dateStr = `${svcDate.getFullYear()}-${String(svcDate.getMonth() + 1).padStart(2, '0')}-${String(svcDate.getDate()).padStart(2, '0')}`;
-  const fileName = `${customer.first_name}-${customer.last_name}-${dateStr}.pdf`;
+  const fileName = `${safe(customer.first_name)}-${safe(customer.last_name)}-${dateStr}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
@@ -510,17 +512,26 @@ function formatDate(d) {
 // =========================================================================
 router.get('/', authenticate, async (req, res, next) => {
   try {
+    // Pagination — caps total result size to prevent runaway payloads for
+    // long-tenured customers with years of service history.
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
     // Get uploaded/static documents
     const docs = await db('customer_documents')
       .where({ customer_id: req.customerId })
-      .orderBy('created_at', 'desc');
+      .orderBy('created_at', 'desc')
+      .limit(limit)
+      .offset(offset);
 
     // Get completed service records for auto-generated docs
     const services = await db('service_records')
       .where({ customer_id: req.customerId, status: 'completed' })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.id', 'service_records.service_date', 'service_records.service_type', 'technicians.name as technician_name')
-      .orderBy('service_records.service_date', 'desc');
+      .orderBy('service_records.service_date', 'desc')
+      .limit(limit)
+      .offset(offset);
 
     // Auto-generate service_report entries for completed services
     const linkedServiceIds = new Set(docs.filter(d => d.linked_service_record_id).map(d => d.linked_service_record_id));
@@ -662,33 +673,46 @@ router.get('/:id/download', authenticate, async (req, res, next) => {
 router.post('/share/:id', authenticate, async (req, res, next) => {
   try {
     const docId = req.params.id;
-    const isAutoGen = docId.startsWith('auto_');
+    const isAutoGen = typeof docId === 'string' && docId.startsWith('auto_report_');
 
-    if (!isAutoGen) {
+    let storedDocId = null;
+    let serviceRecordId = null;
+
+    if (isAutoGen) {
+      // Auto-generated report id format: auto_report_<service_record_uuid>
+      serviceRecordId = docId.slice('auto_report_'.length);
+      // Validate the service record actually belongs to this customer
+      const svc = await db('service_records')
+        .where({ id: serviceRecordId, customer_id: req.customerId })
+        .first()
+        .catch(() => null);
+      if (!svc) return res.status(404).json({ error: 'Document not found' });
+    } else {
       const doc = await db('customer_documents')
         .where({ id: docId, customer_id: req.customerId })
         .first();
       if (!doc) return res.status(404).json({ error: 'Document not found' });
+      storedDocId = doc.id;
 
-      // Mark as shared
       await db('customer_documents')
         .where({ id: docId })
         .update({ is_shared_with_third_party: true });
     }
 
-    // Generate share token
     const shareToken = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + 24);
 
     await db('document_share_links').insert({
-      document_id: isAutoGen ? null : docId,
+      document_id: storedDocId,
+      service_record_id: serviceRecordId,
+      customer_id: req.customerId,
       share_token: shareToken,
       expires_at: expiresAt,
     });
 
-    // In production this would be a full URL to a public endpoint
-    const shareLink = `https://portal.wavespestcontrol.com/shared/${shareToken}`;
+    const base = process.env.PORTAL_BASE_URL || 'https://portal.wavespestcontrol.com';
+    const shareLink = `${base}/api/documents/shared/${shareToken}`;
 
     res.json({
       success: true,
@@ -696,6 +720,85 @@ router.post('/share/:id', authenticate, async (req, res, next) => {
       expiresAt: expiresAt.toISOString(),
       expiresIn: '24 hours',
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// GET /api/documents/shared/:token — public, unauthenticated fetch of a
+// shared document. Token is 32-byte crypto-random; expiration enforced;
+// access is counted for audit.
+// =========================================================================
+router.get('/shared/:token', async (req, res, next) => {
+  try {
+    const token = String(req.params.token || '');
+    if (!/^[a-f0-9]{64}$/.test(token)) {
+      return res.status(404).json({ error: 'Invalid share link' });
+    }
+
+    const link = await db('document_share_links').where({ share_token: token }).first();
+    if (!link) return res.status(404).json({ error: 'Share link not found' });
+    if (new Date(link.expires_at).getTime() < Date.now()) {
+      return res.status(410).json({ error: 'Share link expired' });
+    }
+
+    await db('document_share_links')
+      .where({ id: link.id })
+      .update({ access_count: db.raw('COALESCE(access_count, 0) + 1') })
+      .catch(() => { /* best-effort */ });
+
+    // Auto-generated service report — render the PDF on the fly.
+    if (link.service_record_id && link.customer_id) {
+      const service = await db('service_records')
+        .where({ 'service_records.id': link.service_record_id, 'service_records.customer_id': link.customer_id })
+        .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+        .select(
+          'service_records.*',
+          'technicians.name as technician_name',
+          'technicians.phone as technician_phone',
+          'technicians.fl_applicator_license as technician_license',
+          'technicians.photo_url as technician_photo',
+        )
+        .first();
+      if (!service) return res.status(404).json({ error: 'Document not found' });
+
+      const customer = await db('customers').where({ id: link.customer_id }).first();
+      if (!customer) return res.status(404).json({ error: 'Document not found' });
+
+      const products = await db('service_products as sp')
+        .where({ 'sp.service_record_id': service.id })
+        .leftJoin('products_catalog as pc', 'pc.name', 'sp.product_name')
+        .select(
+          'sp.*',
+          'pc.dilution_rate as catalog_dilution_rate',
+          'pc.signal_word as catalog_signal_word',
+          'pc.rain_free_hours as catalog_rain_free_hours',
+          'pc.formulation as catalog_formulation',
+          'pc.restricted_use as catalog_restricted_use',
+        );
+
+      const compliance = await db('property_application_history')
+        .where({ service_record_id: service.id })
+        .catch(() => []);
+
+      return generateServiceReportPDF(customer, service, products, res, { compliance });
+    }
+
+    // Stored document — file contents aren't hosted yet (S3 integration
+    // pending). Return metadata so the sharer can be told what to expect.
+    if (link.document_id) {
+      const doc = await db('customer_documents').where({ id: link.document_id }).first();
+      if (!doc) return res.status(404).json({ error: 'Document not found' });
+      return res.json({
+        message: 'Document download available when file storage is connected',
+        fileName: doc.file_name,
+        documentType: doc.document_type,
+        title: doc.title,
+      });
+    }
+
+    return res.status(404).json({ error: 'Document not found' });
   } catch (err) {
     next(err);
   }

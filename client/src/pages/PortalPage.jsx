@@ -7041,7 +7041,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
       const url = api.getServiceReportUrl(doc.linkedServiceRecordId);
       const token = localStorage.getItem('waves_token');
       fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.blob())
+        .then(r => {
+          if (!r.ok) throw new Error(`Download failed (${r.status})`);
+          return r.blob();
+        })
         .then(blob => {
           const blobUrl = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -7050,7 +7053,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
           a.click();
           URL.revokeObjectURL(blobUrl);
         })
-        .catch(console.error);
+        .catch(err => {
+          console.error(err);
+          alert('Could not download this document. Please try again in a moment.');
+        });
     }
   };
 
@@ -7064,13 +7070,19 @@ function DocumentsTab({ customer, onSwitchTab }) {
     } catch (err) {
       console.error(err);
       setShareStatus(prev => ({ ...prev, [doc.id]: null }));
+      alert('Could not create a share link right now. Please try again.');
     }
   };
 
   const handleShareWithRealtor = (doc) => {
-    const subject = encodeURIComponent(`WDO Inspection Report - ${customer.address || 'Property'}`);
+    const safeAddress = customer.address || 'Property';
+    const safeReportTitle = doc.title || 'WDO Inspection Report';
+    const subject = encodeURIComponent(`WDO Inspection Report - ${safeAddress}`);
+    const validThrough = doc.expirationDate
+      ? `Valid through: ${new Date(doc.expirationDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`
+      : '';
     const body = encodeURIComponent(
-      `Hi,\n\nPlease find attached the WDO (Wood-Destroying Organism) inspection report for the property at ${customer.address || 'the address on file'}.\n\nReport: ${doc.title}\n${doc.expirationDate ? `Valid through: ${new Date(doc.expirationDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}` : ''}\n\nFor questions, contact Waves Pest Control at (941) 318-7612.\n\nBest regards,\n${customer.firstName || ''} ${customer.lastName || ''}`
+      `Hi,\n\nPlease find attached the WDO (Wood-Destroying Organism) inspection report for the property at ${customer.address || 'the address on file'}.\n\nReport: ${safeReportTitle}\n${validThrough}\n\nFor questions, contact Waves Pest Control at (941) 318-7612.\n\nBest regards,\n${customer.firstName || ''} ${customer.lastName || ''}`
     );
     window.open(`mailto:?subject=${subject}&body=${body}`, '_self');
   };
