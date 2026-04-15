@@ -36,8 +36,6 @@ const BILLING_TYPES = [
 
 const catColors = { pest_control: '#0A7EC2', lawn_care: '#10b981', mosquito: '#6366f1', termite: '#dc2626', rodent: '#78716c', tree_shrub: '#059669', inspection: '#f59e0b', specialty: '#8b5cf6', other: '#64748b' };
 const billingColors = { recurring: '#0A7EC2', one_time: '#f59e0b', free: '#64748b' };
-const tierColors = { Platinum: '#a78bfa', Gold: '#f59e0b', Silver: '#94a3b8', Bronze: '#cd7f32', 'One-Time': '#0A7EC2' };
-
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16 };
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box', width: '100%' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
@@ -217,82 +215,9 @@ function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
   );
 }
 
-function PackageCard({ pkg, allServices, onUpdate }) {
-  const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ ...pkg });
-  const [saving, setSaving] = useState(false);
-  const tierColor = tierColors[pkg.tier] || D.muted;
-  const features = typeof pkg.features === 'string' ? JSON.parse(pkg.features) : (pkg.features || []);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      await aFetch(`/admin/services/packages/${pkg.id}`, { method: 'PUT', body: JSON.stringify(form) });
-      onUpdate();
-      setEditing(false);
-    } finally { setSaving(false); }
-  };
-
-  if (editing) {
-    return (
-      <div style={{ ...sCard, borderColor: tierColor + '66' }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: tierColor, marginBottom: 10 }}>Edit {pkg.name}</div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-          <Field label="Name" half><input style={sInput} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></Field>
-          <Field label="Discount %" half><input style={sInput} type="number" value={form.discount_pct} onChange={e => setForm({ ...form, discount_pct: Number(e.target.value) })} /></Field>
-          <Field label="Monthly Min" half><input style={sInput} type="number" value={form.monthly_price_min || ''} onChange={e => setForm({ ...form, monthly_price_min: Number(e.target.value) })} /></Field>
-          <Field label="Monthly Max" half><input style={sInput} type="number" value={form.monthly_price_max || ''} onChange={e => setForm({ ...form, monthly_price_max: Number(e.target.value) })} /></Field>
-        </div>
-        <Field label="Description"><textarea style={{ ...sInput, minHeight: 50, resize: 'vertical' }} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} /></Field>
-        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          <button style={sBtn(tierColor, D.white)} onClick={save} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
-          <button style={sBtn('transparent', D.muted)} onClick={() => setEditing(false)}>Cancel</button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ ...sCard, borderColor: tierColor + '44', flex: '1 1 220px', minWidth: 220 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: tierColor }}>{pkg.name}</div>
-        <button style={{ ...sBtn('transparent', D.muted), fontSize: 11, padding: '4px 8px' }} onClick={() => setEditing(true)}>Edit</button>
-      </div>
-      <div style={{ fontSize: 20, fontWeight: 700, color: D.heading, marginBottom: 2 }}>
-        ${Number(pkg.monthly_price_min || 0).toFixed(0)}-${Number(pkg.monthly_price_max || 0).toFixed(0)}<span style={{ fontSize: 12, fontWeight: 400, color: D.muted }}>/mo</span>
-      </div>
-      {pkg.discount_pct > 0 && <div style={{ ...sBadge(tierColor), marginBottom: 8 }}>{pkg.discount_pct}% off add-ons</div>}
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>{pkg.description}</div>
-
-      {(pkg.items || []).length > 0 && (
-        <div style={{ marginBottom: 8 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', marginBottom: 4 }}>Included Services</div>
-          {pkg.items.map(item => (
-            <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.text, padding: '2px 0' }}>
-              <span>{item.service_name || item.short_name}</span>
-              {item.included_visits && <span style={{ color: D.muted }}>{item.included_visits}x/yr</span>}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {features.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', marginBottom: 4 }}>Features</div>
-          {features.map((f, i) => (
-            <div key={i} style={{ fontSize: 12, color: D.text, padding: '1px 0' }}>+ {f}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function ServiceLibraryPage() {
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
-  const [packages, setPackages] = useState([]);
-  const [dropdown, setDropdown] = useState([]);
   const [filters, setFilters] = useState({ category: '', billing_type: '', is_active: 'true', search: '' });
   const [expandedId, setExpandedId] = useState(null);
   const [showNew, setShowNew] = useState(false);
@@ -315,43 +240,39 @@ export default function ServiceLibraryPage() {
     } catch { setServices([]); }
   }, [filters]);
 
-  const loadPackages = useCallback(async () => {
-    try {
-      const data = await aFetch('/admin/services/packages');
-      setPackages(data || []);
-    } catch { setPackages([]); }
-  }, []);
-
-  const loadDropdown = useCallback(async () => {
-    try {
-      const data = await aFetch('/admin/services/dropdown');
-      setDropdown(data || []);
-    } catch {}
-  }, []);
-
   useEffect(() => { loadServices(); }, [loadServices]);
-  useEffect(() => { loadPackages(); loadDropdown(); }, [loadPackages, loadDropdown]);
 
   const handleCreate = async (data) => {
     await aFetch('/admin/services', { method: 'POST', body: JSON.stringify(data) });
     setShowNew(false);
     showToast('Service created');
     loadServices();
-    loadDropdown();
-  };
-
-  const handleDelete = async (id) => {
-    if (!confirm('Deactivate this service?')) return;
-    await aFetch(`/admin/services/${id}`, { method: 'DELETE' });
-    showToast('Service deactivated');
-    loadServices();
   };
 
   const tabs = [
     { key: 'catalog', label: 'Service Catalog' },
-    { key: 'packages', label: 'WaveGuard Packages' },
     { key: 'discounts', label: 'Discounts' },
   ];
+
+  // Group services by category for the catalog view
+  const servicesByCategory = (() => {
+    const groups = {};
+    for (const svc of services) {
+      const key = svc.category || 'other';
+      (groups[key] = groups[key] || []).push(svc);
+    }
+    // Keep category order consistent with the CATEGORIES filter list
+    const orderedKeys = CATEGORIES.filter(c => c.value && groups[c.value]).map(c => c.value);
+    for (const k of Object.keys(groups)) {
+      if (!orderedKeys.includes(k)) orderedKeys.push(k);
+    }
+    return orderedKeys.map(k => ({
+      key: k,
+      label: (CATEGORIES.find(c => c.value === k) || {}).label || k,
+      color: catColors[k] || '#64748b',
+      services: groups[k],
+    }));
+  })();
 
   return (
     <div style={{ maxWidth: 1300, margin: '0 auto' }}>
@@ -408,40 +329,33 @@ export default function ServiceLibraryPage() {
             <ServiceForm svc={null} onSave={handleCreate} onCancel={() => setShowNew(false)} />
           )}
 
-          {/* Service Grid */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
-            {services.map(svc => (
-              <ServiceCard
-                key={svc.id}
-                svc={svc}
-                expanded={expandedId === svc.id}
-                onToggle={() => { setExpandedId(expandedId === svc.id ? null : svc.id); setShowNew(false); }}
-                onUpdate={() => { loadServices(); loadDropdown(); showToast('Service updated'); }}
-              />
-            ))}
-          </div>
+          {/* Service Grid — grouped by category */}
+          {servicesByCategory.map(group => (
+            <div key={group.key} style={{ marginBottom: 20 }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10,
+                paddingBottom: 6, borderBottom: `2px solid ${group.color}33`,
+              }}>
+                <div style={{ width: 10, height: 10, borderRadius: 3, background: group.color }} />
+                <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{group.label}</div>
+                <div style={{ fontSize: 12, color: D.muted }}>{group.services.length}</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
+                {group.services.map(svc => (
+                  <ServiceCard
+                    key={svc.id}
+                    svc={svc}
+                    expanded={expandedId === svc.id}
+                    onToggle={() => { setExpandedId(expandedId === svc.id ? null : svc.id); setShowNew(false); }}
+                    onUpdate={() => { loadServices(); loadDropdown(); showToast('Service updated'); }}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
 
           {services.length === 0 && (
             <div style={{ textAlign: 'center', padding: 40, color: D.muted }}>No services found. Adjust filters or add a new service.</div>
-          )}
-        </>
-      )}
-
-      {/* === PACKAGES TAB === */}
-      {tab === 'packages' && (
-        <>
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-            {packages.map(pkg => (
-              <PackageCard
-                key={pkg.id}
-                pkg={pkg}
-                allServices={dropdown}
-                onUpdate={() => { loadPackages(); showToast('Package updated'); }}
-              />
-            ))}
-          </div>
-          {packages.length === 0 && (
-            <div style={{ textAlign: 'center', padding: 40, color: D.muted }}>No packages found. Run the migration to seed WaveGuard packages.</div>
           )}
         </>
       )}
