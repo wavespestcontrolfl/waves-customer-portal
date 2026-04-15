@@ -118,8 +118,13 @@ async function createService(data) {
           val = isNaN(parsed) ? null : parsed;
         }
       }
-      if (jsonbKeys.has(key) && typeof val === 'string') {
-        try { val = JSON.parse(val); } catch { val = null; }
+      if (jsonbKeys.has(key)) {
+        if (typeof val === 'string') {
+          try { val = JSON.parse(val); } catch { val = null; }
+        }
+        if (val !== null && val !== undefined) {
+          val = JSON.stringify(val);
+        }
       }
       insert[key] = val;
     }
@@ -187,8 +192,14 @@ async function updateService(id, data) {
           val = isNaN(parsed) ? null : parsed;
         }
       }
-      if (jsonbKeys.has(key) && typeof val === 'string') {
-        try { val = JSON.parse(val); } catch { val = null; }
+      if (jsonbKeys.has(key)) {
+        if (typeof val === 'string') {
+          try { val = JSON.parse(val); } catch { val = null; }
+        }
+        // Stringify for jsonb — pg otherwise serializes JS arrays as Postgres array literals
+        if (val !== null && val !== undefined) {
+          val = JSON.stringify(val);
+        }
       }
       update[key] = val;
     }
