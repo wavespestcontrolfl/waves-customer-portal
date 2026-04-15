@@ -18,13 +18,19 @@
  * the registry honors both.
  */
 module.exports = {
-  // Example placeholder — populate after the first dry-run surfaces raw-SQL tools.
-  // 'find_churn_risk_customers': {
-  //   tables:  ['customers', 'scheduled_services'],
-  //   columns: {
-  //     customers: ['id', 'waveguard_tier', 'monthly_rate'],
-  //     scheduled_services: ['customer_id', 'scheduled_date', 'status'],
-  //   },
-  //   reason: 'Uses db.raw for the 90-day rolling window CTE',
-  // },
+  // _global applies to every tool. Use for tables/columns referenced inside
+  // try/catch best-effort blocks that may legitimately be absent in some envs.
+  _global: {
+    optionalTables: [
+      'revenue_daily',        // tax-tools: try/catch YTD revenue aggregation
+      'ad_spend_log',         // revenue-tools: try/catch ad spend lookup
+      'wiki_articles',        // tech-tools: try/catch knowledge base search
+      'csr_call_records',     // comms-tools: try/catch CSR call log join
+      'csr_follow_up_tasks',  // comms-tools: try/catch follow-up aggregation
+    ],
+    optionalColumns: {
+      call_log: ['transcript'], // comms-tools: try/catch transcript search
+    },
+    reason: 'Tables/columns referenced inside try/catch best-effort blocks. Absence is tolerated at runtime.',
+  },
 };

@@ -11,6 +11,12 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../../models/db');
 
+let OVERRIDES = {};
+try { OVERRIDES = require('../overrides/manual-contracts'); } catch { /* optional */ }
+const GLOBAL = OVERRIDES._global || {};
+const GLOBAL_OPTIONAL_TABLES = new Set(GLOBAL.optionalTables || []);
+const GLOBAL_OPTIONAL_COLUMNS = GLOBAL.optionalColumns || {}; // { table: [col,...] }
+
 let schemaCache = null;          // Map<table, Set<column>>
 const fileCache = new Map();     // Map<sourcePath, extracted refs>
 
@@ -128,23 +134,34 @@ async function run(tool) {
 
   const errors = [];
   const demoted = []; // column-qualifier tables that don't exist → treated as join aliases → warning
+  const toolOptionalTables = new Set([...(tool.manualContract?.optionalTables || []), ...GLOBAL_OPTIONAL_TABLES]);
+  const toolOptionalColumns = { ...GLOBAL_OPTIONAL_COLUMNS, ...(tool.manualContract?.optionalColumns || {}) };
 
   for (const t of sourceTables) {
-    if (!schemaMap.has(t)) errors.push(`table "${t}" does not exist in public schema`);
+    if (!schemaMap.has(t)) {
+      if (toolOptionalTables.has(t)) demoted.push(`optional table "${t}" missing — tolerated (declared optional)`);
+      else errors.push(`table "${t}" does not exist in public schema`);
+    }
   }
   const sourceSet = new Set(sourceTables);
   for (const t of qualifierTables) {
     if (sourceSet.has(t)) continue; // already covered
     if (!schemaMap.has(t)) {
+      if (toolOptionalTables.has(t)) continue;
       demoted.push(`alias "${t}" not a real table (likely a join alias) — declare in manual-contracts.js if this is a real table`);
     }
   }
   for (const ref of columns) {
     const [t, c] = ref.split('.');
     if (c === '*') continue;
+    if (toolOptionalTables.has(t)) continue;
     const cols = schemaMap.get(t);
     if (!cols) continue; // table-level error or aliased — don't double-report
-    if (!cols.has(c)) errors.push(`column "${t}.${c}" does not exist`);
+    if (!cols.has(c)) {
+      const optCols = toolOptionalColumns[t] || [];
+      if (optCols.includes(c)) demoted.push(`optional column "${t}.${c}" missing — tolerated`);
+      else errors.push(`column "${t}.${c}" does not exist`);
+    }
   }
 
   const allWarnings = [...warnings, ...demoted];
