@@ -17,11 +17,24 @@ function normalizePhone(phone) {
   return phone.startsWith('+') ? phone : `+${digits}`;
 }
 
-function generateCode(len = 6) {
+function generateCode(len = 8) {
+  // Crypto-strong, unambiguous alphabet (no I/O/0/1).
+  // 32^8 ≈ 1.1 trillion — infeasible to brute-force.
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const buf = crypto.randomBytes(len);
   let code = '';
-  for (let i = 0; i < len; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < len; i++) code += chars[buf[i] % chars.length];
   return code;
+}
+
+async function generateUniqueCode() {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = `WAVES-${generateCode(8)}`;
+    const exists = await db('referral_promoters').where({ referral_code: code }).first();
+    if (!exists) return code;
+  }
+  // Fall through with a longer code if (extremely unlikely) we collided 5x
+  return `WAVES-${generateCode(12)}`;
 }
 
 function templateReplace(template, vars) {
@@ -54,7 +67,7 @@ async function enrollPromoter(customerId) {
   }
 
   const settings = await getSettings();
-  const code = customer.referral_code || `WAVES-${generateCode(4)}`;
+  const code = customer.referral_code || (await generateUniqueCode());
   const link = `${settings.base_url}${code}`;
 
   // Ensure customer has a referral_code
@@ -83,6 +96,17 @@ async function enrollPromoter(customerId) {
 // ---------------------------------------------------------------------------
 async function submitReferral(promoterId, { name, phone, email, address, notes, source = 'portal' }) {
   if (!name || !phone) throw new Error('Name and phone are required');
+
+  // Strip control chars + HTML angle brackets so referral data can never carry
+  // injected markup into admin views or future SMS/email templates.
+  const sanitize = (s, max = 200) => String(s || '').replace(/[<>\u0000-\u001F\u007F]/g, '').trim().slice(0, max);
+  name = sanitize(name, 100);
+  phone = sanitize(phone, 32);
+  email = email ? sanitize(email, 254) : null;
+  address = address ? sanitize(address, 300) : null;
+  notes = notes ? sanitize(notes, 500) : null;
+
+  if (!name) throw new Error('Name is required');
 
   const normalizedPhone = normalizePhone(phone);
   const promoter = await db('referral_promoters').where({ id: promoterId }).first();
@@ -115,17 +139,34 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     .first();
   if (dupCheck) throw new Error('You have already referred this phone number');
 
-  // Self-referral
-  if (normalizePhone(promoter.customer_phone) === normalizedPhone) {
+  // Self-referral — check phone (any format), email, AND existing customer link
+  const promoterCustomer = promoter.customer_id
+    ? await db('customers').where({ id: promoter.customer_id }).first()
+    : null;
+  const promoterPhone = normalizePhone(promoter.customer_phone || promoterCustomer?.phone);
+  const promoterEmail = (promoter.customer_email || promoterCustomer?.email || '').toLowerCase().trim();
+  const refEmailLc = (email || '').toLowerCase().trim();
+  if (promoterPhone && promoterPhone === normalizedPhone) {
+    throw new Error('Cannot refer yourself');
+  }
+  if (promoterEmail && refEmailLc && promoterEmail === refEmailLc) {
     throw new Error('Cannot refer yourself');
   }
 
-  // Already a customer
+  // Already a customer (lookup by phone OR email — either disqualifies)
   const existingCustomer = await db('customers')
-    .where('phone', normalizedPhone)
-    .orWhere('phone', phone.trim())
+    .where(function () {
+      this.where('phone', normalizedPhone).orWhere('phone', phone.trim());
+      if (refEmailLc) this.orWhereRaw('LOWER(email) = ?', [refEmailLc]);
+    })
     .first();
-  if (existingCustomer) throw new Error('This person is already a Waves customer');
+  if (existingCustomer) {
+    // Block self-referral via second account (same person, different phone+email)
+    if (promoter.customer_id && existingCustomer.id === promoter.customer_id) {
+      throw new Error('Cannot refer yourself');
+    }
+    throw new Error('This person is already a Waves customer');
+  }
 
   // --- Create referral in the 007 referrals table ---
   const nameParts = name.trim().split(/\s+/);
@@ -196,6 +237,9 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 
   if (smsSent) {
     await db('referrals').where({ id: referral.id }).update({ status: 'contacted' });
+  } else {
+    // Don't silently leave as "pending" — surface the failure so admin can retry.
+    await db('referrals').where({ id: referral.id }).update({ status: 'sms_failed' }).catch(() => {});
   }
 
   logger.info(`[ReferralEngine] Referral ${referral.id} submitted by promoter ${promoterId}`);

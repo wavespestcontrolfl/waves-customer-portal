@@ -217,40 +217,79 @@ router.get('/payouts', async (req, res, next) => {
 router.post('/payouts/:id/approve', async (req, res, next) => {
   try {
     const { payoutMethod, adminNotes } = req.body;
-    const payout = await db('referral_payouts').where({ id: req.params.id }).first();
-    if (!payout) return res.status(404).json({ error: 'Payout not found' });
+    const adminAuditor = req.admin?.email || req.admin?.id || 'admin';
 
-    // Calculate YTD for 1099 tracking
-    const year = new Date().getFullYear();
-    const ytd = await db('referral_payouts')
-      .where({ promoter_id: payout.promoter_id, status: 'applied' })
-      .whereRaw("EXTRACT(YEAR FROM processed_at) = ?", [year])
-      .sum('amount_cents as total')
-      .first();
-    const ytdTotal = parseInt(ytd?.total || 0) + payout.amount_cents;
+    // Wrap the read+balance-check+update in a transaction with row-level locks
+    // so two concurrent approvals can't both succeed and overdraw the balance.
+    const result = await db.transaction(async (trx) => {
+      const payout = await trx('referral_payouts')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!payout) {
+        const err = new Error('Payout not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      if (payout.status === 'applied') {
+        const err = new Error('Payout already applied');
+        err.statusCode = 409;
+        throw err;
+      }
 
-    await db('referral_payouts').where({ id: req.params.id }).update({
-      status: 'applied',
-      payout_method: payoutMethod || payout.method || 'service_credit',
-      admin_notes: adminNotes,
-      processed_at: new Date(),
-      processed_by: 'admin',
-      tax_year: year,
-      ytd_total_at_payout: ytdTotal,
-      requires_1099: ytdTotal >= 60000, // $600 threshold in cents
+      const promoter = await trx('referral_promoters')
+        .where({ id: payout.promoter_id })
+        .forUpdate()
+        .first();
+      if (!promoter) {
+        const err = new Error('Promoter not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      if ((promoter.available_balance_cents || 0) < payout.amount_cents) {
+        const err = new Error('Insufficient promoter balance for this payout');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Calculate YTD for 1099 tracking inside the txn
+      const year = new Date().getFullYear();
+      const ytd = await trx('referral_payouts')
+        .where({ promoter_id: payout.promoter_id, status: 'applied' })
+        .whereRaw('EXTRACT(YEAR FROM processed_at) = ?', [year])
+        .sum('amount_cents as total')
+        .first();
+      const ytdTotal = parseInt(ytd?.total || 0) + payout.amount_cents;
+
+      await trx('referral_payouts').where({ id: req.params.id }).update({
+        status: 'applied',
+        payout_method: payoutMethod || payout.method || 'service_credit',
+        admin_notes: adminNotes,
+        processed_at: new Date(),
+        processed_by: adminAuditor,
+        tax_year: year,
+        ytd_total_at_payout: ytdTotal,
+        requires_1099: ytdTotal >= 60000, // $600 threshold in cents
+      });
+
+      // Deduct exact balance — no GREATEST() floor since we already verified it.
+      await trx('referral_promoters').where({ id: payout.promoter_id }).update({
+        total_paid_out_cents: db.raw('total_paid_out_cents + ?', [payout.amount_cents]),
+        available_balance_cents: db.raw('available_balance_cents - ?', [payout.amount_cents]),
+        referral_balance_cents: db.raw('referral_balance_cents - ?', [payout.amount_cents]),
+        updated_at: new Date(),
+      });
+
+      return { ok: true };
     });
 
-    // Deduct from promoter balance
-    await db('referral_promoters').where({ id: payout.promoter_id }).increment({
-      total_paid_out_cents: payout.amount_cents,
-    }).update({
-      available_balance_cents: db.raw('GREATEST(available_balance_cents - ?, 0)', [payout.amount_cents]),
-      referral_balance_cents: db.raw('GREATEST(referral_balance_cents - ?, 0)', [payout.amount_cents]),
-      updated_at: new Date(),
-    });
-
-    res.json({ success: true });
-  } catch (err) { next(err); }
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // POST /payouts/:id/request — promoter requests payout (admin can also trigger)

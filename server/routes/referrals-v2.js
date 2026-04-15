@@ -3,12 +3,47 @@
  */
 const express = require('express');
 const router = express.Router();
+const Joi = require('joi');
+const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 
 router.use(authenticate);
+
+// Per-customer write throttles. Both endpoints fan out SMS, so we want them
+// stricter than the global /api limiter.
+const submitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customerId || req.ip,
+  message: { error: 'Too many referrals submitted recently. Please try again later.' },
+});
+
+const inviteLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customerId || req.ip,
+  message: { error: 'Too many invites sent recently. Please try again later.' },
+});
+
+const submitSchema = Joi.object({
+  name: Joi.string().trim().min(1).max(100).required(),
+  phone: Joi.string().trim().min(7).max(32).required(),
+  email: Joi.string().trim().email().max(254).optional().allow(''),
+  address: Joi.string().trim().max(300).optional().allow(''),
+  notes: Joi.string().trim().max(500).optional().allow(''),
+});
+
+const inviteSchema = Joi.object({
+  phone: Joi.string().trim().min(7).max(32).required(),
+  friendName: Joi.string().trim().max(100).optional().allow(''),
+});
 
 // =========================================================================
 // GET / — full referral data (auto-enrolls if needed)
@@ -110,10 +145,11 @@ router.get('/stats', async (req, res, next) => {
 // =========================================================================
 // POST / — submit a referral
 // =========================================================================
-router.post('/', async (req, res, next) => {
+router.post('/', submitLimiter, async (req, res, next) => {
   try {
-    const { name, phone, email, address, notes } = req.body;
-    if (!name || !phone) return res.status(400).json({ error: 'Name and phone are required' });
+    const { value, error } = submitSchema.validate(req.body, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const { name, phone, email, address, notes } = value;
 
     // Ensure enrolled
     const { promoter } = await engine.enrollPromoter(req.customerId);
@@ -142,18 +178,40 @@ router.post('/', async (req, res, next) => {
 // =========================================================================
 // POST /invite — send invite SMS to a phone number
 // =========================================================================
-router.post('/invite', async (req, res, next) => {
+router.post('/invite', inviteLimiter, async (req, res, next) => {
   try {
-    const { phone, friendName } = req.body;
-    if (!phone) return res.status(400).json({ error: 'Phone number is required' });
+    const { value, error } = inviteSchema.validate(req.body, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const { phone, friendName } = value;
 
     const { promoter } = await engine.enrollPromoter(req.customerId);
     const settings = await engine.getSettings();
 
-    const TwilioService = require('../services/twilio');
-    const body = `Hi${friendName ? ` ${friendName}` : ''}! ${promoter.first_name} thinks you'd love Waves Pest Control. Get a free quote: ${promoter.referral_link || settings.base_url + promoter.referral_code} or call (941) 318-7612`;
+    // Cooldown: same promoter+phone within 24 hours = no-op (idempotent double-tap protection)
+    const cleanPhone = phone.replace(/\s+/g, '');
+    const cooldownStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recent = await db('referral_invites')
+      .where({ promoter_id: promoter.id, phone: cleanPhone })
+      .where('sent_at', '>=', cooldownStart)
+      .first()
+      .catch(() => null);
 
-    await TwilioService.sendSMS(phone.trim(), body, { messageType: 'referral_invite' });
+    if (recent) {
+      return res.json({ success: true, deduped: true });
+    }
+
+    const TwilioService = require('../services/twilio');
+    const friendly = friendName ? ` ${friendName.replace(/[<>]/g, '')}` : '';
+    const body = `Hi${friendly}! ${promoter.first_name} thinks you'd love Waves Pest Control. Get a free quote: ${promoter.referral_link || settings.base_url + promoter.referral_code} or call (941) 318-7612`;
+
+    await TwilioService.sendSMS(cleanPhone, body, { messageType: 'referral_invite' });
+
+    // Best-effort log of the invite for cooldown tracking
+    await db('referral_invites').insert({
+      promoter_id: promoter.id,
+      phone: cleanPhone,
+      sent_at: new Date(),
+    }).catch(() => { /* table may not exist yet */ });
 
     // Update share timestamp
     await db('referral_promoters').where({ id: promoter.id }).update({
@@ -169,8 +227,10 @@ router.post('/invite', async (req, res, next) => {
 });
 
 function maskPhone(phone) {
-  if (!phone || phone.length < 6) return phone;
-  return phone.slice(0, -4).replace(/\d/g, '•') + phone.slice(-4);
+  if (!phone) return phone;
+  // Mask everything except the area code prefix style — never expose last 4 to the
+  // promoter (prevents enumeration / cross-referencing).
+  return '••• ••• ••••';
 }
 
 module.exports = router;

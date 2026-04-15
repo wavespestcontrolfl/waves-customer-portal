@@ -6703,7 +6703,7 @@ function ReferTab({ customer, onSwitchTab }) {
     if (!name.trim() || !phone.trim()) return;
     setSubmitting(true);
     try {
-      await api.submitReferral({ refereeName: name.trim(), refereePhone: phone.trim() });
+      await api.submitReferral({ name: name.trim(), phone: phone.trim() });
       setSubmitted(true);
       setName(''); setPhone('');
       setShowPreview(false);
@@ -6711,6 +6711,8 @@ function ReferTab({ customer, onSwitchTab }) {
       setTimeout(() => setSubmitted(false), 3000);
     } catch (err) {
       console.error(err);
+      const msg = err?.response?.data?.error || err?.message || 'Could not submit your referral. Please try again or call our office at (941) 318-7612.';
+      alert(msg);
     }
     setSubmitting(false);
   };
