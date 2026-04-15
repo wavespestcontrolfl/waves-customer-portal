@@ -168,6 +168,29 @@ class ApiClient {
     return this.request(`/billing/cards/${cardId}/default`, { method: 'PUT' });
   }
 
+  // ---- Autopay ----
+  getAutopay() {
+    return this.request('/billing/autopay');
+  }
+
+  updateAutopay(patch) {
+    return this.request('/billing/autopay', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  pauseAutopay(until, reason) {
+    return this.request('/billing/autopay/pause', {
+      method: 'POST',
+      body: JSON.stringify({ until, reason }),
+    });
+  }
+
+  resumeAutopay() {
+    return this.request('/billing/autopay/resume', { method: 'POST' });
+  }
+
   // ---- Notifications ----
   getNotificationPrefs() {
     return this.request('/notifications/preferences');

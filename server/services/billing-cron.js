@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const PaymentRouter = require('./payment-router');
 const TwilioService = require('./twilio');
+const { logAutopay } = require('./autopay-log');
 
 /**
  * Billing Cron Service
@@ -35,18 +36,47 @@ const BillingCron = {
 
     logger.info(`[billing-cron] Starting monthly billing for ${monthStart}`);
 
-    // Get active customers with a monthly rate
+    // Get active customers with a monthly rate — include autopay state
     const customers = await db('customers')
       .where({ active: true })
       .where('monthly_rate', '>', 0)
-      .select('id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier');
+      .select(
+        'id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier',
+        'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id',
+        'billing_day',
+      );
 
+    const todayDay = now.getDate();
     let charged = 0;
     let skipped = 0;
     let failed = 0;
 
     for (const customer of customers) {
       try {
+        // GUARD 1: autopay disabled — skip, log
+        if (customer.autopay_enabled === false) {
+          await logAutopay(customer.id, 'skipped_disabled');
+          skipped++;
+          continue;
+        }
+
+        // GUARD 2: autopay paused — skip, log
+        if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) >= new Date(now.toDateString())) {
+          await logAutopay(customer.id, 'skipped_paused', {
+            details: { paused_until: customer.autopay_paused_until },
+          });
+          skipped++;
+          continue;
+        }
+
+        // GUARD 3: wrong billing day — skip silently (no log; not an anomaly)
+        // Note: the cron currently runs only on the 1st, so this only matters
+        // for customers whose billing_day is NOT 1. When scheduler flips to
+        // daily, this guard activates for all custom days.
+        if (customer.billing_day && customer.billing_day !== todayDay) {
+          continue;
+        }
+
         // Check if already charged this month (paid or processing)
         const existingCharge = await db('payments')
           .where({ customer_id: customer.id })
@@ -57,6 +87,7 @@ const BillingCron = {
           .first();
 
         if (existingCharge) {
+          await logAutopay(customer.id, 'skipped_already_paid', { paymentId: existingCharge.id });
           skipped++;
           continue;
         }
@@ -67,6 +98,20 @@ const BillingCron = {
         // Charge
         const paymentResult = await service.chargeMonthly(customer.id);
         charged++;
+
+        // Log success + update next_charge_date (next month, same billing_day)
+        await logAutopay(customer.id, 'charge_success', {
+          amountCents: Math.round(parseFloat(customer.monthly_rate) * 100),
+          paymentMethodId: customer.autopay_payment_method_id || null,
+          paymentId: paymentResult?.id || null,
+          details: { source: 'autopay', tier: customer.waveguard_tier },
+        });
+
+        const nextDate = new Date(now);
+        nextDate.setMonth(nextDate.getMonth() + 1);
+        nextDate.setDate(customer.billing_day || 1);
+        await db('customers').where({ id: customer.id })
+          .update({ next_charge_date: nextDate.toISOString().split('T')[0] });
 
         // Extract receipt URL and include in confirmation SMS
         let receiptUrl = null;
@@ -111,6 +156,13 @@ const BillingCron = {
               next_retry_at: retryAt.toISOString(),
             });
         }
+
+        await logAutopay(customer.id, 'charge_failed', {
+          amountCents: Math.round(parseFloat(customer.monthly_rate) * 100),
+          paymentMethodId: customer.autopay_payment_method_id || null,
+          paymentId: failedPayment?.id || null,
+          details: { source: 'autopay', reason: err.message, next_retry_at: retryAt.toISOString() },
+        });
 
         // Send failure SMS
         try {
@@ -194,6 +246,12 @@ const BillingCron = {
 
         succeeded++;
 
+        await logAutopay(payment.customer_id, 'retry_success', {
+          amountCents: Math.round(parseFloat(payment.amount) * 100),
+          paymentId: newPayment?.id || null,
+          details: { source: 'autopay', retry_count: payment.retry_count + 1, original_payment_id: payment.id },
+        });
+
         // Send success SMS with receipt
         let retryReceiptUrl = null;
         try {
@@ -256,6 +314,12 @@ const BillingCron = {
             logger.error(`[billing-cron] Health alert creation failed: ${alertErr.message}`);
           }
 
+          await logAutopay(payment.customer_id, 'retry_failed', {
+            amountCents: Math.round(parseFloat(payment.amount) * 100),
+            paymentId: payment.id,
+            details: { source: 'autopay', retry_count: newRetryCount, reason: err.message, final: true },
+          });
+
           logger.warn(`[billing-cron] ESCALATED: ${customer.first_name} ${customer.last_name} — 3 retries exhausted`);
         } else {
           // Schedule next retry
@@ -270,6 +334,12 @@ const BillingCron = {
               next_retry_at: nextRetry.toISOString(),
               failure_reason: err.message,
             });
+
+          await logAutopay(payment.customer_id, 'retry_failed', {
+            amountCents: Math.round(parseFloat(payment.amount) * 100),
+            paymentId: payment.id,
+            details: { source: 'autopay', retry_count: newRetryCount, reason: err.message, next_retry_at: nextRetry.toISOString() },
+          });
 
           // Send retry SMS
           try {

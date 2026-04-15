@@ -426,6 +426,8 @@ export default function Customer360Profile({ customerId, onClose }) {
                 <StatCard label="Lifetime Revenue" value={fmtCurrency(c.lifetimeRevenue)} color={D.green} />
               </div>
 
+              <AdminAutopayPanel customerId={c.id} monthlyRate={c.monthlyRate} customerName={`${c.firstName} ${c.lastName}`} />
+
               <SectionTitle>Invoices ({invoices.length})</SectionTitle>
               {invoices.length > 0 ? (
                 <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 20 }}>
@@ -750,3 +752,96 @@ function actionBtnStyleBtn(borderColor) {
 }
 
 const tdStyle = { padding: '8px 12px', fontSize: 12, color: D.muted, borderBottom: `1px solid ${D.border}` };
+
+/**
+ * AdminAutopayPanel — shows autopay state, recent events, and a "Charge now" button.
+ * Read-only for autopay settings (customer controls those). Admin can manually charge.
+ */
+function AdminAutopayPanel({ customerId, monthlyRate, customerName }) {
+  const [state, setState] = useState(null);
+  const [charging, setCharging] = useState(false);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const load = () => {
+    fetch(`${API_BASE}/admin/customers/${customerId}/autopay-state`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setState(d))
+      .catch(() => {});
+  };
+
+  useEffect(() => { load(); }, [customerId]);
+
+  const chargeNow = async () => {
+    const amt = parseFloat(monthlyRate || 0);
+    if (!amt || amt <= 0) { setErr('Customer has no monthly_rate set'); return; }
+    if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`)) return;
+    setCharging(true); setErr(''); setMsg('');
+    try {
+      await adminFetch(`/admin/customers/${customerId}/charge-now`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      setMsg(`Charged $${amt.toFixed(2)} successfully`);
+      load();
+    } catch (e) {
+      setErr(e.message || 'Charge failed');
+    }
+    setCharging(false);
+  };
+
+  const stateLabel = state?.state || 'unknown';
+  const stateColor = stateLabel === 'active' ? D.green : stateLabel === 'paused' ? D.amber : D.muted;
+
+  return (
+    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontFamily: FONT, marginBottom: 4 }}>
+            Auto-pay
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 4, background: stateColor, display: 'inline-block' }} />
+            <span style={{ fontSize: 14, fontWeight: 700, color: '#0F172A', fontFamily: FONT, textTransform: 'capitalize' }}>
+              {stateLabel}
+            </span>
+          </div>
+          {state && (
+            <div style={{ fontSize: 12, color: D.muted, marginTop: 6, lineHeight: 1.6 }}>
+              Next charge: <span style={{ color: '#0F172A', fontFamily: MONO }}>{state.next_charge_date || '—'}</span>
+              {' · '}Day: <span style={{ color: '#0F172A', fontFamily: MONO }}>{state.billing_day || 1}</span>
+              {state.paused_until && <>{' · '}Paused until {fmtDate(state.paused_until)}</>}
+            </div>
+          )}
+        </div>
+        <button onClick={chargeNow} disabled={charging} style={{
+          padding: '8px 16px', borderRadius: 8, background: D.teal, color: D.white, border: 'none',
+          fontSize: 13, fontWeight: 600, cursor: charging ? 'not-allowed' : 'pointer',
+          opacity: charging ? 0.6 : 1, fontFamily: FONT,
+        }}>
+          {charging ? 'Charging…' : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ''}`}
+        </button>
+      </div>
+
+      {msg && <div style={{ marginTop: 10, padding: 8, background: `${D.green}15`, color: D.green, borderRadius: 6, fontSize: 12 }}>{msg}</div>}
+      {err && <div style={{ marginTop: 10, padding: 8, background: `${D.red}15`, color: D.red, borderRadius: 6, fontSize: 12 }}>{err}</div>}
+
+      {state?.recent_events?.length > 0 && (
+        <div style={{ marginTop: 12, borderTop: `1px solid ${D.border}`, paddingTop: 10 }}>
+          <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+            Recent events
+          </div>
+          {state.recent_events.slice(0, 5).map(ev => (
+            <div key={ev.id} style={{ fontSize: 11, color: D.muted, padding: '3px 0', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ fontFamily: MONO, color: '#0F172A' }}>{ev.event_type}</span>
+              <span>{ev.amount_cents != null ? `$${(ev.amount_cents / 100).toFixed(2)}` : ''}</span>
+              <span>{timeAgo(ev.created_at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

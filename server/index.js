@@ -245,6 +245,8 @@ app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
+app.use('/api/billing/autopay', require('./routes/customer-autopay'));
+app.use('/api/admin', require('./routes/admin-billing-health'));
 app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
 app.use('/api/admin/wiki', require('./routes/admin-wiki'));

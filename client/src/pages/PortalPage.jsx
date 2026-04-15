@@ -3,6 +3,7 @@ import { useAuth } from '../hooks/useAuth';
 import api from '../utils/api';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme';
 import NotificationBell from '../components/NotificationBell';
+import AutopayCard from '../components/billing/AutopayCard';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
@@ -3436,6 +3437,9 @@ function BillingTab({ customer }) {
           )}
         </div>
       </div>
+
+      {/* ── 1b. Autopay Control Card ── */}
+      <AutopayCard />
 
       {/* ── 2. Balance Card with context ── */}
       {balance && (

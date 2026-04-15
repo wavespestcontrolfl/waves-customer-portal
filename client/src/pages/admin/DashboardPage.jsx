@@ -143,6 +143,9 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Billing Health */}
+      <BillingHealthCard isMobile={isMobile} />
+
       {/* Two columns: Schedule + Activity */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 14, marginBottom: 20 }}>
         {/* Today's Schedule */}
@@ -218,6 +221,48 @@ export default function DashboardPage() {
             <div style={{ fontSize: 24, marginBottom: 6 }}>{a.icon}</div>
             <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{a.label}</div>
           </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BillingHealthCard({ isMobile }) {
+  const [h, setH] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    adminFetch('/admin/billing-health')
+      .then(d => setH(d?.summary || null))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+  if (loading || !h) return null;
+
+  const metrics = [
+    { label: 'Autopay active', value: h.autopay_active, color: D.green },
+    { label: 'Paused', value: h.autopay_paused, color: D.amber },
+    { label: 'No method', value: h.no_payment_method, color: h.no_payment_method > 0 ? D.red : D.muted },
+    { label: 'Charged this month', value: h.charged_this_month, color: D.teal },
+    { label: 'Failed (30d)', value: h.failed_last_30_days, color: h.failed_last_30_days > 0 ? D.red : D.muted },
+    { label: 'In retry', value: h.in_retry_queue, color: h.in_retry_queue > 0 ? D.amber : D.muted },
+    { label: 'Escalated (30d)', value: h.escalated_last_30_days, color: h.escalated_last_30_days > 0 ? D.red : D.muted },
+    { label: 'Cards expiring 60d', value: h.expiring_cards_60_days, color: h.expiring_cards_60_days > 0 ? D.amber : D.muted },
+  ];
+
+  return (
+    <div style={{ background: D.card, borderRadius: 10, padding: 20, border: `1px solid ${D.border}`, marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Billing Health</div>
+        <span style={{ fontSize: 11, color: D.muted }}>{h.total_billable} billable customers</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 10 }}>
+        {metrics.map(m => (
+          <div key={m.label} style={{ background: D.bg, borderRadius: 8, padding: 12 }}>
+            <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{m.label}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: m.color, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 }}>
+              {m.value}
+            </div>
+          </div>
         ))}
       </div>
     </div>

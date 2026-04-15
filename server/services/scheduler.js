@@ -801,6 +801,28 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Autopay pre-charge reminders — daily 9 AM, 3 days before scheduled charge
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      const { sendPreChargeReminders } = require('./autopay-notifications');
+      const r = await sendPreChargeReminders();
+      if (r.sent > 0) logger.info(`Autopay reminders: ${r.sent} sent`);
+    } catch (err) {
+      logger.error(`Autopay pre-charge reminder failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Card-expiry warnings — Monday 9 AM, cards expiring within 60 days
+  cron.schedule('0 9 * * 1', async () => {
+    try {
+      const { sendCardExpiryWarnings } = require('./autopay-notifications');
+      const r = await sendCardExpiryWarnings();
+      if (r.sent > 0) logger.info(`Card-expiry warnings: ${r.sent} sent`);
+    } catch (err) {
+      logger.error(`Card-expiry warnings failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // BOUNCIE MILEAGE CRONS (daily sync, monthly summary, trip re-matching)
   // =========================================================================
