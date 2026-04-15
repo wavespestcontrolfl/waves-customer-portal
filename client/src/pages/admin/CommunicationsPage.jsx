@@ -361,12 +361,21 @@ function CallLogTab() {
   const [dispositions, setDispositions] = useState({}); // { callId: value }
   const [savingDisp, setSavingDisp] = useState(null);
   const [callFilter, setCallFilter] = useState('all');
+  const [callLogSearch, setCallLogSearch] = useState('');
 
-  const loadCalls = () => {
-    adminFetch('/ai/admin/calls?days=365&limit=200').then(d => { setCalls(d.calls || []); setLoading(false); }).catch(() => setLoading(false));
+  const loadCalls = (search = '') => {
+    const q = search
+      ? `?search=${encodeURIComponent(search)}&limit=1000`
+      : '?days=365&limit=200';
+    adminFetch(`/ai/admin/calls${q}`).then(d => { setCalls(d.calls || []); setLoading(false); }).catch(() => setLoading(false));
   };
 
   useEffect(() => { loadCalls(); }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => { loadCalls(callLogSearch.trim()); }, 300);
+    return () => clearTimeout(t);
+  }, [callLogSearch]);
 
   const handleCall = async () => {
     if (!callTo.trim()) return;
@@ -573,8 +582,19 @@ function CallLogTab() {
 
       {/* Call list */}
       <div style={{ background: D.card, borderRadius: 12, padding: '16px 20px', border: `1px solid ${D.border}` }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, gap: 12, flexWrap: 'wrap' }}>
           <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>Call History</h2>
+          <input
+            type="text"
+            placeholder="Search calls by name or phone..."
+            value={callLogSearch}
+            onChange={e => setCallLogSearch(e.target.value)}
+            style={{
+              flex: '1 1 260px', maxWidth: 360, minWidth: 200,
+              background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text,
+              fontSize: 13, padding: '8px 12px', fontFamily: 'DM Sans, sans-serif', outline: 'none',
+            }}
+          />
         </div>
 
         {calls.length === 0 ? (
@@ -1296,10 +1316,14 @@ export default function CommunicationsPage() {
   const [smsView, setSmsView] = useState('threads'); // 'threads' | 'log' | 'conversation'
   const [activeThread, setActiveThread] = useState(null);
   const [viewedThreads, setViewedThreads] = useState(new Set()); // tracks threads user has opened
+  const [smsSearch, setSmsSearch] = useState('');
 
-  const loadData = useCallback(() => {
+  const loadData = useCallback((search = '') => {
+    const logUrl = search
+      ? `/admin/communications/log?search=${encodeURIComponent(search)}&limit=1000`
+      : '/admin/communications/log';
     Promise.all([
-      adminFetch('/admin/communications/log').catch(() => ({ messages: [] })),
+      adminFetch(logUrl).catch(() => ({ messages: [] })),
       adminFetch('/admin/communications/stats').catch(() => null),
     ]).then(([logData, statsData]) => {
       setMessages(logData.messages || []);
@@ -1309,6 +1333,11 @@ export default function CommunicationsPage() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  useEffect(() => {
+    const t = setTimeout(() => { loadData(smsSearch.trim()); }, 300);
+    return () => clearTimeout(t);
+  }, [smsSearch, loadData]);
 
   // Load AI auto-reply setting
   useEffect(() => {
@@ -1480,7 +1509,7 @@ export default function CommunicationsPage() {
       {/* --- Header --- */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexWrap: 'wrap', gap: 16 }}>
         <div>
-          <h1 style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 24, fontWeight: 700, color: D.heading, margin: 0 }}>Communications</h1>
+          <h1 style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 24, fontWeight: 700, color: D.heading, margin: 0 }}>SMS & Calls</h1>
         </div>
       </div>
 
@@ -1687,6 +1716,21 @@ export default function CommunicationsPage() {
           }}>Log View</button>
         </div>
 
+      </div>
+
+      {/* --- SMS Search (searches all history) --- */}
+      <div style={{ marginBottom: 16 }}>
+        <input
+          type="text"
+          placeholder="Search all SMS by name, phone, or message text..."
+          value={smsSearch}
+          onChange={e => setSmsSearch(e.target.value)}
+          style={{
+            width: '100%', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
+            color: D.text, fontSize: 14, padding: '10px 14px', fontFamily: 'DM Sans, sans-serif',
+            outline: 'none', boxSizing: 'border-box',
+          }}
+        />
       </div>
 
       {/* --- Conversation Thread View --- */}

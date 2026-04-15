@@ -16,7 +16,7 @@ const NAV_SECTIONS = [
     { path: '/admin/service-library', icon: '📖', label: 'Service Library' },
   ]},
   { section: 'Communications', items: [
-    { path: '/admin/communications', icon: '📱', label: 'SMS & Calls' },
+    { path: '/admin/communications', icon: '📱', label: 'Communications' },
     { path: '/admin/reviews', icon: '⭐', label: 'Reviews' },
     { path: '/admin/referrals', icon: '🎁', label: 'Referrals' },
     { path: '/admin/voice-agent', icon: '🎙️', label: 'Voice Agent' },

@@ -86,7 +86,7 @@ router.post('/call', async (req, res, next) => {
 // GET /api/admin/communications/log — SMS history
 router.get('/log', async (req, res, next) => {
   try {
-    const { customerId, direction, messageType, page = 1, limit = 50 } = req.query;
+    const { customerId, direction, messageType, page = 1, limit = 50, search } = req.query;
 
     let query = db('sms_log')
       .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
@@ -100,8 +100,22 @@ router.get('/log', async (req, res, next) => {
     if (direction) query = query.where('sms_log.direction', direction);
     if (messageType) query = query.where('sms_log.message_type', messageType);
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const messages = await query.limit(parseInt(limit)).offset(offset);
+    const searchTerm = typeof search === 'string' ? search.trim() : '';
+    if (searchTerm) {
+      const like = `%${searchTerm}%`;
+      query = query.where(b => b
+        .where('customers.first_name', 'ilike', like)
+        .orWhere('customers.last_name', 'ilike', like)
+        .orWhereRaw("(customers.first_name || ' ' || customers.last_name) ILIKE ?", [like])
+        .orWhere('sms_log.from_phone', 'ilike', like)
+        .orWhere('sms_log.to_phone', 'ilike', like)
+        .orWhere('sms_log.message_body', 'ilike', like)
+      );
+    }
+
+    const effectiveLimit = searchTerm ? Math.max(parseInt(limit), 1000) : parseInt(limit);
+    const offset = searchTerm ? 0 : (parseInt(page) - 1) * parseInt(limit);
+    const messages = await query.limit(effectiveLimit).offset(offset);
 
     // Resolve customer names for messages without customer_id (match by phone)
     const resolved = [];

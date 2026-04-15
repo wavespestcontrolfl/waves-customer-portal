@@ -164,15 +164,31 @@ router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAd
 // GET /api/ai/admin/calls — call history
 router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
-    const { days = 30, limit = 50 } = req.query;
-    const since = new Date(Date.now() - parseInt(days) * 86400000);
+    const { days = 30, limit = 50, search } = req.query;
+    const searchTerm = typeof search === 'string' ? search.trim() : '';
 
-    const calls = await db('call_log as cl')
+    let q = db('call_log as cl')
       .leftJoin('customers as c', 'cl.customer_id', 'c.id')
-      .where('cl.created_at', '>', since)
       .select('cl.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier')
-      .orderBy('cl.created_at', 'desc')
-      .limit(parseInt(limit));
+      .orderBy('cl.created_at', 'desc');
+
+    if (!searchTerm) {
+      const since = new Date(Date.now() - parseInt(days) * 86400000);
+      q = q.where('cl.created_at', '>', since);
+    } else {
+      const like = `%${searchTerm}%`;
+      q = q.where(b => b
+        .where('c.first_name', 'ilike', like)
+        .orWhere('c.last_name', 'ilike', like)
+        .orWhereRaw("(c.first_name || ' ' || c.last_name) ILIKE ?", [like])
+        .orWhere('cl.from_phone', 'ilike', like)
+        .orWhere('cl.to_phone', 'ilike', like)
+        .orWhere('cl.transcription', 'ilike', like)
+      );
+    }
+
+    const effectiveLimit = searchTerm ? Math.max(parseInt(limit), 1000) : parseInt(limit);
+    const calls = await q.limit(effectiveLimit);
 
     const stats = {
       total: calls.length,
