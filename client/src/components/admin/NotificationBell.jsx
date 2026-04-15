@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { ensurePushSubscription, isPushEnabled } from '/push-subscribe.js';
+import { ensurePushSubscription, isPushEnabled } from '../../lib/push-subscribe.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = {
