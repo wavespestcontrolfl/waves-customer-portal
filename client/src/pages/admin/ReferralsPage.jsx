@@ -17,7 +17,7 @@ function StatCard({ label, value, sub, color }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: '16px 20px', flex: '1 1 0', minWidth: 140 }}>
       <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 26, fontWeight: 700, color: color || D.white }}>{value}</div>
+      <div style={{ fontFamily: MONO, fontSize: 26, fontWeight: 700, color: color || D.heading }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{sub}</div>}
     </div>
   );

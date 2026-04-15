@@ -145,7 +145,7 @@ export default function GBPManagement() {
             padding: '12px 18px', borderRadius: 10, border: `1px solid ${selectedLoc?.id === l.id ? D.teal : D.border}`,
             background: selectedLoc?.id === l.id ? `${D.teal}15` : D.card, cursor: 'pointer', minWidth: 170, textAlign: 'left',
           }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: selectedLoc?.id === l.id ? D.teal : D.white }}>{l.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: selectedLoc?.id === l.id ? D.teal : D.heading }}>{l.name}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
               {l.rating && <span style={{ fontSize: 13, fontWeight: 700, color: D.amber, fontFamily: "'JetBrains Mono', monospace" }}>{l.rating}</span>}
               <span style={{ fontSize: 11, color: D.muted }}>({l.totalReviews || 0})</span>
@@ -410,7 +410,7 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
               display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderRadius: 8, marginBottom: 4,
               background: today ? `${D.teal}10` : 'transparent', border: today ? `1px solid ${D.teal}33` : '1px solid transparent',
             }}>
-              <span style={{ fontSize: 13, fontWeight: today ? 600 : 400, color: today ? D.teal : D.white, width: 100, textTransform: 'capitalize' }}>{day}</span>
+              <span style={{ fontSize: 13, fontWeight: today ? 600 : 400, color: today ? D.teal : D.text, width: 100, textTransform: 'capitalize' }}>{day}</span>
               <input type="time" value={h.open || '08:00'} onChange={e => updateDay(day, 'open', e.target.value)} style={{ ...sInput, width: 120 }} />
               <span style={{ color: D.muted, fontSize: 12 }}>to</span>
               <input type="time" value={h.close || '17:00'} onChange={e => updateDay(day, 'close', e.target.value)} style={{ ...sInput, width: 120 }} />

@@ -199,7 +199,7 @@ function SendTab({ automations, showToast, onSent }) {
                 border: `1px solid ${selectedAuto === a.key ? D.teal : D.border}`,
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: selectedAuto === a.key ? D.teal : D.white }}>{a.name}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: selectedAuto === a.key ? D.teal : D.heading }}>{a.name}</div>
                   <div style={{ display: 'flex', gap: 4 }}>
                     {a.smsTemplate && <span style={sBadge(`${D.green}22`, D.green)}>+ SMS</span>}
                     {a.tags?.map(t => <span key={t} style={sBadge(`${D.purple}22`, D.purple)}>{t}</span>)}

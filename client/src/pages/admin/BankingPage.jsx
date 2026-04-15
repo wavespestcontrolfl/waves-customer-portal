@@ -34,7 +34,7 @@ function Badge({ children, color }) {
 
 function TabBtn({ active, label, onClick }) {
   return (
-    <button onClick={onClick} style={{ background: active ? D.card : 'transparent', border: active ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 8, padding: '8px 14px', color: active ? D.white : D.muted, fontSize: 12, cursor: 'pointer', fontWeight: active ? 600 : 400, transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44 }}>
+    <button onClick={onClick} style={{ background: active ? D.card : 'transparent', border: active ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 8, padding: '8px 14px', color: active ? D.heading : D.muted, fontSize: 12, cursor: 'pointer', fontWeight: active ? 600 : 400, transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44 }}>
       {label}
     </button>
   );
@@ -257,7 +257,7 @@ function SummaryCard({ label, value, color }) {
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px' }}>
       <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: color || D.white }}>{value}</div>
+      <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: color || D.heading }}>{value}</div>
     </div>
   );
 }

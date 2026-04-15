@@ -20,7 +20,7 @@ function StatCard({ label, value, color, sub, onClick }) {
     <div onClick={onClick} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px', flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 0', minWidth: isMobile ? 0 : 140, cursor: onClick ? 'pointer' : 'default', transition: 'border-color 0.15s' }}
       onMouseEnter={e => { if (onClick) e.currentTarget.style.borderColor = color || D.teal; }} onMouseLeave={e => { e.currentTarget.style.borderColor = D.border; }}>
       <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: color || D.white }}>{value}</div>
+      <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: color || D.heading }}>{value}</div>
       {sub && <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{sub}</div>}
     </div>
   );
@@ -436,7 +436,7 @@ function AdvisorTab() {
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 10 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: D.heading }}>Action Items</div>
             {['new', 'reviewed', 'acted_on', 'dismissed'].map(s => (
-              <button key={s} onClick={() => { setAlertFilter(s); }} style={{ background: alertFilter === s ? D.card : 'transparent', border: alertFilter === s ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 4, padding: '3px 8px', fontSize: 10, color: alertFilter === s ? D.white : D.muted, cursor: 'pointer', textTransform: 'capitalize' }}>
+              <button key={s} onClick={() => { setAlertFilter(s); }} style={{ background: alertFilter === s ? D.card : 'transparent', border: alertFilter === s ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 4, padding: '3px 8px', fontSize: 10, color: alertFilter === s ? D.heading : D.muted, cursor: 'pointer', textTransform: 'capitalize' }}>
                 {s.replace('_', ' ')} {alertCounts[s] ? `(${alertCounts[s]})` : ''}
               </button>
             ))}
@@ -464,7 +464,7 @@ function AdvisorTab() {
       {reports.length > 0 && (
         <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
           {reports.slice(0, 8).map(rp => (
-            <button key={rp.id} onClick={() => setSelectedReport(rp)} style={{ background: selectedReport?.id === rp.id ? D.card : 'transparent', border: selectedReport?.id === rp.id ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 6, padding: '4px 10px', fontSize: 11, color: selectedReport?.id === rp.id ? D.white : D.muted, cursor: 'pointer' }}>
+            <button key={rp.id} onClick={() => setSelectedReport(rp)} style={{ background: selectedReport?.id === rp.id ? D.card : 'transparent', border: selectedReport?.id === rp.id ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 6, padding: '4px 10px', fontSize: 11, color: selectedReport?.id === rp.id ? D.heading : D.muted, cursor: 'pointer' }}>
               {rp.period || fmtD(rp.date)} <span style={{ fontWeight: 700, color: { A: D.green, B: D.teal, C: D.amber }[rp.grade] || D.muted }}>{rp.grade}</span>
             </button>
           ))}
@@ -796,8 +796,8 @@ function PnlTab() {
 
   const PnlRow = ({ label, value, bold, indent, color }) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${bold ? 6 : 4}px 0`, borderBottom: bold ? `1px solid ${D.border}` : `1px solid ${D.border}22`, marginLeft: indent ? 20 : 0 }}>
-      <span style={{ fontSize: 13, color: bold ? D.white : D.muted, fontWeight: bold ? 700 : 400 }}>{label}</span>
-      <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: bold ? 700 : 400, color: color || (bold ? D.white : D.text), textAlign: 'right' }}>{fmtM(value)}</span>
+      <span style={{ fontSize: 13, color: bold ? D.heading : D.muted, fontWeight: bold ? 700 : 400 }}>{label}</span>
+      <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: bold ? 700 : 400, color: color || (bold ? D.heading : D.text), textAlign: 'right' }}>{fmtM(value)}</span>
     </div>
   );
 
@@ -814,7 +814,7 @@ function PnlTab() {
       {/* Period selector */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
         {periods.map(p => (
-          <button key={p.id} onClick={() => setPeriod(p.id)} style={{ background: period === p.id ? D.card : 'transparent', border: period === p.id ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 6, padding: '6px 12px', color: period === p.id ? D.white : D.muted, fontSize: 12, cursor: 'pointer', fontWeight: period === p.id ? 600 : 400 }}>{p.label}</button>
+          <button key={p.id} onClick={() => setPeriod(p.id)} style={{ background: period === p.id ? D.card : 'transparent', border: period === p.id ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 6, padding: '6px 12px', color: period === p.id ? D.heading : D.muted, fontSize: 12, cursor: 'pointer', fontWeight: period === p.id ? 600 : 400 }}>{p.label}</button>
         ))}
         {period === 'custom' && (
           <>
@@ -1150,7 +1150,7 @@ export default function TaxPage() {
               <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Outstanding A/R</div>
               {arSummary ? (
                 <>
-                  <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: arSummary.total > 500 ? D.red : D.white, marginBottom: 4 }}>{fmtM(arSummary.total)}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: arSummary.total > 500 ? D.red : D.heading, marginBottom: 4 }}>{fmtM(arSummary.total)}</div>
                   <div style={{ fontSize: 11, color: D.muted }}>{arSummary.count} unpaid invoice{arSummary.count !== 1 ? 's' : ''}</div>
                   {arSummary.over90 > 0 && <div style={{ fontSize: 11, color: D.red, marginTop: 4 }}>{fmtM(arSummary.over90)} over 90 days</div>}
                 </>

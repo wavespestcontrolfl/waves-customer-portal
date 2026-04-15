@@ -40,7 +40,7 @@ function KpiCard({ label, value, sub, color }) {
       display: 'flex', flexDirection: 'column', gap: 6,
     }}>
       <div style={{ fontSize: 13, color: D.muted, fontWeight: 500 }}>{label}</div>
-      <div style={{ fontSize: 26, fontWeight: 700, color: color || D.white, fontFamily: MONO }}>{value}</div>
+      <div style={{ fontSize: 26, fontWeight: 700, color: color || D.heading, fontFamily: MONO }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: sub.color || D.muted, fontFamily: MONO }}>{sub.text}</div>}
     </div>
   );

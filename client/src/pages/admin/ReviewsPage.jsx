@@ -51,7 +51,7 @@ function StatCard({ label, value, sub, color, highlight }) {
       padding: isMobile ? '14px 12px' : '20px 24px', flex: isMobile ? '1 1 calc(50% - 6px)' : '1 1 0', minWidth: isMobile ? 0 : 180,
     }}>
       <div style={{ color: D.muted, fontSize: 12, fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{label}</div>
-      <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 28, fontWeight: 700, color: color || D.white }}>{value}</div>
+      <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 28, fontWeight: 700, color: color || D.heading }}>{value}</div>
       {sub && <div style={{ color: D.muted, fontSize: 13, marginTop: 4 }}>{sub}</div>}
     </div>
   );
@@ -335,7 +335,7 @@ function GBPManagement() {
             background: selectedLoc?.id === l.id ? `${D.teal}15` : D.card, cursor: 'pointer',
             display: 'flex', flexDirection: 'column', gap: 4, minWidth: isMobile ? 0 : 180, flex: isMobile ? '1 1 100%' : undefined,
           }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: selectedLoc?.id === l.id ? D.teal : D.white, fontFamily: 'DM Sans, sans-serif' }}>{l.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: selectedLoc?.id === l.id ? D.teal : D.heading, fontFamily: 'DM Sans, sans-serif' }}>{l.name}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: 13, fontWeight: 700, color: D.amber, fontFamily: "'JetBrains Mono', monospace" }}>{l.rating}</span>
               <Stars count={Math.round(l.rating || 0)} size={12} />
@@ -445,7 +445,7 @@ function GBPManagement() {
                     border: isToday ? `1px solid ${D.teal}33` : '1px solid transparent',
                     display: 'flex', justifyContent: 'space-between',
                   }}>
-                    <span style={{ fontSize: 13, color: isToday ? D.teal : D.white, fontWeight: isToday ? 600 : 400 }}>{h}</span>
+                    <span style={{ fontSize: 13, color: isToday ? D.teal : D.text, fontWeight: isToday ? 600 : 400 }}>{h}</span>
                   </div>
                 );
               }) : (

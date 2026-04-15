@@ -32,7 +32,7 @@ function KpiCard({ label, value, sub, color }) {
   return (
     <Card style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>{label}</div>
-      <div style={{ fontSize: 24, fontWeight: 700, color: color || D.white, fontFamily: MONO }}>{value}</div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: color || D.heading, fontFamily: MONO }}>{value}</div>
       {sub && <div style={{ fontSize: 11, color: sub.color || D.muted, fontFamily: MONO }}>{sub.text}</div>}
     </Card>
   );

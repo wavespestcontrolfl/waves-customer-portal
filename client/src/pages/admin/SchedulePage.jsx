@@ -2016,7 +2016,7 @@ function ProtocolReferenceTab() {
                           borderLeft: isCurrentMonth ? `3px solid ${D.teal}` : '3px solid transparent',
                         }}>
                           <td style={{ ...tdSt, fontWeight: 700, color: isCurrentMonth ? D.teal : D.teal + '99', textAlign: 'center' }}>{v.visit}</td>
-                          <td style={{ ...tdSt, fontWeight: 600, color: isCurrentMonth ? D.white : D.text, whiteSpace: 'nowrap' }}>
+                          <td style={{ ...tdSt, fontWeight: 600, color: isCurrentMonth ? D.heading : D.muted, whiteSpace: 'nowrap' }}>
                             {v.month}
                             {isCurrentMonth && <span style={{ fontSize: 9, color: D.teal, marginLeft: 4, fontWeight: 800 }}>NOW</span>}
                           </td>

@@ -192,7 +192,7 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
                 </div>
               </div>
               <div style={{ textAlign: isMobile ? 'left' : 'right' }}>
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: inv.status === 'paid' ? D.green : D.white }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: inv.status === 'paid' ? D.green : D.heading }}>
                   ${parseFloat(inv.total).toFixed(2)}
                 </div>
                 <div style={{ fontSize: 10, color: D.muted }}>

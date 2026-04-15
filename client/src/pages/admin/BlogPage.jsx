@@ -647,7 +647,7 @@ function GenerateTab({ onGenerated }) {
                 border: `1px solid ${contentType === ct.id ? D.teal : D.border}`,
               }}>
                 <div style={{ fontSize: 18, marginBottom: 4 }}>{ct.icon}</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: contentType === ct.id ? D.teal : D.white }}>{ct.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: contentType === ct.id ? D.teal : D.heading }}>{ct.label}</div>
                 <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>{ct.desc}</div>
               </div>
             ))}

@@ -44,7 +44,7 @@ function KpiCard({ label, value, sub, color }) {
   return (
     <Card style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>{label}</div>
-      <div style={{ fontSize: 24, fontWeight: 700, color: color || D.white, fontFamily: MONO }}>{value}</div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: color || D.heading, fontFamily: MONO }}>{value}</div>
       {sub && <div style={{ fontSize: 11, color: sub.color || D.muted, fontFamily: MONO }}>{sub.text}</div>}
     </Card>
   );
@@ -414,7 +414,7 @@ function AdvisorTab() {
                                 style={{
                                   padding: '6px 14px', borderRadius: 6, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
                                   background: applied[globalIdx] ? D.green + '22' : D.teal,
-                                  color: applied[globalIdx] ? D.green : D.white,
+                                  color: applied[globalIdx] ? D.green : D.heading,
                                 }}
                               >{applied[globalIdx] ? `Applied at ${applied[globalIdx]}` : `Apply: ${rec.apply_action.replace(/_/g, ' ')}`}</button>
                             )}
