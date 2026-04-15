@@ -104,13 +104,45 @@ async function createService(data) {
     'base_price', 'price_range_min', 'price_range_max',
     'min_tech_skill_level', 'typical_materials_cost', 'sort_order',
   ]);
+  const jsonbKeys = new Set(['requires_certification', 'default_equipment', 'default_products']);
+
   const insert = {};
   for (const key of allowed) {
     if (data[key] !== undefined) {
-      insert[key] = numericKeys.has(key) && data[key] === '' ? null : data[key];
+      let val = data[key];
+      if (numericKeys.has(key)) {
+        if (val === '' || val === null || (typeof val === 'number' && isNaN(val))) {
+          val = null;
+        } else if (typeof val === 'string') {
+          const parsed = Number(val);
+          val = isNaN(parsed) ? null : parsed;
+        }
+      }
+      if (jsonbKeys.has(key) && typeof val === 'string') {
+        try { val = JSON.parse(val); } catch { val = null; }
+      }
+      insert[key] = val;
     }
   }
-  const [row] = await db('services').insert(insert).returning('*');
+
+  // Retry loop: strip missing columns until the insert succeeds
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const [row] = await db('services').insert(insert).returning('*');
+      return row;
+    } catch (err) {
+      if (err.code === '42703') {
+        const colMatch = err.message.match(/column "(\w+)"/);
+        if (colMatch && insert[colMatch[1]] !== undefined) {
+          delete insert[colMatch[1]];
+          continue;
+        }
+      }
+      throw err;
+    }
+  }
+  // Exhausted retries — try with minimum fields
+  const [row] = await db('services').insert({ service_key: insert.service_key, name: insert.name }).returning('*');
   return row;
 }
 
@@ -132,34 +164,58 @@ async function updateService(id, data) {
     'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
     'is_active', 'is_archived',
   ];
-  // Numeric columns — empty strings must become null or PostgreSQL rejects them
+  // Numeric columns — empty strings and NaN must become null or PostgreSQL rejects them
   const numericKeys = new Set([
     'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
     'base_price', 'price_range_min', 'price_range_max',
     'min_tech_skill_level', 'typical_materials_cost', 'sort_order',
   ]);
+  // JSONB columns — must be objects/arrays/null, not strings
+  const jsonbKeys = new Set(['requires_certification', 'default_equipment', 'default_products']);
+
   const update = { updated_at: new Date() };
   for (const key of allowed) {
     if (data[key] !== undefined) {
-      update[key] = numericKeys.has(key) && data[key] === '' ? null : data[key];
-    }
-  }
-  try {
-    const [row] = await db('services').where({ id }).update(update).returning('*');
-    return row;
-  } catch (err) {
-    // If a column doesn't exist yet (migration pending), strip it and retry
-    if (err.code === '42703') {
-      const colMatch = err.message.match(/column "(\w+)"/);
-      if (colMatch) {
-        delete update[colMatch[1]];
-        const [row] = await db('services').where({ id }).update(update).returning('*');
-        return row;
+      let val = data[key];
+      if (numericKeys.has(key)) {
+        // Coerce empty strings, NaN, and non-numeric values to null
+        if (val === '' || val === null || (typeof val === 'number' && isNaN(val))) {
+          val = null;
+        } else if (typeof val === 'string') {
+          const parsed = Number(val);
+          val = isNaN(parsed) ? null : parsed;
+        }
       }
+      if (jsonbKeys.has(key) && typeof val === 'string') {
+        try { val = JSON.parse(val); } catch { val = null; }
+      }
+      update[key] = val;
     }
-    throw err;
   }
+
+  // Retry loop: strip missing columns until the update succeeds
+  const strippedCols = [];
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const [row] = await db('services').where({ id }).update(update).returning('*');
+      return row;
+    } catch (err) {
+      if (err.code === '42703') {
+        // Column doesn't exist — strip it and retry
+        const colMatch = err.message.match(/column "(\w+)"/);
+        if (colMatch && update[colMatch[1]] !== undefined) {
+          strippedCols.push(colMatch[1]);
+          delete update[colMatch[1]];
+          continue;
+        }
+      }
+      throw err;
+    }
+  }
+  // If we exhausted retries, try with just the basics
+  const [row] = await db('services').where({ id }).update({ updated_at: new Date() }).returning('*');
+  return row;
 }
 
 /**

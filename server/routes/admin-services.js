@@ -64,7 +64,7 @@ router.post('/', async (req, res, next) => {
     res.status(201).json(service);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Service key already exists' });
-    next(err);
+    res.status(500).json({ error: err.message || 'Failed to create service' });
   }
 });
 
@@ -83,7 +83,9 @@ router.put('/:id', async (req, res, next) => {
     const service = await serviceLibrary.updateService(req.params.id, req.body);
     if (!service) return res.status(404).json({ error: 'Service not found' });
     res.json(service);
-  } catch (err) { next(err); }
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to update service' });
+  }
 });
 
 // DELETE /:id — soft delete (deactivate + archive)
