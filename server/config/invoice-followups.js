@@ -24,13 +24,13 @@ module.exports = {
     hour: 10,                  // fires at 10 AM
   },
 
-  // Thank-you message sent when an invoice is paid AFTER at least one reminder fired.
+  // Thank-you SMS disabled — Stripe auto-emails a receipt and the pay link
+  // they already have flips to a "Paid ✓" view with the full service report.
+  // Avoids a third notification for the same payment.
   thankYou: {
-    enabled: true,
+    enabled: false,
     template_key: 'invoice_thank_you',
-    body:
-      `{{name}}, got it — thank you for the payment! Your account is all caught up. ` +
-      `View your receipt + service report: {{payUrl}}\n\nSee you at your next service. — Waves 🌊`,
+    body: '',
   },
 
   // The touches. Order matters; step_index maps to this array.
