@@ -591,7 +591,7 @@ function CustomerTimeline({ customerId }) {
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {items.map((item, i) => (
-          <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 0', borderBottom: i < items.length - 1 ? `1px solid ${D.border}22` : 'none', fontSize: 12 }}>
+          <div key={item.id || `${item.type}-${item.date}-${i}`} style={{ display: 'flex', gap: 10, padding: '6px 0', borderBottom: i < items.length - 1 ? `1px solid ${D.border}22` : 'none', fontSize: 12 }}>
             <span style={{ fontSize: 14, width: 20, textAlign: 'center', flexShrink: 0 }}>{ICONS[item.type] || '•'}</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <span style={{ color: COLORS[item.type] || D.muted, fontWeight: 600 }}>{item.title}</span>

@@ -8,18 +8,20 @@ const logger = require('../services/logger');
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /status — platform connection status
-router.get('/status', async (req, res) => {
-  res.json({
-    platforms: {
-      facebook: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, pageId: process.env.FACEBOOK_PAGE_ID || '110336442031847' },
-      instagram: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, accountId: process.env.INSTAGRAM_ACCOUNT_ID || '17841465266249854' },
-      linkedin: { configured: !!process.env.LINKEDIN_ACCESS_TOKEN, companyId: process.env.LINKEDIN_COMPANY_ID || '89173265' },
-      gbp: { configured: true, locations: 4 },
-      gemini: { configured: !!process.env.GEMINI_API_KEY },
-      ai: { configured: !!process.env.ANTHROPIC_API_KEY },
-    },
-    rssFeed: 'https://www.wavespestcontrol.com/feed/',
-  });
+router.get('/status', async (req, res, next) => {
+  try {
+    res.json({
+      platforms: {
+        facebook: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, pageId: process.env.FACEBOOK_PAGE_ID || '110336442031847' },
+        instagram: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, accountId: process.env.INSTAGRAM_ACCOUNT_ID || '17841465266249854' },
+        linkedin: { configured: !!process.env.LINKEDIN_ACCESS_TOKEN, companyId: process.env.LINKEDIN_COMPANY_ID || '89173265' },
+        gbp: { configured: true, locations: 4 },
+        gemini: { configured: !!process.env.GEMINI_API_KEY },
+        ai: { configured: !!process.env.ANTHROPIC_API_KEY },
+      },
+      rssFeed: 'https://www.wavespestcontrol.com/feed/',
+    });
+  } catch (err) { next(err); }
 });
 
 // GET /rss — fetch latest RSS items
@@ -114,8 +116,8 @@ router.get('/stats', async (req, res, next) => {
 // GET /api/admin/social-media/analytics — aggregated analytics
 router.get('/analytics', async (req, res, next) => {
   try {
-    // Posts grouped by platform
-    const posts = await db('social_media_posts').orderBy('created_at', 'desc');
+    // Posts grouped by platform (cap at 2000 most-recent to avoid unbounded scans)
+    const posts = await db('social_media_posts').orderBy('created_at', 'desc').limit(2000);
 
     const byPlatform = {};
     const weeklyBuckets = {};

@@ -4,9 +4,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const PaymentRouter = require('../services/payment-router');
 const StripeService = require('../services/stripe');
-const SquareService = require('../services/square');
 const stripeConfig = require('../config/stripe-config');
-const config = require('../config');
 const { authenticate } = require('../middleware/auth');
 
 router.use(authenticate);
@@ -29,10 +27,9 @@ router.get('/', async (req, res, next) => {
         description: p.description,
         cardBrand: p.card_brand,
         lastFour: p.last_four,
-        processor: p.processor || p.pm_processor || null,
+        processor: 'stripe',
         methodType: p.method_type || 'card',
         bankName: p.bank_name || null,
-        squarePaymentId: p.square_payment_id || null,
         stripePaymentIntentId: p.stripe_payment_intent_id || null,
         refundAmount: p.refund_amount ? parseFloat(p.refund_amount) : null,
         refundStatus: p.refund_status || null,
@@ -56,7 +53,7 @@ router.get('/cards', async (req, res, next) => {
     res.json({
       cards: cards.map(c => ({
         id: c.id,
-        processor: c.processor || 'square',
+        processor: 'stripe',
         methodType: c.method_type || 'card',
         brand: c.card_brand,
         lastFour: c.last_four,
@@ -75,23 +72,15 @@ router.get('/cards', async (req, res, next) => {
 });
 
 // =========================================================================
-// GET /api/billing/processor — Which processor + publishable keys
+// GET /api/billing/processor — Stripe publishable key + availability
 // =========================================================================
 router.get('/processor', async (req, res, next) => {
   try {
-    const processor = await PaymentRouter.getProcessorName(req.customerId);
-
     res.json({
-      processor,
+      processor: 'stripe',
       stripe: {
         available: StripeService.isAvailable(),
         publishableKey: stripeConfig.publishableKey || null,
-      },
-      square: {
-        available: !!config.square?.accessToken,
-        appId: process.env.SQUARE_APP_ID || null,
-        locationId: config.square?.locationId || null,
-        environment: config.square?.environment || 'sandbox',
       },
     });
   } catch (err) {
@@ -122,33 +111,24 @@ router.post('/cards/setup-intent', async (req, res, next) => {
 });
 
 // =========================================================================
-// POST /api/billing/cards — Save a payment method (Stripe or Square)
+// POST /api/billing/cards — Save a payment method (Stripe)
 // =========================================================================
 router.post('/cards', async (req, res, next) => {
   try {
     const schema = Joi.object({
       // Stripe: paymentMethodId from confirmed SetupIntent
-      paymentMethodId: Joi.string().optional(),
-      // Square: cardNonce from Square Web Payments SDK
-      cardNonce: Joi.string().optional(),
-    }).or('paymentMethodId', 'cardNonce');
+      paymentMethodId: Joi.string().required(),
+    });
 
-    const { paymentMethodId, cardNonce } = await schema.validateAsync(req.body);
+    const { paymentMethodId } = await schema.validateAsync(req.body);
 
-    let card;
-    if (paymentMethodId) {
-      // Stripe flow
-      card = await StripeService.savePaymentMethod(req.customerId, paymentMethodId);
-    } else {
-      // Square flow
-      card = await SquareService.saveCard(req.customerId, cardNonce);
-    }
+    const card = await StripeService.savePaymentMethod(req.customerId, paymentMethodId);
 
     res.json({
       success: true,
       card: {
         id: card.id,
-        processor: card.processor || 'square',
+        processor: 'stripe',
         methodType: card.method_type || 'card',
         brand: card.card_brand,
         lastFour: card.last_four,
@@ -175,11 +155,7 @@ router.delete('/cards/:id', async (req, res, next) => {
 
     if (!card) return res.status(404).json({ error: 'Payment method not found' });
 
-    if (card.processor === 'stripe') {
-      await StripeService.removeCard(req.customerId, req.params.id);
-    } else {
-      await SquareService.removeCard(req.customerId, req.params.id);
-    }
+    await StripeService.removeCard(req.customerId, req.params.id);
 
     res.json({ success: true, message: 'Payment method removed' });
   } catch (err) {
@@ -221,7 +197,7 @@ router.get('/balance', async (req, res, next) => {
       upcomingCharges: parseFloat(upcoming?.total || 0),
       monthlyRate: parseFloat(customer.monthly_rate || 0),
       tier: customer.waveguard_tier,
-      processor: await PaymentRouter.getProcessorName(req.customerId),
+      processor: 'stripe',
       nextCharge: nextPayment ? {
         amount: parseFloat(nextPayment.amount),
         date: nextPayment.payment_date,

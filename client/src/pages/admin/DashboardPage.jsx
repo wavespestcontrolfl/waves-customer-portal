@@ -60,8 +60,8 @@ export default function DashboardPage() {
   const [weekBookings, setWeekBookings] = useState([]);
   const [bookingsLoading, setBookingsLoading] = useState(true);
   useEffect(() => {
-    adminFetch('/admin/dashboard').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
-    adminFetch('/admin/dashboard/square-bookings?days=7').then(d => { setWeekBookings(d.bookings || []); setBookingsLoading(false); }).catch(() => setBookingsLoading(false));
+    adminFetch('/admin/dashboard').then(d => { setData(d); setLoading(false); }).catch(err => { console.error('[dashboard] load failed', err); setLoading(false); });
+    adminFetch('/admin/dashboard/square-bookings?days=7').then(d => { setWeekBookings(d.bookings || []); setBookingsLoading(false); }).catch(err => { console.error('[dashboard] bookings failed', err); setBookingsLoading(false); });
   }, []);
 
   if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center', fontSize: 15 }}>Loading dashboard...</div>;
@@ -106,7 +106,7 @@ export default function DashboardPage() {
             <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 700, color: D.white, fontFamily: "'JetBrains Mono', monospace" }}>
               {kpi.value}
             </div>
-            {kpi.change !== undefined && (
+            {kpi.change != null && (
               <div style={{ fontSize: 13, color: kpi.color, marginTop: 4 }}>
                 {kpi.change >= 0 ? '↑' : '↓'} {kpi.changePrefix || ''}{Math.abs(kpi.change)}{kpi.changeSuffix}
               </div>
@@ -130,9 +130,14 @@ export default function DashboardPage() {
         </div>
         <div style={{ height: 220 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data.revenueChart.daily}>
+            <BarChart data={data.revenueChart?.daily || []}>
               <CartesianGrid strokeDasharray="3 3" stroke={D.border} />
-              <XAxis dataKey="date" tick={{ fill: D.muted, fontSize: 10 }} tickFormatter={d => new Date(d + 'T12:00:00').getDate()} />
+              <XAxis dataKey="date" tick={{ fill: D.muted, fontSize: 10 }} tickFormatter={d => {
+              if (!d) return '';
+              const s = String(d).slice(0, 10);
+              const parsed = new Date(s + 'T12:00:00');
+              return isNaN(parsed) ? '' : parsed.getDate();
+            }} />
               <YAxis tick={{ fill: D.muted, fontSize: 10 }} tickFormatter={v => `$${v}`} />
               <Tooltip contentStyle={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, color: D.white, fontSize: 13 }} formatter={(v) => fmtD(v)} />
               <Bar dataKey="total" fill={D.teal} radius={[4, 4, 0, 0]} />

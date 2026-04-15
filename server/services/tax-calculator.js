@@ -1,6 +1,11 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+// Waves operates in ET. Use ET calendar date regardless of server TZ (Railway=UTC).
+function todayET() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
 const TaxCalculator = {
 
   /**
@@ -17,7 +22,7 @@ const TaxCalculator = {
     const exemption = await db('tax_exemptions')
       .where({ customer_id: customerId, active: true, verified: true })
       .where(function () {
-        this.whereNull('expiry_date').orWhere('expiry_date', '>=', new Date().toISOString().split('T')[0]);
+        this.whereNull('expiry_date').orWhere('expiry_date', '>=', todayET());
       })
       .first();
 

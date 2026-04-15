@@ -302,7 +302,9 @@ async function comparePeriods(input) {
       m.estimates_accepted = parseInt(ea?.c || 0);
     }
     if (wantAll || metrics.includes('churn')) {
-      const ch = await db('customers').where({ active: false }).whereBetween('updated_at', [from, to + 'T23:59:59']).count('* as c').first();
+      const ch = await db('customers').where({ active: false })
+        .whereRaw('COALESCE(churned_at, updated_at) BETWEEN ? AND ?', [from, to + 'T23:59:59'])
+        .count('* as c').first();
       m.churned = parseInt(ch?.c || 0);
     }
     return m;
@@ -332,44 +334,46 @@ async function comparePeriods(input) {
 
 
 async function getMrrTrend(months) {
-  const results = [];
   const now = new Date();
-
+  const windows = [];
   for (let i = months - 1; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-    const label = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    windows.push({
+      start: d,
+      end: monthEnd,
+      label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+    });
+  }
 
-    // Approximate MRR by active customers at end of that month
-    const mrrRow = await db('customers')
-      .where({ active: true })
-      .where('created_at', '<=', monthEnd.toISOString())
-      .where(function () {
-        this.whereNull('updated_at')
-          .orWhere('updated_at', '>=', d.toISOString())
-          .orWhere('active', true);
-      })
-      .where('monthly_rate', '>', 0)
-      .select(
-        db.raw('SUM(monthly_rate) as mrr'),
-        db.raw('COUNT(*) as customer_count'),
-      ).first();
-
-    const byTier = await db('customers')
-      .where({ active: true })
-      .where('created_at', '<=', monthEnd.toISOString())
-      .where('monthly_rate', '>', 0)
-      .select('waveguard_tier', db.raw('SUM(monthly_rate) as mrr'), db.raw('COUNT(*) as count'))
-      .groupBy('waveguard_tier');
-
-    results.push({
-      month: label,
-      date: d.toISOString().split('T')[0],
+  // Batch: one query per month, all in parallel (instead of sequential awaits)
+  const settled = await Promise.all(windows.map(async w => {
+    const [mrrRow, byTier] = await Promise.all([
+      db('customers')
+        .where({ active: true })
+        .where('created_at', '<=', w.end.toISOString())
+        .where('monthly_rate', '>', 0)
+        .select(
+          db.raw('SUM(monthly_rate) as mrr'),
+          db.raw('COUNT(*) as customer_count'),
+        ).first(),
+      db('customers')
+        .where({ active: true })
+        .where('created_at', '<=', w.end.toISOString())
+        .where('monthly_rate', '>', 0)
+        .select('waveguard_tier', db.raw('SUM(monthly_rate) as mrr'), db.raw('COUNT(*) as count'))
+        .groupBy('waveguard_tier'),
+    ]);
+    return {
+      month: w.label,
+      date: w.start.toISOString().split('T')[0],
       mrr: parseFloat(mrrRow?.mrr || 0),
       customer_count: parseInt(mrrRow?.customer_count || 0),
       by_tier: byTier.map(t => ({ tier: t.waveguard_tier || 'None', mrr: parseFloat(t.mrr || 0), count: parseInt(t.count) })),
-    });
-  }
+    };
+  }));
+
+  const results = settled;
 
   // Growth rates
   for (let i = 1; i < results.length; i++) {
@@ -489,8 +493,8 @@ async function getChurnAnalysis(input) {
 
   const churned = await db('customers')
     .where({ active: false })
-    .whereBetween('updated_at', [from, to + 'T23:59:59'])
-    .select('id', 'first_name', 'last_name', 'waveguard_tier', 'monthly_rate', 'city', 'member_since', 'updated_at', 'lead_source')
+    .whereRaw('COALESCE(churned_at, updated_at) BETWEEN ? AND ?', [from, to + 'T23:59:59'])
+    .select('id', 'first_name', 'last_name', 'waveguard_tier', 'monthly_rate', 'city', 'member_since', 'updated_at', 'churned_at', 'lead_source')
     .orderBy('monthly_rate', 'desc');
 
   const totalLostMRR = churned.reduce((s, c) => s + parseFloat(c.monthly_rate || 0), 0);

@@ -25,7 +25,13 @@ const { WAVES_LOCATIONS } = require('../config/locations');
 const config = require('../config');
 
 let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+try {
+  const sdk = require('@anthropic-ai/sdk');
+  Anthropic = sdk.default || sdk.Anthropic || sdk;
+} catch (err) {
+  logger.warn(`[social] Anthropic SDK unavailable: ${err.message}`);
+  Anthropic = null;
+}
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID || '110336442031847';
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID || '17841465266249854';
@@ -38,32 +44,36 @@ async function generateContent(platform, { title, description, link, locationNam
   }
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+  const safeTitle = String(title || '').replace(/[\r\n]+/g, ' ').slice(0, 300);
+  const safeDesc = String(description || '').replace(/[\r\n]+/g, ' ').slice(0, 1000);
+  const safeLocation = String(locationName || '').replace(/[\r\n]+/g, ' ').slice(0, 100);
+
   const prompts = {
     facebook: `Write an engaging Facebook post for Waves Pest Control based on this blog article.
 Keep it conversational, use 1-2 relevant emojis, include a call to action.
 150-250 characters. Do NOT include the URL — it will be added separately.
 
-Title: ${title}
-Description: ${description}`,
+Title: ${safeTitle}
+Description: ${safeDesc}`,
 
     instagram: `Write an Instagram caption for Waves Pest Control based on this blog article.
 Keep it engaging, use 3-5 relevant hashtags at the end (#wavespestcontrol #pestcontrol #swfl etc).
 150-300 characters before hashtags. Do NOT include any URL.
 
-Title: ${title}
-Description: ${description}`,
+Title: ${safeTitle}
+Description: ${safeDesc}`,
 
     linkedin: `Write a professional LinkedIn post for Waves Pest Control company page based on this blog article.
 Professional but approachable tone. 100-200 characters. Do NOT include the URL.
 
-Title: ${title}
-Description: ${description}`,
+Title: ${safeTitle}
+Description: ${safeDesc}`,
 
-    gbp: `Write a Google Business Profile post for Waves Pest Control ${locationName || ''} based on this blog article.
+    gbp: `Write a Google Business Profile post for Waves Pest Control ${safeLocation} based on this blog article.
 Local, helpful tone for SWFL homeowners. 100-200 characters. Do NOT include any URL.
 
-Title: ${title}
-Description: ${description}`,
+Title: ${safeTitle}
+Description: ${safeDesc}`,
   };
 
   const prompt = prompts[platform] || prompts.facebook;
@@ -246,9 +256,15 @@ async function postToLinkedIn(text, link, title, description, imageUrl) {
     const err = await res.text();
     throw new Error(`LinkedIn API ${res.status}: ${err}`);
   }
-  const data = await res.json();
-  logger.info(`[social] LinkedIn post created: ${data.id}`);
-  return { platform: 'linkedin', postId: data.id, success: true };
+  const headerId = res.headers.get('x-restli-id');
+  let bodyId = null;
+  try {
+    const data = await res.json();
+    bodyId = data?.id || null;
+  } catch { /* empty body */ }
+  const postId = headerId || bodyId;
+  logger.info(`[social] LinkedIn post created: ${postId}`);
+  return { platform: 'linkedin', postId, success: true };
 }
 
 async function postToGBP(locationId, summary, link, imageUrl) {
@@ -275,7 +291,14 @@ async function postToGBP(locationId, summary, link, imageUrl) {
 
 // ── RSS Feed Polling ──
 async function fetchRSSFeed(feedUrl) {
-  const res = await fetch(feedUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  let res;
+  try {
+    res = await fetch(feedUrl, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!res.ok) throw new Error(`RSS fetch failed: ${res.status}`);
   const xml = await res.text();
 
@@ -402,9 +425,12 @@ const SocialMediaService = {
     }
 
     // Post to all 4 GBP locations
+    // customContent.gbp may be a string (same copy for all locations) or an object keyed by location id
     for (const loc of WAVES_LOCATIONS) {
       try {
-        const gbpContent = customContent?.gbp?.[loc.id] ||
+        const gbpCustom = customContent?.gbp;
+        const gbpContent =
+          (typeof gbpCustom === 'string' ? gbpCustom : gbpCustom?.[loc.id]) ||
           await generateContent('gbp', { title, description, link, locationName: loc.name });
         const r = await postToGBP(loc.id, gbpContent, link);
         platformResults.push(r);

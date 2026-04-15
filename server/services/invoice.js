@@ -1,22 +1,8 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const config = require('../config');
-const { v4: uuidv4 } = require('uuid');
 const TaxCalculator = require('./tax-calculator');
 const DiscountEngine = require('./discount-engine');
-
-let paymentsApi;
-try {
-  const { Client, Environment } = require('square');
-  if (config.square?.accessToken) {
-    const client = new Client({
-      accessToken: config.square.accessToken,
-      environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,
-    });
-    paymentsApi = client.paymentsApi;
-  }
-} catch { /* square not available */ }
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -236,100 +222,6 @@ const InvoiceService = {
       products_applied: typeof invoice.products_applied === 'string' ? JSON.parse(invoice.products_applied) : (invoice.products_applied || []),
       service_photos: typeof invoice.service_photos === 'string' ? JSON.parse(invoice.service_photos) : (invoice.service_photos || []),
     };
-  },
-
-  /**
-   * Process payment via Square Web Payments SDK.
-   * Called when customer submits payment on the /pay page.
-   */
-  async processPayment(token, { sourceId, verificationToken, paymentMethod }) {
-    if (!paymentsApi) throw new Error('Square payments not configured');
-
-    const invoice = await db('invoices').where({ token }).first();
-    if (!invoice) throw new Error('Invoice not found');
-    if (invoice.status === 'paid') throw new Error('Invoice already paid');
-
-    const customer = await db('customers').where({ id: invoice.customer_id }).first();
-    const amountCents = Math.round(invoice.total * 100);
-
-    try {
-      const paymentRequest = {
-        idempotencyKey: uuidv4(),
-        sourceId, // card nonce, Apple Pay token, Google Pay token, or ACH token
-        amountMoney: {
-          amount: BigInt(amountCents),
-          currency: 'USD',
-        },
-        locationId: config.square.locationId,
-        note: `${invoice.invoice_number} — ${invoice.title || 'Service'} — ${customer.first_name} ${customer.last_name}`,
-        referenceId: invoice.id,
-      };
-
-      // Link to Square customer if available
-      if (customer.square_customer_id) {
-        paymentRequest.customerId = customer.square_customer_id;
-      }
-
-      // Add verification token for SCA/3DS if provided
-      if (verificationToken) {
-        paymentRequest.verificationToken = verificationToken;
-      }
-
-      const { result } = await paymentsApi.createPayment(paymentRequest);
-      const payment = result.payment;
-
-      // Update invoice
-      await db('invoices').where({ id: invoice.id }).update({
-        status: 'paid',
-        paid_at: new Date(),
-        square_payment_id: payment.id,
-        payment_method: paymentMethod || 'card',
-        card_brand: payment.cardDetails?.card?.cardBrand || null,
-        card_last_four: payment.cardDetails?.card?.last4 || null,
-        receipt_url: payment.receiptUrl || null,
-        updated_at: new Date(),
-      });
-
-      // Record in payments table for billing history
-      await db('payments').insert({
-        customer_id: invoice.customer_id,
-        square_payment_id: payment.id,
-        payment_date: new Date().toISOString().split('T')[0],
-        amount: invoice.total,
-        status: payment.status === 'COMPLETED' ? 'paid' : 'processing',
-        description: invoice.title || `Invoice ${invoice.invoice_number}`,
-        metadata: JSON.stringify({
-          invoice_id: invoice.id,
-          invoice_number: invoice.invoice_number,
-          square_receipt_url: payment.receiptUrl,
-        }),
-      });
-
-      // Log activity
-      await db('activity_log').insert({
-        customer_id: invoice.customer_id,
-        action: 'invoice_paid',
-        description: `Invoice ${invoice.invoice_number} paid: $${invoice.total} via ${paymentMethod || 'card'}`,
-        metadata: JSON.stringify({
-          invoiceId: invoice.id,
-          amount: invoice.total,
-          squarePaymentId: payment.id,
-        }),
-      }).catch(() => {});
-
-      logger.info(`[invoice] Payment processed: ${invoice.invoice_number} — $${invoice.total} via ${paymentMethod || 'card'}`);
-
-      return {
-        success: true,
-        invoiceNumber: invoice.invoice_number,
-        amount: invoice.total,
-        receiptUrl: payment.receiptUrl,
-        paymentId: payment.id,
-      };
-    } catch (err) {
-      logger.error(`[invoice] Payment failed for ${invoice.invoice_number}: ${err.message}`);
-      throw new Error(`Payment failed: ${err.message}`);
-    }
   },
 
   /**

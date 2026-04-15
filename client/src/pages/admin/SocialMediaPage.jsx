@@ -19,7 +19,15 @@ const sInput = { width: '100%', padding: '10px 12px', background: D.input, borde
 const PLATFORM_ICONS = { facebook: '📘', instagram: '📷', linkedin: '💼', gbp: '📍' };
 const PLATFORM_COLORS = { facebook: D.blue, instagram: D.purple, linkedin: D.blue, gbp: D.green };
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' && window.innerWidth < 640);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 640);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return isMobile;
+}
 
 export default function SocialMediaPage() {
   const [tab, setTab] = useState('compose');
@@ -126,6 +134,7 @@ export default function SocialMediaPage() {
 
 // ── Compose Tab ──
 function ComposeTab({ showToast, onPublished }) {
+  const isMobile = useIsMobile();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [link, setLink] = useState('');
@@ -143,8 +152,11 @@ function ComposeTab({ showToast, onPublished }) {
       });
       setPreview(data);
       setCustomContent(data);
-    } catch (e) { showToast(`Preview failed: ${e.message}`); }
-    setGenerating(false);
+    } catch (e) {
+      showToast(`Preview failed: ${e.message}`);
+    } finally {
+      setGenerating(false);
+    }
   };
 
   const handlePublish = async () => {
@@ -158,8 +170,11 @@ function ComposeTab({ showToast, onPublished }) {
       const failed = result.platforms?.filter(p => p.error).length || 0;
       showToast(`Published: ${successes} success, ${skipped} skipped, ${failed} failed`);
       onPublished();
-    } catch (e) { showToast(`Publish failed: ${e.message}`); }
-    setPublishing(false);
+    } catch (e) {
+      showToast(`Publish failed: ${e.message}`);
+    } finally {
+      setPublishing(false);
+    }
   };
 
   return (
@@ -286,6 +301,7 @@ function RSSTab({ showToast, onPublished }) {
 
 // ── History Tab ──
 function HistoryTab({ history, onRefresh }) {
+  const isMobile = useIsMobile();
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -295,7 +311,13 @@ function HistoryTab({ history, onRefresh }) {
       {history.length === 0 ? (
         <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No posts yet</div>
       ) : history.map(post => {
-        const platforms = typeof post.platforms_posted === 'string' ? JSON.parse(post.platforms_posted) : (post.platforms_posted || []);
+        let platforms = [];
+        try {
+          platforms = typeof post.platforms_posted === 'string'
+            ? JSON.parse(post.platforms_posted)
+            : (post.platforms_posted || []);
+          if (!Array.isArray(platforms)) platforms = [];
+        } catch { platforms = []; }
         return (
           <div key={post.id} style={{ ...sCard, marginBottom: 8 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
@@ -405,6 +427,7 @@ function AnalyticsTab() {
 
 // ── Templates Tab ──
 function TemplatesTab({ showToast }) {
+  const isMobile = useIsMobile();
   const TEMPLATES = [
     { id: 'seasonal_tip', name: 'Seasonal Pest Tip', icon: '🐛', platforms: ['facebook', 'instagram', 'gbp'],
       template: 'SW Florida pest alert: {topic}. Here\'s what homeowners need to know to protect their property this season. 🌊\n\n#wavespestcontrol #pestcontrol #swfl' },

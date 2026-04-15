@@ -27,18 +27,12 @@ module.exports = {
     verifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID,
   },
 
-  square: {
-    accessToken: process.env.SQUARE_ACCESS_TOKEN,
-    locationId: process.env.SQUARE_LOCATION_ID,
-    environment: process.env.SQUARE_ENVIRONMENT || 'sandbox',
-  },
-
   stripe: {
     secretKey: process.env.STRIPE_SECRET_KEY,
     publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
     webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
   },
-  paymentProcessor: process.env.PAYMENT_PROCESSOR || 'both',
+  paymentProcessor: 'stripe',
 
   bouncie: {
     clientId: process.env.BOUNCIE_CLIENT_ID,

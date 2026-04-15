@@ -1,13 +1,10 @@
 /**
- * Unified Calendar Sync — pulls appointments from both Square Bookings API
- * and Google Calendar into the scheduled_services table.
- *
- * One button, both sources.
+ * Unified Calendar Sync — pulls appointments from Google Calendar into
+ * the scheduled_services table.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { resolveLocation } = require('../config/locations');
 
 const GOOGLE_KEY = process.env.GOOGLE_CALENDAR_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'c_5c16252ee04075f3fa68df16b64b93a0bf260fb164a84adbbcf5203e59e57609@group.calendar.google.com';
@@ -40,10 +37,6 @@ function getZone(city) {
   if (c.includes('sarasota') || c.includes('siesta') || c.includes('osprey')) return 'sarasota';
   if (c.includes('venice') || c.includes('north port') || c.includes('nokomis')) return 'venice';
   return 'unknown';
-}
-
-function mapSquareStatus(s) {
-  return { ACCEPTED: 'confirmed', PENDING: 'pending', DECLINED: 'cancelled', CANCELLED_BY_CUSTOMER: 'cancelled', CANCELLED_BY_SELLER: 'cancelled', NO_SHOW: 'cancelled' }[s] || 'pending';
 }
 
 async function findOrCreateCustomer({ name, phone, email, source }) {
@@ -80,101 +73,9 @@ async function findOrCreateCustomer({ name, phone, email, source }) {
 // ══════════════════════════════════════════════════════════════
 const CalendarSync = {
   async syncAll(daysAhead = 14) {
-    const results = { square: { found: 0, created: 0, updated: 0, skipped: 0, error: null }, google: { found: 0, created: 0, updated: 0, skipped: 0, error: null } };
+    const results = { google: { found: 0, created: 0, updated: 0, skipped: 0, error: null } };
 
-    // ── Square Bookings ──
     try {
-      const SquareService = require('./square');
-      const bookings = await SquareService.getUpcomingBookings(daysAhead);
-      results.square.found = bookings.length;
-
-      for (const b of bookings) {
-        try {
-          const isCancelled = ['CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SELLER', 'DECLINED', 'NO_SHOW'].includes(b.status);
-
-          // Dedup: check by square_booking_id OR by customer+date+time
-          let existing = null;
-          try { existing = await db('scheduled_services').where({ square_booking_id: b.id }).first(); } catch { /* column may not exist */ }
-
-          if (!existing) {
-            // Fallback dedup: match by customer + date + time window
-            const start = new Date(b.startAt);
-            const dateStr = start.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-            const startTime = start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' });
-
-            const customerId = await findOrCreateCustomer({ name: b.customerName, phone: b.customerPhone, email: b.customerEmail, source: 'square_booking' });
-            if (customerId) {
-              existing = await db('scheduled_services')
-                .where({ customer_id: customerId, scheduled_date: dateStr, window_start: startTime })
-                .first();
-            }
-          }
-
-          if (existing) {
-            const newStatus = isCancelled ? 'cancelled' : mapSquareStatus(b.status);
-            if (existing.status !== newStatus && existing.status !== 'completed') {
-              await db('scheduled_services').where({ id: existing.id }).update({ status: newStatus, updated_at: new Date() });
-              results.square.updated++;
-            } else { results.square.skipped++; }
-            continue;
-          }
-
-          if (isCancelled) { results.square.skipped++; continue; }
-
-          const customerId = await findOrCreateCustomer({ name: b.customerName, phone: b.customerPhone, email: b.customerEmail, source: 'square_booking' });
-          if (!customerId) { results.square.skipped++; continue; }
-
-          const start = new Date(b.startAt);
-          const dateStr = start.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-          const startTime = start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' });
-          const endTime = b.durationMinutes ? new Date(start.getTime() + b.durationMinutes * 60000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' }) : null;
-          const customer = await db('customers').where({ id: customerId }).first();
-          const hour = parseInt(startTime.split(':')[0]);
-
-          const ins = {
-            customer_id: customerId, scheduled_date: dateStr,
-            window_start: startTime, window_end: endTime,
-            service_type: b.serviceName || 'Service', status: mapSquareStatus(b.status),
-            notes: b.note || null,
-          };
-          // These columns from migration 062 may not exist yet
-          try {
-            await db('scheduled_services').insert({ ...ins, square_booking_id: b.id, source: 'square', zone: getZone(customer?.city), time_window: hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening', estimated_duration_minutes: b.durationMinutes || 60 });
-          } catch (colErr) {
-            // Fallback without new columns
-            await db('scheduled_services').insert(ins);
-          }
-          // Register for appointment reminders (no confirmation SMS for square_sync)
-          try {
-            const AppointmentReminders = require('./appointment-reminders');
-            const newSvc = await db('scheduled_services').where({ square_booking_id: b.id }).first();
-            if (newSvc) {
-              await AppointmentReminders.registerAppointment(
-                newSvc.id, customerId, start.toISOString(),
-                b.serviceName || 'Service', 'square_sync'
-              );
-            }
-          } catch (remErr) {
-            logger.error(`[cal-sync] Reminder registration failed: ${remErr.message}`);
-          }
-
-          results.square.created++;
-        } catch (err) {
-          logger.error(`[cal-sync] Square booking insert failed: ${err.message}`);
-          results.square.skipped++;
-        }
-      }
-    } catch (err) {
-      results.square.error = err.message;
-      logger.error(`[cal-sync] Square sync failed: ${err.message}`);
-    }
-
-    // ── Google Calendar ──
-    // DISABLED: Google Calendar "Adam Benetti - Square Appointments" is a mirror
-    // of Square Bookings, so syncing both creates duplicates. Square is the source of truth.
-    const SKIP_GCAL = true;
-    try {
-      if (SKIP_GCAL) throw new Error('Google Calendar sync disabled — Square is source of truth');
       if (!GOOGLE_KEY) throw new Error('Set GOOGLE_API_KEY or GOOGLE_CALENDAR_API_KEY in Railway env vars');
 
       const now = new Date();
@@ -186,7 +87,6 @@ const CalendarSync = {
 
       const res = await fetch(url);
       if (!res.ok) {
-        const errBody = await res.text();
         const hint = res.status === 403
           ? 'Calendar must be shared publicly: Google Calendar → Settings → calendar → Access permissions → Make available to public'
           : res.status === 404 ? 'Calendar ID not found — check GOOGLE_CALENDAR_ID'
@@ -202,7 +102,7 @@ const CalendarSync = {
           const startRaw = ev.start?.dateTime || ev.start?.date;
           if (!startRaw) { results.google.skipped++; continue; }
 
-          // Deduplicate by google event ID
+          // Deduplicate by google event ID (stored in legacy square_booking_id column)
           const gcalId = `gcal_${ev.id}`;
           try {
             const existing = await db('scheduled_services').where({ square_booking_id: gcalId }).first();
@@ -248,7 +148,7 @@ const CalendarSync = {
       logger.error(`[cal-sync] Google Calendar sync failed: ${err.message}`);
     }
 
-    logger.info(`[cal-sync] Done — Square: ${results.square.created} new / Google: ${results.google.created} new`);
+    logger.info(`[cal-sync] Done — Google: ${results.google.created} new`);
     return results;
   },
 };

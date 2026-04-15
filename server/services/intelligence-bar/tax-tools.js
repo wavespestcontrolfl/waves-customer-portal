@@ -10,6 +10,19 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 
+// ET date (Waves operates in FL; Railway server runs UTC).
+function todayET() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+// Calendar-day diff (dueDate - today) anchored at UTC midnight; same-day = 0.
+function daysUntil(due) {
+  if (!due) return 0;
+  const dueStr = (due instanceof Date ? due.toISOString() : String(due)).slice(0, 10);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  return Math.floor((new Date(dueStr + 'T00:00:00Z') - new Date(todayStr + 'T00:00:00Z')) / 86400000);
+}
+
 const TAX_TOOLS = [
   {
     name: 'get_tax_dashboard',
@@ -157,9 +170,9 @@ async function executeTaxTool(toolName, input) {
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 
 async function getTaxDashboard(yearInput) {
-  const year = yearInput || String(new Date().getFullYear());
+  const year = yearInput || todayET().slice(0, 4);
   const yearStart = `${year}-01-01`;
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayET();
 
   const [expenses, equipment, deadlines, alertCounts, latestReport] = await Promise.all([
     db('expenses').where('tax_year', year).select(
@@ -185,16 +198,24 @@ async function getTaxDashboard(yearInput) {
     db('tax_advisor_reports').orderBy('report_date', 'desc').first().catch(() => null),
   ]);
 
-  // Estimated tax collected
+  // Estimated tax collected + gross revenue
   let taxCollected = 0;
+  let ytdRevenue = 0;
   try {
-    const rev = await db('revenue_daily').where('date', '>=', yearStart).sum('tax_collected as total').first();
-    taxCollected = parseFloat(rev?.total || 0);
-  } catch {}
+    const rev = await db('revenue_daily')
+      .where('date', '>=', yearStart)
+      .select(db.raw('COALESCE(SUM(tax_collected), 0) as tax'), db.raw('COALESCE(SUM(total_revenue), 0) as revenue'))
+      .first();
+    taxCollected = parseFloat(rev?.tax || 0);
+    ytdRevenue = parseFloat(rev?.revenue || 0);
+  } catch (err) {
+    logger.warn(`[intelligence-bar:tax] revenue_daily unavailable: ${err.message}`);
+  }
 
   return {
     year,
     tax_collected_ytd: taxCollected,
+    ytd_revenue: ytdRevenue,
     expenses: { total: parseFloat(expenses.total), deductible: parseFloat(expenses.deductible), count: parseInt(expenses.count) },
     equipment: {
       count: parseInt(equipment.count), total_cost: parseFloat(equipment.total_cost),
@@ -204,7 +225,7 @@ async function getTaxDashboard(yearInput) {
     upcoming_deadlines: deadlines.map(d => ({
       type: d.filing_type, title: d.title, due_date: d.due_date, status: d.status,
       amount_due: d.amount_due ? parseFloat(d.amount_due) : null,
-      days_until: Math.ceil((new Date(d.due_date) - new Date()) / 86400000),
+      days_until: daysUntil(d.due_date),
     })),
     pending_alerts: parseInt(alertCounts?.count || 0),
     latest_report: latestReport ? { date: latestReport.report_date, grade: latestReport.grade, summary: latestReport.executive_summary } : null,
@@ -294,11 +315,11 @@ async function getFilingDeadlines(input) {
       id: f.id, type: f.filing_type, title: f.title, period: f.period_label,
       due_date: f.due_date, status: f.status,
       amount_due: f.amount_due ? parseFloat(f.amount_due) : null,
-      days_until: Math.ceil((new Date(f.due_date) - new Date()) / 86400000),
+      days_until: daysUntil(f.due_date),
       overdue: new Date(f.due_date) < new Date() && f.status !== 'filed',
     })),
     overdue_count: overdue.length,
-    next_due: filings[0] ? { title: filings[0].title, date: filings[0].due_date, days: Math.ceil((new Date(filings[0].due_date) - new Date()) / 86400000) } : null,
+    next_due: filings[0] ? { title: filings[0].title, date: filings[0].due_date, days: daysUntil(filings[0].due_date) } : null,
   };
 }
 
@@ -306,41 +327,39 @@ async function getFilingDeadlines(input) {
 async function getQuarterlyEstimate(quarter) {
   const now = new Date();
   const q = quarter || `Q${Math.floor(now.getMonth() / 3) + 1}`;
+  const year = now.getFullYear();
+  const qNum = parseInt(q.replace('Q', ''));
+  const startMonth = (qNum - 1) * 3;
+  const startDate = new Date(year, startMonth, 1).toISOString().split('T')[0];
+  const endDate = new Date(year, startMonth + 3, 0).toISOString().split('T')[0];
 
-  try {
-    const SquareTaxReconciliation = require('../square-tax-reconciliation');
-    const result = await SquareTaxReconciliation.calculateQuarterlyEstimate(q);
-    return { quarter: q, ...result };
-  } catch {
-    // Fallback manual calculation
-    const year = now.getFullYear();
-    const qNum = parseInt(q.replace('Q', ''));
-    const startMonth = (qNum - 1) * 3;
-    const startDate = new Date(year, startMonth, 1).toISOString().split('T')[0];
-    const endDate = new Date(year, startMonth + 3, 0).toISOString().split('T')[0];
+  const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
+  const expenses = await db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
 
-    const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
-    const expenses = await db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
+  const grossIncome = parseFloat(revenue?.total || 0);
+  const totalExpenses = parseFloat(expenses?.total || 0);
+  const taxableIncome = Math.max(0, grossIncome - totalExpenses);
 
-    const grossIncome = parseFloat(revenue?.total || 0);
-    const totalExpenses = parseFloat(expenses?.total || 0);
-    const taxableIncome = grossIncome - totalExpenses;
-    const estimatedFederal = taxableIncome * 0.22; // rough estimate
-    const estimatedState = 0; // Florida has no state income tax
-    const selfEmployment = taxableIncome * 0.153;
+  // SE tax: 15.3% on 92.35% of net SE earnings (IRS Schedule SE)
+  const seBase = taxableIncome * 0.9235;
+  const selfEmployment = seBase * 0.153;
 
-    return {
-      quarter: q,
-      gross_income: Math.round(grossIncome),
-      total_expenses: Math.round(totalExpenses),
-      taxable_income: Math.round(taxableIncome),
-      estimated_federal: Math.round(estimatedFederal),
-      estimated_state: estimatedState,
-      self_employment_tax: Math.round(selfEmployment),
-      total_estimated: Math.round(estimatedFederal + selfEmployment),
-      note: 'Florida has no state income tax. Federal rate estimated at 22%. Self-employment tax at 15.3%. Consult your CPA for precise calculations.',
-    };
-  }
+  // 50% of SE tax is deductible from AGI before federal income tax
+  const incomeTaxBase = Math.max(0, taxableIncome - (selfEmployment * 0.5));
+  const estimatedFederal = incomeTaxBase * 0.22; // rough 22% bracket estimate
+  const estimatedState = 0; // Florida has no state income tax
+
+  return {
+    quarter: q,
+    gross_income: Math.round(grossIncome),
+    total_expenses: Math.round(totalExpenses),
+    taxable_income: Math.round(taxableIncome),
+    estimated_federal: Math.round(estimatedFederal),
+    estimated_state: estimatedState,
+    self_employment_tax: Math.round(selfEmployment),
+    total_estimated: Math.round(estimatedFederal + selfEmployment),
+    note: 'Florida has no state income tax. Federal rate estimated at 22%. SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. Consult your CPA for precise calculations.',
+  };
 }
 
 
@@ -459,21 +478,26 @@ async function getAdvisorAlerts(status) {
 
 async function getMileageSummary(yearInput) {
   const year = yearInput || String(new Date().getFullYear());
-  const IRS_RATE = 0.70; // 2026 IRS mileage rate (update annually)
+  const IRS_RATE = parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
+  const yearStart = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
 
-  const stats = await db('mileage_log').where('tax_year', year).select(
-    db.raw('COALESCE(SUM(miles), 0) as total_miles'),
-    db.raw("COALESCE(SUM(CASE WHEN purpose = 'business' THEN miles ELSE 0 END), 0) as business_miles"),
-    db.raw("COALESCE(SUM(CASE WHEN purpose = 'personal' THEN miles ELSE 0 END), 0) as personal_miles"),
-    db.raw('COUNT(*) as entries'),
-  ).first().catch(() => ({ total_miles: 0, business_miles: 0, personal_miles: 0, entries: 0 }));
+  const stats = await db('mileage_log')
+    .whereBetween('trip_date', [yearStart, yearEnd])
+    .select(
+      db.raw('COALESCE(SUM(distance_miles), 0) as total_miles'),
+      db.raw("COALESCE(SUM(CASE WHEN purpose = 'business' THEN distance_miles ELSE 0 END), 0) as business_miles"),
+      db.raw("COALESCE(SUM(CASE WHEN purpose = 'personal' THEN distance_miles ELSE 0 END), 0) as personal_miles"),
+      db.raw('COUNT(*) as entries'),
+    ).first().catch(() => ({ total_miles: 0, business_miles: 0, personal_miles: 0, entries: 0 }));
 
   const businessMiles = parseFloat(stats.business_miles || 0);
   const deduction = businessMiles * IRS_RATE;
 
   // Monthly breakdown
-  const monthly = await db('mileage_log').where('tax_year', year)
-    .select(db.raw("TO_CHAR(trip_date, 'YYYY-MM') as month"), db.raw('SUM(miles) as miles'))
+  const monthly = await db('mileage_log')
+    .whereBetween('trip_date', [yearStart, yearEnd])
+    .select(db.raw("TO_CHAR(trip_date, 'YYYY-MM') as month"), db.raw('SUM(distance_miles) as miles'))
     .groupByRaw("TO_CHAR(trip_date, 'YYYY-MM')").orderBy('month').catch(() => []);
 
   return {
@@ -500,7 +524,7 @@ async function getArAging(input) {
     .orderBy('invoices.total', 'desc');
 
   const now = new Date();
-  const aging = { current: 0, days_30: 0, days_60: 0, days_90_plus: 0 };
+  const aging = { current: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0, days_90_plus: 0 };
   let total = 0;
 
   invoices.forEach(i => {
@@ -508,8 +532,9 @@ async function getArAging(input) {
     total += amt;
     const age = i.due_date ? Math.floor((now - new Date(i.due_date)) / 86400000) : 0;
     if (age <= 0) aging.current += amt;
-    else if (age <= 30) aging.days_30 += amt;
-    else if (age <= 60) aging.days_60 += amt;
+    else if (age < 30) aging.days_1_30 += amt;
+    else if (age < 60) aging.days_31_60 += amt;
+    else if (age < 90) aging.days_61_90 += amt;
     else aging.days_90_plus += amt;
   });
 
@@ -518,8 +543,9 @@ async function getArAging(input) {
     invoice_count: invoices.length,
     aging: {
       current: Math.round(aging.current),
-      '1_30_days': Math.round(aging.days_30),
-      '31_60_days': Math.round(aging.days_60),
+      '1_30_days': Math.round(aging.days_1_30),
+      '31_60_days': Math.round(aging.days_31_60),
+      '61_90_days': Math.round(aging.days_61_90),
       '90_plus_days': Math.round(aging.days_90_plus),
     },
     top_balances: invoices.slice(0, 10).map(i => ({

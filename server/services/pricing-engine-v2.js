@@ -560,7 +560,7 @@ function calcPestBase(footprint, p, mods) {
 
   // Near water
   let waterAdj = 0;
-  if (p.nearWater && p.nearWater !== 'NONE' && p.nearWater !== 'NO') waterAdj = 5;
+  if (p.nearWater && p.nearWater !== 'NONE' && p.nearWater !== 'NO') waterAdj = 2.5;
   if (waterAdj > 0) {
     adj += waterAdj;
     adjItems.push({ name: 'Near water', value: waterAdj });
@@ -568,8 +568,8 @@ function calcPestBase(footprint, p, mods) {
 
   // Large driveway
   if (p.hasLargeDriveway) {
-    adj += 5;
-    adjItems.push({ name: 'Large driveway', value: 5 });
+    adj += 2.5;
+    adjItems.push({ name: 'Large driveway', value: 2.5 });
   }
 
   // Indoor treatment

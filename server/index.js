@@ -89,12 +89,12 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://web.squarecdn.com", "https://sandbox.web.squarecdn.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
       imgSrc: ["'self'", "https:", "data:", "blob:"],
-      connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://api.rentcast.io", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://pci-connect.squareup.com", "https://pci-connect.squareupsandbox.com"],
-      frameSrc: ["'self'", "https://www.google.com", "https://web.squarecdn.com", "https://sandbox.web.squarecdn.com", "https://pci-connect.squareup.com", "https://pci-connect.squareupsandbox.com"],
+      connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://api.rentcast.io", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com"],
+      frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com"],
       mediaSrc: ["'self'", "https:"],
     },
   },
@@ -197,8 +197,6 @@ app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, 
 app.use('/api/booking', require('./routes/booking'));
 app.use('/api/ai', aiAssistantRoutes);
 app.use('/api/webhooks/twilio', twilioVoiceWebhookRoutes);
-// Square webhook disabled — migrated to Stripe
-// app.use('/api/webhooks/square', require('./routes/square-webhook'));
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
@@ -242,8 +240,6 @@ app.use('/api/admin/ical-history', require('./routes/admin-ical-history'));
 app.use('/api/admin/mileage', require('./routes/admin-mileage'));
 app.use('/api/admin/compliance-v2', require('./routes/admin-compliance-v2'));
 app.use('/api/admin/services', require('./routes/admin-services'));
-// Square import disabled — migration complete
-// app.use('/api/admin/square-import', require('./routes/admin-square-import'));
 app.use('/api/admin/discounts', require('./routes/admin-discounts'));
 app.use('/api/admin/banking', require('./routes/admin-banking'));
 app.use('/api/admin/dashboard-ops', require('./routes/admin-dashboard-ops'));

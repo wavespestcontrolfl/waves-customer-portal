@@ -5,7 +5,9 @@
 
 function esc(val) {
   if (val == null) return '';
-  const s = String(val);
+  let s = String(val);
+  // Prevent CSV formula injection (Excel executes cells starting with = + - @ \t \r)
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
   if (s.includes(',') || s.includes('"') || s.includes('\n')) {
     return '"' + s.replace(/"/g, '""') + '"';
   }

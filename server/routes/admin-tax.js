@@ -119,12 +119,13 @@ router.get('/rates', async (req, res, next) => {
 router.post('/rates', async (req, res, next) => {
   try {
     const { county, stateRate, countySurtax, effectiveDate, serviceZone, notes } = req.body;
-    // Deactivate old rate for this county
-    await db('tax_rates').where({ county, active: true }).update({ active: false, expiry_date: effectiveDate });
-    await db('tax_rates').insert({
-      county, state: 'FL', state_rate: stateRate, county_surtax: countySurtax,
-      combined_rate: parseFloat(stateRate) + parseFloat(countySurtax),
-      effective_date: effectiveDate, service_zone: serviceZone, notes, active: true,
+    await db.transaction(async (trx) => {
+      await trx('tax_rates').where({ county, active: true }).update({ active: false, expiry_date: effectiveDate });
+      await trx('tax_rates').insert({
+        county, state: 'FL', state_rate: stateRate, county_surtax: countySurtax,
+        combined_rate: parseFloat(stateRate) + parseFloat(countySurtax),
+        effective_date: effectiveDate, service_zone: serviceZone, notes, active: true,
+      });
     });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -234,13 +235,41 @@ router.get('/equipment', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const VALID_DEPRECIATION_METHODS = ['MACRS', 'SL', 'section_179', 'bonus_100'];
+// IRS Section 179 annual election limits. Update each tax year.
+const SECTION_179_LIMITS = { 2024: 1160000, 2025: 1220000, 2026: 1250000 };
+
 router.post('/equipment', async (req, res, next) => {
   try {
     const { name, description, assetCategory, irsClass, purchaseDate, purchaseCost,
       salvageValue, depreciationMethod, usefulLifeYears, section179Elected,
       serialNumber, makeModel, location, notes } = req.body;
 
+    if (depreciationMethod && !VALID_DEPRECIATION_METHODS.includes(depreciationMethod)) {
+      return res.status(400).json({ error: `Invalid depreciation method. Must be one of: ${VALID_DEPRECIATION_METHODS.join(', ')}` });
+    }
+    if (!name || !purchaseDate || purchaseCost == null) {
+      return res.status(400).json({ error: 'name, purchaseDate, and purchaseCost are required' });
+    }
+
     const s179 = section179Elected && depreciationMethod === 'section_179';
+    if (s179) {
+      const purchaseYear = new Date(purchaseDate).getFullYear();
+      const limit = SECTION_179_LIMITS[purchaseYear];
+      if (limit) {
+        const existing = await db('equipment_register')
+          .where('section_179_elected', true)
+          .whereRaw("EXTRACT(YEAR FROM purchase_date) = ?", [purchaseYear])
+          .sum('section_179_amount as total').first();
+        const existingTotal = parseFloat(existing?.total || 0);
+        if (existingTotal + parseFloat(purchaseCost) > limit) {
+          return res.status(400).json({
+            error: `Section 179 election would exceed ${purchaseYear} IRS limit ($${limit.toLocaleString()}). Already elected: $${existingTotal.toLocaleString()}. Consider MACRS or bonus depreciation for the excess.`,
+          });
+        }
+      }
+    }
+
     await db('equipment_register').insert({
       name, description, asset_category: assetCategory, irs_class: irsClass,
       purchase_date: purchaseDate, placed_in_service_date: purchaseDate,
@@ -259,6 +288,9 @@ router.post('/equipment', async (req, res, next) => {
 router.put('/equipment/:id', async (req, res, next) => {
   try {
     const fields = req.body;
+    if (fields.depreciationMethod && !VALID_DEPRECIATION_METHODS.includes(fields.depreciationMethod)) {
+      return res.status(400).json({ error: `Invalid depreciation method. Must be one of: ${VALID_DEPRECIATION_METHODS.join(', ')}` });
+    }
     const update = { updated_at: new Date() };
     const map = {
       name: 'name', description: 'description', assetCategory: 'asset_category',
@@ -287,7 +319,8 @@ router.get('/expense-categories', async (req, res, next) => {
 
 router.get('/expenses', async (req, res, next) => {
   try {
-    const { year, quarter, categoryId, page = 1, limit = 50 } = req.query;
+    const { quarter, categoryId, page = 1, limit = 50 } = req.query;
+    const year = req.query.year || String(new Date().getFullYear());
     let query = db('expenses')
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line')
@@ -300,7 +333,7 @@ router.get('/expenses', async (req, res, next) => {
 
     // Summary
     const summary = await db('expenses')
-      .where(function () { if (year) this.where('tax_year', year); })
+      .where('expenses.tax_year', year)
       .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
       .select('expense_categories.name as category')
       .sum('expenses.amount as total')
@@ -336,6 +369,7 @@ router.post('/expenses', async (req, res, next) => {
 
     // Auto-categorize with Claude if no category provided
     let aiCategory = null;
+    let aiCategorizeError = null;
     if (!categoryId && (vendorName || description)) {
       try {
         aiCategory = await autoCategorizeExpense(vendorName, description, amount);
@@ -347,6 +381,7 @@ router.post('/expenses', async (req, res, next) => {
           }
         }
       } catch (err) {
+        aiCategorizeError = err.message;
         logger.warn(`[tax] AI expense categorization failed: ${err.message}`);
         // Continue without categorization — don't block the insert
       }
@@ -363,8 +398,9 @@ router.post('/expenses', async (req, res, next) => {
     res.json({
       success: true,
       expense: inserted,
-      aiCategorized: !!aiCategory,
+      aiCategorized: !!(aiCategory?.categoryId),
       aiCategory: aiCategory || null,
+      aiCategorizeError,
     });
   } catch (err) { next(err); }
 });
@@ -602,9 +638,9 @@ router.post('/mileage', async (req, res, next) => {
     }
 
     const year = new Date(tripDate).getFullYear();
-    // IRS rates by year
+    // IRS rates by year (env override for current/future years)
     const rateMap = { 2024: 0.67, 2025: 0.70, 2026: 0.70 };
-    const irsRate = rateMap[year] || 0.70;
+    const irsRate = rateMap[year] || parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
     const deductionAmount = parseFloat((distanceMiles * irsRate).toFixed(2));
 
     const [inserted] = await db('mileage_log').insert({
@@ -665,6 +701,7 @@ router.get('/mileage/stats', async (req, res, next) => {
     const byPurpose = await db('mileage_log')
       .where('trip_date', '>=', startDate)
       .where('trip_date', '<=', endDate)
+      .whereNotNull('purpose')
       .select('purpose')
       .sum('distance_miles as miles')
       .sum('deduction_amount as deduction')
@@ -681,11 +718,17 @@ router.get('/mileage/stats', async (req, res, next) => {
       .groupBy(db.raw("TO_CHAR(trip_date, 'YYYY-MM')"))
       .orderBy('month');
 
+    const tripCount = parseInt(totals.trip_count);
+    const totalMiles = parseFloat(totals.total_miles);
+    const irsRate = parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
     res.json({
       year,
-      totalMiles: parseFloat(totals.total_miles),
+      totalMiles,
       totalDeduction: parseFloat(totals.total_deduction),
-      tripCount: parseInt(totals.trip_count),
+      tripCount,
+      totalTrips: tripCount,
+      avgDistance: tripCount > 0 ? totalMiles / tripCount : 0,
+      irsRate,
       byPurpose: byPurpose.map(p => ({
         purpose: p.purpose,
         miles: parseFloat(p.miles),
@@ -706,17 +749,42 @@ router.get('/mileage/stats', async (req, res, next) => {
 // REVENUE RECONCILIATION (Square Integration)
 // ═══════════════════════════════════════════════════════════════
 
-// GET /revenue/reconcile?month=2026-04 — Square tax reconciliation
+// GET /revenue/reconcile?month=2026-04 — Stripe/native tax reconciliation
 router.get('/revenue/reconcile', async (req, res, next) => {
   try {
     const { month } = req.query;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
       return res.status(400).json({ error: 'month parameter required in YYYY-MM format' });
     }
+    const [yr, mo] = month.split('-').map(Number);
+    const startDate = `${month}-01`;
+    const endDate = new Date(yr, mo, 0).toISOString().split('T')[0];
 
-    const SquareTaxReconciliation = require('../services/square-tax-reconciliation');
-    const result = await SquareTaxReconciliation.reconcileSalesTax(month);
-    res.json(result);
+    let totalRevenue = 0, taxCollected = 0;
+    try {
+      const rev = await db('revenue_daily')
+        .whereBetween('date', [startDate, endDate])
+        .select(
+          db.raw('COALESCE(SUM(total_revenue), 0) as revenue'),
+          db.raw('COALESCE(SUM(tax_collected), 0) as tax'),
+        ).first();
+      totalRevenue = parseFloat(rev?.revenue || 0);
+      taxCollected = parseFloat(rev?.tax || 0);
+    } catch { /* table may not exist */ }
+
+    // Expected tax = revenue * blended 7% FL rate (state 6% + 1% surtax) on taxable revenue
+    const taxOwed = totalRevenue * 0.07;
+
+    res.json({
+      month,
+      startDate,
+      endDate,
+      totalRevenue,
+      taxCollected,
+      taxOwed,
+      difference: taxCollected - taxOwed,
+      note: 'Reconciliation assumes 7% blended FL rate on all revenue. For exact figures, factor in exempt customers and non-taxable services.',
+    });
   } catch (err) { next(err); }
 });
 
@@ -727,10 +795,38 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
     if (!quarter || !/^Q[1-4]$/.test(quarter)) {
       return res.status(400).json({ error: 'quarter parameter required (Q1, Q2, Q3, or Q4)' });
     }
+    const now = new Date();
+    const year = now.getFullYear();
+    const qNum = parseInt(quarter.replace('Q', ''));
+    const startMonth = (qNum - 1) * 3;
+    const startDate = new Date(year, startMonth, 1).toISOString().split('T')[0];
+    const endDate = new Date(year, startMonth + 3, 0).toISOString().split('T')[0];
+    const ytdStart = `${year}-01-01`;
 
-    const SquareTaxReconciliation = require('../services/square-tax-reconciliation');
-    const result = await SquareTaxReconciliation.calculateQuarterlyEstimate(quarter);
-    res.json(result);
+    const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [ytdStart, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
+    const expenses = await db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
+
+    const ytdRevenue = parseFloat(revenue?.total || 0);
+    const ytdExpenses = parseFloat(expenses?.total || 0);
+    const estimatedNetIncome = Math.max(0, ytdRevenue - ytdExpenses);
+
+    const seBase = estimatedNetIncome * 0.9235;
+    const seTax = seBase * 0.153;
+    const incomeTaxBase = Math.max(0, estimatedNetIncome - (seTax * 0.5));
+    const incomeTax = incomeTaxBase * 0.22;
+    const annualLiability = seTax + incomeTax;
+    const quarterlyPayment = annualLiability / 4;
+
+    // Quarterly due dates (1040-ES)
+    const dueDates = { Q1: `${year}-04-15`, Q2: `${year}-06-15`, Q3: `${year}-09-15`, Q4: `${year + 1}-01-15` };
+
+    res.json({
+      quarter, startDate, endDate,
+      ytdRevenue, ytdExpenses, estimatedNetIncome,
+      seTax, incomeTax, quarterlyPayment,
+      dueDate: dueDates[quarter],
+      note: 'Estimates assume 22% federal bracket. SE tax is 15.3% on 92.35% of net earnings; 50% of SE tax is deducted before income tax. Consult CPA for precise figures.',
+    });
   } catch (err) { next(err); }
 });
 
@@ -790,7 +886,7 @@ router.get('/pnl', async (req, res, next) => {
     try {
       const rev = await db('payments')
         .where('created_at', '>=', startDate)
-        .where('created_at', '<=', endDate + ' 23:59:59')
+        .where('created_at', '<', db.raw("?::date + interval '1 day'", [endDate]))
         .where('status', 'completed')
         .select(
           db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue"),
@@ -861,15 +957,33 @@ router.get('/pnl', async (req, res, next) => {
       mileageDeduction = parseFloat(mil?.total || 0);
     } catch { /* */ }
 
-    // Depreciation
+    // Depreciation — per-asset proration that respects placed_in_service_date
     let depreciationTotal = 0;
     try {
-      const depr = await db('equipment_register').where('active', true)
-        .sum('annual_depreciation as total').first();
-      // Prorate based on period length
-      const days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1;
-      const yearFraction = days / 365;
-      depreciationTotal = parseFloat(depr?.total || 0) * yearFraction;
+      const assets = await db('equipment_register')
+        .where('active', true)
+        .where(function () { this.whereNull('disposed').orWhere('disposed', false); })
+        .whereNotNull('annual_depreciation');
+      const periodStart = new Date(startDate);
+      const periodEnd = new Date(endDate);
+      const periodDays = (periodEnd - periodStart) / 86400000 + 1;
+      for (const a of assets) {
+        const annual = parseFloat(a.annual_depreciation || 0);
+        if (!annual) continue;
+        const inService = a.placed_in_service_date ? new Date(a.placed_in_service_date) : (a.purchase_date ? new Date(a.purchase_date) : null);
+        const effStart = inService && inService > periodStart ? inService : periodStart;
+        if (effStart > periodEnd) continue;
+        const effDays = (periodEnd - effStart) / 86400000 + 1;
+        depreciationTotal += annual * (Math.max(0, effDays) / 365);
+      }
+      // Fallback: if no assets have annual_depreciation set, prorate total by period
+      if (depreciationTotal === 0) {
+        const depr = await db('equipment_register')
+          .where('active', true)
+          .where(function () { this.whereNull('disposed').orWhere('disposed', false); })
+          .sum('annual_depreciation as total').first();
+        depreciationTotal = parseFloat(depr?.total || 0) * (periodDays / 365);
+      }
     } catch { /* */ }
 
     const totalRevenue = serviceRevenue + otherRevenue;
@@ -983,7 +1097,8 @@ router.get('/export/transactions', async (req, res, next) => {
     let payments = [];
     try {
       payments = await db('payments')
-        .where('created_at', '>=', sd).where('created_at', '<=', ed + ' 23:59:59')
+        .where('created_at', '>=', sd)
+        .where('created_at', '<', db.raw("?::date + interval '1 day'", [ed]))
         .leftJoin('customers', 'payments.customer_id', 'customers.id')
         .select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name"))
         .orderBy('payments.created_at', 'desc');
@@ -1100,7 +1215,7 @@ router.get('/export/pnl', async (req, res, next) => {
 
       let serviceRevenue = 0;
       try {
-        const rev = await db('payments').where('created_at', '>=', startDate).where('created_at', '<=', endDate + ' 23:59:59').where('status', 'completed')
+        const rev = await db('payments').where('created_at', '>=', startDate).where('created_at', '<', db.raw("?::date + interval '1 day'", [endDate])).where('status', 'completed')
           .select(db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue")).first();
         serviceRevenue = parseFloat(rev?.revenue || 0);
       } catch { try { const rev = await db('revenue_daily').where('date', '>=', startDate).where('date', '<=', endDate).sum('total_revenue as total').first(); serviceRevenue = parseFloat(rev?.total || 0); } catch { /* */ } }
@@ -1119,7 +1234,7 @@ router.get('/export/pnl', async (req, res, next) => {
       try { const ml = await db('mileage_log').where('trip_date', '>=', startDate).where('trip_date', '<=', endDate).sum('deduction_amount as total').first(); mileageDed = parseFloat(ml?.total || 0); } catch { /* */ }
 
       let depreciation = 0;
-      try { const dp = await db('equipment_register').where('active', true).sum('annual_depreciation as total').first(); const days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1; depreciation = parseFloat(dp?.total || 0) * (days / 365); } catch { /* */ }
+      try { const dp = await db('equipment_register').where('active', true).where(function () { this.whereNull('disposed').orWhere('disposed', false); }).sum('annual_depreciation as total').first(); const days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1; depreciation = parseFloat(dp?.total || 0) * (days / 365); } catch { /* */ }
 
       const cogsTotal = laborCost + materialsCost;
       const grossProfit = serviceRevenue - cogsTotal;
@@ -1154,7 +1269,7 @@ router.get('/export/tax-package', async (req, res, next) => {
 
     // Gather all data with fallbacks
     let payments = [];
-    try { payments = await db('payments').where('created_at', '>=', sd).where('created_at', '<=', ed + ' 23:59:59').leftJoin('customers', 'payments.customer_id', 'customers.id').select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name")).orderBy('payments.created_at', 'desc'); } catch { /* */ }
+    try { payments = await db('payments').where('created_at', '>=', sd).where('created_at', '<', db.raw("?::date + interval '1 day'", [ed])).leftJoin('customers', 'payments.customer_id', 'customers.id').select('payments.*', db.raw("COALESCE(customers.first_name || ' ' || customers.last_name, 'Unknown') as customer_name")).orderBy('payments.created_at', 'desc'); } catch { /* */ }
 
     let expenses = [];
     try { expenses = await db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id').where('expenses.expense_date', '>=', sd).where('expenses.expense_date', '<=', ed).select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.irs_line').orderBy('expenses.expense_date', 'desc'); } catch { /* */ }
@@ -1163,14 +1278,14 @@ router.get('/export/tax-package', async (req, res, next) => {
     try { trips = await db('mileage_log').where('trip_date', '>=', sd).where('trip_date', '<=', ed).orderBy('trip_date', 'desc'); } catch { /* */ }
 
     let equipment = [];
-    try { equipment = await db('equipment_register').where('active', true).orderBy('name'); } catch { /* */ }
+    try { equipment = await db('equipment_register').where('active', true).where(function () { this.whereNull('disposed').orWhere('disposed', false); }).orderBy('name'); } catch { /* */ }
 
     let laborSummaries = [];
     try { laborSummaries = await db('time_entry_daily_summary').where('date', '>=', sd).where('date', '<=', ed).orderBy('date', 'desc'); } catch { /* */ }
 
     // Build P&L data
     let serviceRevenue = 0;
-    try { const rev = await db('payments').where('created_at', '>=', sd).where('created_at', '<=', ed + ' 23:59:59').where('status', 'completed').select(db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue")).first(); serviceRevenue = parseFloat(rev?.revenue || 0); } catch { /* */ }
+    try { const rev = await db('payments').where('created_at', '>=', sd).where('created_at', '<', db.raw("?::date + interval '1 day'", [ed])).where('status', 'completed').select(db.raw("COALESCE(SUM(CASE WHEN type != 'refund' THEN amount ELSE 0 END), 0) as revenue")).first(); serviceRevenue = parseFloat(rev?.revenue || 0); } catch { /* */ }
     const laborCost = laborSummaries.reduce((s, l) => s + parseFloat(l.total_cost || 0), 0);
     const materialsCost = expenses.filter(e => ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'].includes(e.category_name)).reduce((s, e) => s + parseFloat(e.amount || 0), 0);
     const opexItems = expenses.filter(e => !['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'].includes(e.category_name));

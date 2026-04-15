@@ -200,12 +200,12 @@ export function calculateEstimate(inputs) {
   else addMod('pest', `${landscapeComplexity || 'Simple'} landscape: $0/visit`, 0, 'info');
 
   // Water proximity
-  const waterAdj = (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) ? 5 : 0;
-  if (waterAdj > 0) addMod('pest', `Near water: +$5/visit`, waterAdj, 'up');
+  const waterAdj = (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) ? 2.5 : 0;
+  if (waterAdj > 0) addMod('pest', `Near water: +$2.50/visit`, waterAdj, 'up');
   else addMod('pest', 'No water nearby: $0/visit', 0, 'info');
 
   // Driveway
-  if (hasLargeDriveway) addMod('pest', 'Large driveway: +$5/visit', 5, 'up');
+  if (hasLargeDriveway) addMod('pest', 'Large driveway: +$2.50/visit', 2.5, 'up');
   else addMod('pest', 'Standard driveway: $0/visit', 0, 'info');
 
   // Indoor treatment
@@ -345,8 +345,8 @@ export function calculateEstimate(inputs) {
     else if (treeDensity === 'MODERATE') adj += 5;
     else if (treeDensity === 'HEAVY') adj += 10;
     if (landscapeComplexity === 'COMPLEX') adj += 5;
-    if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 5;
-    if (hasLargeDriveway) adj += 5;
+    if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 2.5;
+    if (hasLargeDriveway) adj += 2.5;
     if (indoor) adj += 10;
     adj += propTypeAdj; // Property type adjustment
     let pp = Math.max(92, 121 + adj), rOG = 0;
@@ -538,6 +538,8 @@ export function calculateEstimate(inputs) {
       if (treeDensity === 'LIGHT') adj -= 3;
       else if (treeDensity === 'HEAVY') adj += 15;
       if (landscapeComplexity === 'COMPLEX') adj += 8;
+      if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO') adj += 2.5;
+      if (hasLargeDriveway) adj += 2.5;
       if (indoor) adj += 10;
       bpp = Math.max(92, 121 + adj);
     }

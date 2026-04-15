@@ -94,7 +94,12 @@ router.get('/', async (req, res, next) => {
 
     const revMTDVal = parseFloat(revMTD?.total || 0);
     const revLMVal = parseFloat(revLastMonth?.total || 0);
-    const revChange = revLMVal > 0 ? Math.round((revMTDVal - revLMVal) / revLMVal * 100) : 0;
+    const revChange = revLMVal > 0 ? Math.round((revMTDVal - revLMVal) / revLMVal * 100) : null;
+
+    function safeParseJSON(v) {
+      if (v == null || typeof v !== 'string') return v ?? null;
+      try { return JSON.parse(v); } catch { return null; }
+    }
 
     // Revenue chart — daily for current month
     const dailyRevenue = await db('payments')
@@ -111,7 +116,7 @@ router.get('/', async (req, res, next) => {
         newCustomersThisMonth: parseInt(newThisMonth?.count || 0),
         estimatesPending: parseInt(estimatesPending?.count || 0),
         servicesThisWeek: { total: parseInt(servicesWeek?.total || 0), completed: parseInt(servicesWeek?.completed || 0) },
-        avgResponseTimeHours: parseFloat(avgResponse?.avg_hrs || 0).toFixed(1),
+        avgResponseTimeHours: (Number(avgResponse?.avg_hrs) || 0).toFixed(1),
         googleReviewRating: parseFloat(reviewStats?.avg_rating || 0) || 4.9,
         googleReviewCount: parseInt(reviewStats?.total || 0) || 0,
         googleUnresponded: parseInt(reviewStats?.unresponded || 0),
@@ -127,7 +132,7 @@ router.get('/', async (req, res, next) => {
       })),
       recentActivity: recentActivity.map(a => ({
         id: a.id, action: a.action, description: a.description,
-        metadata: typeof a.metadata === 'string' ? JSON.parse(a.metadata) : a.metadata,
+        metadata: safeParseJSON(a.metadata),
         createdAt: a.created_at,
       })),
       revenueByTier: tierRevenue.map(t => ({
@@ -137,14 +142,9 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/dashboard/square-bookings — upcoming Square appointments
-router.get('/square-bookings', async (req, res, next) => {
-  try {
-    const SquareService = require('../services/square');
-    const days = parseInt(req.query.days || '7');
-    const bookings = await SquareService.getUpcomingBookings(days);
-    res.json({ bookings, count: bookings.length });
-  } catch (err) { next(err); }
+// GET /api/admin/dashboard/square-bookings — legacy endpoint, Square is phased out
+router.get('/square-bookings', (req, res) => {
+  res.json({ bookings: [], count: 0 });
 });
 
 // GET /api/admin/dashboard/forecast — revenue forecasting

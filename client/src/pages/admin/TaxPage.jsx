@@ -32,6 +32,13 @@ const inputStyle = { background: '#0f1923', border: `1px solid ${D.border}`, bor
 const fmtD = (d) => d ? new Date(d).toLocaleDateString() : '—';
 const fmtM = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
 const fmtPct = (n) => n != null ? (n * 100).toFixed(2) + '%' : '—';
+// Calendar-day diff (due date - today) with both anchored at UTC midnight so same-day = 0.
+const daysUntil = (due) => {
+  if (!due) return 0;
+  const dueStr = String(due).slice(0, 10);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  return Math.floor((new Date(dueStr + 'T00:00:00Z') - new Date(todayStr + 'T00:00:00Z')) / 86400000);
+};
 
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 const PRIORITY_COLORS = { high: D.red, medium: D.amber, low: D.teal };
@@ -322,14 +329,14 @@ function FilingCalendarTab() {
       <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Upcoming Deadlines</div>
       {upcoming.length === 0 && <div style={{ padding: 20, textAlign: 'center', color: D.muted, fontSize: 12, marginBottom: 16 }}>All caught up!</div>}
       {upcoming.map(f => {
-        const daysUntil = Math.ceil((new Date(f.dueDate) - new Date()) / 86400000);
-        const urgentColor = daysUntil <= 7 ? D.red : daysUntil <= 30 ? D.amber : D.muted;
+        const du = daysUntil(f.dueDate);
+        const urgentColor = du <= 7 ? D.red : du <= 30 ? D.amber : D.muted;
         return (
-          <div key={f.id} style={{ background: D.card, border: `1px solid ${daysUntil <= 7 ? D.red + '66' : D.border}`, borderRadius: 8, padding: '12px 14px', marginBottom: 6 }}>
+          <div key={f.id} style={{ background: D.card, border: `1px solid ${du <= 7 ? D.red + '66' : D.border}`, borderRadius: 8, padding: '12px 14px', marginBottom: 6 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: D.white, flex: 1 }}>{f.title}</span>
               <Badge color={STATUS_COLORS[f.status]}>{f.status}</Badge>
-              <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700, color: urgentColor }}>{daysUntil > 0 ? `${daysUntil}d` : daysUntil === 0 ? 'TODAY' : `${Math.abs(daysUntil)}d OVERDUE`}</span>
+              <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700, color: urgentColor }}>{du > 0 ? `${du}d` : du === 0 ? 'TODAY' : `${Math.abs(du)}d OVERDUE`}</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 11, color: D.muted }}>
               <span>Due: {fmtD(f.dueDate)}</span>
@@ -374,15 +381,19 @@ function AdvisorTab() {
   const [running, setRunning] = useState(false);
   const [alertFilter, setAlertFilter] = useState('new');
 
-  const load = useCallback(async () => {
-    try {
-      const [rpt, alt] = await Promise.all([adminFetch('/admin/tax/advisor/reports'), adminFetch(`/admin/tax/advisor/alerts?status=${alertFilter}`)]);
-      setReports(rpt.reports || []); setAlerts(alt.alerts || []); setAlertCounts(alt.counts || {});
-      if (rpt.reports?.length && !selectedReport) setSelectedReport(rpt.reports[0]);
-    } catch { }
-  }, [alertFilter, selectedReport]);
+  useEffect(() => {
+    adminFetch('/admin/tax/advisor/reports').then(rpt => {
+      setReports(rpt.reports || []);
+      setSelectedReport(prev => prev || (rpt.reports?.[0] ?? null));
+    }).catch(() => {});
+  }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    adminFetch(`/admin/tax/advisor/alerts?status=${alertFilter}`).then(alt => {
+      setAlerts(alt.alerts || []);
+      setAlertCounts(alt.counts || {});
+    }).catch(() => {});
+  }, [alertFilter]);
 
   const handleRunAdvisor = async () => {
     setRunning(true);
@@ -591,9 +602,13 @@ function MileageTab() {
 
   const load = () => {
     Promise.all([
-      adminFetch('/admin/tax/mileage').catch(() => ({ entries: [] })),
-      adminFetch('/admin/tax/mileage/stats').catch(() => null),
-    ]).then(([m, s]) => { setEntries(m.entries || m || []); setStats(s); setLoading(false); });
+      adminFetch('/admin/tax/mileage').catch((err) => { console.error('[tax] mileage fetch failed:', err); return { entries: [] }; }),
+      adminFetch('/admin/tax/mileage/stats').catch((err) => { console.error('[tax] mileage stats failed:', err); return null; }),
+    ]).then(([m, s]) => {
+      setEntries((m && (m.entries || m)) || []);
+      setStats(s || { totalMiles: 0, totalDeduction: 0, totalTrips: 0, avgDistance: 0, irsRate: 0.70 });
+      setLoading(false);
+    });
   };
   useEffect(load, []);
 
@@ -671,7 +686,7 @@ function MileageTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// REVENUE TAB (Square Reconciliation)
+// REVENUE TAB (Sales Tax Reconciliation)
 // ═══════════════════════════════════════════════════════════════
 function RevenueTab() {
   const [month, setMonth] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; });
@@ -733,7 +748,7 @@ function RevenueTab() {
       )}
 
       {!reconcile && !quarterly && (
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 40, textAlign: 'center', color: D.muted }}>No revenue data available. Square integration will populate this automatically.</div>
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 40, textAlign: 'center', color: D.muted }}>No revenue data available for this period.</div>
       )}
     </div>
   );
@@ -1072,7 +1087,7 @@ export default function TaxPage() {
             <StatCard label="Tax Collected YTD" value={fmtM(d.ytdTaxCollected)} color={D.green} />
             <StatCard label="Expenses YTD" value={fmtM(d.expenses?.total)} color={D.amber} sub={`${d.expenses?.count || 0} records`} />
             <StatCard label="Equipment Book Value" value={fmtM(d.equipment?.bookValue)} color={D.teal} sub={`${d.equipment?.count || 0} assets`} />
-            <StatCard label="Next Deadline" value={d.nextDeadlines?.[0] ? `${Math.max(0, Math.ceil((new Date(d.nextDeadlines[0].dueDate) - new Date()) / 86400000))}d` : '—'} color={d.nextDeadlines?.[0] && Math.ceil((new Date(d.nextDeadlines[0].dueDate) - new Date()) / 86400000) <= 14 ? D.red : D.blue} sub={d.nextDeadlines?.[0]?.title?.substring(0, 40)} />
+            <StatCard label="Next Deadline" value={d.nextDeadlines?.[0] ? `${Math.max(0, daysUntil(d.nextDeadlines[0].dueDate))}d` : '—'} color={d.nextDeadlines?.[0] && daysUntil(d.nextDeadlines[0].dueDate) <= 14 ? D.red : D.blue} sub={d.nextDeadlines?.[0]?.title?.substring(0, 40)} />
           </div>
 
           {/* Latest advisor */}
@@ -1092,7 +1107,7 @@ export default function TaxPage() {
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: D.white, marginBottom: 8 }}>Upcoming Deadlines</div>
               {d.nextDeadlines.map(dl => {
-                const days = Math.ceil((new Date(dl.dueDate) - new Date()) / 86400000);
+                const days = daysUntil(dl.dueDate);
                 return (
                   <div key={dl.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: D.card, borderRadius: 6, marginBottom: 3, border: `1px solid ${days <= 7 ? D.red + '66' : D.border}` }}>
                     <Badge color={STATUS_COLORS[dl.status]}>{dl.status}</Badge>

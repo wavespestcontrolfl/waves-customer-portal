@@ -51,7 +51,7 @@ async function checkFacebook() {
   }
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v19.0/me?access_token=${token}`);
+    const res = await fetch(`https://graph.facebook.com/v21.0/me?access_token=${token}`);
     const data = await res.json();
 
     if (res.ok && !data.error) {
@@ -87,7 +87,7 @@ async function checkInstagram() {
   }
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v19.0/${accountId}?access_token=${token}`);
+    const res = await fetch(`https://graph.facebook.com/v21.0/${accountId}?access_token=${token}`);
     const data = await res.json();
 
     if (res.ok && !data.error) {
@@ -186,35 +186,6 @@ async function checkGBP(locationKey) {
   } catch (err) {
     const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'refresh_token', envVarName });
-    return result;
-  }
-}
-
-async function checkSquare() {
-  const platform = 'square';
-  const envVarName = 'SQUARE_ACCESS_TOKEN';
-
-  if (!config.square.accessToken) {
-    const result = { platform, status: 'not_configured', lastError: 'SQUARE_ACCESS_TOKEN not set', expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  }
-
-  try {
-    const { Client, Environment } = require('square');
-    const client = new Client({
-      accessToken: config.square.accessToken,
-      environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,
-    });
-    await client.customersApi.listCustomers(undefined, 1);
-    const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  } catch (err) {
-    const statusCode = err.statusCode || err.status;
-    const status = (statusCode === 401 || statusCode === 403) ? 'expired' : 'error';
-    const result = { platform, status, lastError: err.message || String(err), expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
     return result;
   }
 }

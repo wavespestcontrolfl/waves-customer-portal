@@ -8,7 +8,6 @@
  * Set these as environment variables on Railway:
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
- *   GATE_SQUARE_PAYMENTS=true   (enable real payment processing)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
@@ -27,9 +26,6 @@ const gates = {
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,
 
-  // Square — processes real payment charges
-  squarePayments: isProd ? process.env.GATE_SQUARE_PAYMENTS === 'true' : true,
-
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -39,7 +35,7 @@ const gates = {
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
   cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : true,
 
-  // Webhooks — process inbound Twilio/Square/Lead webhooks
+  // Webhooks — process inbound Twilio/Stripe/Lead webhooks
   webhooks: isProd ? process.env.GATE_WEBHOOKS === 'true' : true,
 
   // SEO Intelligence — DataForSEO API calls, rank tracking, backlink scans

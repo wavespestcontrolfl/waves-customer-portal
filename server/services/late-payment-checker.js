@@ -1,147 +1,99 @@
 /**
- * Late Payment Checker — replaces Zapier zap #24 (7 Day Late Payment SMS)
+ * Late Payment Checker
  *
- * Runs daily (weekdays 10AM) via cron. Searches Square for unpaid invoices
- * 7+ days overdue, sends reminder SMS via Twilio, logs to avoid duplicates.
+ * Runs daily (weekdays 10AM) via cron. Searches the portal's invoices table
+ * for unpaid invoices 7+ days overdue, sends tiered reminder SMS via Twilio,
+ * and logs each send to avoid duplicate reminders.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
-const config = require('../config');
-
-let squareClient, invoicesApi;
-try {
-  const { Client, Environment } = require('square');
-  if (config.square?.accessToken) {
-    squareClient = new Client({
-      accessToken: config.square.accessToken,
-      environment: config.square.environment === 'production' ? Environment.Production : Environment.Sandbox,
-    });
-    invoicesApi = squareClient.invoicesApi;
-  }
-} catch { /* square not available */ }
-
-const LOCATION_ID = process.env.SQUARE_LOCATION_ID || 'L4D5MY94THC3P';
 
 const LatePaymentService = {
   async checkAndNotify(daysOverdue = 7) {
-    if (!invoicesApi) {
-      logger.warn('[late-payment] Square SDK not configured');
-      return { notified: 0, skipped: 0, error: 'Square not configured' };
-    }
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - daysOverdue * 86400000);
 
-    // Search Square for all unpaid invoices
     let invoices = [];
     try {
-      const { result } = await invoicesApi.searchInvoices({
-        query: {
-          filter: {
-            locationIds: [LOCATION_ID],
-          },
-        },
-        limit: 200,
-      });
-      invoices = (result.invoices || []).filter(inv => inv.status === 'UNPAID');
+      invoices = await db('invoices')
+        .whereIn('status', ['sent', 'viewed', 'overdue'])
+        .where(function () {
+          this.where('due_date', '<=', cutoff)
+            .orWhere(function () {
+              this.whereNull('due_date').andWhere('created_at', '<=', cutoff);
+            });
+        })
+        .limit(500);
     } catch (err) {
-      logger.error(`[late-payment] Square invoice search failed: ${err.message}`);
+      logger.error(`[late-payment] Invoice lookup failed: ${err.message}`);
       return { notified: 0, skipped: 0, error: err.message };
     }
 
-    const now = new Date();
     let notified = 0;
     let skipped = 0;
+    const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
 
     for (const inv of invoices) {
-      // Calculate days overdue from due_date or created_at
-      const dueDate = inv.payment_requests?.[0]?.due_date;
-      const createdAt = inv.created_at;
-      const refDate = dueDate ? new Date(dueDate + 'T00:00:00') : new Date(createdAt);
+      const refDate = inv.due_date ? new Date(inv.due_date) : new Date(inv.created_at);
       const daysSince = Math.floor((now - refDate) / 86400000);
-
       if (daysSince < daysOverdue) continue;
 
-      const invoiceKey = `${inv.public_url || inv.id}|${daysOverdue} DAYS`;
+      const invoiceKey = `${inv.invoice_number || inv.id}|${daysOverdue} DAYS`;
 
-      // Deduplicate — check if we already sent this specific reminder
       try {
         const alreadySent = await db('activity_log')
           .where({ action: 'late_payment_reminder' })
           .whereRaw("metadata::text LIKE ?", [`%${invoiceKey}%`])
           .first();
+        if (alreadySent) { skipped++; continue; }
+      } catch { /* proceed if activity_log check fails */ }
 
-        if (alreadySent) {
-          skipped++;
-          continue;
-        }
-      } catch { /* table might not have the right structure, proceed */ }
+      const customer = await db('customers').where({ id: inv.customer_id }).first();
+      if (!customer?.phone) { skipped++; continue; }
 
-      // Get customer info
-      const recipient = inv.primary_recipient;
-      if (!recipient) { skipped++; continue; }
-
-      const phone = recipient.phone_number;
-      const firstName = recipient.given_name || '';
-      const customerName = `${firstName} ${recipient.family_name || ''}`.trim();
+      const name = customer.first_name || 'there';
       const invoiceTitle = inv.title || 'your service';
-      const publicUrl = inv.public_url || '';
-      const totalAmount = (inv.payment_requests?.[0]?.computed_amount_money?.amount || 0) / 100;
-      const serviceDate = inv.sale_or_service_date || '';
+      const payUrl = `${domain}/pay/${inv.token}`;
+      const totalAmount = parseFloat(inv.total || 0);
 
       let formattedDate = '';
-      if (serviceDate) {
+      if (inv.service_date) {
         try {
-          formattedDate = new Date(serviceDate + 'T12:00:00').toLocaleDateString('en-US', {
+          formattedDate = new Date(inv.service_date).toLocaleDateString('en-US', {
             month: 'short', day: 'numeric', year: 'numeric',
           });
-        } catch { formattedDate = serviceDate; }
+        } catch { /* ignore */ }
+      }
+      const dateClause = formattedDate ? ` completed on ${formattedDate}` : '';
+
+      let body;
+      if (daysSince < 14) {
+        body = `Hello ${name}! This is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 7 days overdue.\n\nPlease make your payment here: ${payUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+      } else if (daysSince < 30) {
+        body = `Hello ${name}, this is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 14 days overdue.\n\nPlease make your payment as soon as possible at: ${payUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+      } else if (daysSince < 60) {
+        body = `Hello ${name}, this is a final reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 30 days overdue.\n\nPlease make your payment immediately at: ${payUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+      } else if (daysSince < 90) {
+        body = `Hello ${name}, this is an urgent notice from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 60 days overdue.\n\nPlease make payment or contact us immediately to avoid further action: ${payUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+      } else {
+        body = `Hello ${name}, your invoice from Waves for ${invoiceTitle}${dateClause} is now 90 days overdue.\n\nFinal notice: This account will be sent to collections if payment is not received today. Please pay now: ${payUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
       }
 
-      // Find customer in portal
-      let customer = null;
-      if (recipient.customer_id) {
-        customer = await db('customers').where({ square_customer_id: recipient.customer_id }).first();
-      }
-      if (!customer && phone) {
-        customer = await db('customers').where({ phone }).first();
-      }
-
-      const customerPhone = customer?.phone || phone;
-      if (!customerPhone) { skipped++; continue; }
-
-      // Send SMS — tiered by days overdue
       try {
-        const name = firstName || customer?.first_name || 'there';
-        const dateClause = formattedDate ? ` completed on ${formattedDate}` : '';
-        let body;
-
-        if (daysSince < 14) {
-          body = `Hello ${name}! This is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 7 days overdue.\n\nPlease make your payment here: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
-        } else if (daysSince < 30) {
-          body = `Hello ${name}, this is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 14 days overdue.\n\nPlease make your payment as soon as possible at: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
-        } else if (daysSince < 60) {
-          body = `Hello ${name}, this is a final reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 30 days overdue.\n\nPlease make your payment immediately at: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
-        } else if (daysSince < 90) {
-          body = `Hello ${name}, this is an urgent notice from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 60 days overdue.\n\nPlease make payment or contact us immediately to avoid further action: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
-        } else {
-          body = `Hello ${name}, your invoice from Waves for ${invoiceTitle}${dateClause} is now 90 days overdue.\n\nFinal notice: This account will be sent to collections if payment is not received today. Please pay now: ${publicUrl}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
-        }
-
-        await TwilioService.sendSMS(customerPhone, body);
+        await TwilioService.sendSMS(customer.phone, body);
         notified++;
+        logger.info(`[late-payment] Reminder sent to ${name} ${customer.last_name || ''} (${customer.phone}) — ${daysSince} days overdue`);
 
-        logger.info(`[late-payment] Reminder sent to ${customerName} (${customerPhone}) — ${daysSince} days overdue`);
-
-        // Log to prevent duplicate sends
         await db('activity_log').insert({
-          customer_id: customer?.id || null,
+          customer_id: customer.id,
           action: 'late_payment_reminder',
           description: `${daysOverdue}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
           metadata: JSON.stringify({ invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince }),
         }).catch(() => {});
-
       } catch (smsErr) {
-        logger.error(`[late-payment] SMS failed for ${customerName}: ${smsErr.message}`);
+        logger.error(`[late-payment] SMS failed for customer ${customer.id}: ${smsErr.message}`);
         skipped++;
       }
     }

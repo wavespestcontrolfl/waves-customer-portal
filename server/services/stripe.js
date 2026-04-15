@@ -206,7 +206,7 @@ const StripeService = {
   // =========================================================================
 
   /**
-   * Return all payment_methods for a customer (Stripe + Square)
+   * Return all payment_methods for a customer (Stripe)
    */
   async getCards(customerId) {
     return db('payment_methods')
@@ -220,7 +220,7 @@ const StripeService = {
   // =========================================================================
 
   /**
-   * Detach a payment method. Routes to Stripe or Square based on processor.
+   * Detach a payment method via Stripe.
    */
   async removeCard(customerId, cardId) {
     const card = await db('payment_methods')
@@ -242,12 +242,6 @@ const StripeService = {
       await db('payment_methods').where({ id: cardId }).del();
       logger.info(`[stripe] Payment method removed for ${customerId}: ${cardId}`);
       return { success: true };
-    }
-
-    if (card.processor === 'square' && card.square_card_id) {
-      // Delegate to Square service
-      const SquareService = require('./square');
-      return SquareService.removeCard(customerId, cardId);
     }
 
     // Fallback — just remove from DB

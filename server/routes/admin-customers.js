@@ -8,10 +8,91 @@ const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// --- Static POST routes (must be registered before /:id handlers to avoid route shadowing) ---
+
+// POST /api/admin/customers/sync-square — DEPRECATED (Square removed)
+router.post('/sync-square', (req, res) => {
+  res.json({ message: 'Square sync disabled — migrated to Stripe', synced: 0 });
+});
+
+// POST /api/admin/customers/fix-tiers — Recalculate tiers from service count
+router.post('/fix-tiers', async (req, res, next) => {
+  try {
+    const customers = await db('customers')
+      .select('customers.id', 'customers.waveguard_tier')
+      .whereIn('customers.pipeline_stage', ['active_customer', 'won'])
+      .whereNull('deleted_at');
+
+    let updated = 0;
+    for (const c of customers) {
+      const services = await db('scheduled_services')
+        .where({ customer_id: c.id })
+        .whereIn('status', ['scheduled', 'confirmed', 'completed'])
+        .countDistinct('service_type as count')
+        .first();
+
+      const count = parseInt(services?.count || 0);
+      let newTier = null;
+      if (count === 0) newTier = null;
+      else if (count === 1) newTier = 'Bronze';
+      else if (count === 2) newTier = 'Silver';
+      else if (count === 3) newTier = 'Gold';
+      else newTier = 'Platinum';
+
+      if (newTier !== c.waveguard_tier) {
+        await db('customers').where({ id: c.id }).update({ waveguard_tier: newTier });
+        updated++;
+      }
+    }
+
+    logger.info(`[customers] Fix tiers: ${updated} of ${customers.length} customers updated`);
+    res.json({ success: true, updated, total: customers.length });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
+router.post('/quick-add', async (req, res, next) => {
+  try {
+    const { firstName, lastName, phone, address, city, zip } = req.body;
+    if (!firstName || !lastName || !phone) {
+      return res.status(400).json({ error: 'firstName, lastName, phone required' });
+    }
+
+    const [customer] = await db('customers').insert({
+      first_name: firstName,
+      last_name: lastName,
+      phone,
+      address_line1: address || null,
+      city: city || null,
+      state: 'FL',
+      zip: zip || null,
+      pipeline_stage: 'new_lead',
+      lead_source: 'admin_manual',
+      active: true,
+    }).returning('*');
+
+    logger.info(`[customers] Quick-add: ${firstName} ${lastName} (${phone})`);
+
+    res.status(201).json({
+      customer: {
+        id: customer.id,
+        firstName: customer.first_name,
+        lastName: customer.last_name,
+        phone: customer.phone,
+        address: `${customer.address_line1 || ''}, ${customer.city || ''}, ${customer.state || ''} ${customer.zip || ''}`.trim(),
+        city: customer.city,
+        tier: customer.waveguard_tier,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers — directory + pipeline
 router.get('/', async (req, res, next) => {
   try {
-    const { search, stage, tier, tag, source, area, city, sort = 'lead_score', order = 'desc', page = 1, limit = 100 } = req.query;
+    const { search, stage, tier, tag, source, area, city, sort = 'lead_score', order = 'desc' } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit) || 100));
 
     let query = db('customers').whereNull('customers.deleted_at').select(
       'customers.*',
@@ -39,7 +120,7 @@ router.get('/', async (req, res, next) => {
     if (stage) query = query.where('pipeline_stage', stage);
     if (tier === 'none') query = query.whereNull('waveguard_tier');
     else if (tier) query = query.where('waveguard_tier', tier);
-    if (city) query = query.whereILike('city', city);
+    if (city) query = query.whereILike('city', `%${city}%`);
     if (source) query = query.where('lead_source', source);
     if (area) query = query.whereILike('city', `%${area}%`);
     if (tag) query = query.whereExists(function () {
@@ -50,8 +131,9 @@ router.get('/', async (req, res, next) => {
     query = query.orderBy(sortCol, order === 'asc' ? 'asc' : 'desc');
 
     const total = await db('customers').whereNull('deleted_at').count('* as count').first();
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const customers = await query.limit(parseInt(limit)).offset(offset);
+    const totalCount = parseInt(total?.count || 0);
+    const offset = (page - 1) * limit;
+    const customers = await query.limit(limit).offset(offset);
 
     // Pipeline counts
     const pipelineCounts = await db('customers').whereNull('deleted_at').select('pipeline_stage').count('* as count').groupBy('pipeline_stage');
@@ -87,8 +169,8 @@ router.get('/', async (req, res, next) => {
         balanceOwed: parseFloat(c.balance_owed || 0),
         healthScore: c.health_score != null ? parseInt(c.health_score) : null,
       })),
-      total: parseInt(total.count), page: parseInt(page), limit: parseInt(limit),
-      totalPages: Math.ceil(parseInt(total.count) / parseInt(limit)),
+      total: totalCount, page, limit,
+      totalPages: Math.max(1, Math.ceil(totalCount / limit)),
       pipelineCounts: pipelineMap,
       filters: {
         tags: allTags.map(t => t.tag),
@@ -108,10 +190,8 @@ router.get('/pipeline/view', async (req, res, next) => {
     for (const stage of stages) {
       const customers = await db('customers')
         .where({ pipeline_stage: stage })
-        .whereNull('customers.deleted_at')
-        .leftJoin('customer_tags', 'customers.id', 'customer_tags.customer_id')
-        .select('customers.*')
-        .groupBy('customers.id')
+        .whereNull('deleted_at')
+        .select('*')
         .orderBy('lead_score', 'desc')
         .limit(20);
 
@@ -260,14 +340,14 @@ router.get('/:id', async (req, res, next) => {
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
       db('sms_log').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(20),
-      db('customer_health_scores').where({ customer_id: c.id }).orderBy('scored_at', 'desc').first().catch(() => null),
-      db('invoices').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(10).catch(() => []),
-      db('payment_methods').where({ customer_id: c.id }).catch(() => []),
-      db('service_photos').where({ customer_id: c.id }).select('id', 's3_url', 'caption', 'service_record_id', 'created_at').orderBy('created_at', 'desc').limit(12).catch(() => []),
-      db('notification_prefs').where({ customer_id: c.id }).first().catch(() => null),
-      db('referral_promoters').where({ customer_id: c.id }).first().catch(() => null),
-      db('property_application_history').where({ customer_id: c.id }).orderBy('applied_at', 'desc').limit(10).catch(() => []),
-      db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.discount_type', 'discounts.amount as discount_value').catch(() => []),
+      db('customer_health_scores').where({ customer_id: c.id }).orderBy('scored_at', 'desc').first().catch(e => { logger.warn(`[customers:${c.id}] health_scores: ${e.message}`); return null; }),
+      db('invoices').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] invoices: ${e.message}`); return []; }),
+      db('payment_methods').where({ customer_id: c.id }).catch(e => { logger.warn(`[customers:${c.id}] payment_methods: ${e.message}`); return []; }),
+      db('service_photos').where({ customer_id: c.id }).select('id', 's3_url', 'caption', 'service_record_id', 'created_at').orderBy('created_at', 'desc').limit(12).catch(e => { logger.warn(`[customers:${c.id}] service_photos: ${e.message}`); return []; }),
+      db('notification_prefs').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] notification_prefs: ${e.message}`); return null; }),
+      db('referral_promoters').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] referral_promoters: ${e.message}`); return null; }),
+      db('property_application_history').where({ customer_id: c.id }).orderBy('applied_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] property_application_history: ${e.message}`); return []; }),
+      db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.discount_type', 'discounts.amount as discount_value').catch(e => { logger.warn(`[customers:${c.id}] customer_discounts: ${e.message}`); return []; }),
     ]);
 
     res.json({
@@ -465,11 +545,6 @@ router.post('/:id/follow-up', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/customers/sync-square — DEPRECATED (Square removed)
-router.post('/sync-square', (req, res) => {
-  res.json({ message: 'Square sync disabled — migrated to Stripe', synced: 0 });
-});
-
 // DELETE /api/admin/customers/:id — soft-delete a customer
 router.delete('/:id', async (req, res, next) => {
   try {
@@ -491,79 +566,6 @@ router.patch('/:id/restore', async (req, res, next) => {
     await db('customers').where({ id: req.params.id }).update({ deleted_at: null });
     logger.info(`[customers] Restored customer ${customer.first_name} ${customer.last_name} (${req.params.id})`);
     res.json({ success: true });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/customers/fix-tiers — Recalculate tiers from service count
-router.post('/fix-tiers', async (req, res, next) => {
-  try {
-    const customers = await db('customers')
-      .select('customers.id', 'customers.waveguard_tier')
-      .whereIn('customers.pipeline_stage', ['active_customer', 'won'])
-      .whereNull('deleted_at');
-
-    let updated = 0;
-    for (const c of customers) {
-      // Count distinct recurring service types for this customer
-      const services = await db('scheduled_services')
-        .where({ customer_id: c.id })
-        .whereIn('status', ['scheduled', 'confirmed', 'completed'])
-        .countDistinct('service_type as count')
-        .first();
-
-      const count = parseInt(services?.count || 0);
-      let newTier = null;
-      if (count === 0) newTier = null;
-      else if (count === 1) newTier = 'Bronze';
-      else if (count === 2) newTier = 'Silver';
-      else if (count === 3) newTier = 'Gold';
-      else newTier = 'Platinum';
-
-      if (newTier !== c.waveguard_tier) {
-        await db('customers').where({ id: c.id }).update({ waveguard_tier: newTier });
-        updated++;
-      }
-    }
-
-    logger.info(`[customers] Fix tiers: ${updated} of ${customers.length} customers updated`);
-    res.json({ success: true, updated, total: customers.length });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
-router.post('/quick-add', async (req, res, next) => {
-  try {
-    const { firstName, lastName, phone, address, city, zip } = req.body;
-    if (!firstName || !lastName || !phone) {
-      return res.status(400).json({ error: 'firstName, lastName, phone required' });
-    }
-
-    const [customer] = await db('customers').insert({
-      first_name: firstName,
-      last_name: lastName,
-      phone,
-      address_line1: address || null,
-      city: city || null,
-      state: 'FL',
-      zip: zip || null,
-      pipeline_stage: 'new_lead',
-      lead_source: 'admin_manual',
-      active: true,
-    }).returning('*');
-
-    logger.info(`[customers] Quick-add: ${firstName} ${lastName} (${phone})`);
-
-    res.status(201).json({
-      customer: {
-        id: customer.id,
-        firstName: customer.first_name,
-        lastName: customer.last_name,
-        phone: customer.phone,
-        address: `${customer.address_line1 || ''}, ${customer.city || ''}, ${customer.state || ''} ${customer.zip || ''}`.trim(),
-        city: customer.city,
-        tier: customer.waveguard_tier,
-      },
-    });
   } catch (err) { next(err); }
 });
 

@@ -84,7 +84,8 @@ export default function DashboardIntelligenceBar({ kpiData }) {
   useEffect(() => {
     adminFetch('/admin/intelligence-bar/quick-actions?context=dashboard')
       .then(d => setQuickActions(d.actions || []))
-      .catch(() => {
+      .catch(err => {
+        console.error('[dashboard-bar] quick-actions failed, using fallback', err);
         setQuickActions([
           { id: 'briefing', label: 'Morning Briefing', prompt: 'Give me a morning briefing', icon: '☀️' },
           { id: 'week_compare', label: 'This vs Last Week', prompt: 'How did we do this week vs last week?', icon: '📊' },
@@ -143,7 +144,7 @@ export default function DashboardIntelligenceBar({ kpiData }) {
 
     setLoading(false);
     setPrompt('');
-  }, [prompt, loading, conversationHistory, buildPageData]);
+  }, [prompt, loading, conversationHistory, buildPageData, setPrompt]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
