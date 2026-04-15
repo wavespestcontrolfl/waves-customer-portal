@@ -230,13 +230,20 @@ function generateEstimate(input) {
   if (services.plugging) {
     const result = pricePlugging(
       services.plugging.area || property.lawnSqFt,
-      services.plugging.spacing || 12
+      services.plugging.spacing || 12,
+      {
+        urgency: services.plugging.urgency || 'ROUTINE',
+        afterHours: services.plugging.afterHours || false,
+      }
     );
     result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   if (services.foam) {
-    const result = priceFoamDrill(services.foam.points || 5);
+    const result = priceFoamDrill(services.foam.points || 5, {
+      urgency: services.foam.urgency || 'ROUTINE',
+      afterHours: services.foam.afterHours || false,
+    });
     result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
@@ -261,6 +268,8 @@ function generateEstimate(input) {
       moderate: services.exclusion.moderate || 0,
       advanced: services.exclusion.advanced || 0,
       waiveInspection: services.exclusion.waiveInspection || false,
+      urgency: services.exclusion.urgency || 'ROUTINE',
+      afterHours: services.exclusion.afterHours || false,
     });
     result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);

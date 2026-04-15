@@ -26,6 +26,15 @@ function laborCost(onSiteMinutes) {
   return GLOBAL.LABOR_RATE * (GLOBAL.DRIVE_TIME + onSiteMinutes) / 60;
 }
 
+// ── Urgency multiplier helper (matches v2 applyOT — urgency only, ────
+// not recurring-customer discount which is handled by discount-engine) ─
+function applyUrgency(price, urgency = 'ROUTINE', afterHours = false) {
+  let mult = 1.0;
+  if (urgency === 'SOON') mult = afterHours ? 1.50 : 1.25;
+  else if (urgency === 'URGENT') mult = afterHours ? 2.0 : 1.50;
+  return Math.round(price * mult);
+}
+
 // ============================================================
 // PEST CONTROL
 // ============================================================
@@ -730,14 +739,19 @@ function priceDethatching(lawnSqFt) {
 // ============================================================
 // PLUGGING (sod plug install by spacing)
 // ============================================================
-function pricePlugging(lawnSqFt, spacing = 12) {
+// Urgency handling matches v2 applyOT (urgency multiplier only — rc discount
+// is applied downstream by the discount engine for one-time services).
+function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
+  const { urgency = 'ROUTINE', afterHours = false } = options;
   const cfg = SPECIALTY.plugging;
   const ppsf = cfg.spacingRates[`${spacing}inch`] || cfg.spacingRates['12inch'];
   const label = spacing === 6 ? '6" Premium' : spacing === 9 ? '9" Standard' : '12" Economy';
   const totalPlugs = Math.ceil(lawnSqFt * ppsf);
   const trays = Math.ceil(totalPlugs / cfg.plugsPerTray);
   const cost = totalPlugs * cfg.costPerPlug + (totalPlugs / cfg.laborPerPlugs) * GLOBAL.LABOR_RATE;
-  const price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
+  // v2 parity: raw floor 250 (not r'd), raw margin 1 - 0.45 = 0.55
+  let price = Math.max(250, Math.round(cost / 0.55));
+  price = applyUrgency(price, urgency, afterHours);
   const perSf = Math.round(price / Math.max(1, lawnSqFt) * 100) / 100;
   return {
     service: 'plugging',
@@ -752,17 +766,22 @@ function pricePlugging(lawnSqFt, spacing = 12) {
 // ============================================================
 // FOAM & DRILL (termite perimeter injection)
 // ============================================================
-function priceFoamDrill(points = 5) {
+// v2 parity: exact-match tier lookup (5/10/15/20 only; falls back to Spot).
+function priceFoamDrill(points = 5, options = {}) {
+  const { urgency = 'ROUTINE', afterHours = false } = options;
   const cfg = SPECIALTY.foamDrill;
-  const tier = cfg.tiers.find(t => points <= t.maxPoints) || cfg.tiers[0];
+  const tierMap = { 5: cfg.tiers[0], 10: cfg.tiers[1], 15: cfg.tiers[2], 20: cfg.tiers[3] };
+  const tier = tierMap[points] || cfg.tiers[0];
   const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
-  const price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
+  let price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
+  price = applyUrgency(price, urgency, afterHours);
+  const label = tier.label + (tier.maxPoints === 5 ? ' (1–5)' : tier.maxPoints === 10 ? ' (6–10)' : tier.maxPoints === 15 ? ' (11–15)' : '');
   return {
     service: 'foam_drill',
     name: 'Drill-and-Foam Termite',
     price,
-    detail: `${tier.label} | ${tier.cans} can${tier.cans > 1 ? 's' : ''}`,
-    points, tier: tier.label, cans: tier.cans,
+    detail: `${label} | ${tier.cans} can${tier.cans > 1 ? 's' : ''}`,
+    points, tier: label, cans: tier.cans,
   };
 }
 
@@ -787,31 +806,29 @@ function priceStingingInsect(options = {}) {
 
   let price = cfg.tiers[Math.max(0, Math.min(cfg.tiers.length - 1, tier - 1))];
   const mods = [];
-  const [aMild, aHigh, aExt] = cfg.addons.aggressiveness;
-  if (aggressive === 'MILD') { price += aMild; mods.push(`+$${aMild} aggressive`); }
-  else if (aggressive === 'HIGH') { price += aHigh; mods.push(`+$${aHigh} aggressive`); }
-  else if (aggressive === 'EXTREME') { price += aExt; mods.push(`+$${aExt} aggressive`); }
+  // v2 parity: raw addon values (not r'd). Base tiers stay r'd-matched.
+  if (aggressive === 'MILD') { price += 75; mods.push('+$75 aggressive'); }
+  else if (aggressive === 'HIGH') { price += 150; mods.push('+$150 aggressive'); }
+  else if (aggressive === 'EXTREME') { price += 200; mods.push('+$200 aggressive'); }
 
-  const [hMid, hHigh] = cfg.addons.height;
-  if (height === 'MID') { price += hMid; mods.push(`+$${hMid} height`); }
-  else if (height === 'HIGH') { price += hHigh; mods.push(`+$${hHigh} height`); }
+  if (height === 'MID') { price += 75; mods.push('+$75 height'); }
+  else if (height === 'HIGH') { price += 150; mods.push('+$150 height'); }
 
   if (confined === 'YES') {
-    const [cLow, cHigh] = cfg.addons.confinedSpace;
-    const add = tier >= 3 ? cHigh : cLow;
+    const add = tier >= 3 ? 200 : 100;
     price += add; mods.push(`+$${add} confined`);
   }
 
-  if (urgency === 'SOON') { price += cfg.addons.sameDay; mods.push(`+$${cfg.addons.sameDay} same-day`); }
-  else if (urgency === 'URGENT') { price = Math.round(price * cfg.addons.urgent); mods.push(`+${Math.round((cfg.addons.urgent - 1) * 100)}% emergency`); }
-  if (afterHours) { price += cfg.addons.afterHours; mods.push(`+$${cfg.addons.afterHours} after-hours`); }
+  if (urgency === 'SOON') { price += 75; mods.push('+$75 same-day'); }
+  else if (urgency === 'URGENT') { price = Math.round(price * 1.5); mods.push('+50% emergency'); }
+  if (afterHours) { price += 75; mods.push('+$75 after-hours'); }
 
   let removalPrice = 0, removalLabel = '';
-  const R = cfg.removal;
-  if (removal === 'SMALL') { removalPrice = R.small; removalLabel = 'Small nest'; }
-  else if (removal === 'LARGE') { removalPrice = R.large; removalLabel = 'Large comb'; }
-  else if (removal === 'HONEYCOMB') { removalPrice = R.honeycomb; removalLabel = 'Honeycomb extraction'; }
-  else if (removal === 'RELOCATE') { removalPrice = R.relocate; removalLabel = 'Live bee relocation'; }
+  // v2 parity: raw removal values
+  if (removal === 'SMALL') { removalPrice = 75; removalLabel = 'Small nest'; }
+  else if (removal === 'LARGE') { removalPrice = 250; removalLabel = 'Large comb'; }
+  else if (removal === 'HONEYCOMB') { removalPrice = 375; removalLabel = 'Honeycomb extraction'; }
+  else if (removal === 'RELOCATE') { removalPrice = 450; removalLabel = 'Live bee relocation'; }
 
   const total = price + removalPrice;
   const includedOnProgram = cfg.freeWithRecurringPest && hasRecurringPest
@@ -831,13 +848,17 @@ function priceStingingInsect(options = {}) {
 // ============================================================
 // EXCLUSION (rodent entry-point sealing)
 // ============================================================
+// v2 parity: urgency applied to points subtotal, NOT to inspection fee.
 function priceExclusion(options = {}) {
-  const { simple = 0, moderate = 0, advanced = 0, waiveInspection = false } = options;
+  const {
+    simple = 0, moderate = 0, advanced = 0, waiveInspection = false,
+    urgency = 'ROUTINE', afterHours = false,
+  } = options;
   const cfg = SPECIALTY.exclusion;
   const sc = simple * cfg.perPoint.simple + moderate * cfg.perPoint.moderate + advanced * cfg.perPoint.advanced;
   const ep = Math.max(cfg.floor, Math.round(sc));
   const insp = waiveInspection ? 0 : cfg.inspectionFee;
-  const total = ep + insp;
+  const total = applyUrgency(ep, urgency, afterHours) + insp;
   let tier = 'Basic';
   if (advanced > 0) tier = 'Advanced (Roof)';
   else if (moderate > 0) tier = 'Moderate';
