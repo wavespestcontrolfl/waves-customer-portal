@@ -41,7 +41,6 @@ export default function AdminInvoicesPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: D.heading }}>Invoices</div>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Waves-branded invoices with service recap and tap-to-pay</div>
         </div>
       </div>
 

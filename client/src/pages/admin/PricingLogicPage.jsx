@@ -149,9 +149,6 @@ export default function PricingLogicPage() {
       <div style={{ maxWidth: 1280, margin: '0 auto' }}>
         <div style={{ marginBottom: 24 }}>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0 }}>Pricing Logic</h1>
-          <p style={{ fontSize: 13, color: D.muted, margin: '4px 0 0' }}>
-            Edit pricing constants, brackets, and discount rules. Changes are saved immediately with audit logging.
-          </p>
         </div>
 
         <MarginCalculator />

@@ -138,7 +138,6 @@ export default function LawnAssessmentPanel() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
           <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Lawn Health Assessment</div>
-          <div style={{ fontSize: 12, color: D.muted }}>Today's scheduled lawn services — upload photos for AI scoring</div>
         </div>
         {step !== 'select' && <button onClick={() => { setStep('select'); setPhotos([]); setResult(null); }} style={btnOutline}>← Back</button>}
       </div>

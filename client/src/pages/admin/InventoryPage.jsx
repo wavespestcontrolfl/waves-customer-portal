@@ -42,7 +42,6 @@ export default function InventoryPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
           <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Procurement Intelligence</div>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>Products, vendor pricing, approvals & COGS</div>
         </div>
       </div>
 

@@ -139,7 +139,6 @@ export default function EquipmentMaintenancePage() {
       {/* Header */}
       <div style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Equipment Maintenance & Fleet</div>
-        <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Maintenance schedules, mileage tracking, cost analysis, fleet health</div>
       </div>
 
       {/* Tabs */}

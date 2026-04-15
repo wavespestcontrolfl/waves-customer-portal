@@ -62,8 +62,7 @@ export default function BadgesPage() {
 
   return (
     <div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Badge Management</div>
-      <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>22 badges across 5 categories — earned by customers through activity</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: D.heading, marginBottom: 20 }}>Badge Management</div>
 
       {/* Stats */}
       {stats && (

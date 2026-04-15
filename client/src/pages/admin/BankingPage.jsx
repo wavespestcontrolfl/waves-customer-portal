@@ -636,7 +636,6 @@ export default function BankingPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
         <div>
           <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Banking & Cash Flow</div>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>Stripe payouts, reconciliation & cash flow analysis</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {lastSync && (

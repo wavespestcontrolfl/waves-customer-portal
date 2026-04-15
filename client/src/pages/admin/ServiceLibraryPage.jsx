@@ -280,7 +280,6 @@ export default function ServiceLibraryPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
         <div>
           <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Service Library</div>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>Single source of truth for all services, pricing, and WaveGuard packages</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span style={{ fontSize: 12, color: D.muted }}>{total} services</span>

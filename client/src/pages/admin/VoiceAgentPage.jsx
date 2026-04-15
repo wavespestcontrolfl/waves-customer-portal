@@ -310,7 +310,7 @@ export default function WavesVoiceAgentAdmin() {
             <StatusBadge active={agentEnabled} label={agentEnabled ? "Active" : "Off"} />
           </div>
           <div style={{ fontSize: 12, color: "#64748B" }}>
-            Twilio ConversationRelay + Claude API • {afterHoursOnly ? "After-hours only" : "Always on"} • {
+            {afterHoursOnly ? "After-hours only" : "Always on"} • {
               new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/New_York" })
             } ET
           </div>

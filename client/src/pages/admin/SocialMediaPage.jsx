@@ -57,7 +57,6 @@ export default function SocialMediaPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
           <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Social Media Engine</div>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Auto-post blog content to Facebook, Instagram, LinkedIn & GBP</div>
         </div>
       </div>
 
