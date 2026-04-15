@@ -1457,7 +1457,7 @@ function HeroSlider({ onSwitchTab }) {
                 textShadow: '0 2px 8px rgba(0,0,0,0.5)',
               }}>{slide.title}</div>
               <div style={{
-                fontSize: 13, color: 'rgba(255,255,255,0.95)', lineHeight: 1.4,
+                fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.98)', lineHeight: 1.4,
                 maxWidth: 320, marginBottom: 14,
                 textShadow: '0 1px 4px rgba(0,0,0,0.5)',
               }}>{slide.subtitle}</div>
