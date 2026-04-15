@@ -29,7 +29,14 @@ const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
+const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const logger = require('../services/logger');
+
+const adminToolBreaker = getBreaker('intelligence-bar');
+
+function isToolFailure(result) {
+  return result && typeof result === 'object' && (result.error || result.failed === true);
+}
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -579,11 +586,33 @@ router.post('/query', async (req, res, next) => {
       for (const toolUse of toolUses) {
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, toolUse.input);
 
-        const result = await executeToolByName(toolUse.name, toolUse.input, techContext);
+        let result;
+        let failed = false;
+        if (adminToolBreaker.isTripped()) {
+          result = adminToolBreaker.fastFailResult();
+          failed = true;
+        } else {
+          try {
+            result = await executeToolByName(toolUse.name, toolUse.input, techContext);
+            if (isToolFailure(result)) {
+              failed = true;
+              adminToolBreaker.recordFailure();
+            } else {
+              adminToolBreaker.recordSuccess();
+            }
+          } catch (err) {
+            logger.error(`[intelligence-bar] Tool ${toolUse.name} threw:`, err);
+            adminToolBreaker.recordFailure();
+            result = { error: err.message || 'Tool execution failed' };
+            failed = true;
+          }
+        }
+
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
           content: JSON.stringify(result),
+          ...(failed ? { is_error: true } : {}),
         });
 
         toolCalls.push({ name: toolUse.name, input: toolUse.input });

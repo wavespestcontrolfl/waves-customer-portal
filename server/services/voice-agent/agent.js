@@ -22,6 +22,24 @@ const db = require("../../models/db");
 
 const { SYSTEM_PROMPT, buildDynamicPrompt } = require("./system-prompt");
 const { TOOLS, executeTool } = require("./tools");
+const { getBreaker } = require("../intelligence-bar/circuit-breaker");
+
+const voiceToolBreaker = getBreaker("voice-agent");
+const VOICE_TOOL_TIMEOUT_MS = 8000;
+
+function isToolFailure(result) {
+  return result && typeof result === "object" && (result.error || result.failed === true);
+}
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error(`Tool ${label} timed out after ${ms}ms`)),
+      ms,
+    )),
+  ]);
+}
 
 let anthropic; try { anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); } catch { anthropic = null; }
 
@@ -361,8 +379,44 @@ async function aiResponseStream(sessionData, ws, depth = 0) {
 
       console.log(`[VoiceAgent] Tool: ${currentToolUse.name}`, JSON.stringify(parsedInput).substring(0, 200));
 
-      // Execute tool against portal DB/services
-      const toolResult = await executeTool(currentToolUse.name, parsedInput, sessionData);
+      // Execute tool against portal DB/services — with timeout + circuit breaker
+      // Silence kills calls, so we send a filler phrase immediately and fast-fail
+      // rather than waiting on a stuck tool.
+      let toolResult;
+      let toolFailed = false;
+      if (voiceToolBreaker.isTripped()) {
+        toolResult = voiceToolBreaker.fastFailResult();
+        toolFailed = true;
+      } else {
+        let fillerTimer = null;
+        if (ws.readyState === 1) {
+          fillerTimer = setTimeout(() => {
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: "text", token: "One moment...", last: false }));
+            }
+          }, 2000);
+        }
+        try {
+          toolResult = await withTimeout(
+            executeTool(currentToolUse.name, parsedInput, sessionData),
+            VOICE_TOOL_TIMEOUT_MS,
+            currentToolUse.name,
+          );
+          if (isToolFailure(toolResult)) {
+            toolFailed = true;
+            voiceToolBreaker.recordFailure();
+          } else {
+            voiceToolBreaker.recordSuccess();
+          }
+        } catch (err) {
+          console.error(`[VoiceAgent] Tool ${currentToolUse.name} failed: ${err.message}`);
+          voiceToolBreaker.recordFailure();
+          toolResult = { error: err.message || "Tool failed" };
+          toolFailed = true;
+        } finally {
+          if (fillerTimer) clearTimeout(fillerTimer);
+        }
+      }
 
       // Add tool use + result to conversation
       sessionData.conversation.push({
@@ -384,6 +438,7 @@ async function aiResponseStream(sessionData, ws, depth = 0) {
           type: "tool_result",
           tool_use_id: currentToolUse.id,
           content: JSON.stringify(toolResult),
+          ...(toolFailed ? { is_error: true } : {}),
         }],
       });
 

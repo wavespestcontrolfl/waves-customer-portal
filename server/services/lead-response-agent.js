@@ -21,6 +21,24 @@
 const logger = require('./logger');
 const db = require('../models/db');
 const { executeLeadTool } = require('./lead-response-tools');
+const { getBreaker } = require('./intelligence-bar/circuit-breaker');
+
+const leadToolBreaker = getBreaker('lead-response-agent');
+
+// Tools whose failure means the agent is working with incomplete context.
+// If any of these fail, we won't let the agent auto-send a personalized SMS —
+// we swap to a safe generic ack and queue the draft for Virginia/Adam.
+const CRITICAL_CONTEXT_TOOLS = new Set([
+  'get_customer_context',
+  'check_existing_estimates',
+  'check_next_availability',
+  'get_pest_context',
+  'get_lead_details',
+]);
+
+function isToolFailure(result) {
+  return result && typeof result === 'object' && (result.error || result.failed === true);
+}
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const LEAD_AGENT_ID = process.env.LEAD_AGENT_ID;
@@ -142,6 +160,7 @@ const LeadResponseAgent = {
       let toolsExecuted = [];
       let actionTaken = null;
       let maxIterations = 25;
+      const criticalFailures = [];
 
       for await (const { event, data } of streamSessionEvents(sessionId)) {
         if (--maxIterations <= 0) break;
@@ -163,14 +182,61 @@ const LeadResponseAgent = {
           logger.info(`[lead-agent] Tool: ${toolName}`);
 
           let toolResult;
-          try {
-            toolResult = await executeLeadTool(toolName, toolInput);
+          let failed = false;
 
-            if (toolName === 'send_lead_response') actionTaken = 'auto_sent';
-            if (toolName === 'queue_for_adam') actionTaken = 'queued_for_adam';
-          } catch (err) {
-            toolResult = { error: `Tool failed: ${err.message}` };
-            logger.error(`[lead-agent] Tool ${toolName} error: ${err.message}`);
+          // Pre-send quality check: if critical context is missing, don't
+          // let the agent auto-send a personalized SMS. Swap to a safe
+          // generic acknowledgment and queue the draft for human review.
+          if (toolName === 'send_lead_response' && criticalFailures.length > 0) {
+            logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Falling back to safe generic response.`);
+            const safeMessage = `Hi ${lead.name?.split(' ')[0] || 'there'} — this is Waves Pest Control. Thanks for reaching out! Someone from our team will follow up with you shortly.`;
+            try {
+              await executeLeadTool('queue_for_adam', {
+                lead_id: lead.leadId,
+                customer_id: lead.customerId,
+                reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Generic ack sent; please review and follow up.`,
+                draft_message: toolInput.message || '',
+              });
+              // Send the safe generic message directly
+              await executeLeadTool('send_lead_response', {
+                lead_id: lead.leadId,
+                customer_id: lead.customerId,
+                message: safeMessage,
+              });
+              toolResult = {
+                sent: true,
+                fallback: true,
+                note: 'Sent safe generic ack and queued full draft for human review due to missing context.',
+              };
+              actionTaken = 'safe_fallback_sent';
+            } catch (err) {
+              toolResult = { error: `Safe fallback failed: ${err.message}` };
+              failed = true;
+              logger.error(`[lead-agent] Safe fallback failed: ${err.message}`);
+            }
+          } else if (leadToolBreaker.isTripped()) {
+            toolResult = leadToolBreaker.fastFailResult();
+            failed = true;
+            if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
+          } else {
+            try {
+              toolResult = await executeLeadTool(toolName, toolInput);
+              if (isToolFailure(toolResult)) {
+                failed = true;
+                leadToolBreaker.recordFailure();
+                if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
+              } else {
+                leadToolBreaker.recordSuccess();
+                if (toolName === 'send_lead_response') actionTaken = 'auto_sent';
+                if (toolName === 'queue_for_adam') actionTaken = 'queued_for_adam';
+              }
+            } catch (err) {
+              toolResult = { error: `Tool failed: ${err.message}` };
+              failed = true;
+              leadToolBreaker.recordFailure();
+              if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
+              logger.error(`[lead-agent] Tool ${toolName} error: ${err.message}`);
+            }
           }
 
           toolsExecuted.push(toolName);
@@ -179,6 +245,7 @@ const LeadResponseAgent = {
             type: 'tool_result',
             tool_use_id: toolUseId,
             content: [{ type: 'text', text: JSON.stringify(toolResult) }],
+            ...(failed ? { is_error: true } : {}),
           });
         }
 
