@@ -58,12 +58,13 @@ const sBtn = (bg, fg) => ({ display: 'inline-flex', alignItems: 'center', justif
 const sBtnSm = (bg, fg) => ({ ...sBtn(bg, fg), padding: '10px 18px', fontSize: 14 });
 
 /* ── result display helpers ─────────────────────────────────── */
-const sTierRow = (rec, dim) => ({
+const sTierRow = (rec, dim, clickable, sel) => ({
   display: 'grid', gridTemplateColumns: '120px 1fr 110px', alignItems: 'center',
-  background: rec ? 'rgba(16,185,129,0.06)' : C.navy,
-  border: rec ? `2px solid ${C.green}` : `1px solid ${C.border}`,
+  background: sel ? 'rgba(14,165,233,0.08)' : rec ? 'rgba(16,185,129,0.06)' : C.navy,
+  border: sel ? `2px solid ${C.teal}` : rec ? `2px solid ${C.green}` : `1px solid ${C.border}`,
   borderRadius: 8, padding: '14px 18px', fontSize: 15, transition: 'all 0.2s',
-  opacity: dim ? 0.5 : 1,
+  opacity: dim && !sel ? 0.5 : 1,
+  cursor: clickable ? 'pointer' : 'default',
 });
 const sTierName = { fontWeight: 700, color: C.heading, fontSize: 15 };
 const sTierDetail = { fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: C.gray };
@@ -82,10 +83,15 @@ const sDiscBadge = { display: 'inline-block', background: 'rgba(16,185,129,0.15)
 
 /* ── TierGrid ───────────────────────────────────────────────── */
 function TierGrid({ children }) { return <div style={{ display: 'grid', gap: 10 }}>{children}</div>; }
-function TierRow({ name, detail, price, recommended, dimmed }) {
+function TierRow({ name, detail, price, recommended, dimmed, onSelect, selected }) {
   return (
-    <div className="estimate-tier-row" style={sTierRow(recommended, dimmed)}>
-      <div style={sTierName}>{name}{recommended ? ' \u2605' : ''}</div>
+    <div
+      className="estimate-tier-row"
+      onClick={onSelect}
+      title={onSelect ? 'Click to select this frequency' : undefined}
+      style={sTierRow(recommended, dimmed, !!onSelect, selected)}
+    >
+      <div style={sTierName}>{name}{selected ? ' \u2713' : recommended ? ' \u2605' : ''}</div>
       <div style={{ ...sTierDetail, wordWrap: 'break-word', overflowWrap: 'break-word' }}>{detail}</div>
       <div style={sTierPrice}>{price}</div>
     </div>
@@ -220,7 +226,8 @@ function EstimateToolView() {
     shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
     nearWater: 'NO', urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
     bedArea: '', palmCount: '', treeCount: '',
-    roachModifier: 'NONE', pestFreq: '4', plugArea: '', plugSpacing: '12',
+    roachModifier: 'NONE', lawnFreq: '9', pestFreq: '4', plugArea: '', plugSpacing: '12',
+    manualDiscountType: 'NONE', manualDiscountValue: '', manualDiscountLabel: '',
     grassType: 'st_augustine',
     otLawnType: 'FERT',
     exclSimple: '0', exclModerate: '0', exclAdvanced: '0', exclWaive: 'NO',
@@ -508,7 +515,7 @@ function EstimateToolView() {
   }
 
   /* ── generate estimate ────────────────────────────────────── */
-  async function doGenerate() {
+  async function doGenerate(overrides = {}) {
     // If we have an enriched profile from v2 lookup, use server-side calculation
     if (enrichedProfile) {
       try {
@@ -540,9 +547,17 @@ function EstimateToolView() {
         if (form.svcBedbug) selectedServices.push('BEDBUG');
         if (form.svcExclusion) selectedServices.push('EXCLUSION');
 
+        const manualDiscountType = overrides.manualDiscountType ?? form.manualDiscountType;
+        const manualDiscountValue = Number(overrides.manualDiscountValue ?? form.manualDiscountValue) || 0;
+        const manualDiscount = (manualDiscountType && manualDiscountType !== 'NONE' && manualDiscountValue > 0)
+          ? { type: manualDiscountType, value: manualDiscountValue, label: form.manualDiscountLabel || '' }
+          : null;
+
         const options = {
           grassType: form.grassType || 'st_augustine',
-          pestFreq: parseInt(form.pestFreq) || 4,
+          lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq) || 9,
+          pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq) || 4,
+          manualDiscount,
           roachModifier: form.roachModifier || 'NONE',
           urgency: form.urgency || 'ROUTINE',
           afterHours: form.isAfterHours === 'YES',
@@ -1045,9 +1060,30 @@ function EstimateToolView() {
             )}
           </div>
 
+          {/* Manual discount (stacks on top of WaveGuard bundle discount) */}
+          <div style={{ ...sPanel, borderColor: C.border, marginBottom: 14 }}>
+            <div style={sPanelTitle}>Manual Discount (optional)</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '140px 120px 1fr', gap: 10 }}>
+              <Field label="Type">
+                <Select k="manualDiscountType" options={[
+                  { value: 'NONE', label: 'None' },
+                  { value: 'PERCENT', label: 'Percent %' },
+                  { value: 'FIXED', label: 'Dollar $' },
+                ]} />
+              </Field>
+              <Field label="Amount">
+                <Input k="manualDiscountValue" type="number" min="0" placeholder="0" />
+              </Field>
+              <Field label="Label (shown on estimate)">
+                <Input k="manualDiscountLabel" placeholder="e.g. Military, Referral" />
+              </Field>
+            </div>
+            <div style={{ fontSize: 12, color: C.gray, marginTop: 4 }}>Applies after WaveGuard bundle discount. Re-click Generate Estimate to recalculate.</div>
+          </div>
+
           {/* Action buttons */}
           <div className="estimate-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
-            <button style={{ ...sBtn(C.teal, '#fff'), fontSize: 16, padding: '16px 28px' }} onClick={doGenerate}>GENERATE ESTIMATE</button>
+            <button style={{ ...sBtn(C.teal, '#fff'), fontSize: 16, padding: '16px 28px' }} onClick={() => doGenerate()}>GENERATE ESTIMATE</button>
             <button style={{ ...sBtn(C.blue, '#fff'), fontSize: 16, padding: '16px 28px' }} onClick={() => {
               if (!estimate) { doGenerate(); }
               setShowSendForm(true);
@@ -1173,10 +1209,10 @@ function EstimateToolView() {
                   <>
                     <div style={{ background: 'linear-gradient(135deg, rgba(14,165,233,0.15), rgba(16,185,129,0.10))', border: `2px solid ${C.teal}`, borderRadius: C.radius, padding: 24, marginBottom: 24, textAlign: 'center' }}>
                       <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 36, fontWeight: 700, color: C.green }}>
-                        {fmt(E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0))}/mo
+                        {fmt(E.recurring.grandTotal || (E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0)))}/mo
                       </div>
                       <div style={{ fontSize: 14, color: C.gray, marginTop: 4 }}>
-                        Recurring monthly{E.recurring.savings > 0 ? ` (WaveGuard ${E.recurring.waveGuardTier} pricing)` : ''}
+                        Recurring monthly{E.recurring.savings > 0 ? ` (WaveGuard ${E.recurring.waveGuardTier} pricing)` : ''}{E.manualDiscount && E.manualDiscount.amount > 0 ? ' + manual discount' : ''}
                       </div>
                       <div className="estimate-summary-flex" style={{ display: 'flex', justifyContent: 'center', gap: 40, marginTop: 14, flexWrap: 'wrap' }}>
                         {E.oneTime.total > 0 && (
@@ -1271,7 +1307,16 @@ function EstimateToolView() {
                         <div style={sSectionTitle}>Lawn Care <span style={sTag('blue')}>{R.lawnMeta?.lsf?.toLocaleString()} sf turf</span>{R.lawnMeta?.grassName && <span style={sTag('green')}>{R.lawnMeta.grassName}</span>}</div>
                         <TierGrid>
                           {R.lawn.map((t, i) => (
-                            <TierRow key={i} name={t.name} detail={`${fmt(t.pa)}/app x ${t.v}`} price={`${fmt(t.mo)}/mo`} recommended={t.recommended} dimmed={t.dimmed} />
+                            <TierRow
+                              key={i}
+                              name={t.name}
+                              detail={`${fmt(t.pa)}/app x ${t.v}`}
+                              price={`${fmt(t.mo)}/mo`}
+                              recommended={t.recommended}
+                              dimmed={t.dimmed}
+                              selected={String(t.v) === String(form.lawnFreq)}
+                              onSelect={() => { set('lawnFreq', String(t.v)); doGenerate({ lawnFreq: t.v }); }}
+                            />
                           ))}
                         </TierGrid>
                       </div>
@@ -1283,7 +1328,16 @@ function EstimateToolView() {
                         <div style={sSectionTitle}>Pest Control</div>
                         <TierGrid>
                           {R.pestTiers.map((t, i) => (
-                            <TierRow key={i} name={t.label} detail={`${fmt(t.pa)}/app x ${t.apps}${R.pest?.rOG > 0 ? ' (incl roach +15%)' : ''}`} price={`${fmt(t.mo)}/mo`} recommended={t.recommended} dimmed={t.dimmed} />
+                            <TierRow
+                              key={i}
+                              name={t.label}
+                              detail={`${fmt(t.pa)}/app x ${t.apps}${R.pest?.rOG > 0 ? ' (incl roach +15%)' : ''}`}
+                              price={`${fmt(t.mo)}/mo`}
+                              recommended={t.recommended}
+                              dimmed={t.dimmed}
+                              selected={String(t.apps) === String(form.pestFreq)}
+                              onSelect={() => { set('pestFreq', String(t.apps)); doGenerate({ pestFreq: t.apps }); }}
+                            />
                           ))}
                         </TierGrid>
                         {R.pest?.rOG > 0 && <div style={sModNote}>Roach modifier: +{fmt(R.pest.rOG)}/visit ({R.pestRoachMod === 'GERMAN' ? 'German' : 'Regular'})</div>}
@@ -1511,6 +1565,12 @@ function EstimateToolView() {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', fontSize: 16 }}>
                           <span>Rodent bait (separate)</span>
                           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: C.green }}>{fmtInt(E.recurring.rodentBaitMo * 12)}/yr (${E.recurring.rodentBaitMo}/mo)</span>
+                        </div>
+                      )}
+                      {E.manualDiscount && E.manualDiscount.amount > 0 && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', fontSize: 16 }}>
+                          <span style={{ color: C.green }}>{E.manualDiscount.label || (E.manualDiscount.type === 'PERCENT' ? `Discount (${E.manualDiscount.value}%)` : `Discount`)}</span>
+                          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: C.green }}>-{fmt(E.manualDiscount.amount)}/yr</span>
                         </div>
                       )}
                       {E.oneTime.tmInstall > 0 && (

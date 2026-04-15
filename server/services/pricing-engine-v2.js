@@ -110,7 +110,9 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
   const PRICING_CFG = await loadPricingConfig();
   const {
     grassType: _grassType = 'st_augustine',
+    lawnFreq = 9,
     pestFreq = 4,
+    manualDiscount = null, // { type: 'FIXED'|'PERCENT', value: number, label?: string }
     roachModifier = 'NONE',
     urgency = 'ROUTINE',
     afterHours = false,
@@ -376,7 +378,7 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
 
   // ── LAWN CARE ──
   if (selectedServices.includes('LAWN') && turfSf > 0) {
-    result.recurring.lawn = calcLawn(turfSf, grassType, p, PRICING_CFG);
+    result.recurring.lawn = calcLawn(turfSf, grassType, p, PRICING_CFG, lawnFreq);
   }
 
   // ── PEST CONTROL ──
@@ -517,7 +519,7 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
   // WAVEGUARD BUNDLE
   // ═══════════════════════════════════════════
   result.waveguard = await calcWaveGuard(result.recurring);
-  result.totals = calcTotals(result);
+  result.totals = calcTotals(result, manualDiscount);
 
   return result;
 }
@@ -541,7 +543,7 @@ function interpolate(v, breakpoints) {
 // ─────────────────────────────────────────────
 // LAWN CARE
 // ─────────────────────────────────────────────
-function calcLawn(turfSf, grassType, p, cfg = null) {
+function calcLawn(turfSf, grassType, p, cfg = null, lawnFreq = 9) {
   // Default lawn brackets — overridden at runtime by lawn_pricing_brackets table (edited in 📐 Pricing Logic)
   const DEFAULT_LAWN_PRICES = {
     st_augustine: { name: 'St. Augustine', pts: [[0,36,46,57,67],[3000,36,46,57,67],[3500,36,46,57,70],[4000,36,46,57,75],[5000,36,46,61,87],[6000,36,47,68,99],[7000,39,52,75,110],[8000,42,57,82,122],[10000,48,66,97,144],[12000,56,75,112,167],[15000,65,89,134,201],[20000,82,111,170,258]] },
@@ -583,17 +585,20 @@ function calcLawn(turfSf, grassType, p, cfg = null) {
       monthly: mo,
       annual: ann,
       perApp,
-      recommended: i === 2 // 9x default recommendation
+      recommended: f.visits === lawnFreq,
     };
   });
+
+  const selected = tiers.find(t => t.visits === lawnFreq) || tiers[2];
 
   return {
     service: 'Lawn Care',
     grassType: lp.name,
     turfSf,
     tiers,
-    recommended: tiers[2], // 9x
-    wgMonthly: tiers[2].monthly
+    recommended: selected,
+    selected,
+    wgMonthly: selected.monthly,
   };
 }
 
@@ -1291,12 +1296,12 @@ async function calcWaveGuard(recurring) {
     const svc = recurring[key];
     if (!svc) return;
     serviceCount++;
-    const recTier = svc.recommended || svc.selected || svc;
+    const recTier = svc.selected || svc.recommended || svc;
     const ann = recTier.annual || (recTier.monthly || svc.wgMonthly || 0) * 12;
     annualBeforeDiscount += ann;
     services.push({
       name: svc.service || key,
-      monthly: svc.wgMonthly || recTier.monthly || Math.round(ann / 12 * 100) / 100
+      monthly: recTier.monthly || svc.wgMonthly || Math.round(ann / 12 * 100) / 100
     });
   });
 
@@ -1339,7 +1344,7 @@ async function calcWaveGuard(recurring) {
 // ─────────────────────────────────────────────
 // TOTALS
 // ─────────────────────────────────────────────
-function calcTotals(result) {
+function calcTotals(result, manualDiscount = null) {
   const wg = result.waveguard;
   const rec = result.recurring;
 
@@ -1384,13 +1389,36 @@ function calcTotals(result) {
   }
 
   const totalOneTimeAndSpecialty = oneTimeTotal + specialtyTotal;
-  const year1 = Math.round((wg.annualAfterDiscount + rodentBaitAnn + totalOneTimeAndSpecialty) * 100) / 100;
-  const year2 = Math.round((wg.annualAfterDiscount + rodentBaitAnn) * 100) / 100;
-  const year2mo = Math.round(year2 / 12 * 100) / 100;
+
+  // ── Manual discount (applies on top of WaveGuard) ──
+  let manualDiscountAmount = 0;
+  let manualDiscountInfo = null;
+  const baseRecurringAnn = wg.annualAfterDiscount + rodentBaitAnn;
+  if (manualDiscount && Number(manualDiscount.value) > 0) {
+    const v = Number(manualDiscount.value);
+    if (manualDiscount.type === 'PERCENT') {
+      manualDiscountAmount = Math.round(baseRecurringAnn * (v / 100) * 100) / 100;
+    } else {
+      manualDiscountAmount = Math.round(v * 100) / 100;
+    }
+    manualDiscountAmount = Math.min(manualDiscountAmount, baseRecurringAnn);
+    manualDiscountInfo = {
+      type: manualDiscount.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
+      value: v,
+      amount: manualDiscountAmount,
+      label: manualDiscount.label || (manualDiscount.type === 'PERCENT' ? `Discount (${v}%)` : `Discount -$${v.toFixed(2)}`),
+    };
+  }
+
+  const recurringAnnual = Math.round((baseRecurringAnn - manualDiscountAmount) * 100) / 100;
+  const recurringMonthly = Math.round(recurringAnnual / 12 * 100) / 100;
+  const year1 = Math.round((recurringAnnual + totalOneTimeAndSpecialty) * 100) / 100;
+  const year2 = recurringAnnual;
+  const year2mo = recurringMonthly;
 
   return {
-    recurringMonthly: wg.monthlyAfterDiscount + rodentBaitMo,
-    recurringAnnual: wg.annualAfterDiscount + rodentBaitAnn,
+    recurringMonthly,
+    recurringAnnual,
     rodentBaitMonthly: rodentBaitMo,
     rodentBaitAnnual: rodentBaitAnn,
     oneTimeItems: otItems,
@@ -1402,7 +1430,8 @@ function calcTotals(result) {
     year2,
     year2Monthly: year2mo,
     waveguardTier: wg.tier,
-    waveguardSavings: wg.savings
+    waveguardSavings: wg.savings,
+    manualDiscount: manualDiscountInfo,
   };
 }
 

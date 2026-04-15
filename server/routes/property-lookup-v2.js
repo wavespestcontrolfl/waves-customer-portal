@@ -1223,7 +1223,9 @@ router.post('/calculate-estimate', async (req, res) => {
         year1: totals.year1 || 0,
         year2: totals.year2 || 0,
         year2mo: totals.year2Monthly || 0,
+        manualDiscount: totals.manualDiscount || null,
       },
+      manualDiscount: totals.manualDiscount || null,
       results: R,
       specItems: v1SpecItems,
     };
