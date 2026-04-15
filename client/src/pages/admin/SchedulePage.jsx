@@ -234,7 +234,7 @@ function PropertyAlerts({ alerts }) {
 
 /* ── Service Card ─────────────────────────────────────── */
 
-function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onLawnPhotos }) {
+function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onLawnPhotos, onEdit }) {
   const [updating, setUpdating] = useState(false);
   const [lawnUploading, setLawnUploading] = useState(false);
   const [lawnDone, setLawnDone] = useState(false);
@@ -558,16 +558,14 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
             ✅ Lawn Assessed
           </span>
         )}
-        {service.customerId && (
-          <button
-            onClick={() => { window.location.href = `/admin/customers?customerId=${service.customerId}`; }}
-            style={{
-              ...btnBase, background: 'transparent', color: D.teal, border: `1px solid ${D.teal}44`,
-            }}
-          >
-            ✏️ Edit
-          </button>
-        )}
+        <button
+          onClick={() => onEdit?.(service)}
+          style={{
+            ...btnBase, background: 'transparent', color: D.teal, border: `1px solid ${D.teal}44`,
+          }}
+        >
+          ✏️ Edit
+        </button>
         {status !== 'completed' && status !== 'skipped' && (
           <>
             <button onClick={() => onReschedule?.(service)} style={{
@@ -622,7 +620,7 @@ function groupMultiServiceStops(services) {
   return [...result, ...singles];
 }
 
-function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onDelete, onProtocol }) {
+function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onEdit }) {
   const [collapsed, setCollapsed] = useState(false);
 
   const completedCount = tech.completedServices || tech.services.filter(s => s.status === 'completed').length;
@@ -722,11 +720,123 @@ function TechSection({ tech, zoneColors, zoneLabels, onStatusChange, onComplete,
                 onReschedule={onReschedule}
                 onDelete={onDelete}
                 onProtocol={onProtocol}
+                onEdit={onEdit}
               />
             </div>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── Edit Service Modal ───────────────────────────────── */
+
+function EditServiceModal({ service, technicians, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    scheduledDate: service.scheduledDate ? String(service.scheduledDate).split('T')[0] : '',
+    windowStart: service.windowStart || '',
+    windowEnd: service.windowEnd || '',
+    serviceType: service.serviceType || '',
+    estimatedDuration: service.estimatedDuration || 60,
+    technicianId: service.technicianId || '',
+    routeOrder: service.routeOrder || '',
+    notes: service.notes || '',
+  });
+  const [saving, setSaving] = useState(false);
+
+  const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+        method: 'PUT',
+        body: JSON.stringify(form),
+      });
+      onSaved?.();
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    }
+    setSaving(false);
+  };
+
+  const labelStyle = { fontSize: 12, fontWeight: 600, color: D.muted, marginBottom: 4, display: 'block' };
+  const inputStyle = {
+    width: '100%', padding: '10px 12px', borderRadius: 8, background: D.input,
+    color: D.text, border: `1px solid ${D.inputBorder}`, fontSize: 14, outline: 'none', boxSizing: 'border-box',
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)', zIndex: 1000,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: D.card, borderRadius: 14, border: `1px solid ${D.border}`,
+        width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto', padding: 24,
+      }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Edit Service</div>
+        <div style={{ fontSize: 13, color: D.muted, marginBottom: 18 }}>
+          {service.customerName} — {service.address || ''}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <div>
+            <label style={labelStyle}>Date</label>
+            <input type="date" value={form.scheduledDate} onChange={e => update('scheduledDate', e.target.value)} style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Duration (min)</label>
+            <input type="number" value={form.estimatedDuration} onChange={e => update('estimatedDuration', e.target.value)} style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Window Start</label>
+            <input type="time" value={form.windowStart} onChange={e => update('windowStart', e.target.value)} style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Window End</label>
+            <input type="time" value={form.windowEnd} onChange={e => update('windowEnd', e.target.value)} style={inputStyle} />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <label style={labelStyle}>Service Type</label>
+          <input type="text" value={form.serviceType} onChange={e => update('serviceType', e.target.value)} style={inputStyle} />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginBottom: 12 }}>
+          <div>
+            <label style={labelStyle}>Technician</label>
+            <select value={form.technicianId} onChange={e => update('technicianId', e.target.value)} style={inputStyle}>
+              <option value="">— Unassigned —</option>
+              {(technicians || []).map(t => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={labelStyle}>Route #</label>
+            <input type="number" value={form.routeOrder} onChange={e => update('routeOrder', e.target.value)} style={inputStyle} />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 18 }}>
+          <label style={labelStyle}>Notes</label>
+          <textarea value={form.notes} onChange={e => update('notes', e.target.value)} rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button onClick={onClose} disabled={saving} style={{
+            padding: '10px 18px', borderRadius: 8, background: 'transparent',
+            color: D.muted, border: `1px solid ${D.border}`, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          }}>Cancel</button>
+          <button onClick={handleSave} disabled={saving} style={{
+            padding: '10px 20px', borderRadius: 8, background: D.teal, color: '#fff',
+            border: 'none', fontSize: 13, fontWeight: 700, cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.6 : 1,
+          }}>{saving ? 'Saving…' : 'Save Changes'}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2109,6 +2219,7 @@ export default function SchedulePage() {
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
   const [rescheduleService, setRescheduleService] = useState(null);
+  const [editingService, setEditingService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newAppt, setNewAppt] = useState({ customerId: '', customerSearch: '', customerResults: [], serviceType: 'Pest Control', windowStart: '09:00', windowEnd: '11:00', notes: '' });
@@ -2479,6 +2590,7 @@ export default function SchedulePage() {
           onReschedule={svc => setRescheduleService(svc)}
           onDelete={handleDelete}
           onProtocol={svc => setProtocolService(svc)}
+          onEdit={svc => setEditingService(svc)}
         />
       ))}
 
@@ -2524,6 +2636,7 @@ export default function SchedulePage() {
                   onReschedule={svc2 => setRescheduleService(svc2)}
                   onDelete={handleDelete}
                   onProtocol={svc2 => setProtocolService(svc2)}
+                  onEdit={svc2 => setEditingService(svc2)}
                 />
               </div>
             ))}
@@ -2557,6 +2670,19 @@ export default function SchedulePage() {
           onClose={() => setRescheduleService(null)}
           onRescheduled={() => {
             setRescheduleService(null);
+            fetchSchedule(date);
+          }}
+        />
+      )}
+
+      {/* Edit Service Modal */}
+      {editingService && (
+        <EditServiceModal
+          service={editingService}
+          technicians={technicians}
+          onClose={() => setEditingService(null)}
+          onSaved={() => {
+            setEditingService(null);
             fetchSchedule(date);
           }}
         />

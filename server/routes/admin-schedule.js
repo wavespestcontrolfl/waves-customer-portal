@@ -497,13 +497,23 @@ router.post('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PUT /api/admin/schedule/:id/update-details — edit service type + duration
+// PUT /api/admin/schedule/:id/update-details — edit service fields
 router.put('/:id/update-details', async (req, res, next) => {
   try {
-    const { serviceType, estimatedDuration } = req.body;
+    const {
+      serviceType, estimatedDuration, scheduledDate,
+      windowStart, windowEnd, technicianId, notes, routeOrder, zone,
+    } = req.body;
     const updates = {};
-    if (serviceType) updates.service_type = serviceType;
-    if (estimatedDuration) updates.estimated_duration_minutes = parseInt(estimatedDuration);
+    if (serviceType !== undefined) updates.service_type = serviceType;
+    if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
+    if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
+    if (windowStart !== undefined) updates.window_start = windowStart || null;
+    if (windowEnd !== undefined) updates.window_end = windowEnd || null;
+    if (technicianId !== undefined) updates.technician_id = technicianId || null;
+    if (notes !== undefined) updates.notes = notes;
+    if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
+    if (zone !== undefined) updates.zone = zone;
     if (Object.keys(updates).length) {
       await db('scheduled_services').where({ id: req.params.id }).update(updates);
     }
