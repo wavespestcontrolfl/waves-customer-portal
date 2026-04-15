@@ -153,6 +153,14 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
 
   if (invoiceUpdated > 0) {
     logger.info(`[stripe-webhook] Updated ${invoiceUpdated} invoice(s) to paid for PI: ${piId}`);
+    try {
+      const paidInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
+      if (paidInvoice) {
+        await require('../services/invoice-followups').stopOnPayment(paidInvoice.id);
+      }
+    } catch (e) {
+      logger.error(`[invoice-followups] stopOnPayment failed: ${e.message}`);
+    }
   }
 
   // If ACH payment succeeded, resolve any pending ACH failures for this customer
@@ -405,6 +413,14 @@ async function handleAchFailure(paymentIntent, failureReason) {
       }
     } catch (dbErr) {
       logger.error(`[stripe-webhook] ACH status update failed: ${dbErr.message}`);
+    }
+
+    // Notify the per-invoice follow-up engine — increments autopay-hold counters
+    // and releases sequences once the threshold is crossed.
+    try {
+      await require('../services/invoice-followups').handleAutopayFailure(customer.id);
+    } catch (e) {
+      logger.error(`[invoice-followups] handleAutopayFailure failed: ${e.message}`);
     }
   } catch (err) {
     logger.error(`[stripe-webhook] ACH failure handler error: ${err.message}`);

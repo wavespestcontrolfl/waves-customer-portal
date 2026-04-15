@@ -106,6 +106,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 10AM (Tue–Fri) — Per-invoice follow-up sequences
+  // Fires the next due touch for each unpaid invoice's automated chain.
+  // =========================================================================
+  cron.schedule('0 10 * * 2-5', async () => {
+    logger.info('Running: invoice follow-up sequences');
+    try {
+      const InvoiceFollowUps = require('./invoice-followups');
+      const result = await InvoiceFollowUps.runPending();
+      logger.info(`Invoice follow-ups done: ${result.sent} sent, ${result.skipped} skipped`);
+    } catch (err) {
+      logger.error(`Invoice follow-ups failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {

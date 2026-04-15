@@ -40,6 +40,12 @@ const LatePaymentService = {
       const daysSince = Math.floor((now - refDate) / 86400000);
       if (daysSince < daysOverdue) continue;
 
+      // Skip if a per-invoice follow-up sequence is already handling this invoice
+      try {
+        const InvoiceFollowUps = require('./invoice-followups');
+        if (await InvoiceFollowUps.hasActiveSequence(inv.id)) { skipped++; continue; }
+      } catch { /* fall through if module unavailable */ }
+
       const invoiceKey = `${inv.invoice_number || inv.id}|${daysOverdue} DAYS`;
 
       try {

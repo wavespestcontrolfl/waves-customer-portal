@@ -283,6 +283,13 @@ const InvoiceService = {
         updated_at: new Date(),
       });
 
+      // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
+      try {
+        await require('./invoice-followups').scheduleForInvoice(invoiceId);
+      } catch (e) {
+        logger.error(`[invoice-followups] scheduleForInvoice failed: ${e.message}`);
+      }
+
       // Log
       await db('activity_log').insert({
         customer_id: customer.id,

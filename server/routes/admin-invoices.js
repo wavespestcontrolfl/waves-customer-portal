@@ -131,4 +131,60 @@ router.post('/:id/void', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─────────────────────────────────────────────────────────────
+// Per-invoice follow-up sequence (Day 0/3/7/14/30 reminder chain)
+// ─────────────────────────────────────────────────────────────
+const FollowUps = require('../services/invoice-followups');
+const followupConfig = require('../config/invoice-followups');
+
+// GET /:id/followup — current sequence state + config
+router.get('/:id/followup', async (req, res, next) => {
+  try {
+    const seq = await db('invoice_followup_sequences').where({ invoice_id: req.params.id }).first();
+    res.json({
+      sequence: seq || null,
+      steps: followupConfig.steps.map(s => ({ id: s.id, label: s.label, daysAfterDue: s.daysAfterDue })),
+      autopayFailureThreshold: followupConfig.autopayFailureThreshold,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/followup/pause
+router.post('/:id/followup/pause', async (req, res, next) => {
+  try {
+    const { reason, until } = req.body || {};
+    await FollowUps.pauseSequence(req.params.id, {
+      reason, until, adminId: req.user?.id || null,
+    });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/followup/resume
+router.post('/:id/followup/resume', async (req, res, next) => {
+  try {
+    await FollowUps.resumeSequence(req.params.id);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/followup/stop
+router.post('/:id/followup/stop', async (req, res, next) => {
+  try {
+    const { reason } = req.body || {};
+    await FollowUps.stopSequence(req.params.id, {
+      reason, adminId: req.user?.id || null,
+    });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/followup/send-now — fires the next touch immediately
+router.post('/:id/followup/send-now', async (req, res, next) => {
+  try {
+    await FollowUps.sendNextTouchNow(req.params.id);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

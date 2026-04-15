@@ -90,6 +90,7 @@ export default function AdminInvoicesPage() {
 function InvoiceList({ showToast, onRefresh, isMobile }) {
   const [invoices, setInvoices] = useState([]);
   const [filter, setFilter] = useState('');
+  const [expanded, setExpanded] = useState(null);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ limit: '50' });
@@ -163,9 +164,18 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
                 <button onClick={() => { navigator.clipboard.writeText(`${domain}/pay/${inv.token}`); showToast('Pay link copied'); }} style={sBtn(D.border, D.muted)}>Copy Link</button>
               )}
               {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red)}>Void</button>}
+              {inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft' && (
+                <button onClick={() => setExpanded(expanded === inv.id ? null : inv.id)} style={sBtn(D.border, D.muted)}>
+                  {expanded === inv.id ? '▾ Hide' : '▸ Follow-ups'}
+                </button>
+              )}
               {inv.view_count > 0 && <span style={{ fontSize: 10, color: D.muted }}>{inv.view_count} views</span>}
               {inv.sms_sent_at && <span style={{ fontSize: 10, color: D.muted }}>SMS: {new Date(inv.sms_sent_at).toLocaleString()}</span>}
             </div>
+
+            {expanded === inv.id && (
+              <FollowupPanel invoiceId={inv.id} showToast={showToast} />
+            )}
           </div>
         );
       })}
@@ -379,6 +389,104 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Follow-up Sequence Panel (per-invoice) ──
+function FollowupPanel({ invoiceId, showToast }) {
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    const d = await adminFetch(`/admin/invoices/${invoiceId}/followup`).catch(() => null);
+    setData(d);
+  }, [invoiceId]);
+  useEffect(() => { load(); }, [load]);
+
+  const act = async (path, body) => {
+    setBusy(true);
+    try {
+      await adminFetch(`/admin/invoices/${invoiceId}/followup/${path}`, {
+        method: 'POST',
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      showToast('Done');
+      await load();
+    } catch {
+      showToast('Action failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!data) return <div style={{ marginTop: 10, fontSize: 12, color: D.muted }}>Loading follow-up…</div>;
+
+  const seq = data.sequence;
+  const steps = data.steps || [];
+
+  const STATUS_COLOR = {
+    active: D.green, paused: D.amber, stopped: D.muted,
+    completed: D.muted, autopay_hold: D.teal,
+  };
+
+  const nextStep = seq ? steps[seq.step_index] : null;
+
+  return (
+    <div style={{ marginTop: 12, padding: 12, background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          Automated Follow-ups
+        </div>
+        {seq ? (
+          <span style={sBadge(`${STATUS_COLOR[seq.status] || D.muted}22`, STATUS_COLOR[seq.status] || D.muted)}>
+            {seq.status.replace('_', ' ')}
+          </span>
+        ) : (
+          <span style={sBadge(`${D.muted}22`, D.muted)}>not scheduled</span>
+        )}
+      </div>
+
+      {seq && (
+        <div style={{ fontSize: 12, color: D.muted, marginBottom: 10, lineHeight: 1.6 }}>
+          <div>Touches sent: <b style={{ color: D.heading }}>{seq.touches_sent}</b> of {steps.length}</div>
+          {nextStep && seq.next_touch_at && seq.status === 'active' && (
+            <div>Next: <b style={{ color: D.heading }}>{nextStep.label}</b> on {new Date(seq.next_touch_at).toLocaleString()}</div>
+          )}
+          {seq.status === 'autopay_hold' && (
+            <div>On autopay hold — will release after {data.autopayFailureThreshold} failed attempts ({seq.autopay_failures_observed} so far)</div>
+          )}
+          {seq.status === 'paused' && seq.paused_reason && <div>Paused: {seq.paused_reason}</div>}
+          {seq.status === 'stopped' && seq.stopped_reason && <div>Stopped: {seq.stopped_reason}</div>}
+          {seq.last_touch_at && <div>Last touch: {new Date(seq.last_touch_at).toLocaleString()}</div>}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {seq && seq.status === 'active' && (
+          <>
+            <button disabled={busy} onClick={() => {
+              const reason = prompt('Why pause? (e.g. "customer said they\'ll pay Friday")');
+              if (reason !== null) act('pause', { reason });
+            }} style={sBtn(D.amber, D.white)}>Pause</button>
+            <button disabled={busy} onClick={() => {
+              if (confirm('Send the next follow-up SMS right now?')) act('send-now');
+            }} style={sBtn(D.teal, D.white)}>Send Next Now</button>
+            <button disabled={busy} onClick={() => {
+              const reason = prompt('Why stop? (e.g. "waived", "customer disputed")');
+              if (reason !== null) act('stop', { reason });
+            }} style={sBtn('transparent', D.red)}>Stop</button>
+          </>
+        )}
+        {seq && (seq.status === 'paused' || seq.status === 'autopay_hold') && (
+          <>
+            <button disabled={busy} onClick={() => act('resume')} style={sBtn(D.green, D.white)}>Resume</button>
+            <button disabled={busy} onClick={() => {
+              if (confirm('Send the next follow-up SMS right now?')) act('send-now');
+            }} style={sBtn(D.teal, D.white)}>Send Now</button>
+          </>
+        )}
       </div>
     </div>
   );

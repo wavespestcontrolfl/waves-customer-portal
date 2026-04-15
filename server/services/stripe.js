@@ -600,6 +600,14 @@ const StripeService = {
       });
 
       logger.info(`[stripe] Invoice ${invoice.invoice_number} paid via Stripe PI: ${paymentIntentId}`);
+
+      // Stop the automated follow-up sequence + send thank-you if we nagged.
+      try {
+        await require('./invoice-followups').stopOnPayment(invoiceId);
+      } catch (e) {
+        logger.error(`[invoice-followups] stopOnPayment (stripe confirm) failed: ${e.message}`);
+      }
+
       return paymentRecord;
     } catch (err) {
       logger.error(`[stripe] Confirm invoice payment failed: ${err.message}`);
