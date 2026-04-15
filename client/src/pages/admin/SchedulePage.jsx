@@ -813,6 +813,7 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
     technicianId: service.technicianId || '',
     routeOrder: service.routeOrder || '',
     notes: service.notes || '',
+    price: service.estimatedPrice != null ? String(service.estimatedPrice) : (service.estimated_price != null ? String(service.estimated_price) : ''),
   });
   const [saving, setSaving] = useState(false);
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
@@ -887,8 +888,9 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
           recurringNth: isRecurring && recurringFreq === 'monthly_nth_weekday' ? recurringNth : undefined,
           recurringWeekday: isRecurring && recurringFreq === 'monthly_nth_weekday' ? recurringWeekday : undefined,
           recurringIntervalDays: isRecurring && recurringFreq === 'custom' ? recurringIntervalDays : undefined,
-          discountType: isRecurring && discountType ? discountType : undefined,
-          discountAmount: isRecurring && discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
+          discountType: discountType || undefined,
+          discountAmount: discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
+          estimatedPrice: form.price !== '' && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
           createInvoice,
         }),
       });
@@ -1003,6 +1005,16 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
             <label style={labelStyle}>Route #</label>
             <input type="number" value={form.routeOrder} onChange={e => update('routeOrder', e.target.value)} style={inputStyle} />
           </div>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <label style={labelStyle}>Price ($)</label>
+          <input type="number" min={0} step={0.01} value={form.price} onChange={e => update('price', e.target.value)} placeholder="0.00" style={inputStyle} />
+          {discountType && discountAmount !== '' && form.price !== '' && !isNaN(parseFloat(form.price)) && (
+            <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+              After discount: <span style={{ color: D.green, fontWeight: 700 }}>${Math.max(0, discountType === 'percentage' ? parseFloat(form.price) * (1 - Number(discountAmount) / 100) : parseFloat(form.price) - Number(discountAmount)).toFixed(2)}</span>
+            </div>
+          )}
         </div>
 
         {/* Recurring toggle (same pattern as New Appointment) */}

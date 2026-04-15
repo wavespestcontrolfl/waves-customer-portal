@@ -565,7 +565,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
-      discountType, discountAmount,
+      discountType, discountAmount, estimatedPrice,
       createInvoice,
     } = req.body;
     const updates = {};
@@ -596,6 +596,25 @@ router.put('/:id/update-details', async (req, res, next) => {
       try {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.create_invoice_on_complete) updates.create_invoice_on_complete = !!createInvoice;
+      } catch {}
+    }
+    // Price + discount (apply discount to the final stored price used at invoicing)
+    if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        let finalPrice = Number(estimatedPrice);
+        if (discountType && discountAmount != null && discountAmount !== '') {
+          finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
+        }
+        if (cols.estimated_price) updates.estimated_price = finalPrice;
+        if (cols.discount_type) updates.discount_type = discountType || null;
+        if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+      } catch {}
+    } else if (!isRecurring && (discountType !== undefined || discountAmount !== undefined)) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        if (cols.discount_type) updates.discount_type = discountType || null;
+        if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
       } catch {}
     }
     if (Object.keys(updates).length) {
@@ -642,11 +661,8 @@ router.put('/:id/update-details', async (req, res, next) => {
             if (cols.recurring_interval_days) childData.recurring_interval_days = rOpts.intervalDays != null ? parseInt(rOpts.intervalDays) : null;
             const dType = discountType !== undefined ? discountType : parent.discount_type;
             const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
-            let childPrice = parent.estimated_price;
-            if (childPrice != null && dType && dAmt != null && dAmt !== '') {
-              childPrice = applyDiscount(childPrice, dType, dAmt);
-            }
-            if (cols.estimated_price && childPrice != null) childData.estimated_price = childPrice;
+            // parent.estimated_price is already discounted at save time — copy as-is to children
+            if (cols.estimated_price && parent.estimated_price != null) childData.estimated_price = parent.estimated_price;
             if (cols.discount_type && dType) childData.discount_type = dType;
             if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
             const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
