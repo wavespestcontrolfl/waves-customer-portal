@@ -505,7 +505,7 @@ const StripeService = {
     try {
       // Idempotency key: ensures duplicate POSTs don't create duplicate PIs.
       // Scoped per invoice + amount so amount changes (rare) still create a fresh PI.
-      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}`;
+      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${stripeCustomerId || 'nocust'}`;
       const paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
       // Store PI reference on invoice
@@ -523,8 +523,8 @@ const StripeService = {
         amount: parseFloat(invoice.total),
       };
     } catch (err) {
-      logger.error(`[stripe] Invoice PaymentIntent failed: ${err.message}`);
-      throw new Error('Failed to create payment intent for invoice');
+      logger.error(`[stripe] Invoice PaymentIntent failed for invoice ${invoiceId} (amount=${amountCents}, customer=${stripeCustomerId || 'none'}): ${err.type || 'Error'} — ${err.message}${err.code ? ` [code=${err.code}]` : ''}${err.param ? ` [param=${err.param}]` : ''}`);
+      throw new Error(`Failed to create payment intent for invoice: ${err.message}`);
     }
   },
 
