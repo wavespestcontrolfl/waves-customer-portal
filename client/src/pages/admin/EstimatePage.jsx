@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, createContext
 import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
 import { LeadsSection } from './LeadsTabs';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
+import ESTIMATE_PRESETS, { ALL_SVC_KEYS } from '../../config/estimate-presets';
 
 class EstimateErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -243,7 +244,7 @@ function EstimateToolView() {
 
     // Tier logic
     const tierMap = { 0: { name: 'None', discount: 0 }, 1: { name: 'Bronze', discount: 0 }, 2: { name: 'Silver', discount: 0.10 }, 3: { name: 'Gold', discount: 0.15 } };
-    const tier = recurringCount >= 4 ? { name: 'Platinum', discount: 0.20 } : (tierMap[recurringCount] || tierMap[0]);
+    const tier = recurringCount >= 4 ? { name: 'Platinum', discount: 0.18 } : (tierMap[recurringCount] || tierMap[0]);
 
     // Approximate monthly costs for recurring (rough averages based on typical property)
     const sqft = Number(form.homeSqFt) || 2000;
@@ -875,6 +876,37 @@ function EstimateToolView() {
             <div style={sRow}>
               <Field label="After Hours"><Select k="isAfterHours" options={[{ value: 'NO', label: 'No — business hours' }, { value: 'YES', label: 'Yes — evenings/weekends/holidays' }]} /></Field>
               <Field label="Recurring Customer"><Select k="isRecurringCustomer" options={[{ value: 'NO', label: 'No — new customer' }, { value: 'YES', label: 'Yes — 15% off one-time' }]} /></Field>
+            </div>
+          </div>
+
+          {/* Preset Selector */}
+          <div style={sPanel}>
+            <div style={sPanelTitle}>Quick Start</div>
+            <div style={{ fontSize: 12, color: C.gray, marginBottom: 10 }}>Pick a template to pre-fill services, or build from scratch below.</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 8 }}>
+              {ESTIMATE_PRESETS.map(preset => (
+                <div key={preset.id} onClick={() => {
+                  setForm(f => {
+                    const upd = { ...f };
+                    ALL_SVC_KEYS.forEach(k => upd[k] = false);
+                    Object.entries(preset.services).forEach(([k, v]) => upd[k] = v);
+                    if (preset.defaults) Object.entries(preset.defaults).forEach(([k, v]) => upd[k] = v);
+                    return upd;
+                  });
+                  setEstimate(null);
+                  setSavedId(null);
+                }} style={{
+                  padding: '10px 8px', borderRadius: 10, cursor: 'pointer',
+                  border: `1px solid ${C.border}`, background: C.navy,
+                  textAlign: 'center', transition: 'border-color 0.15s',
+                }} onMouseEnter={e => e.currentTarget.style.borderColor = C.teal}
+                   onMouseLeave={e => e.currentTarget.style.borderColor = C.border}>
+                  <div style={{ fontSize: 22 }}>{preset.icon}</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: C.white, marginTop: 4, lineHeight: 1.3 }}>{preset.name}</div>
+                  {preset.popular && <div style={{ fontSize: 9, color: C.teal, fontWeight: 700, marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.5 }}>Popular</div>}
+                  {preset.tier && <div style={{ fontSize: 9, color: C.green, fontWeight: 600, marginTop: 1 }}>{preset.tier}</div>}
+                </div>
+              ))}
             </div>
           </div>
 

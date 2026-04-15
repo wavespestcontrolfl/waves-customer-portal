@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme';
+import { calculateEstimate } from '../lib/estimateEngine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const SAND = '#FDF6EC';
@@ -516,6 +517,142 @@ if (typeof document !== 'undefined' && !document.getElementById(pulseStyleId)) {
 }
 
 // =========================================================================
+// TIER COMPARISON — shows 2-3 WaveGuard tier options side-by-side
+// =========================================================================
+function TierComparisonCards({ options, onSelect, saving, selectedTier }) {
+  return (
+    <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 16, border: `1px solid ${SAND_DARK}` }}>
+      <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textAlign: 'center', marginBottom: 4 }}>
+        Choose Your WaveGuard Level
+      </div>
+      <div style={{ fontSize: 13, color: B.grayDark, textAlign: 'center', marginBottom: 16, fontFamily: FONTS.body }}>
+        More services = bigger savings on every line item
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(options.length, 3)}, 1fr)`, gap: 10 }}>
+        {options.map((opt, i) => {
+          const isSelected = selectedTier === opt.tier && !opt.isCurrent;
+          return (
+            <div key={i} style={{
+              borderRadius: 14, padding: 16, textAlign: 'center',
+              border: opt.isRecommended ? `2px solid ${B.wavesBlue}` : isSelected ? `2px solid ${B.green}` : `1px solid ${SAND_DARK}`,
+              background: opt.isCurrent ? B.blueSurface : '#fff',
+              position: 'relative',
+              transition: 'transform 0.15s, box-shadow 0.15s',
+            }}>
+              {opt.isRecommended && (
+                <div style={{
+                  position: 'absolute', top: -10, left: '50%', transform: 'translateX(-50%)',
+                  background: B.wavesBlue, color: '#fff', padding: '3px 12px', borderRadius: 10,
+                  fontSize: 10, fontWeight: 700, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+                }}>
+                  BEST VALUE
+                </div>
+              )}
+
+              <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: opt.isRecommended ? 4 : 0 }}>
+                {opt.tier}
+              </div>
+              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600, marginTop: 2 }}>
+                {opt.discount > 0 ? `${Math.round(opt.discount * 100)}% off all services` : 'Base pricing'}
+              </div>
+
+              <div style={{ fontSize: 28, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui, marginTop: 10 }}>
+                ${Number(opt.monthly).toFixed(0)}<span style={{ fontSize: 13, fontWeight: 400 }}>/mo</span>
+              </div>
+
+              <div style={{ margin: '12px 0', borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>
+                {opt.services.map((svc, j) => (
+                  <div key={j} style={{
+                    fontSize: 13, color: B.navy, fontWeight: 600, marginBottom: 3, fontFamily: FONTS.body,
+                  }}>
+                    {svc.name || svc}
+                  </div>
+                ))}
+                {opt.additionalService && (
+                  <div style={{ fontSize: 13, color: B.green, fontWeight: 700, marginTop: 6, fontFamily: FONTS.body }}>
+                    + {opt.additionalService}
+                  </div>
+                )}
+              </div>
+
+              {opt.savings > 0 && (
+                <div style={{ fontSize: 13, fontWeight: 700, color: B.green, marginBottom: 10, fontFamily: FONTS.body }}>
+                  Save ${Math.round(opt.savings)}/yr
+                </div>
+              )}
+
+              {opt.isCurrent ? (
+                <div style={{
+                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 13,
+                  background: SAND, color: B.navy, border: `1px solid ${SAND_DARK}`,
+                  fontWeight: 700,
+                }}>
+                  Current Plan
+                </div>
+              ) : isSelected ? (
+                <div style={{
+                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 13,
+                  background: B.green, color: '#fff', fontWeight: 700,
+                }}>
+                  Selected
+                </div>
+              ) : (
+                <button onClick={() => onSelect(opt)} disabled={saving} style={{
+                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 13,
+                  background: opt.isRecommended ? B.wavesBlue : B.navy,
+                  color: '#fff', opacity: saving ? 0.7 : 1,
+                  cursor: saving ? 'wait' : 'pointer',
+                }}>
+                  {saving ? 'Updating...' : 'Select This Plan'}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ fontSize: 12, color: B.grayMid, textAlign: 'center', marginTop: 14, fontFamily: FONTS.body, lineHeight: 1.6 }}>
+        All plans include: priority scheduling, unlimited callbacks, 24-hour response, transferable warranty
+      </div>
+    </div>
+  );
+}
+
+// =========================================================================
+// UPSELL NUDGE — for single-service estimates
+// =========================================================================
+function UpsellNudge({ currentService, suggestedService, onInquiry, sent }) {
+  if (sent) {
+    return (
+      <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${B.green}33`, textAlign: 'center' }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.green, fontFamily: FONTS.heading }}>
+          Got it! We'll reach out shortly with a bundled quote.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}`, borderLeft: `4px solid ${B.wavesBlue}` }}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6 }}>
+        Did you know?
+      </div>
+      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, fontFamily: FONTS.body }}>
+        Add <strong style={{ color: B.navy }}>{suggestedService}</strong> to your {currentService} and unlock{' '}
+        <strong style={{ color: B.wavesBlue }}>WaveGuard Silver</strong> — saving 10% on both services.
+      </div>
+      <button onClick={onInquiry} style={{
+        ...BUTTON_BASE, marginTop: 12, padding: '10px 20px', fontSize: 14,
+        background: B.wavesBlue, color: '#fff', cursor: 'pointer',
+      }}>
+        Ask About Bundling
+      </button>
+    </div>
+  );
+}
+
+// =========================================================================
 // MAIN PAGE
 // =========================================================================
 export default function EstimateViewPage() {
@@ -525,6 +662,9 @@ export default function EstimateViewPage() {
   const [loading, setLoading] = useState(true);
   const [accepting, setAccepting] = useState(false);
   const [declined, setDeclined] = useState(false);
+  const [tierSaving, setTierSaving] = useState(false);
+  const [selectedTier, setSelectedTier] = useState(null);
+  const [bundleInquirySent, setBundleInquirySent] = useState(false);
   const reviewsRef = useRef(null);
 
   useEffect(() => {
@@ -547,6 +687,174 @@ export default function EstimateViewPage() {
   const handleDecline = async () => {
     await fetch(`${API_BASE}/estimates/${token}/decline`, { method: 'PUT', headers: { 'Content-Type': 'application/json' } });
     setDeclined(true);
+  };
+
+  // ── Tier comparison logic ──────────────────────────────────
+  const tierOptions = useMemo(() => {
+    if (!data?.estimate?.data) return null;
+    const rawData = typeof data.estimate.data === 'string' ? JSON.parse(data.estimate.data) : data.estimate.data;
+    const inputs = rawData.inputs;
+    if (!inputs || !inputs.homeSqFt) return null;
+
+    const yesNo = v => v === 'YES' || v === true;
+    const baseInputs = {
+      ...inputs,
+      hasPool: yesNo(inputs.hasPool),
+      hasPoolCage: yesNo(inputs.hasPoolCage),
+      hasLargeDriveway: yesNo(inputs.hasLargeDriveway),
+      nearWater: yesNo(inputs.nearWater),
+      isAfterHours: yesNo(inputs.isAfterHours),
+      isRecurringCustomer: yesNo(inputs.isRecurringCustomer),
+      exclWaive: yesNo(inputs.exclWaive),
+    };
+
+    // Tier-qualifying services in upgrade priority
+    const TIER_SVCS = [
+      { key: 'svcPest', label: 'Pest Control' },
+      { key: 'svcLawn', label: 'Lawn Care' },
+      { key: 'svcMosquito', label: 'Mosquito Control' },
+      { key: 'svcTs', label: 'Tree & Shrub Care' },
+    ];
+
+    const active = TIER_SVCS.filter(s => baseInputs[s.key]);
+    const missing = TIER_SVCS.filter(s => !baseInputs[s.key]);
+    const serviceCount = active.length;
+
+    // Only show for 2-3 service estimates
+    if (serviceCount < 2 || serviceCount >= 4) return null;
+
+    try {
+      const options = [];
+
+      // Current tier
+      const currentResult = calculateEstimate(baseInputs);
+      if (currentResult.error) return null;
+
+      options.push({
+        tier: currentResult.recurring.waveGuardTier,
+        discount: currentResult.recurring.discount,
+        monthly: currentResult.recurring.monthlyTotal || (currentResult.recurring.grandTotal),
+        annual: currentResult.recurring.annualAfterDiscount,
+        savings: currentResult.recurring.savings,
+        services: currentResult.recurring.services,
+        inputs: baseInputs,
+        result: currentResult,
+        isCurrent: true,
+      });
+
+      // Next tier up (add first missing service)
+      if (missing.length > 0) {
+        const nextInputs = { ...baseInputs, [missing[0].key]: true };
+        const nextResult = calculateEstimate(nextInputs);
+        if (!nextResult.error) {
+          options.push({
+            tier: nextResult.recurring.waveGuardTier,
+            discount: nextResult.recurring.discount,
+            monthly: nextResult.recurring.monthlyTotal || nextResult.recurring.grandTotal,
+            annual: nextResult.recurring.annualAfterDiscount,
+            savings: nextResult.recurring.savings,
+            services: nextResult.recurring.services,
+            additionalService: missing[0].label,
+            inputs: nextInputs,
+            result: nextResult,
+            isCurrent: false,
+            isRecommended: true,
+          });
+        }
+      }
+
+      // Platinum (if still 2+ services away)
+      if (missing.length > 1) {
+        const platInputs = { ...baseInputs };
+        missing.forEach(s => platInputs[s.key] = true);
+        const platResult = calculateEstimate(platInputs);
+        if (!platResult.error && platResult.recurring.waveGuardTier === 'Platinum') {
+          options.push({
+            tier: 'Platinum',
+            discount: platResult.recurring.discount,
+            monthly: platResult.recurring.monthlyTotal || platResult.recurring.grandTotal,
+            annual: platResult.recurring.annualAfterDiscount,
+            savings: platResult.recurring.savings,
+            services: platResult.recurring.services,
+            additionalService: missing.map(s => s.label).join(' + '),
+            inputs: platInputs,
+            result: platResult,
+            isCurrent: false,
+          });
+        }
+      }
+
+      return options.length > 1 ? options : null;
+    } catch (e) {
+      console.error('[tier-comparison] Calculation failed:', e);
+      return null;
+    }
+  }, [data]);
+
+  const handleSelectTier = async (option) => {
+    if (option.isCurrent || tierSaving) return;
+    setTierSaving(true);
+    try {
+      const mo = option.monthly;
+      const ann = option.annual;
+      const res = await fetch(`${API_BASE}/estimates/${token}/select-tier`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          selectedTier: option.tier,
+          estimateData: { inputs: option.inputs, result: option.result },
+          monthlyTotal: mo,
+          annualTotal: ann,
+        }),
+      });
+      if (res.ok) {
+        setSelectedTier(option.tier);
+        // Update displayed data with new pricing
+        setData(prev => ({
+          ...prev,
+          estimate: {
+            ...prev.estimate,
+            monthlyTotal: mo,
+            annualTotal: ann,
+            tier: option.tier,
+            data: { inputs: option.inputs, result: option.result },
+          },
+        }));
+      }
+    } catch (e) {
+      console.error('Tier selection failed:', e);
+    }
+    setTierSaving(false);
+  };
+
+  // ── Upsell nudge for single-service estimates ──────────────
+  const upsellInfo = useMemo(() => {
+    if (!data?.estimate?.data) return null;
+    const rawData = typeof data.estimate.data === 'string' ? JSON.parse(data.estimate.data) : data.estimate.data;
+    const ed = rawData.result || rawData;
+    const svcs = ed.recurring?.services || [];
+    if (svcs.length !== 1) return null;
+
+    const name = (svcs[0]?.name || '').toLowerCase();
+    if (name.includes('pest')) return { current: 'Pest Control', suggest: 'Lawn Care' };
+    if (name.includes('lawn')) return { current: 'Lawn Care', suggest: 'Pest Control' };
+    if (name.includes('mosquito')) return { current: 'Mosquito Control', suggest: 'Pest Control' };
+    if (name.includes('tree') || name.includes('shrub')) return { current: 'Tree & Shrub', suggest: 'Pest Control' };
+    return { current: svcs[0]?.name || 'your service', suggest: 'Lawn Care' };
+  }, [data]);
+
+  const handleBundleInquiry = async () => {
+    if (bundleInquirySent) return;
+    try {
+      await fetch(`${API_BASE}/estimates/${token}/bundle-inquiry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ suggestedService: upsellInfo?.suggest }),
+      });
+      setBundleInquirySent(true);
+    } catch (e) {
+      console.error('Bundle inquiry failed:', e);
+    }
   };
 
   // Loading state
@@ -717,6 +1025,30 @@ export default function EstimateViewPage() {
       <div style={{ maxWidth: 560, margin: '0 auto', padding: '0 16px 40px' }}>
 
         {/* ============================================================= */}
+        {/* TIER COMPARISON (2-3 service estimates)                         */}
+        {/* ============================================================= */}
+        {tierOptions && e.status !== 'accepted' && (
+          <TierComparisonCards
+            options={tierOptions}
+            onSelect={handleSelectTier}
+            saving={tierSaving}
+            selectedTier={selectedTier}
+          />
+        )}
+
+        {/* Already Platinum badge */}
+        {!tierOptions && e.tier === 'Platinum' && e.status !== 'accepted' && (
+          <div style={{
+            background: '#fff', borderRadius: 16, padding: 16, marginTop: 16,
+            border: `1px solid ${SAND_DARK}`, textAlign: 'center',
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
+              You're getting our best rate — Platinum 18% off all services
+            </div>
+          </div>
+        )}
+
+        {/* ============================================================= */}
         {/* DREAM OUTCOME                                                  */}
         {/* ============================================================= */}
         <div style={{ textAlign: 'center', marginTop: 20, marginBottom: 4, padding: '0 16px' }}>
@@ -799,6 +1131,16 @@ export default function EstimateViewPage() {
           </div>
         </div>
 
+
+        {/* UPSELL NUDGE — single-service estimates */}
+        {upsellInfo && !tierOptions && e.status !== 'accepted' && (
+          <UpsellNudge
+            currentService={upsellInfo.current}
+            suggestedService={upsellInfo.suggest}
+            onInquiry={handleBundleInquiry}
+            sent={bundleInquirySent}
+          />
+        )}
 
         {/* Accept CTA — below Monthly Total */}
         {e.status !== 'accepted' && (

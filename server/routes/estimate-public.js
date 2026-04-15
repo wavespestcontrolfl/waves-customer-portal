@@ -53,7 +53,7 @@ router.get('/:token', async (req, res, next) => {
 
     // Anchor price = sum of individual service prices before WaveGuard bundle discount
     const monthlyTotal = parseFloat(estimate.monthly_total || 0);
-    const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+    const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
     const discount = tierDiscount[estimate.waveguard_tier] || 0;
     const anchorPrice = discount > 0
       ? Math.round((monthlyTotal / (1 - discount)) * 100) / 100
@@ -189,6 +189,71 @@ router.put('/:token/accept', async (req, res, next) => {
     }
 
     res.json({ success: true, onboardingToken });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier
+router.put('/:token/select-tier', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Estimate already accepted' });
+
+    const { selectedTier, estimateData, monthlyTotal, annualTotal } = req.body;
+    if (!selectedTier) return res.status(400).json({ error: 'selectedTier required' });
+
+    const previousTier = estimate.waveguard_tier || 'Bronze';
+
+    await db('estimates').where({ id: estimate.id }).update({
+      estimate_data: JSON.stringify(estimateData),
+      waveguard_tier: selectedTier,
+      monthly_total: monthlyTotal,
+      annual_total: annualTotal,
+      updated_at: db.fn.now(),
+    });
+
+    // Notify admin of tier selection
+    try {
+      const NotificationService = require('../services/notification-service');
+      await NotificationService.notifyAdmin('estimate',
+        `Tier upgrade: ${estimate.customer_name}`,
+        `Selected ${selectedTier} (was ${previousTier}) \u2014 $${monthlyTotal}/mo`,
+        { icon: '\u2B06\uFE0F', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
+      );
+    } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
+
+    logger.info(`[estimate] ${estimate.customer_name} selected ${selectedTier} tier (was ${previousTier}) — $${monthlyTotal}/mo`);
+    res.json({ success: true, tier: selectedTier, monthlyTotal, annualTotal });
+  } catch (err) { next(err); }
+});
+
+// POST /api/estimates/:token/bundle-inquiry — customer interested in bundling
+router.post('/:token/bundle-inquiry', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+
+    const { suggestedService } = req.body;
+
+    // SMS to office
+    try {
+      await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+        `\u{1F4E6} Bundle inquiry from ${estimate.customer_name}:\nCurrently quoted: ${estimate.waveguard_tier || 'Bronze'} at $${estimate.monthly_total}/mo\nInterested in adding: ${suggestedService || 'another service'}\nProperty: ${estimate.address || 'N/A'}\nPhone: ${estimate.customer_phone || 'N/A'}`
+      );
+    } catch (e) { logger.error(`[estimate] Bundle inquiry SMS failed: ${e.message}`); }
+
+    // In-app notification
+    try {
+      const NotificationService = require('../services/notification-service');
+      await NotificationService.notifyAdmin('estimate',
+        `Bundle inquiry: ${estimate.customer_name}`,
+        `Interested in adding ${suggestedService || 'a service'} to ${estimate.waveguard_tier || 'Bronze'} plan`,
+        { icon: '\u{1F4E6}', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
+      );
+    } catch (e) { logger.error(`[estimate] Bundle inquiry notification failed: ${e.message}`); }
+
+    logger.info(`[estimate] Bundle inquiry from ${estimate.customer_name} — wants ${suggestedService}`);
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 
