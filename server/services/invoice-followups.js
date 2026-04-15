@@ -28,6 +28,7 @@ async function resolveBody(step, ctx) {
       amount: ctx.amount || '0.00',
       pay_url: ctx.payUrl || '',
       receipt_url: ctx.payUrl || '',
+      service_date: ctx.serviceDate || '',
       service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
     });
     if (fromTable) return fromTable;

@@ -57,7 +57,7 @@ module.exports = {
     },
     {
       id: 'd7_firmer',
-      template_key: 'invoice_followup_7day',
+      template_key: 'late_payment_7d',
       daysAfterDue: 7,
       label: '7-day follow-up',
       body:
@@ -67,7 +67,7 @@ module.exports = {
     },
     {
       id: 'd14_urgent',
-      template_key: 'invoice_followup_14day',
+      template_key: 'late_payment_14d',
       daysAfterDue: 14,
       label: '14-day urgent',
       body:
@@ -77,7 +77,7 @@ module.exports = {
     },
     {
       id: 'd30_final',
-      template_key: 'invoice_followup_30day',
+      template_key: 'late_payment_30d',
       daysAfterDue: 30,
       label: '30-day final notice',
       body:
