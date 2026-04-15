@@ -947,12 +947,24 @@ function TeamTab({ showToast }) {
   };
 
   const handleDelete = async (tech) => {
-    if (!confirm(`Permanently delete ${tech.name}? This cannot be undone. If they have time entries or assigned jobs, deactivate them instead.`)) return;
+    if (!confirm(`Permanently delete ${tech.name}? This cannot be undone.`)) return;
     try {
       await adminFetch(`/admin/timetracking/technicians/${tech.id}`, { method: 'DELETE' });
       showToast(`${tech.name} deleted`);
       load();
-    } catch (e) { showToast('Failed: ' + e.message); }
+    } catch (e) {
+      const msg = String(e.message || '');
+      if (msg.includes('linked records') || msg.includes('409')) {
+        if (!confirm(`${tech.name} has linked records (time entries, jobs, assignments, etc.). Purge all related data and delete anyway? This is NOT reversible.`)) return;
+        try {
+          await adminFetch(`/admin/timetracking/technicians/${tech.id}?force=true`, { method: 'DELETE' });
+          showToast(`${tech.name} force-deleted`);
+          load();
+        } catch (e2) { showToast('Force delete failed: ' + e2.message); }
+      } else {
+        showToast('Failed: ' + msg);
+      }
+    }
   };
 
   const startEdit = (tech) => {

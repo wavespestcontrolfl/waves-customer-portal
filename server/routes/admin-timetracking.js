@@ -621,14 +621,58 @@ router.put('/technicians/:id', async (req, res, next) => {
 // If related records exist (time entries, assignments) the DB FK
 // will error; the client surfaces that message.
 router.delete('/technicians/:id', async (req, res, next) => {
+  const force = String(req.query.force || '') === 'true';
   try {
-    const deleted = await db('technicians').where({ id: req.params.id }).del();
-    if (!deleted) return res.status(404).json({ error: 'Technician not found' });
-    logger.info(`[team] Deleted technician: ${req.params.id}`);
-    res.json({ success: true });
+    if (!force) {
+      const deleted = await db('technicians').where({ id: req.params.id }).del();
+      if (!deleted) return res.status(404).json({ error: 'Technician not found' });
+      logger.info(`[team] Deleted technician: ${req.params.id}`);
+      return res.json({ success: true });
+    }
+
+    // Force delete — cascade-clean every FK reference using information_schema.
+    const techId = req.params.id;
+    const tech = await db('technicians').where({ id: techId }).first();
+    if (!tech) return res.status(404).json({ error: 'Technician not found' });
+
+    const fks = await db.raw(`
+      SELECT tc.table_name, kcu.column_name, c.is_nullable
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+       AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage ccu
+        ON ccu.constraint_name = tc.constraint_name
+       AND ccu.table_schema = tc.table_schema
+      JOIN information_schema.columns c
+        ON c.table_name = tc.table_name
+       AND c.column_name = kcu.column_name
+       AND c.table_schema = tc.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND ccu.table_name = 'technicians'
+        AND ccu.column_name = 'id'
+    `);
+
+    const purged = [];
+    await db.transaction(async (trx) => {
+      for (const row of fks.rows) {
+        const { table_name, column_name, is_nullable } = row;
+        if (is_nullable === 'YES') {
+          const n = await trx(table_name).where({ [column_name]: techId }).update({ [column_name]: null });
+          purged.push({ table: table_name, column: column_name, action: 'nulled', rows: n });
+        } else {
+          const n = await trx(table_name).where({ [column_name]: techId }).del();
+          purged.push({ table: table_name, column: column_name, action: 'deleted', rows: n });
+        }
+      }
+      await trx('technicians').where({ id: techId }).del();
+    });
+
+    logger.warn(`[team] FORCE deleted technician ${tech.email || techId}: ${JSON.stringify(purged)}`);
+    res.json({ success: true, forced: true, cleaned: purged });
   } catch (err) {
-    if (err.code === '23503') {
-      return res.status(409).json({ error: 'Technician has linked records (time entries or jobs). Deactivate instead.' });
+    if (err.code === '23503' && !force) {
+      return res.status(409).json({ error: 'Technician has linked records (time entries or jobs). Deactivate instead, or retry with ?force=true to purge related data.' });
     }
     next(err);
   }

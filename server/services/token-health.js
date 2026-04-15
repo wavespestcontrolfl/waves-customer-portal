@@ -357,10 +357,35 @@ const TokenHealthService = {
 
   /**
    * Get all credential statuses from the database (no live checks).
+   * Purges deprecated platforms (e.g. 'square') and dedupes any duplicate
+   * rows per platform before returning.
    */
   async getAll() {
     try {
-      return await db('token_credentials').orderBy('platform');
+      const KNOWN = new Set([
+        'facebook', 'instagram', 'linkedin',
+        'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
+        'bouncie', 'beehiiv', 'dataforseo',
+      ]);
+
+      await db('token_credentials').whereNotIn('platform', [...KNOWN]).del();
+
+      const rows = await db('token_credentials').orderBy('platform');
+      const byPlatform = new Map();
+      for (const r of rows) {
+        const prev = byPlatform.get(r.platform);
+        const ts = (r.last_verified_at && new Date(r.last_verified_at).getTime()) || 0;
+        const prevTs = prev ? (prev.last_verified_at && new Date(prev.last_verified_at).getTime()) || 0 : -1;
+        if (!prev || ts >= prevTs) byPlatform.set(r.platform, r);
+      }
+      const duplicateIds = rows
+        .filter(r => byPlatform.get(r.platform)?.id !== r.id)
+        .map(r => r.id);
+      if (duplicateIds.length) {
+        await db('token_credentials').whereIn('id', duplicateIds).del();
+      }
+
+      return [...byPlatform.values()].sort((a, b) => a.platform.localeCompare(b.platform));
     } catch {
       return [];
     }

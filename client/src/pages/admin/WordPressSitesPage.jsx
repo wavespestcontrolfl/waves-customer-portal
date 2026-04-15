@@ -103,7 +103,6 @@ export default function WordPressSitesPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
           <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>WordPress Fleet</div>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>15-domain network management</div>
         </div>
         <button onClick={quickScanAll} style={{ ...sBtn('transparent', D.teal), border: `1px solid ${D.teal}33`, padding: '10px 20px' }}>
           🔍 Scan All Sites
