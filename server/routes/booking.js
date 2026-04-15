@@ -113,10 +113,10 @@ router.get('/availability', async (req, res, next) => {
       const est = await db('estimates').where('id', estimate_id).first();
       if (est?.customer_id) {
         const c = await db('customers').where('id', est.customer_id)
-          .select('lat', 'lng', 'address_line1', 'city', 'state', 'zip').first();
-        if (c?.lat && c?.lng) {
-          resolvedLat = parseFloat(c.lat);
-          resolvedLng = parseFloat(c.lng);
+          .select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
+        if (c?.latitude && c?.longitude) {
+          resolvedLat = parseFloat(c.latitude);
+          resolvedLng = parseFloat(c.longitude);
         } else if (c) {
           const addr = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
           if (addr) {
@@ -292,8 +292,8 @@ router.post('/confirm', async (req, res, next) => {
           city: new_customer.city || null,
           state: new_customer.state || 'FL',
           zip: new_customer.zip || null,
-          lat: new_customer.lat || null,
-          lng: new_customer.lng || null,
+          latitude: new_customer.lat || null,
+          longitude: new_customer.lng || null,
         }).returning('id');
         custId = created.id || created;
       }
