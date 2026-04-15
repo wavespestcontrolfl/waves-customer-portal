@@ -272,4 +272,195 @@ router.get('/forecast', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
+// ServiceTitan-style operational KPIs: completion, CSAT, callback, RPJ, efficiency, retention, AR days, lead conv
+router.get('/core-kpis', async (req, res, next) => {
+  try {
+    const period = String(req.query.period || 'mtd').toLowerCase();
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+
+    let start;
+    if (period === 'today') start = todayStr;
+    else if (period === 'wtd') start = mondayThisWeek();
+    else if (period === 'ytd') start = new Date(now.getFullYear(), 0, 1).toISOString().split('T')[0];
+    else start = startOfMonth();
+
+    // Service completion rate — scheduled_services in window
+    const svcAgg = await db('scheduled_services')
+      .where('scheduled_date', '>=', start).where('scheduled_date', '<=', todayStr)
+      .select(
+        db.raw("COUNT(*) as total"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled")
+      ).first();
+    const svcTotal = parseInt(svcAgg?.total || 0);
+    const svcCompleted = parseInt(svcAgg?.completed || 0);
+    const completionRate = svcTotal > 0 ? Math.round((svcCompleted / svcTotal) * 100) : null;
+
+    // Callback rate — service_records.is_callback in window
+    const cbAgg = await db('service_records')
+      .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+      .select(
+        db.raw("COUNT(*) as total"),
+        db.raw("COUNT(*) FILTER (WHERE is_callback = true) as callbacks")
+      ).first();
+    const srTotal = parseInt(cbAgg?.total || 0);
+    const callbacks = parseInt(cbAgg?.callbacks || 0);
+    const callbackRate = srTotal > 0 ? Math.round((callbacks / srTotal) * 1000) / 10 : null;
+
+    // CSAT — review_requests.rating (1-10 NPS) in window
+    const csatRow = await db('review_requests')
+      .where('created_at', '>=', start).whereNotNull('rating')
+      .select(
+        db.raw("AVG(rating) as avg_rating"),
+        db.raw("COUNT(*) as responses"),
+        db.raw("COUNT(*) FILTER (WHERE rating >= 9) as promoters"),
+        db.raw("COUNT(*) FILTER (WHERE rating <= 6) as detractors")
+      ).first().catch(() => null);
+    const csatAvg = csatRow?.avg_rating ? parseFloat(csatRow.avg_rating).toFixed(1) : null;
+    const nps = csatRow && parseInt(csatRow.responses) > 0
+      ? Math.round(((parseInt(csatRow.promoters) - parseInt(csatRow.detractors)) / parseInt(csatRow.responses)) * 100)
+      : null;
+
+    // Revenue/job, RPMH, job efficiency, gross margin
+    const srFin = await db('service_records')
+      .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+      .whereNotNull('revenue')
+      .select(
+        db.raw("SUM(revenue) as rev_total"),
+        db.raw("SUM(labor_hours) as hours_total"),
+        db.raw("AVG(revenue) as avg_rev"),
+        db.raw("AVG(revenue_per_man_hour) as avg_rpmh"),
+        db.raw("AVG(gross_margin_pct) as avg_margin"),
+        db.raw("COUNT(*) as jobs")
+      ).first();
+    const revPerJob = srFin?.avg_rev ? parseFloat(srFin.avg_rev) : null;
+    const rpmh = srFin?.avg_rpmh ? parseFloat(srFin.avg_rpmh) : null;
+    const grossMargin = srFin?.avg_margin ? parseFloat(srFin.avg_margin) : null;
+    const jobsDone = parseInt(srFin?.jobs || 0);
+    const laborHoursTotal = parseFloat(srFin?.hours_total || 0);
+
+    // Tech utilization — billable hours / available hours (8h/day × techs × days)
+    const techCount = await db('technicians').where({ active: true }).count('* as c').first().catch(() => ({ c: 3 }));
+    const numTechs = parseInt(techCount?.c || 3);
+    const daysInPeriod = Math.max(1, Math.ceil((now - new Date(start)) / 86400000) + 1);
+    const availableHours = numTechs * 8 * daysInPeriod;
+    const utilization = availableHours > 0 && laborHoursTotal > 0
+      ? Math.round((laborHoursTotal / availableHours) * 100) : null;
+
+    // Route efficiency — stops per hour (completed stops / labor hours)
+    const stopsPerHour = laborHoursTotal > 0 ? Math.round((jobsDone / laborHoursTotal) * 10) / 10 : null;
+
+    // Lead response time + conv — leads table
+    let leadMetrics = { avgResponseMin: null, conversion: null, leads: 0, booked: 0 };
+    try {
+      const leadAgg = await db('leads')
+        .where('created_at', '>=', start)
+        .select(
+          db.raw("COUNT(*) as total"),
+          db.raw("COUNT(*) FILTER (WHERE status = 'won') as booked"),
+          db.raw("AVG(response_time_minutes) FILTER (WHERE response_time_minutes IS NOT NULL) as avg_resp")
+        ).first();
+      const leads = parseInt(leadAgg?.total || 0);
+      const booked = parseInt(leadAgg?.booked || 0);
+      leadMetrics = {
+        leads,
+        booked,
+        conversion: leads > 0 ? Math.round((booked / leads) * 1000) / 10 : null,
+        avgResponseMin: leadAgg?.avg_resp ? Math.round(parseFloat(leadAgg.avg_resp)) : null,
+      };
+    } catch {}
+
+    // AR Days — avg days outstanding on unpaid invoices + DSO
+    let arDays = null, arOpen = 0, arOverdue = 0;
+    try {
+      const arAgg = await db('invoices')
+        .whereNull('paid_at').whereNotIn('status', ['void', 'cancelled', 'draft'])
+        .select(
+          db.raw("COUNT(*) as open_count"),
+          db.raw("SUM(total) as open_total"),
+          db.raw("AVG(EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) as avg_days_open"),
+          db.raw("COUNT(*) FILTER (WHERE due_date < CURRENT_DATE) as overdue_count")
+        ).first();
+      arDays = arAgg?.avg_days_open ? Math.round(parseFloat(arAgg.avg_days_open)) : null;
+      arOpen = parseFloat(arAgg?.open_total || 0);
+      arOverdue = parseInt(arAgg?.overdue_count || 0);
+    } catch {}
+
+    // Retention — customers who churned in window vs active at start
+    let retentionPct = null, churned = 0;
+    try {
+      const churnedRow = await db('customers')
+        .whereNotNull('churned_at').where('churned_at', '>=', start).count('* as c').first();
+      churned = parseInt(churnedRow?.c || 0);
+      const activeStart = await db('customers').where({ active: true }).whereNull('deleted_at').count('* as c').first();
+      const base = parseInt(activeStart?.c || 0) + churned;
+      retentionPct = base > 0 ? Math.round(((base - churned) / base) * 1000) / 10 : null;
+    } catch {}
+
+    // Tech leaderboard — revenue + jobs + RPMH per tech in window
+    let leaderboard = [];
+    try {
+      leaderboard = await db('service_records')
+        .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+        .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+        .groupBy('technicians.id', 'technicians.name')
+        .select(
+          'technicians.id as tech_id',
+          'technicians.name as tech_name',
+          db.raw("COUNT(*) as jobs"),
+          db.raw("SUM(revenue) as revenue"),
+          db.raw("AVG(revenue_per_man_hour) as rpmh"),
+          db.raw("AVG(gross_margin_pct) as margin"),
+          db.raw("COUNT(*) FILTER (WHERE is_callback = true) as callbacks")
+        )
+        .orderByRaw('SUM(revenue) DESC NULLS LAST');
+      leaderboard = leaderboard
+        .filter(r => r.tech_name)
+        .map(r => ({
+          techId: r.tech_id,
+          name: r.tech_name,
+          jobs: parseInt(r.jobs),
+          revenue: parseFloat(r.revenue || 0),
+          rpmh: r.rpmh ? Math.round(parseFloat(r.rpmh)) : 0,
+          margin: r.margin ? Math.round(parseFloat(r.margin)) : 0,
+          callbacks: parseInt(r.callbacks || 0),
+          callbackRate: r.jobs > 0 ? Math.round((parseInt(r.callbacks || 0) / parseInt(r.jobs)) * 1000) / 10 : 0,
+        }));
+    } catch {}
+
+    res.json({
+      period,
+      periodLabel: { today: 'Today', wtd: 'Week to Date', mtd: 'Month to Date', ytd: 'Year to Date' }[period] || 'Month to Date',
+      service: {
+        completionRate,
+        scheduled: svcTotal,
+        completed: svcCompleted,
+        callbackRate,
+        callbacks,
+        totalJobs: srTotal,
+      },
+      quality: {
+        csatAvg,
+        csatResponses: parseInt(csatRow?.responses || 0),
+        nps,
+      },
+      financial: {
+        revPerJob,
+        rpmh,
+        grossMargin,
+        jobsDone,
+        laborHours: Math.round(laborHoursTotal * 10) / 10,
+        stopsPerHour,
+        utilization,
+      },
+      sales: leadMetrics,
+      ar: { days: arDays, open: arOpen, overdueCount: arOverdue },
+      retention: { pct: retentionPct, churned },
+      leaderboard,
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
