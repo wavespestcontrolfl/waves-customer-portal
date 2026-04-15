@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, createContext
 import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
 import { LeadsSection } from './LeadsTabs';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
+import { MarginCalculator } from './PricingLogicPage';
 import ESTIMATE_PRESETS, { ALL_SVC_KEYS } from '../../config/estimate-presets';
 
 class EstimateErrorBoundary extends Component {
@@ -2227,7 +2228,12 @@ export default function EstimatePage() {
       {activeTab === 'leads' && <LeadsSection />}
       {activeTab === 'estimates' && <EstimatePipelineView />}
       {activeTab === 'new' && <EstimateToolView />}
-      {activeTab === 'pricing' && <PricingLogicPanel />}
+      {activeTab === 'pricing' && (
+        <>
+          <MarginCalculator />
+          <PricingLogicPanel />
+        </>
+      )}
     </div>
   );
 }

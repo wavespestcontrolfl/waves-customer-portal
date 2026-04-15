@@ -11,10 +11,11 @@ function generateToken(customer, serviceDate) {
   const first = (customer?.first_name || 'customer').toLowerCase().replace(/[^a-z0-9]/g, '');
   const last = (customer?.last_name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const d = serviceDate ? new Date(serviceDate) : new Date();
+  const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
-  const suffix = crypto.randomBytes(3).toString('hex'); // 6 random chars
-  return `${first}-${last}-${month}${day}-${suffix}`.replace(/--+/g, '-');
+  const suffix = crypto.randomBytes(2).toString('hex'); // 4 random chars — enough given name+date scope
+  return `${first}-${last}-${year}${month}${day}-${suffix}`.replace(/--+/g, '-').replace(/^-|-$/g, '');
 }
 
 async function nextInvoiceNumber() {

@@ -21,7 +21,7 @@ const af = (p, o = {}) =>
   }).then(r => r.json());
 
 // ── Margin Calculator ──
-function MarginCalculator() {
+export function MarginCalculator() {
   const [lotSqFt, setLotSqFt] = useState(10000);
   const [homeSqFt, setHomeSqFt] = useState(2000);
   const [lawnSqFt, setLawnSqFt] = useState(5000);

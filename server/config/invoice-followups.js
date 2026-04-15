@@ -27,6 +27,7 @@ module.exports = {
   // Thank-you message sent when an invoice is paid AFTER at least one reminder fired.
   thankYou: {
     enabled: true,
+    template_key: 'invoice_thank_you',
     body:
       `{{name}}, got it — thank you for the payment! Your account is all caught up. ` +
       `See you at your next service. — Waves 🌊`,
@@ -36,6 +37,7 @@ module.exports = {
   steps: [
     {
       id: 'due_today',
+      template_key: 'invoice_due_today',
       daysAfterDue: 0,
       label: 'Due-date reminder',
       body:
@@ -45,6 +47,7 @@ module.exports = {
     },
     {
       id: 'd3_friendly',
+      template_key: 'invoice_followup_3day',
       daysAfterDue: 3,
       label: '3-day friendly nudge',
       body:
@@ -54,6 +57,7 @@ module.exports = {
     },
     {
       id: 'd7_firmer',
+      template_key: 'invoice_followup_7day',
       daysAfterDue: 7,
       label: '7-day follow-up',
       body:
@@ -63,6 +67,7 @@ module.exports = {
     },
     {
       id: 'd14_urgent',
+      template_key: 'invoice_followup_14day',
       daysAfterDue: 14,
       label: '14-day urgent',
       body:
@@ -72,6 +77,7 @@ module.exports = {
     },
     {
       id: 'd30_final',
+      template_key: 'invoice_followup_30day',
       daysAfterDue: 30,
       label: '30-day final notice',
       body:

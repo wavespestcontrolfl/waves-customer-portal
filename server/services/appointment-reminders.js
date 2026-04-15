@@ -14,8 +14,24 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
+const smsTemplatesRouter = require('../routes/admin-sms-templates');
 
 const TZ = 'America/New_York';
+
+/**
+ * Render an SMS body from sms_templates, falling back to the provided default
+ * if the template is missing/disabled. Keeps brand voice editable from the
+ * Communications → SMS Templates admin page.
+ */
+async function renderTemplate(templateKey, vars, fallback) {
+  try {
+    if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      if (body) return body;
+    }
+  } catch { /* fall through */ }
+  return fallback;
+}
 
 // ── Date formatting helpers ──
 
@@ -165,7 +181,11 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
             const firstName = customer.first_name || 'there';
 
-            const body = `Hello ${firstName}! Your ${serviceType || 'service'} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`;
+            const body = await renderTemplate(
+              'appointment_confirmation',
+              { first_name: firstName, service_type: serviceType || 'service', date, time, day },
+              `Hello ${firstName}! Your ${serviceType || 'service'} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
+            );
 
             const sent = await safeSend(customerId, customer.phone, body, 'confirmation');
 
@@ -247,7 +267,11 @@ const AppointmentReminders = {
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
 
-            const body = `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nIf you have any questions or need assistance, simply reply to this message.`;
+            const body = await renderTemplate(
+              'reminder_72h',
+              { first_name: firstName, service_type: r.service_type, day, date, time },
+              `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nIf you have any questions or need assistance, simply reply to this message.`,
+            );
 
             await safeSend(r.customer_id, customer.phone, body);
 
@@ -282,7 +306,11 @@ const AppointmentReminders = {
             const firstName = customer.first_name || 'there';
             const time = formatTime(apptTime);
 
-            const body = `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`;
+            const body = await renderTemplate(
+              'reminder_24h',
+              { first_name: firstName, service_type: r.service_type, time },
+              `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`,
+            );
 
             await safeSend(r.customer_id, customer.phone, body);
 
@@ -350,9 +378,13 @@ const AppointmentReminders = {
         const date = formatDate(newApptTime);
         const time = formatTime(newApptTime);
 
-        const body = `Hello ${firstName}! Your ${record.service_type} with Waves has been rescheduled to ${day}, ${date} at ${time}.\n\n` +
-          `Please ensure gates are unlocked and pets are secured before we arrive.\n\n` +
-          `Questions? Reply to this message.\nThank you for choosing Waves!`;
+        const body = await renderTemplate(
+          'appointment_rescheduled',
+          { first_name: firstName, service_type: record.service_type, day, date, time },
+          `Hello ${firstName}! Your ${record.service_type} with Waves has been rescheduled to ${day}, ${date} at ${time}.\n\n` +
+            `Please ensure gates are unlocked and pets are secured before we arrive.\n\n` +
+            `Questions? Reply to this message.\nThank you for choosing Waves!`,
+        );
 
         await safeSend(record.customer_id, customer.phone, body);
         logger.info(`[appt-remind] Reschedule notice sent: ${firstName} — ${record.service_type} -> ${day} ${date}`);
@@ -391,8 +423,12 @@ const AppointmentReminders = {
         const day = formatDay(apptTime);
         const date = formatDate(apptTime);
 
-        const body = `Hello ${firstName}! Your ${record.service_type} with Waves scheduled for ${day}, ${date} has been cancelled.\n\n` +
-          `Need to rebook? Reply to this message and we'll get you scheduled.\nThank you for choosing Waves!`;
+        const body = await renderTemplate(
+          'appointment_cancelled',
+          { first_name: firstName, service_type: record.service_type, day, date },
+          `Hello ${firstName}! Your ${record.service_type} with Waves scheduled for ${day}, ${date} has been cancelled.\n\n` +
+            `Need to rebook? Reply to this message and we'll get you scheduled.\nThank you for choosing Waves!`,
+        );
 
         await safeSend(record.customer_id, customer.phone, body);
         logger.info(`[appt-remind] Cancellation notice sent: ${firstName} — ${record.service_type}`);

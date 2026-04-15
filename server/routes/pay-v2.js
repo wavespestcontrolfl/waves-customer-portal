@@ -60,6 +60,7 @@ router.get('/:token', async (req, res, next) => {
         city: customer.city,
         state: customer.state,
         zip: customer.zip,
+        isCommercial: customer.property_type === 'commercial' || customer.property_type === 'business',
       },
       processor: 'stripe',
       stripe: {

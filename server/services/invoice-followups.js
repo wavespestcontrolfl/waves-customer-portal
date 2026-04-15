@@ -12,7 +12,27 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
+const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const config = require('../config/invoice-followups');
+
+/**
+ * Try to load the SMS body from the editable sms_templates table first.
+ * Falls back to the hardcoded config copy if the template is missing/disabled.
+ * Templates use {var} syntax; config uses {{var}} syntax — we render both.
+ */
+async function resolveBody(step, ctx) {
+  if (step.template_key && typeof smsTemplatesRouter.getTemplate === 'function') {
+    const fromTable = await smsTemplatesRouter.getTemplate(step.template_key, {
+      first_name: ctx.name || 'there',
+      invoice_title: ctx.invoiceTitle || 'your service',
+      amount: ctx.amount || '0.00',
+      pay_url: ctx.payUrl || '',
+      service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
+    });
+    if (fromTable) return fromTable;
+  }
+  return renderBody(step.body, ctx);
+}
 
 const DOMAIN = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
 
@@ -182,7 +202,7 @@ async function fireStep(row) {
     ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
     : '';
 
-  const body = renderBody(step.body, {
+  const body = await resolveBody(step, {
     name: customer.first_name || 'there',
     invoiceTitle: row.title || 'your service',
     amount,
@@ -242,7 +262,7 @@ async function stopOnPayment(invoiceId) {
     try {
       const customer = await db('customers').where({ id: seq.customer_id }).first();
       if (customer?.phone) {
-        const body = renderBody(config.thankYou.body, { name: customer.first_name });
+        const body = await resolveBody(config.thankYou, { name: customer.first_name });
         await TwilioService.sendSMS(customer.phone, body, {
           customerId: customer.id,
           messageType: 'invoice_thank_you',
