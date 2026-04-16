@@ -231,7 +231,7 @@ router.post('/blog/:id/publish', async (req, res, next) => {
   try {
     const post = await db('blog_posts').where('id', req.params.id).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
-    await db('blog_posts').where('id', req.params.id).update({ status: 'published', published_at: new Date(), updated_at: new Date() });
+    await db('blog_posts').where('id', req.params.id).update({ status: 'published', publish_date: new Date() });
     res.json({ success: true, link: `https://www.wavespestcontrol.com/${post.slug}` });
   } catch (err) { next(err); }
 });
