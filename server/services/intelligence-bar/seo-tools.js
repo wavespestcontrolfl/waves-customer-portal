@@ -148,6 +148,45 @@ Use for: "any content decay issues?", "are any pages cannibalizing each other?",
       },
     },
   },
+  {
+    name: 'get_semantic_concept_map',
+    description: `Get the semantic concept cluster map for a service line. Returns the full concept hub: core concept, related subtopics, required entities (products, institutions, species, geography), and content architecture recommendations.
+Use for: "show me the concept map for pest control", "what entities should our lawn care pages cover?", "semantic map for termite content", "what's the concept cluster for mosquito control?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        service_line: { type: 'string', enum: ['pest_control', 'lawn_care', 'mosquito', 'termite', 'tree_shrub', 'rodent'], description: 'Which service line concept cluster to return' },
+      },
+      required: ['service_line'],
+    },
+  },
+  {
+    name: 'score_page_refresh_priority',
+    description: `Score pages for refresh priority based on ranking drops, content age, entity coverage, FAQ completeness, and traffic potential. Returns a prioritized list of pages most likely to benefit from a semantic refresh.
+Use for: "which pages should I refresh first?", "page refresh priority list", "what's the best ROI content update?", "score our service pages for refresh"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        service_category: { type: 'string', description: 'Filter by service type: pest, lawn, mosquito, termite, rodent, tree_shrub' },
+        city: { type: 'string', description: 'Filter by target city' },
+        limit: { type: 'number', description: 'Max results (default 15)' },
+      },
+    },
+  },
+  {
+    name: 'get_content_workflow_brief',
+    description: `Generate a structured content workflow brief for a target keyword/page following the semantic SEO process: SERP consensus → entity map → content blueprint → writing brief. Returns a step-by-step action plan.
+Use for: "create a content brief for pest control bradenton", "workflow brief for lawn care sarasota page", "how should I refresh the termite page?", "build me a brief for mosquito control venice"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        target_keyword: { type: 'string', description: 'The primary keyword or topic to build a brief for' },
+        page_url: { type: 'string', description: 'Existing page URL if this is a refresh (optional)' },
+        brief_type: { type: 'string', enum: ['new_page', 'page_refresh', 'blog_post', 'concept_hub'], description: 'Type of content (default: page_refresh)' },
+      },
+      required: ['target_keyword'],
+    },
+  },
 ];
 
 
@@ -166,6 +205,9 @@ async function executeSeoTool(toolName, input) {
       case 'get_backlink_overview': return await getBacklinkOverview(input);
       case 'compare_domains': return await compareDomains(input);
       case 'get_content_decay_alerts': return await getContentDecayAlerts(input);
+      case 'get_semantic_concept_map': return await getSemanticConceptMap(input);
+      case 'score_page_refresh_priority': return await scorePageRefreshPriority(input);
+      case 'get_content_workflow_brief': return await getContentWorkflowBrief(input);
       default: return { error: `Unknown SEO tool: ${toolName}` };
     }
   } catch (err) {
@@ -644,6 +686,401 @@ async function getContentDecayAlerts(input) {
     })),
     total_decay: decayAlerts.length,
     total_cannibalization: cannibFlags.length,
+  };
+}
+
+
+// ─── SEMANTIC CONCEPT CLUSTERS ─────────────────────────────────
+
+const CONCEPT_CLUSTERS = {
+  pest_control: {
+    core_concept: 'Residential pest management in subtropical coastal environments',
+    old_keyword_target: 'pest control [city] FL',
+    related_concepts: [
+      'Integrated pest management (IPM) principles',
+      'Pest pressure seasonality in SWFL (June–October rainy season surge)',
+      'Exterior perimeter defense vs interior treatment methodology',
+      'Product safety around children and pets — re-entry intervals',
+      'Bait rotation to prevent resistance (MOA rotation)',
+      'Moisture-driven pest biology (palmetto bug population explosions after rain)',
+      'Role of landscaping in pest harborage — mulch depth, ground cover, irrigation',
+      'HOA common-area pest dynamics and commercial contracts',
+      'Warranty and re-service expectations for recurring programs',
+      'Florida building code post-Hurricane Andrew — pest entry points in modern construction',
+    ],
+    product_entities: ['Phantom (chlorfenapyr)', 'Alpine WSG', 'Demand CS', 'Advion', 'Syngenta', 'BASF', 'Bayer Environmental Science'],
+    institutional_entities: ['Florida Department of Agriculture (FDACS)', 'EPA registration numbers', 'NPMA', 'UF/IFAS Extension'],
+    species_entities: ['German cockroaches', 'American cockroaches (palmetto bugs)', 'fire ants', 'ghost ants', 'whitefoot ants', 'paper wasps', 'yellow jackets', 'bed bugs', 'fleas', 'ticks'],
+    geographic_signals: ['SWFL soil types (Myakka fine sand)', 'Subtropical coastal climate Zone 9b–10a', 'Hurricane-code construction', 'Mangrove and tidal proximity'],
+    hub_page: '/pest-control',
+    sub_pages: ['/pests/palmetto-bugs', '/pests/german-cockroaches', '/pests/fire-ants', '/pests/ghost-ants'],
+  },
+  lawn_care: {
+    core_concept: 'Warm-season turfgrass management in USDA Zone 9b–10a',
+    old_keyword_target: 'lawn care [city] FL',
+    related_concepts: [
+      'St. Augustine cultivar selection (Floratam vs CitraBlue vs Palmetto vs Sapphire)',
+      'Chinch bug lifecycle and threshold-based treatment',
+      'Large patch (Rhizoctonia solani) — cultural vs chemical management',
+      'Proper mowing height by species (3.5–4" for St. Augustine)',
+      'Soil pH and micronutrient availability in Florida alkaline sandy soils',
+      'Irrigation scheduling using evapotranspiration (ET) rates',
+      'Pre-emergent timing windows — soil temp at 4" depth using FAWN stations',
+      'Take-all root rot diagnostics and cultural management',
+      'Granular vs liquid application trade-offs in FL climate',
+      'Sod webworm and mole cricket pressure cycles',
+    ],
+    product_entities: ['Celsius WG', 'Tribute Total', 'Pillar G', 'Quali-Pro', 'LESCO', 'FMC', 'Snapshot pre-emergent'],
+    institutional_entities: ['FAWN weather stations (311 Myakka River, 260 Arcadia)', 'UF/IFAS Extension', 'USDA Zone 9b–10a'],
+    species_entities: ['St. Augustine (Floratam, CitraBlue, Palmetto, Sapphire)', 'Bermuda', 'Zoysia', 'Bahia', 'Chinch bugs', 'Sod webworms', 'Mole crickets'],
+    disease_entities: ['Large patch (Rhizoctonia)', 'Take-all root rot', 'Gray leaf spot', 'Brown patch', 'Dollar spot'],
+    geographic_signals: ['Alkaline sandy soils', 'High water table', 'Subtropical humidity', 'Rainy season June–October'],
+    hub_page: '/lawn-care',
+    sub_pages: ['/lawn-care/st-augustine', '/lawn-care/chinch-bugs', '/lawn-care/fertilization-program'],
+  },
+  mosquito: {
+    core_concept: 'Residential mosquito population suppression in coastal Florida',
+    old_keyword_target: 'mosquito control near me',
+    related_concepts: [
+      'Aedes vs Culex vs Anopheles behavior differences',
+      'Breeding site elimination (standing water audit methodology)',
+      'Adulticide mist application vs larvicide programs',
+      'In2Care station technology — dual-action larvicide + adulticide',
+      'Barrier spray residual timelines (21-day cycle)',
+      'Impact of tidal marshes and mangrove proximity on mosquito pressure',
+      'HOA/community-wide program economics',
+      'Event-based one-time treatments (weddings, parties)',
+      'CDC guidance on mosquito-borne illness in FL (Zika, Dengue, EEE, West Nile)',
+    ],
+    product_entities: ['In2Care', 'Onslaught FastCap', 'Mavrik Perimeter'],
+    institutional_entities: ['Lee County Mosquito Control District', 'Sarasota County Mosquito Management', 'CDC', 'FL DOH'],
+    species_entities: ['Aedes aegypti', 'Aedes albopictus (Asian tiger)', 'Culex quinquefasciatus'],
+    geographic_signals: ['Tidal marsh proximity', 'Mangrove ecosystems', 'Standing water in FL flat terrain', 'Rainy season breeding surge'],
+    hub_page: '/mosquito-control',
+    sub_pages: ['/mosquito-control/barrier-spray', '/mosquito-control/in2care-stations'],
+  },
+  termite: {
+    core_concept: 'Subterranean and drywood termite detection, treatment, and prevention in Florida construction',
+    old_keyword_target: 'termite treatment [city] FL',
+    related_concepts: [
+      'WDO inspection process and Form 13645',
+      'Mud tube identification and subterranean termite behavior',
+      'Formosan vs Eastern subterranean behavioral differences',
+      'Drywood termite frass patterns and identification',
+      'Liquid barrier vs bait station systems — decision framework',
+      'Pre-construction soil treatment methodology',
+      'Bora-Care borate wood treatment for new construction',
+      'Termidor SC transfer effect via trophallaxis',
+      'Tent fumigation vs spot treatment decision framework',
+      'Real estate transaction WDO requirements (FL statute 482)',
+      'Annual renewal inspection protocols',
+    ],
+    product_entities: ['Termidor SC', 'Termidor Foam', 'Sentricon', 'Bora-Care', 'BASF', 'Corteva'],
+    institutional_entities: ['FDACS', 'Florida statute 482', 'NPMA'],
+    species_entities: ['Eastern subterranean termites', 'Formosan termites', 'Drywood termites'],
+    geographic_signals: ['FL construction types (slab-on-grade vs crawlspace)', 'Post-Andrew building codes', 'High moisture + warm climate = year-round pressure', 'Sandy soil termiticide binding behavior'],
+    hub_page: '/termite-treatment',
+    sub_pages: ['/termite-treatment/wdo-inspection', '/termite-treatment/subterranean', '/termite-treatment/drywood'],
+  },
+  tree_shrub: {
+    core_concept: 'Ornamental plant health management in subtropical landscapes',
+    old_keyword_target: 'tree spraying service [city]',
+    related_concepts: [
+      'Scale insect and whitefly pressure cycles',
+      'Sooty mold as a secondary indicator of sucking pest infestation',
+      'Palm nutrient deficiency (manganese, potassium, boron)',
+      'Trunk injection vs foliar application — when to use each',
+      'FRAC rotation for fungicide resistance management',
+      'Snapshot pre-emergent for ornamental bed weed control',
+      'Proper pruning timing to avoid stress-induced pest invasion',
+      'Spiraling whitefly on Ficus and Gumbo Limbo',
+      'Rugose spiraling whitefly vs conventional whitefly',
+      'Fertilization timing relative to rainy season',
+    ],
+    product_entities: ['Arborjet TREE-äge', 'Safari 20SG', 'Transtect', 'Snapshot'],
+    institutional_entities: ['UF/IFAS Extension', 'FRAC codes'],
+    species_entities: ['Scale insects', 'Spiraling whitefly', 'Rugose spiraling whitefly', 'Ficus whitefly'],
+    geographic_signals: ['Subtropical landscape species', 'Salt-tolerant ornamentals near coast', 'Hurricane damage recovery'],
+    hub_page: '/tree-and-shrub-care',
+    sub_pages: ['/tree-and-shrub-care/palm-health', '/tree-and-shrub-care/whitefly-treatment'],
+  },
+  rodent: {
+    core_concept: 'Rodent exclusion and population management in Florida residential structures',
+    old_keyword_target: 'rodent control [city] FL',
+    related_concepts: [
+      'Roof rat vs Norway rat behavior in FL',
+      'Exclusion-first approach — seal entry points before baiting',
+      'Attic inspection methodology in FL construction',
+      'Bait station placement and monitoring protocols',
+      'Snap trap vs bait station decision framework',
+      'Rodent-borne disease risks in subtropical climate',
+      'A/C line entry points and soffit gaps as common access',
+      'Signs of rodent activity: droppings, rub marks, gnaw marks, sounds',
+    ],
+    product_entities: ['Contrac', 'Final Blox', 'Trapper T-Rex snap traps'],
+    institutional_entities: ['CDC', 'FL DOH', 'NPMA'],
+    species_entities: ['Roof rats (Rattus rattus)', 'Norway rats (Rattus norvegicus)', 'House mice'],
+    geographic_signals: ['Florida attic construction (truss roof, no basement)', 'Citrus/fruit tree proximity attracting rodents', 'Warm climate = year-round activity'],
+    hub_page: '/rodent-control',
+    sub_pages: ['/rodent-control/roof-rats', '/rodent-control/exclusion'],
+  },
+};
+
+async function getSemanticConceptMap(input) {
+  const { service_line } = input;
+  const cluster = CONCEPT_CLUSTERS[service_line];
+  if (!cluster) {
+    return { error: `Unknown service line: ${service_line}. Available: ${Object.keys(CONCEPT_CLUSTERS).join(', ')}` };
+  }
+
+  // Also pull any existing pages and their GSC performance for this service line
+  let gscData = [];
+  try {
+    const categoryMap = {
+      pest_control: 'pest', lawn_care: 'lawn', mosquito: 'mosquito',
+      termite: 'termite', tree_shrub: 'tree_shrub', rodent: 'rodent',
+    };
+    const since = new Date(Date.now() - 28 * 86400000).toISOString().split('T')[0];
+    gscData = await db('gsc_top_queries')
+      .where('service_category', categoryMap[service_line] || service_line)
+      .where('date', '>=', since)
+      .select('query', 'clicks', 'impressions', 'position')
+      .orderBy('clicks', 'desc')
+      .limit(20);
+  } catch (e) { /* table may not exist */ }
+
+  // Pull any blog posts in this category
+  let blogPosts = [];
+  try {
+    blogPosts = await db('blog_posts')
+      .whereILike('tag', `%${service_line.replace('_', ' ')}%`)
+      .select('id', 'title', 'slug', 'status', 'word_count', 'seo_score')
+      .orderBy('created_at', 'desc')
+      .limit(10);
+  } catch (e) { /* ok */ }
+
+  return {
+    service_line,
+    ...cluster,
+    current_gsc_queries: gscData,
+    existing_blog_content: blogPosts,
+    recommendation: `Use this concept map to audit existing ${service_line.replace('_', ' ')} pages. Check each related concept, product entity, and institutional entity against your current page content. Any gap = content to add. Prioritize entities that appear in competitor top-5 SERP results but are missing from your pages.`,
+  };
+}
+
+
+async function scorePageRefreshPriority(input) {
+  const { service_category, city, limit: rawLimit } = input;
+  const limit = Math.min(rawLimit || 15, 50);
+
+  // Pull pages with ranking data
+  const since = new Date(Date.now() - 28 * 86400000).toISOString().split('T')[0];
+  const prevSince = new Date(Date.now() - 56 * 86400000).toISOString().split('T')[0];
+
+  let currentQuery = db('gsc_top_pages')
+    .where('date', '>=', since)
+    .whereILike('domain', '%wavespestcontrol.com%');
+  let prevQuery = db('gsc_top_pages')
+    .whereBetween('date', [prevSince, since])
+    .whereILike('domain', '%wavespestcontrol.com%');
+
+  if (service_category) {
+    currentQuery = currentQuery.where('service_category', service_category);
+    prevQuery = prevQuery.where('service_category', service_category);
+  }
+  if (city) {
+    currentQuery = currentQuery.whereILike('page', `%${city.toLowerCase()}%`);
+    prevQuery = prevQuery.whereILike('page', `%${city.toLowerCase()}%`);
+  }
+
+  let currentPages, prevPages;
+  try {
+    currentPages = await currentQuery.select('page')
+      .sum('clicks as clicks').sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('page').orderByRaw('SUM(clicks) DESC').limit(limit * 2);
+    prevPages = await prevQuery.select('page')
+      .sum('clicks as clicks').sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('page');
+  } catch (e) {
+    return { error: 'GSC page data not available. Run a GSC sync first.' };
+  }
+
+  const prevMap = {};
+  prevPages.forEach(p => { prevMap[p.page] = p; });
+
+  // Pull content decay alerts
+  let decayAlerts = [];
+  try {
+    decayAlerts = await db('seo_content_decay_alerts')
+      .where('status', 'active')
+      .whereILike('page_url', '%wavespestcontrol.com%')
+      .select('page_url', 'severity');
+  } catch (e) { /* ok */ }
+  const decayMap = {};
+  decayAlerts.forEach(a => { decayMap[a.page_url] = a.severity; });
+
+  // Score each page
+  const scored = currentPages.map(p => {
+    const prev = prevMap[p.page] || {};
+    const clickDelta = parseInt(p.clicks || 0) - parseInt(prev.clicks || 0);
+    const posDelta = parseFloat(prev.avg_position || 0) - parseFloat(p.avg_position || 0); // positive = improved
+    const hasDecay = decayMap[p.page] || null;
+
+    // Scoring: higher = more urgent refresh needed
+    let score = 0;
+    // Pages losing clicks get high priority
+    if (clickDelta < 0) score += Math.min(Math.abs(clickDelta) * 2, 30);
+    // Pages losing position
+    if (posDelta < 0) score += Math.min(Math.abs(posDelta) * 5, 25);
+    // Pages with decay alerts
+    if (hasDecay === 'high') score += 20;
+    else if (hasDecay === 'medium') score += 10;
+    // Pages with high impressions but low clicks (CTR opportunity)
+    const ctr = parseInt(p.impressions) > 0 ? parseInt(p.clicks) / parseInt(p.impressions) : 0;
+    if (parseInt(p.impressions) > 100 && ctr < 0.03) score += 15;
+    // Pages ranking 4-15 (striking distance, high refresh ROI)
+    const pos = parseFloat(p.avg_position || 0);
+    if (pos >= 4 && pos <= 15) score += 15;
+    else if (pos >= 16 && pos <= 30) score += 8;
+
+    return {
+      page: p.page,
+      clicks_current: parseInt(p.clicks || 0),
+      clicks_delta: clickDelta,
+      avg_position: parseFloat(parseFloat(p.avg_position || 0).toFixed(1)),
+      position_delta: parseFloat(posDelta.toFixed(1)),
+      impressions: parseInt(p.impressions || 0),
+      ctr: parseFloat((ctr * 100).toFixed(2)),
+      decay_alert: hasDecay,
+      refresh_score: score,
+      refresh_reason: [
+        clickDelta < 0 ? `losing ${Math.abs(clickDelta)} clicks` : null,
+        posDelta < 0 ? `dropped ${Math.abs(posDelta).toFixed(1)} positions` : null,
+        hasDecay ? `decay alert: ${hasDecay}` : null,
+        ctr < 0.03 && parseInt(p.impressions) > 100 ? `low CTR (${(ctr * 100).toFixed(1)}%) with high impressions` : null,
+        pos >= 4 && pos <= 15 ? `striking distance (pos ${pos.toFixed(1)})` : null,
+      ].filter(Boolean),
+    };
+  });
+
+  scored.sort((a, b) => b.refresh_score - a.refresh_score);
+
+  return {
+    pages: scored.slice(0, limit),
+    total_scored: scored.length,
+    high_priority: scored.filter(s => s.refresh_score >= 25).length,
+    medium_priority: scored.filter(s => s.refresh_score >= 10 && s.refresh_score < 25).length,
+    methodology: 'Score based on: click loss (max 30), position loss (max 25), decay alerts (max 20), low CTR with high impressions (15), striking distance ranking 4-15 (15). Higher = more urgent refresh.',
+  };
+}
+
+
+async function getContentWorkflowBrief(input) {
+  const { target_keyword, page_url, brief_type = 'page_refresh' } = input;
+
+  // Determine which service line this keyword belongs to
+  const kw = target_keyword.toLowerCase();
+  let service_line = 'pest_control';
+  if (kw.includes('lawn') || kw.includes('turf') || kw.includes('grass') || kw.includes('mow') || kw.includes('fertiliz')) service_line = 'lawn_care';
+  else if (kw.includes('mosquito')) service_line = 'mosquito';
+  else if (kw.includes('termite') || kw.includes('wdo')) service_line = 'termite';
+  else if (kw.includes('tree') || kw.includes('shrub') || kw.includes('palm') || kw.includes('ornamental')) service_line = 'tree_shrub';
+  else if (kw.includes('rodent') || kw.includes('rat') || kw.includes('mouse') || kw.includes('mice')) service_line = 'rodent';
+
+  const cluster = CONCEPT_CLUSTERS[service_line];
+
+  // Pull ranking data for this keyword if we have it
+  let rankingData = null;
+  try {
+    rankingData = await db('seo_rankings')
+      .whereILike('keyword', `%${target_keyword}%`)
+      .orderBy('checked_at', 'desc')
+      .first();
+  } catch (e) { /* ok */ }
+
+  // Pull GSC data for this keyword
+  let gscData = null;
+  try {
+    const since = new Date(Date.now() - 28 * 86400000).toISOString().split('T')[0];
+    gscData = await db('gsc_top_queries')
+      .whereILike('query', `%${target_keyword}%`)
+      .where('date', '>=', since)
+      .select('query')
+      .sum('clicks as clicks').sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('query')
+      .orderByRaw('SUM(clicks) DESC')
+      .limit(5);
+  } catch (e) { /* ok */ }
+
+  // Pull existing blog posts that might relate
+  let relatedContent = [];
+  try {
+    const kwWords = target_keyword.split(/\s+/).filter(w => w.length > 3);
+    if (kwWords.length > 0) {
+      let q = db('blog_posts');
+      kwWords.forEach(w => { q = q.orWhereILike('title', `%${w}%`); });
+      relatedContent = await q.select('id', 'title', 'slug', 'status', 'word_count').limit(5);
+    }
+  } catch (e) { /* ok */ }
+
+  return {
+    target_keyword,
+    brief_type,
+    detected_service_line: service_line,
+    concept_cluster: {
+      core_concept: cluster.core_concept,
+      hub_page: cluster.hub_page,
+    },
+    current_data: {
+      ranking: rankingData ? {
+        position: rankingData.organic_position,
+        map_pack: rankingData.map_pack_position,
+        ai_overview: rankingData.ai_overview_cited,
+        last_checked: rankingData.checked_at,
+      } : null,
+      gsc_queries: gscData || [],
+      related_content: relatedContent,
+    },
+    workflow_steps: {
+      step_1_serp_analysis: {
+        action: `Search Google for "${target_keyword}" in the target SWFL city. Analyze top 10 results: page types, content formats, entity coverage, SERP features (local pack, PAA, featured snippet, AI overview).`,
+        goal: 'Understand what Google currently rewards for this query.',
+      },
+      step_2_entity_map: {
+        action: `Compare the target page against top-5 SERP competitors. Extract all entities (products, species, institutions, geographies) they cover.`,
+        required_entities: [...(cluster.product_entities || []), ...(cluster.institutional_entities || [])],
+        species_entities: cluster.species_entities || [],
+        geographic_signals: cluster.geographic_signals || [],
+        goal: 'Find every entity gap — if competitors mention it and we don\'t, add it.',
+      },
+      step_3_content_blueprint: {
+        action: 'Build H2 structure based on cross-page consensus. Map required sections, entity placements, FAQ questions from People Also Ask.',
+        related_concepts_to_cover: cluster.related_concepts || [],
+        goal: 'Data-backed content structure, not a guess.',
+      },
+      step_4_write_or_refresh: {
+        action: brief_type === 'page_refresh'
+          ? 'Update the existing page: add missing entities, expand thin sections, update FAQ schema, add freshness signals (seasonal data, recent FAWN readings).'
+          : 'Write new content following the blueprint. Lead with SWFL-specific depth. Use real product names, species, and institutional references.',
+        word_count_target: brief_type === 'blog_post' ? '1,500–2,500 words' : '2,000–4,000 words for service/city pages',
+        goal: 'Content that comprehensively covers the semantic concept, not just the keyword.',
+      },
+      step_5_schema_and_links: {
+        action: 'Ensure FAQ schema matches content. Add internal links to/from concept hub page. Verify LocalBusiness and Service schema.',
+        hub_page: cluster.hub_page,
+        goal: 'Technical SEO alignment with content improvements.',
+      },
+    },
+    differentiation_angles: [
+      'Reference specific products by name with application methodology (not just "we use professional-grade products")',
+      'Include FAWN weather station data for treatment timing',
+      'Mention Florida-specific conditions: soil types, construction codes, subtropical pest pressure',
+      'Reference UF/IFAS Extension research for credibility',
+      'Add geographic specificity: neighborhoods, waterways, microclimates — not just city names',
+    ],
   };
 }
 
