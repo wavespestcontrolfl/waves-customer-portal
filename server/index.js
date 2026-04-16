@@ -82,6 +82,10 @@ const toolHealthRoutes = require('./routes/tool-health');
 
 const app = express();
 
+// Railway terminates TLS upstream and forwards via X-Forwarded-For.
+// Trust a single proxy hop so express-rate-limit can key on the real client IP.
+app.set('trust proxy', 1);
+
 // =========================================================================
 // MIDDLEWARE
 // =========================================================================
@@ -124,6 +128,7 @@ app.use(cors({
     config.clientUrl,
     'https://portal.wavespestcontrol.com',
     'https://wavespestcontrol.com',
+    'https://www.wavespestcontrol.com',
   ],
   credentials: true,
 }));
@@ -281,6 +286,7 @@ app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));
 app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
+app.use('/api/newsletter', require('./routes/newsletter'));
 
 // Health check
 app.get('/api/health', (req, res) => {
