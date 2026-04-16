@@ -1,11 +1,11 @@
 // ============================================================
 // constants.js — Waves Pest Control Pricing Constants
-// All customer-facing prices include 3% processing absorption
-// Last updated: April 2026 (pricing audit + payment restructure)
+// Prices are quoted at base. A 3% processing fee is added at
+// checkout when the customer pays by credit card (not ACH).
 // ============================================================
 
-const PROCESSING_ADJUSTMENT = 1.03;
-const r = (val) => Math.round(val * PROCESSING_ADJUSTMENT); // Round after 3% adj
+const PROCESSING_ADJUSTMENT = 1.00;
+const r = (val) => Math.round(val * PROCESSING_ADJUSTMENT); // Retained wrapper; multiplier is 1.00
 
 // ── Global Constants ──────────────────────────────────────────
 const GLOBAL = {
@@ -118,7 +118,7 @@ const LAWN_TIERS = {
 };
 
 // Bracket tables: [sqft, basic, standard, enhanced, premium]
-// All values include 3% processing adjustment
+// Base prices — 3% card surcharge is applied at checkout, not baked in here.
 const LAWN_BRACKETS = {
   st_augustine: [
     [3000,  r(35), r(45), r(55), r(65)],
@@ -466,8 +466,10 @@ const WAVEGUARD = {
 };
 
 // ── ACH Payment Discount ──────────────────────────────────────
+// Retired. Kept at 0% so any legacy callers stay harmless. Card payments
+// incur a 3% processing surcharge at checkout instead.
 const ACH_DISCOUNT = {
-  percentage: 0.03,
+  percentage: 0,
   paymentMethod: 'us_bank_account',
   exemptFromCompositeCap: true,
 };

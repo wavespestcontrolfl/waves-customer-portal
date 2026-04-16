@@ -2204,10 +2204,22 @@ function ServicesTab() {
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState(String(new Date().getFullYear()));
   const [searchTerm, setSearchTerm] = useState('');
+  const [photoMap, setPhotoMap] = useState({});
+  const [lightbox, setLightbox] = useState(null);
 
   useEffect(() => {
     api.getServices({ limit: 100 }).then(d => { setServices(d.services || []); setLoading(false); }).catch(console.error);
   }, []);
+
+  const toggleExpand = (svc) => {
+    const next = expanded === svc.id ? null : svc.id;
+    setExpanded(next);
+    if (next && svc.hasPhotos && !photoMap[svc.id]) {
+      api.getService(svc.id)
+        .then(d => setPhotoMap(prev => ({ ...prev, [svc.id]: d.photos || [] })))
+        .catch(err => console.error('Failed to load service photos', err));
+    }
+  };
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading service history...</div>;
 
@@ -2402,7 +2414,7 @@ function ServicesTab() {
                     transition: 'all 0.3s ease',
                   }}>
                     {/* Header — always visible */}
-                    <div onClick={() => setExpanded(expanded === s.id ? null : s.id)}
+                    <div onClick={() => toggleExpand(s)}
                       style={{ padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                         <div style={{
@@ -2541,9 +2553,35 @@ function ServicesTab() {
                         {/* Photos */}
                         {s.hasPhotos && (
                           <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ padding: '10px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}`, fontSize: 12, color: B.wavesBlue, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
-                              {'📷'} {s.photoCount} photo{s.photoCount > 1 ? 's' : ''} attached — tap to view
+                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 8 }}>
+                              {'📷'} Service Photos ({s.photoCount})
                             </div>
+                            {!photoMap[s.id] ? (
+                              <div style={{ fontSize: 12, color: B.grayMid }}>Loading photos…</div>
+                            ) : photoMap[s.id].length === 0 ? (
+                              <div style={{ fontSize: 12, color: B.grayMid }}>No photos available.</div>
+                            ) : (
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 8 }}>
+                                {photoMap[s.id].map((p) => (
+                                  <div key={p.id}
+                                    onClick={() => setLightbox(p)}
+                                    style={{
+                                      position: 'relative', cursor: 'pointer', borderRadius: 10, overflow: 'hidden',
+                                      border: `1px solid ${B.grayLight}`, aspectRatio: '1 / 1', background: B.offWhite,
+                                    }}>
+                                    <img src={p.url} alt={p.caption || p.type || 'service photo'}
+                                      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                                    {p.type && (
+                                      <div style={{
+                                        position: 'absolute', top: 4, left: 4, padding: '2px 6px', borderRadius: 6,
+                                        background: 'rgba(0,0,0,0.6)', color: B.white, fontSize: 9, fontWeight: 700,
+                                        textTransform: 'uppercase', letterSpacing: 0.5,
+                                      }}>{p.type}</div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         )}
 
@@ -2582,6 +2620,30 @@ function ServicesTab() {
           </div>
         );
       })}
+      {lightbox && (
+        <div onClick={() => setLightbox(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 9999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, cursor: 'pointer',
+          }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ position: 'relative', maxWidth: '95vw', maxHeight: '95vh', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+            <img src={lightbox.url} alt={lightbox.caption || 'service photo'}
+              style={{ maxWidth: '95vw', maxHeight: '85vh', objectFit: 'contain', borderRadius: 10, background: '#000' }} />
+            {(lightbox.caption || lightbox.type) && (
+              <div style={{ color: B.white, fontSize: 13, textAlign: 'center', maxWidth: 600 }}>
+                {lightbox.type && <span style={{ textTransform: 'uppercase', fontWeight: 700, marginRight: 8, opacity: 0.8 }}>{lightbox.type}</span>}
+                {lightbox.caption}
+              </div>
+            )}
+            <button onClick={() => setLightbox(null)}
+              style={{
+                position: 'absolute', top: -10, right: -10, width: 36, height: 36, borderRadius: '50%',
+                border: 'none', background: B.white, color: B.navy, fontSize: 18, fontWeight: 700, cursor: 'pointer',
+              }}>×</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3556,9 +3618,9 @@ function BillingTab({ customer }) {
         }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Auto Pay Enrollment</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Save 3% with bank payment.</div>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Bank transfers have no added fee — credit/debit cards add a 3% processing fee.</div>
             <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6, lineHeight: 1.5 }}>
-              By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. A 3% discount is applied automatically when you pay via bank transfer (ACH). To update your billing information or cancel automatic payments, contact us at (941) 318-7612 or billing@wavespestcontrol.com.
+              By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. Bank transfers (ACH) are charged the quoted invoice amount. Credit and debit card payments include a 3% processing fee added at checkout. To update your billing information or cancel automatic payments, contact us at (941) 318-7612 or billing@wavespestcontrol.com.
             </div>
           </div>
           <span style={{

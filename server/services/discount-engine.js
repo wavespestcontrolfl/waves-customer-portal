@@ -315,21 +315,12 @@ const DiscountEngine = {
   },
 
   /**
-   * Calculate ACH discount for a given amount.
-   * Returns { discount, rate } or null if not applicable.
+   * ACH discount has been retired. Prices no longer bake in a 3% card-processing
+   * absorption — instead, credit card payments incur a 3% surcharge at checkout
+   * and ACH pays the quoted price with no discount. Kept as a no-op for callers.
    */
-  async getAchDiscount(amount, paymentMethod) {
-    if (paymentMethod !== 'us_bank_account') return null;
-    try {
-      const disc = await db('discounts')
-        .where({ discount_key: 'ach_payment_discount', is_active: true })
-        .first();
-      if (!disc) return null;
-      const rate = Number(disc.amount) / 100;
-      return { discount: Math.round(amount * rate * 100) / 100, rate };
-    } catch {
-      return { discount: Math.round(amount * 0.03 * 100) / 100, rate: 0.03 };
-    }
+  async getAchDiscount(_amount, _paymentMethod) {
+    return null;
   },
 
   /**

@@ -88,11 +88,39 @@ router.post('/:token/setup', async (req, res, next) => {
       clientSecret: result.clientSecret,
       paymentIntentId: result.paymentIntentId,
       amount: result.amount,
+      baseAmount: result.baseAmount,
+      cardSurchargeRate: result.cardSurchargeRate,
       publishableKey: stripeConfig.publishableKey,
     });
   } catch (err) {
     logger.error(`[pay-v2] Setup error: ${err.message}`);
     next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/pay/:token/update-amount — Adjust PI for selected payment method
+// (adds a 3% processing surcharge for card-family methods; ACH stays at base)
+// =========================================================================
+router.post('/:token/update-amount', async (req, res, next) => {
+  try {
+    const { paymentIntentId, methodCategory } = req.body || {};
+    if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
+
+    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(
+      invoice.id,
+      paymentIntentId,
+      methodCategory,
+    );
+
+    res.json(result);
+  } catch (err) {
+    logger.error(`[pay-v2] Update-amount error: ${err.message}`);
+    res.status(400).json({ error: err.message });
   }
 });
 

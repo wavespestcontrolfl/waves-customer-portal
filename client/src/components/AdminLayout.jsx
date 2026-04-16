@@ -26,7 +26,6 @@ const NAV_SECTIONS = [
     { path: '/admin/ppc', icon: '📣', label: 'PPC' },
     { path: '/admin/seo', icon: '🔍', label: 'SEO' },
     { path: '/admin/social-media', icon: '📲', label: 'Social Media' },
-    { path: '/admin/wordpress', icon: '🌐', label: 'WordPress' },
   ]},
   { section: 'Field & Equipment', items: [
     { path: '/admin/equipment', icon: '🔧', label: 'Equipment' },

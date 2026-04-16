@@ -91,7 +91,7 @@ app.set('trust proxy', 1);
 // =========================================================================
 
 // Security headers — CSP allows Google Fonts, APIs, and inline styles.
-// The /book public booking page is iframe-embeddable on the WordPress fleet,
+// The /book public booking page is iframe-embeddable on external sites,
 // so it gets permissive frame-ancestors via a scoped middleware.
 const cspDirectives = {
   defaultSrc: ["'self'"],
@@ -252,7 +252,7 @@ app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'))
 app.use('/api/admin/knowledge-bridge', require('./routes/admin-knowledge-bridge'));
 app.use('/api/admin/assessment-analytics', require('./routes/admin-assessment-analytics'));
 app.use('/api/admin/equipment', require('./routes/admin-equipment'));
-app.use('/api/admin/wordpress', require('./routes/admin-wordpress-v2'));
+// WordPress fleet removed — content now publishes to wavespestcontrol.com Astro site
 app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));

@@ -53,8 +53,6 @@ function PostList({ status, onSelectPost }) {
   const [filterTag, setFilterTag] = useState('');
   const [filterCity, setFilterCity] = useState('');
   const [search, setSearch] = useState('');
-  const [syncing, setSyncing] = useState(false);
-
   const load = () => {
     setLoading(true);
     let url = `/admin/content/blog?status=${status}`;
@@ -67,13 +65,6 @@ function PostList({ status, onSelectPost }) {
 
   useEffect(load, [status, filterTag, filterCity, search]);
 
-  const handleSync = async () => {
-    setSyncing(true);
-    await adminPost('/admin/content/blog/sync-wordpress', {});
-    setSyncing(false);
-    load();
-  };
-
   const tags = [...new Set(posts.map(p => p.tag).filter(Boolean))].sort();
   const cities = [...new Set(posts.map(p => p.city).filter(Boolean))].sort();
 
@@ -83,12 +74,6 @@ function PostList({ status, onSelectPost }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* Filters */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-        {status === 'published' && (
-          <button onClick={handleSync} disabled={syncing} style={{
-            padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.teal}`, background: 'transparent',
-            color: D.teal, fontSize: 12, cursor: 'pointer', opacity: syncing ? 0.5 : 1,
-          }}>{syncing ? 'Syncing...' : '🔄 Sync WordPress'}</button>
-        )}
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search..." style={{
           padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.border}`, background: D.bg,
           color: D.text, fontSize: 12, width: 180,
@@ -146,9 +131,6 @@ function PostList({ status, onSelectPost }) {
               )}
               {status === 'queued' && p.content && (
                 <span style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, background: D.green + '22', color: D.green }}>Content Ready</span>
-              )}
-              {p.source === 'wordpress_import' && (
-                <span style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, background: D.purple + '22', color: D.purple }}>WordPress</span>
               )}
             </div>
           </div>
@@ -214,7 +196,7 @@ function PostEditor({ post, onBack, onUpdate }) {
       await adminPost(`/admin/content/blog/${post.id}/publish`, {});
       setEditing(prev => ({ ...prev, status: 'published' }));
     } catch (err) {
-      alert('Publish failed — check WordPress credentials');
+      alert('Publish failed — check connection');
     }
     setPublishing(false);
   };
@@ -413,7 +395,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           <button onClick={handlePublish} disabled={publishing} style={{
             padding: '10px 20px', borderRadius: 8, border: `1px solid ${D.green}`, background: 'transparent',
             color: D.green, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: publishing ? 0.5 : 1,
-          }}>{publishing ? 'Publishing...' : 'Publish to WordPress'}</button>
+          }}>{publishing ? 'Publishing...' : 'Publish to Site'}</button>
         )}
         {(editing.status === 'published' || editing.content) && (
           <button onClick={handleShareSocial} disabled={sharing} style={{
@@ -557,10 +539,11 @@ function AuditTab() {
 // =========================================================================
 
 const CONTENT_TYPES = [
-  { id: 'blog_post', label: 'Blog Post', desc: '800–1200 words, SEO optimized, FAQ schema', icon: '📝' },
+  { id: 'blog_post', label: 'Blog Post', desc: '800–1200 words, entity-complete, FAQ schema from SERP consensus', icon: '📝' },
+  { id: 'page_refresh', label: 'Page Refresh', desc: 'Update existing page: add missing entities, expand FAQs, fix schema', icon: '🔄' },
   { id: 'pest_pressure', label: 'Pest Pressure Report', desc: 'Weekly SWFL conditions + actionable advice', icon: '🐛' },
   { id: 'gbp_post', label: 'GBP Post', desc: '150–300 words, Google Business Profile', icon: '📍' },
-  { id: 'service_page', label: 'Service Page', desc: '1500–2000 words, comprehensive landing page', icon: '🏠' },
+  { id: 'service_page', label: 'Service Page', desc: '1500–2000 words, full entity coverage, semantic depth', icon: '🏠' },
 ];
 
 const CITIES = ['Lakewood Ranch', 'Parrish', 'Bradenton', 'Sarasota', 'Venice', 'North Port', 'Port Charlotte'];
@@ -573,6 +556,13 @@ const SUGGESTIONS = {
     'German roach infestation — what it actually takes to eliminate them',
     'Fertilizer blackout rules in Sarasota County — complete guide',
     'Roof rats in SWFL — entry points, signs, and exclusion',
+  ],
+  page_refresh: [
+    'Refresh pest-control-bradenton-fl — add missing entities from SERP competitors',
+    'Expand lawn-care-sarasota-fl FAQs based on People Also Ask',
+    'Update termite-control-bradenton-fl schema to match SERP consensus',
+    'Add seasonal freshness signals to mosquito-control pages',
+    'Fill entity gaps on rodent-control-venice-fl vs top 5 competitors',
   ],
   pest_pressure: [
     'This week in SWFL pest pressure — April conditions and what to watch',
@@ -592,11 +582,13 @@ const SUGGESTIONS = {
 };
 
 const ARTICLE_CHECKLIST = [
+  { label: 'All entities competitors cover — no gaps', icon: '🧩' },
+  { label: 'FAQ section from SERP consensus (People Also Ask)', icon: '❓' },
+  { label: 'Schema markup (FAQ, HowTo, LocalBusiness)', icon: '📋' },
   { label: 'FAWN weather data (timestamped, station-specific)', icon: '🌡' },
   { label: 'UF/IFAS citation with EDIS publication ID', icon: '🎓' },
   { label: 'Specific neighborhood reference for target city', icon: '🏘' },
   { label: 'Real field observation from tech data', icon: '🔬' },
-  { label: 'County fertilizer compliance where relevant', icon: '⚖' },
   { label: 'WaveGuard CTA tied to the specific problem', icon: '🛡' },
 ];
 
@@ -796,7 +788,7 @@ export default function BlogPage() {
   if (selectedPost) {
     return (
       <div>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 24 }}>Blog Editor</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 24 }}>Content Editor</div>
         <PostEditor post={selectedPost} onBack={() => setSelectedPost(null)} onUpdate={(p) => { setSelectedPost(null); }} />
       </div>
     );
@@ -807,7 +799,7 @@ export default function BlogPage() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Blog Content</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Content Engine</div>
         <button onClick={handleGenerateIdeas} disabled={generatingIdeas} style={{
           padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.teal}`, background: 'transparent',
           color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: generatingIdeas ? 0.5 : 1,

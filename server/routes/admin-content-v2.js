@@ -4,7 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const BlogWriter = require('../services/content/blog-writer');
 const BlogAuditor = require('../services/content/blog-auditor');
-const WordPressSync = require('../services/content/wordpress-sync');
+// WordPressSync removed — content now publishes to wavespestcontrol.com Astro site
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -223,22 +223,16 @@ router.post('/blog/ideas', async (req, res, next) => {
 });
 
 // =========================================================================
-// WORDPRESS
+// PUBLISH TO SITE
 // =========================================================================
 
-// POST /api/admin/content/blog/sync-wordpress
-router.post('/blog/sync-wordpress', async (req, res, next) => {
-  try {
-    const result = await WordPressSync.syncAllPosts();
-    res.json(result);
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/content/blog/:id/publish — publish to WordPress
+// POST /api/admin/content/blog/:id/publish — publish to wavespestcontrol.com
 router.post('/blog/:id/publish', async (req, res, next) => {
   try {
-    const wpPost = await WordPressSync.publishToWordPress(req.params.id);
-    res.json({ success: true, wordpressId: wpPost.id, link: wpPost.link });
+    const post = await db('blog_posts').where('id', req.params.id).first();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    await db('blog_posts').where('id', req.params.id).update({ status: 'published', published_at: new Date(), updated_at: new Date() });
+    res.json({ success: true, link: `https://www.wavespestcontrol.com/${post.slug}` });
   } catch (err) { next(err); }
 });
 
@@ -248,7 +242,7 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
     const post = await db('blog_posts').where({ id: req.params.id }).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
 
-    const link = post.wordpress_url || post.url || `https://www.wavespestcontrol.com/${post.slug}`;
+    const link = post.url || `https://www.wavespestcontrol.com/${post.slug}`;
     const title = post.title;
     const description = post.meta_description || (post.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300);
 
@@ -468,7 +462,7 @@ Title: "${title}"
 Topic: ${keyword || topic}
 Style: Bright, professional, clean. Southwest Florida setting (palm trees, tropical landscaping, sunny).
 DO NOT include any text, words, or watermarks in the image.
-The image should feel like a professional stock photo that could be a WordPress featured image.
+The image should feel like a professional stock photo suitable for a blog featured image.
 Landscape orientation, 1200x630px aspect ratio.`;
 
         const imgRes = await fetch(
@@ -678,7 +672,7 @@ router.get('/agent/runs', async (req, res, next) => {
       .select(
         'content_agent_runs.*',
         'blog_posts.title as post_title',
-        'blog_posts.wordpress_url',
+        'blog_posts.url',
         'blog_posts.status as post_status'
       )
       .orderBy('content_agent_runs.created_at', 'desc')
@@ -694,7 +688,7 @@ router.get('/agent/runs', async (req, res, next) => {
         title: r.post_title,
         wordCount: r.word_count,
         qaScore: r.qa_score,
-        wordpressUrl: r.wordpress_url,
+        siteUrl: r.url,
         postStatus: r.post_status,
         toolsExecuted: typeof r.tools_executed === 'string' ? JSON.parse(r.tools_executed) : r.tools_executed,
         durationSeconds: r.duration_seconds,

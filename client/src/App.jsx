@@ -87,7 +87,6 @@ const AdminVoiceAgentPage = lazyWithRetry(() => import('./pages/admin/VoiceAgent
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePage'));
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
-const AdminWordPressSitesPage = lazyWithRetry(() => import('./pages/admin/WordPressSitesPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
@@ -192,7 +191,6 @@ export default function App() {
             <Route path="kb" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgeBasePage /></Suspense>} />
             <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
-            <Route path="wordpress" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading WordPress...</div>}><AdminWordPressSitesPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
             <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
             <Route path="timetracking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading time tracking...</div>}><TimeTrackingPage /></Suspense>} />

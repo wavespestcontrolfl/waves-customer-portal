@@ -1,9 +1,9 @@
 /**
- * Intelligence Bar — SEO, Blog & WordPress Fleet Tools
+ * Intelligence Bar — SEO & Content Tools
  * server/services/intelligence-bar/seo-tools.js
  *
- * Gives Claude access to the 15-site WordPress fleet, GSC data,
- * rank tracking, blog content pipeline, and site health metrics.
+ * Gives Claude access to GSC data, rank tracking,
+ * blog content pipeline, and site health metrics for wavespestcontrol.com.
  */
 
 const db = require('../../models/db');
@@ -76,12 +76,12 @@ Use for: "which keywords dropped this week?", "how do we rank for pest control b
   },
   {
     name: 'check_site_health',
-    description: `Check WordPress fleet health: PageSpeed scores, SSL status, content status, blog counts, schema deployment, GA4 status, indexing issues.
-Use for: "which sites need attention?", "PageSpeed scores for all sites", "which sites have low blog counts?", "any SSL expiring soon?"`,
+    description: `Check site health: PageSpeed scores, SSL status, content status, blog counts, schema deployment, GA4 status, indexing issues.
+Use for: "how's the site health?", "PageSpeed scores", "any indexing issues?", "schema status"`,
     input_schema: {
       type: 'object',
       properties: {
-        domain: { type: 'string', description: 'Specific domain or omit for all 15 sites' },
+        domain: { type: 'string', description: 'Domain to check (default: wavespestcontrol.com)' },
         check: { type: 'string', enum: ['all', 'pagespeed', 'content', 'ssl', 'schema', 'indexing'], description: 'What to check (default: all)' },
       },
     },
@@ -126,8 +126,8 @@ Use for: "how are our backlinks?", "any new backlinks this week?", "backlink str
   },
   {
     name: 'compare_domains',
-    description: `Compare performance metrics across the 15-site fleet. Shows which sites are performing best/worst by clicks, impressions, blog count, PageSpeed, etc.
-Use for: "which of my 15 sites is performing best?", "compare pest control sites vs lawn care sites", "rank all sites by traffic"`,
+    description: `Compare performance metrics across tracked domains in GSC. Shows clicks, impressions, PageSpeed, blog count, content status.
+Use for: "how is wavespestcontrol.com performing?", "compare traffic by section", "site performance overview"`,
     input_schema: {
       type: 'object',
       properties: {
@@ -362,8 +362,10 @@ async function querySeoRankings(input) {
 async function checkSiteHealth(input) {
   const { domain, check = 'all' } = input;
 
+  // Primary site health — wavespestcontrol.com
   let query = db('wordpress_sites').orderBy('domain');
   if (domain) query = query.whereILike('domain', `%${domain}%`);
+  else query = query.whereILike('domain', '%wavespestcontrol.com%');
 
   const sites = await query;
 

@@ -49,13 +49,23 @@ function getStripe(publishableKey) {
 }
 
 // ─── Stripe Payment Element wrapper ─────────────────────────────
-function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, onError }) {
+function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError }) {
   const mountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [elementError, setElementError] = useState(null);
+  // 'card' by default (surcharged) so we never undercharge — flips to 'us_bank_account' when ACH is selected.
+  const [selectedMethod, setSelectedMethod] = useState('card');
+  const [displayedBase, setDisplayedBase] = useState(amount);
+  const [displayedSurcharge, setDisplayedSurcharge] = useState(
+    Math.round(amount * (cardSurchargeRate || 0.03) * 100) / 100,
+  );
+  const [displayedTotal, setDisplayedTotal] = useState(
+    Math.round((amount + amount * (cardSurchargeRate || 0.03)) * 100) / 100,
+  );
+  const [syncingAmount, setSyncingAmount] = useState(false);
 
   useEffect(() => {
     if (!publishableKey || !clientSecret) return;
@@ -126,7 +136,13 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, on
 
         paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
         paymentElement.on('change', (event) => {
-          if (!cancelled) setElementError(event.error?.message || null);
+          if (cancelled) return;
+          setElementError(event.error?.message || null);
+          const nextMethod = event.value?.type || null;
+          if (nextMethod && nextMethod !== selectedMethod) {
+            setSelectedMethod(nextMethod);
+            syncAmountForMethod(nextMethod);
+          }
         });
 
         paymentElement.mount(mountRef.current);
@@ -136,7 +152,32 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, on
     })();
 
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publishableKey, clientSecret]);
+
+  const syncAmountForMethod = async (methodCategory) => {
+    if (!paymentIntentId || !token) return;
+    setSyncingAmount(true);
+    try {
+      const res = await fetch(`${API_BASE}/pay/${token}/update-amount`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentIntentId, methodCategory }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDisplayedBase(data.base);
+        setDisplayedSurcharge(data.surcharge);
+        setDisplayedTotal(data.total);
+      }
+    } catch {
+      // Non-fatal — Stripe will still charge the PI's current amount.
+    } finally {
+      setSyncingAmount(false);
+    }
+  };
+
+  const isCardFamily = selectedMethod !== 'us_bank_account';
 
   const handleSubmit = async () => {
     if (!stripeRef.current || !elementsRef.current || processing) return;
@@ -174,20 +215,48 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, on
 
   const isDisabled = !ready || processing;
 
+  const pct = Math.round((cardSurchargeRate || 0.03) * 100);
+  const buttonAmount = isCardFamily ? displayedTotal : displayedBase;
+
   return (
     <div>
-      {/* ACH savings nudge */}
+      {/* Processing fee disclosure */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12,
         padding: '10px 14px', borderRadius: 10,
-        background: W.greenLight, border: `1px solid ${W.green}33`,
+        background: W.bluePale, border: `1px solid ${W.blue}33`,
       }}>
-        <span style={{ fontSize: 18 }}>🏦</span>
-        <span style={{ fontSize: 13, color: '#2E7D32', fontWeight: 500 }}>
-          Save 3% when you pay by bank account
+        <span style={{ fontSize: 18 }}>💳</span>
+        <span style={{ fontSize: 13, color: W.navy, fontWeight: 500 }}>
+          A {pct}% processing fee is added to credit/debit card and wallet payments. Bank transfers (ACH) pay the quoted amount with no added fee.
         </span>
       </div>
       <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
+
+      {/* Live total breakdown */}
+      <div style={{
+        marginBottom: 16, padding: '12px 14px', borderRadius: 10,
+        background: W.offWhite, border: `1px solid ${W.border}`, fontSize: 13,
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <span style={{ color: W.textBody }}>Invoice total</span>
+          <span style={{ color: W.navy, fontWeight: 600 }}>${displayedBase.toFixed(2)}</span>
+        </div>
+        {isCardFamily && displayedSurcharge > 0 && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ color: W.textBody }}>Card processing fee ({pct}%)</span>
+            <span style={{ color: W.navy, fontWeight: 600 }}>+ ${displayedSurcharge.toFixed(2)}</span>
+          </div>
+        )}
+        <div style={{
+          display: 'flex', justifyContent: 'space-between',
+          paddingTop: 6, marginTop: 6, borderTop: `1px solid ${W.border}`,
+          fontSize: 14, fontWeight: 700, color: W.navy,
+        }}>
+          <span>{isCardFamily ? 'Total charged' : 'Total (bank transfer)'}</span>
+          <span>${buttonAmount.toFixed(2)}</span>
+        </div>
+      </div>
 
       {elementError && (
         <div style={{
@@ -200,18 +269,24 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, onSuccess, on
 
       <button
         onClick={handleSubmit}
-        disabled={isDisabled}
+        disabled={isDisabled || syncingAmount}
         style={{
           width: '100%', padding: 16,
           background: processing ? W.textCaption : W.blue,
           color: W.white, border: 'none', borderRadius: 12,
           fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 16,
-          cursor: isDisabled ? 'default' : 'pointer',
-          opacity: isDisabled ? 0.6 : 1,
+          cursor: (isDisabled || syncingAmount) ? 'default' : 'pointer',
+          opacity: (isDisabled || syncingAmount) ? 0.6 : 1,
           transition: 'all 0.2s',
         }}
       >
-        {processing ? 'Processing...' : !ready ? 'Loading payment form...' : `Pay $${amount.toFixed(2)}`}
+        {processing
+          ? 'Processing...'
+          : !ready
+            ? 'Loading payment form...'
+            : syncingAmount
+              ? 'Updating total…'
+              : `Pay $${buttonAmount.toFixed(2)}`}
       </button>
 
       <div style={{ textAlign: 'center', marginTop: 12, fontSize: 11, color: W.textCaption }}>
@@ -278,6 +353,9 @@ export default function PayPage() {
       .then(setup => {
         setStripeSetup({
           clientSecret: setup.clientSecret,
+          paymentIntentId: setup.paymentIntentId,
+          baseAmount: setup.baseAmount ?? setup.amount,
+          cardSurchargeRate: setup.cardSurchargeRate ?? 0.03,
           publishableKey: setup.publishableKey || data.stripe.publishableKey,
         });
         setPaymentState('ready');
@@ -547,7 +625,10 @@ export default function PayPage() {
                 <StripePaymentForm
                   publishableKey={stripeSetup.publishableKey}
                   clientSecret={stripeSetup.clientSecret}
-                  amount={invoice.total}
+                  paymentIntentId={stripeSetup.paymentIntentId}
+                  token={token}
+                  cardSurchargeRate={stripeSetup.cardSurchargeRate}
+                  amount={stripeSetup.baseAmount ?? invoice.total}
                   onSuccess={handlePaymentSuccess}
                   onError={(msg) => setPaymentError(msg)}
                 />

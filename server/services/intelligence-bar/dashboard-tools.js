@@ -464,7 +464,7 @@ async function getEstimateFunnel(input) {
     .select(db.raw("AVG(EXTRACT(EPOCH FROM (accepted_at - sent_at)) / 3600) as avg_hrs")).first();
 
   const totalValue = await db('estimates').where({ status: 'accepted' }).whereBetween('accepted_at', [from, to + 'T23:59:59'])
-    .sum('total_amount as total').first();
+    .select(db.raw('COALESCE(SUM(COALESCE(monthly_total,0) + COALESCE(onetime_total,0)), 0) as total')).first();
 
   return {
     period: { from, to },

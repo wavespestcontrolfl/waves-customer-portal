@@ -271,7 +271,7 @@ router.get('/stats', async (req, res) => {
       .where('created_at_stripe', '>=', mtdStart)
       .select(
         db.raw('COALESCE(SUM(amount), 0) as mtd_deposited'),
-        db.raw('COALESCE(SUM(fee), 0) as mtd_fees'),
+        db.raw('COALESCE(SUM(fee_total), 0) as mtd_fees'),
         db.raw('COUNT(*) as payout_count'),
         db.raw('COALESCE(AVG(amount), 0) as avg_payout'),
       )

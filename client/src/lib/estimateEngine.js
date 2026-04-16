@@ -303,12 +303,11 @@ export function calculateEstimate(inputs) {
     const lsf = Math.round(oa * tf);
 
     // ── Track-based pricing lookup (from Lawn_Pricing_v4_TimeScaled) ──
-    // Lawn pricing brackets — 3% increase applied (payment model restructure)
     const LAWN_PRICES = {
-      st_augustine: { name: 'St. Augustine', pts: [[0,36,46,57,67],[3000,36,46,57,67],[3500,36,46,57,70],[4000,36,46,57,75],[5000,36,46,61,87],[6000,36,47,68,99],[7000,39,52,75,110],[8000,42,57,82,122],[10000,48,66,97,144],[12000,56,75,112,167],[15000,65,89,134,201],[20000,82,111,170,258]] },
-      bermuda:      { name: 'Bermuda',       pts: [[0,41,52,62,77],[4000,41,52,62,77],[5000,41,52,62,89],[6000,41,52,69,100],[7000,41,53,76,111],[8000,43,58,84,124],[10000,49,67,99,146],[12000,57,76,114,170],[15000,67,91,136,205],[20000,83,114,174,264]] },
-      zoysia:       { name: 'Zoysia',        pts: [[0,41,52,62,77],[4000,41,52,62,77],[5000,41,52,63,90],[6000,41,52,70,101],[7000,41,54,77,113],[8000,43,58,85,125],[10000,50,68,100,148],[12000,58,77,115,172],[15000,68,92,138,208],[20000,85,115,176,267]] },
-      bahia:        { name: 'Bahia',         pts: [[0,31,41,52,62],[3000,31,41,52,62],[3500,31,41,52,65],[4000,31,41,52,70],[5000,31,41,57,80],[6000,33,43,63,90],[7000,36,47,69,100],[8000,38,52,75,110],[10000,44,60,89,130],[12000,49,68,101,149],[15000,59,79,121,179],[20000,73,100,152,230]] },
+      st_augustine: { name: 'St. Augustine', pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
+      bermuda:      { name: 'Bermuda',       pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
+      zoysia:       { name: 'Zoysia',        pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
+      bahia:        { name: 'Bahia',         pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] },
     };
     const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
 
@@ -360,7 +359,7 @@ export function calculateEstimate(inputs) {
     if (hasLargeDriveway) adj += 5;
     if (indoor) adj += 15;
     adj += propTypeAdj; // Property type adjustment
-    let pp = Math.max(92, 121 + adj), rOG = 0;
+    let pp = Math.max(89, 117 + adj), rOG = 0;
     // Split roach modifier: German 25% (labor-intensive: gel bait, IGR, monitoring), Regular 10%
     if (roachMod === 'GERMAN') rOG = Math.round(pp * 0.25 * 100) / 100;
     else if (roachMod === 'REGULAR') rOG = Math.round(pp * 0.10 * 100) / 100;
@@ -464,13 +463,12 @@ export function calculateEstimate(inputs) {
     else if (sz === 'HALF') pr += 0.05;
     // v1.7: pressure cap 1.80 (was 1.60 then 2.00; 2× doubles base price, too high)
     pr = Math.min(1.80, Math.round(pr * 100) / 100);
-    // Mosquito base prices — 3% increase applied
     const bp = {
-      SMALL:   { b: 82, s: 93, g: 103, p: 113 },
-      QUARTER: { b: 93, s: 103, g: 118, p: 129 },
-      THIRD:   { b: 103, s: 113, g: 129, p: 139 },
-      HALF:    { b: 113, s: 129, g: 149, p: 160 },
-      ACRE:    { b: 144, s: 160, g: 185, p: 206 },
+      SMALL:   { b: 80, s: 90, g: 100, p: 110 },
+      QUARTER: { b: 90, s: 100, g: 115, p: 125 },
+      THIRD:   { b: 100, s: 110, g: 125, p: 135 },
+      HALF:    { b: 110, s: 125, g: 145, p: 155 },
+      ACRE:    { b: 140, s: 155, g: 180, p: 200 },
     };
     const b = bp[sz] || bp.SMALL;
     const mt = [
@@ -502,8 +500,8 @@ export function calculateEstimate(inputs) {
     const sta = Math.max(8, Math.ceil(perim / 10));
     const ai = Math.round((sta * 14 + sta * 5.25 + sta * 0.75) * 1.75);
     const ti = Math.round((sta * 24 + sta * 5.25 + sta * 0.75) * 1.75);
-    R.tmBait = { ai, ti, bmo: 36, pmo: 67, perim, sta };
-    wgServices.push({ name: 'Termite Bait (Basic)', mo: 36 });
+    R.tmBait = { ai, ti, bmo: 35, pmo: 65, perim, sta };
+    wgServices.push({ name: 'Termite Bait (Basic)', mo: 35 });
   }
 
   /* ── RODENT BAIT ─────────────────────────────────────────── */
@@ -517,8 +515,7 @@ export function calculateEstimate(inputs) {
     if (lotSqFt >= 20000) rodentScore += 2; else if (lotSqFt >= 12000) rodentScore += 1;
     if (nearWater) rodentScore += 1;
     if (treeDensity === 'HEAVY') rodentScore += 1;
-    // Rodent monthly — 3% increase applied (75→77, 89→92, 109→112)
-    const rmo = rodentScore >= 3 ? 112 : rodentScore <= 1 ? 77 : 92;
+    const rmo = rodentScore >= 3 ? 109 : rodentScore <= 1 ? 75 : 89;
     R.rodBaitMo = rmo;
     R.rodBaitSize = rodentScore >= 3 ? 'Large' : rodentScore <= 1 ? 'Small' : 'Medium';
     R.rodBaitScore = rodentScore;
@@ -555,7 +552,7 @@ export function calculateEstimate(inputs) {
       if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO') adj += 2.5;
       if (hasLargeDriveway) adj += 2.5;
       if (indoor) adj += 10;
-      bpp = Math.max(92, 121 + adj);
+      bpp = Math.max(89, 117 + adj);
     }
     const fp = otP(Math.max(150, Math.round(bpp * 1.30)));
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
@@ -582,12 +579,11 @@ export function calculateEstimate(inputs) {
   /* ── One-Time Mosquito ───────────────────────────────────── */
   if (svcOnetimeMosquito && lotSqFt > 0) {
     hasOT = true;
-    // One-time mosquito — 3% increase applied
-    let p = 206;
-    if (lotSqFt >= 43560) p = 361;
-    else if (lotSqFt >= 21780) p = 309;
-    else if (lotSqFt >= 14520) p = 283;
-    else if (lotSqFt >= 10890) p = 258;
+    let p = 200;
+    if (lotSqFt >= 43560) p = 350;
+    else if (lotSqFt >= 21780) p = 300;
+    else if (lotSqFt >= 14520) p = 275;
+    else if (lotSqFt >= 10890) p = 250;
     const fp = otP(p);
     otItems.push({ name: 'OT Mosquito', price: fp, detail: 'Rain re-spray guarantee' });
   }
@@ -626,8 +622,7 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     const dt = lawnEst / 100 + lawnEst / 200 + 30;
     const dc = LABOR * (dt / 60) + lawnEst / 1000 * 2.10;
-    // Dethatching floor — 3% increase applied (150→155)
-    const sp = otP(Math.max(155, Math.round(dc / 0.40)));
+    const sp = otP(Math.max(150, Math.round(dc / 0.40)));
     R.dth = sp;
     otItems.push({ name: 'Dethatching', price: sp, detail: 'One-time service' });
   }
@@ -644,9 +639,8 @@ export function calculateEstimate(inputs) {
     // v1.5: raised cap from 0.50 to 0.60 — full cage + 3-car garage can hit 55-60%
     cp = Math.min(0.60, cp);
     const dl = Math.round(perim * (1 - cp)), cl = Math.round(perim * cp);
-    // Trenching — 3% increase applied (floor 600→618, rates 10→10.30/14→14.42, renewal 325→335)
-    const fp = otP(Math.max(618, Math.round(dl * 10.30 + cl * 14.42)));
-    R.trench = { price: fp, ren: 335, dl, cl };
+    const fp = otP(Math.max(600, dl * 10 + cl * 14));
+    R.trench = { price: fp, ren: 325, dl, cl };
     otItems.push({ name: 'Trenching', price: fp, detail: dl + ' LF dirt + ' + cl + ' LF concrete' });
   }
 
@@ -694,25 +688,23 @@ export function calculateEstimate(inputs) {
     };
     const t = ft[String(fmPts)] || ft['5'];
     const cost = t.c * FM_CAN + t.l * LABOR + FM_BITS;
-    // Foam drill floor — 3% increase applied (250→258)
-    const fp = otP(Math.max(258, Math.round(cost / 0.45)));
+    const fp = otP(Math.max(250, Math.round(cost / 0.45)));
     otItems.push({ name: 'Foam Drill', price: fp, detail: t.c + ' cans | ~$' + Math.round(fp / fmPts) + '/point', tierName: t.n });
   }
 
   /* ── Rodent Trapping ─────────────────────────────────────── */
   if (svcRodentTrap) {
     hasOT = true;
-    // Rodent trapping — 3% increase applied (350→361)
-    let p = 361;
+    let p = 350;
     p += interpolate(footprint, [
-      { at: 800, adj: -26 }, { at: 1500, adj: -10 }, { at: 2000, adj: 0 },
-      { at: 2500, adj: 21 }, { at: 3000, adj: 41 }, { at: 4000, adj: 67 },
+      { at: 800, adj: -25 }, { at: 1500, adj: -10 }, { at: 2000, adj: 0 },
+      { at: 2500, adj: 20 }, { at: 3000, adj: 40 }, { at: 4000, adj: 65 },
     ]);
     p += interpolate(lotSqFt, [
       { at: 5000, adj: 0 }, { at: 10000, adj: 10 },
-      { at: 15000, adj: 21 }, { at: 25000, adj: 36 },
+      { at: 15000, adj: 20 }, { at: 25000, adj: 35 },
     ]);
-    const fp = otP(Math.max(361, p));
+    const fp = otP(Math.max(350, p));
     otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + check visits' });
   }
 
@@ -727,9 +719,8 @@ export function calculateEstimate(inputs) {
   let specItems = [];
 
   /* ── Flea ────────────────────────────────────────────────── */
-  // Flea — 3% increase applied (225→232, 125→129)
   if (svcFlea) {
-    let fi = 232, ff = 129;
+    let fi = 225, ff = 125;
     fi += interpolate(footprint, [
       { at: 800, adj: -25 }, { at: 1200, adj: -15 }, { at: 1500, adj: -5 },
       { at: 2000, adj: 0 }, { at: 2500, adj: 15 }, { at: 3000, adj: 25 },
@@ -752,16 +743,14 @@ export function calculateEstimate(inputs) {
     else if (treeDensity === 'MODERATE') { fi += 10; ff += 5; }
     if (landscapeComplexity === 'COMPLEX') { fi += 15; ff += 10; }
     else if (landscapeComplexity === 'MODERATE') { fi += 5; ff += 5; }
-    // Flea floors — 3% increase applied (185→191, 95→98)
-    fi = Math.max(191, fi);
-    ff = Math.max(98, ff);
+    fi = Math.max(185, fi);
+    ff = Math.max(95, ff);
     specItems.push({ name: 'Flea (2-visit)', price: otP(fi + ff), det: '$' + fi + ' + $' + ff });
   }
 
   /* ── Wasp ────────────────────────────────────────────────── */
-  // Wasp — 3% increase applied (150→155)
   if (svcWasp) {
-    let wp = 155;
+    let wp = 150;
     wp += interpolate(treeNum, [{ at: 0, adj: 0 }, { at: 1, adj: 10 }, { at: 2, adj: 25 }]);
     if (landscapeComplexity === 'COMPLEX') wp += 15;
     else if (landscapeComplexity === 'MODERATE') wp += 5;
@@ -769,7 +758,7 @@ export function calculateEstimate(inputs) {
       { at: 5000, adj: 0 }, { at: 10000, adj: 5 },
       { at: 15000, adj: 15 }, { at: 25000, adj: 25 },
     ]);
-    wp = Math.max(155, wp);
+    wp = Math.max(150, wp);
     if (R.pest) {
       specItems.push({ name: 'Wasp/Bee', price: 0, det: 'Included on ' + R.pest.label + ' program', onProg: true });
     } else {
@@ -780,17 +769,16 @@ export function calculateEstimate(inputs) {
   /* ── Roach (standalone specialty) ────────────────────────── */
   if (svcRoach) {
     const rt = roachType;
-    // Roach — 3% increase applied
     if (rt === 'REGULAR') {
-      let bpp = R.pest ? R.pest.pa : 121;
-      specItems.push({ name: 'Regular Roach', price: otP(Math.max(155, Math.round(bpp * 1.15 * 1.30))), det: 'Enhanced treatment' });
+      let bpp = R.pest ? R.pest.pa : 117;
+      specItems.push({ name: 'Regular Roach', price: otP(Math.max(150, Math.round(bpp * 1.15 * 1.30))), det: 'Enhanced treatment' });
     } else {
-      let gp = 464 + interpolate(footprint, [
-        { at: 800, adj: -41 }, { at: 1200, adj: -21 }, { at: 1500, adj: -10 },
-        { at: 2000, adj: 0 }, { at: 2500, adj: 26 }, { at: 3000, adj: 52 },
-        { at: 4000, adj: 88 },
+      let gp = 450 + interpolate(footprint, [
+        { at: 800, adj: -40 }, { at: 1200, adj: -20 }, { at: 1500, adj: -10 },
+        { at: 2000, adj: 0 }, { at: 2500, adj: 25 }, { at: 3000, adj: 50 },
+        { at: 4000, adj: 85 },
       ]);
-      specItems.push({ name: 'German Roach (3-visit)', price: otP(Math.max(412, gp)), det: 'Gel+IGR+monitoring' });
+      specItems.push({ name: 'German Roach (3-visit)', price: otP(Math.max(400, gp)), det: 'Gel+IGR+monitoring' });
     }
   }
 
@@ -802,16 +790,14 @@ export function calculateEstimate(inputs) {
       const lv2 = 25 + Math.max(0, (rm - 1) * 20) + DRIVE;
       const mpr = 50.42;
       let cp = Math.round((mpr * rm + LABOR * (lv1 / 60) + mpr * rm * 0.5 + LABOR * (lv2 / 60)) / 0.35 * 100) / 100;
-      // Bed bug chemical — 3% increase applied (400→412, 250→258)
-      const fl = 412 + (rm - 1) * 258;
+      const fl = 400 + (rm - 1) * 250;
       if (cp < fl) cp = fl;
       if (footprint > 2500) cp = Math.round(cp * 1.10);
       else if (footprint > 1800) cp = Math.round(cp * 1.05);
       specItems.push({ name: 'Bed Bug Chemical', price: otP(cp), det: rm + ' room' + (rm > 1 ? 's' : '') + ', 2 visits' });
     }
     if (meth !== 'CHEMICAL') {
-      // Bed bug heat — 3% increase applied (1000→1030, 850→876, 750→773)
-      let hpr = rm === 1 ? 1030 : rm === 2 ? 876 : 773;
+      let hpr = rm === 1 ? 1000 : rm === 2 ? 850 : 750;
       let hp = hpr * rm;
       // v1.5: in-house heat adds equipment cost (heaters, fans, monitoring)
       // Subcontract rate already includes equipment in the per-room price
@@ -828,15 +814,14 @@ export function calculateEstimate(inputs) {
 
   /* ── Exclusion ───────────────────────────────────────────── */
   if (svcExclusion && (exS + exM + exA) > 0) {
-    // Exclusion — 3% increase applied (37.50→39, 75→77, 150→155, floor 150→155, inspect 85→88)
-    const sc = exS * 39 + exM * 77 + exA * 155;
-    let ep = Math.max(155, Math.round(sc));
-    let insp = exW ? 0 : 88;
+    const sc = exS * 37.50 + exM * 75 + exA * 150;
+    let ep = Math.max(150, Math.round(sc));
+    let insp = exW ? 0 : 85;
     const tp = otP(ep) + insp;
     let tl = 'Basic';
     if (exA > 0) tl = 'Advanced (Roof)';
     else if (exM > 0) tl = 'Moderate';
-    specItems.push({ name: 'Rodent Exclusion', price: tp, det: tl + ' — ' + (exS + exM + exA) + ' points' + (insp > 0 ? ' + $88 inspect' : '') + (exW ? ' (waived)' : '') });
+    specItems.push({ name: 'Rodent Exclusion', price: tp, det: tl + ' — ' + (exS + exM + exA) + ' points' + (insp > 0 ? ' + $85 inspect' : '') + (exW ? ' (waived)' : '') });
   }
 
   /* ═══════════ WAVEGUARD TOTALS ═══════════ */
@@ -851,7 +836,7 @@ export function calculateEstimate(inputs) {
     const ri = treeDensity === 'HEAVY' ? 2 : 1;
     if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', ann: R.mq[ri].ann }); }
   }
-  if (R.tmBait) { ac++; ra += 36 * 12; lineItems.push({ name: 'Termite Bait', ann: 432 }); }
+  if (R.tmBait) { ac++; ra += 35 * 12; lineItems.push({ name: 'Termite Bait', ann: 420 }); }
 
   let wt = 'Bronze', wd = 0;
   if (ac >= 4) { wt = 'Platinum'; wd = 0.18; }

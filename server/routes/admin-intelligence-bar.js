@@ -124,30 +124,31 @@ ANALYSIS STYLE:
 
   seo: `
 SEO & CONTENT CONTEXT:
-You are on the SEO Dashboard / Blog / WordPress Sites page. The operator manages a 15-site WordPress hub-and-spoke network across pest control, exterminator, and lawn care verticals serving Southwest Florida.
+You are on the SEO Dashboard / Content Engine page. The operator runs wavespestcontrol.com — a static Astro site on Cloudflare Pages serving pest control, lawn care, and related services across Southwest Florida (Manatee, Sarasota, Charlotte counties).
 
-THE 15-SITE FLEET:
-Pest Control (6): wavespestcontrol.com (hub), bradentonflpestcontrol.com, sarasotaflpestcontrol.com, veniceflpestcontrol.com, palmettoflpestcontrol.com, parrishpestcontrol.com
-Exterminator (4): bradentonflexterminator.com, sarasotaflexterminator.com, palmettoexterminator.com, parrishexterminator.com
-Lawn Care (5): waveslawncare.com (hub), bradentonfllawncare.com, sarasotafllawncare.com, venicelawncare.com, parrishfllawncare.com
+CONTENT STRATEGY — AI-DRIVEN SEMANTIC SEO:
+The operator's SEO strategy focuses on targeted updates to existing pages that compound freshness, entity completeness, and schema accuracy. This consistently outperforms brand-new content campaigns. Key principles:
+1. ENTITY COMPLETENESS — Every page must cover all entities that competing top-5 SERP results cover. If competitors mention a concept and we don't, that's a gap.
+2. FAQ EXPANSION — Expand FAQ sections based on SERP consensus (People Also Ask, featured snippets). Fix FAQ schema to match.
+3. SCHEMA ACCURACY — Ensure structured data (FAQ, HowTo, LocalBusiness, Service) matches the actual page content and SERP expectations.
+4. FRESHNESS SIGNALS — Targeted updates to established pages (new sections, updated data, seasonal content) trigger freshness scoring boosts.
+5. SEMANTIC DEPTH — Go beyond keywords. Cover the full semantic concept: related entities, subtopics, synonyms, and contextual information.
 
 SEO CAPABILITIES:
-- GSC performance by domain with period comparison
+- GSC performance with period comparison
 - Top queries and pages with service/city/branded filters
 - Keyword rank tracking with drop/gain detection
-- WordPress fleet health (PageSpeed, SSL, content status, schema, GA4)
 - Blog content pipeline (queued, draft, published, generation queue)
 - Backlink overview and strategy reports
-- Cross-domain comparison (rank all 15 sites by any metric)
 - Content decay and keyword cannibalization alerts
 
 ANALYSIS STYLE:
 - When showing GSC data, always include clicks, impressions, avg position, and CTR
 - When comparing periods, calculate and highlight the delta
-- For fleet-wide analysis, group by vertical (pest/exterminator/lawn) and flag outliers
-- Hub sites (wavespestcontrol.com, waveslawncare.com) should generally outperform spokes — flag if not
 - Blog posts should target 1,500+ words for SEO value — flag thin content
-- PageSpeed mobile ≥ 90 = good, 50-89 = needs work, <50 = poor`,
+- Flag pages that are losing position — these are prime candidates for entity refresh
+- When analyzing content, look for entity gaps vs competitors and missing FAQ coverage
+- Prioritize page refreshes over net-new content when the existing page already has domain authority`,
 
   procurement: `
 PROCUREMENT & INVENTORY CONTEXT:
@@ -397,7 +398,7 @@ function getToolsForContext(context) {
   if (context === 'dashboard') {
     return [...TOOLS, ...DASHBOARD_TOOLS];
   }
-  if (context === 'seo' || context === 'blog' || context === 'wordpress') {
+  if (context === 'seo' || context === 'blog') {
     return [...TOOLS, ...SEO_TOOLS];
   }
   if (context === 'procurement' || context === 'inventory') {
@@ -747,21 +748,20 @@ router.get('/quick-actions', async (req, res) => {
   ];
 
   const seoActions = [
-    { id: 'fleet_health', label: 'Fleet Health', prompt: 'Check the health of all 15 WordPress sites — any issues?', icon: '🏥' },
-    { id: 'top_traffic', label: 'Top Sites', prompt: 'Rank all 15 sites by traffic this month', icon: '📊' },
-    { id: 'drops', label: 'Ranking Drops', prompt: 'Which keywords dropped in rankings this week?', icon: '📉' },
+    { id: 'drops', label: 'Ranking Drops', prompt: 'Which keywords dropped in rankings this week? These are refresh candidates.', icon: '📉' },
     { id: 'top_queries', label: 'Top Queries', prompt: 'What are our top 20 non-branded keywords by clicks?', icon: '🔍' },
+    { id: 'entity_gaps', label: 'Entity Gaps', prompt: 'Which pages are losing position and likely have entity gaps vs competitors?', icon: '🧩' },
     { id: 'content_pipe', label: 'Content Pipeline', prompt: "What's in the content pipeline? How many posts need generation?", icon: '📝' },
     { id: 'blog_perf', label: 'Blog Performance', prompt: 'Which published blog posts are performing best in search?', icon: '📰' },
     { id: 'decay', label: 'Content Decay', prompt: 'Any content decay alerts or keyword cannibalization issues?', icon: '⚠️' },
-    { id: 'compare_verticals', label: 'Pest vs Lawn', prompt: 'Compare pest control sites vs lawn care sites by traffic', icon: '⚖️' },
+    { id: 'refresh', label: 'Refresh Candidates', prompt: 'Which established pages would benefit most from a freshness update with FAQ expansion and entity completeness?', icon: '🔄' },
   ];
 
   if (context === 'schedule' || context === 'dispatch') {
     res.json({ actions: scheduleActions });
   } else if (context === 'dashboard') {
     res.json({ actions: dashboardActions });
-  } else if (context === 'seo' || context === 'blog' || context === 'wordpress') {
+  } else if (context === 'seo' || context === 'blog') {
     res.json({ actions: seoActions });
   } else if (context === 'procurement' || context === 'inventory') {
     res.json({ actions: [

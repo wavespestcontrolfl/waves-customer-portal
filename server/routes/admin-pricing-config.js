@@ -18,7 +18,7 @@ async function ensureTable() {
       t.timestamps(true, true);
     });
     const configs = [
-      { config_key: 'pest_base', name: 'Pest Control Base Price', category: 'pest', sort_order: 1, data: JSON.stringify({ base: 117, floor: 89, note: 'Pre-r() values. Customer sees r(117)=121, r(89)=92' }) },
+      { config_key: 'pest_base', name: 'Pest Control Base Price', category: 'pest', sort_order: 1, data: JSON.stringify({ base: 117, floor: 89 }) },
       { config_key: 'pest_footprint', name: 'Pest Footprint Modifiers', category: 'pest', sort_order: 2, data: JSON.stringify({ breakpoints: [{sqft:800,adj:-15},{sqft:1200,adj:-10},{sqft:1500,adj:-5},{sqft:2000,adj:0},{sqft:2500,adj:8},{sqft:3000,adj:14},{sqft:4000,adj:21},{sqft:5500,adj:31}] }) },
       { config_key: 'pest_features', name: 'Pest Feature Modifiers', category: 'pest', sort_order: 3, data: JSON.stringify({ indoor:15,pool_cage:10,pool_no_cage:5,shrubs_heavy:12,shrubs_moderate:5,trees_heavy:12,trees_moderate:5,landscape_complex:8,near_water:5,large_driveway:5 }) },
       { config_key: 'pest_property_type', name: 'Pest Property Type', category: 'pest', sort_order: 4, data: JSON.stringify({ single_family:0,townhome_end:-8,townhome_interior:-12,duplex:-10,condo_ground:-18,condo_upper:-22 }) },
@@ -39,7 +39,7 @@ async function ensureTable() {
 
       // Tree & Shrub
       { config_key: 'ts_material_rates', name: 'T&S Material Rates per SqFt', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ '6x_standard': 0.110, '9x_enhanced': 0.190, '12x_premium': 0.220, note: 'Updated Apr 2026 vendor cost audit — old rates underestimated by ~2x' }) },
-      { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ standard: 52, enhanced: 67, premium: 82, note: 'After 3% processing adjustment' }) },
+      { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ standard: 50, enhanced: 65, premium: 80 }) },
 
       // Palm
       { config_key: 'palm_pricing', name: 'Palm Injection Tiered Pricing', category: 'palm', sort_order: 1, data: JSON.stringify({ nutrition: 35, preventive_insecticide: 45, combo: 55, fungal: 40, lethal_bronzing_floor: 125, tree_age_floor: 65, min_per_visit: 75, apps_per_year: 2, tier_qualifier: false, flat_credit_per_palm: 10, flat_credit_min_tier: 'gold' }) },
@@ -50,26 +50,26 @@ async function ensureTable() {
 
       // Termite
       { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.75, advance_bait: 14, trelona_bait: 24, labor_per_station: 5.25, misc_per_station: 0.75 }) },
-      { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 36, premier: 67, note: 'After 3% processing adjustment' }) },
+      { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 35, premier: 65 }) },
 
       // Rodent
-      { config_key: 'rodent_monthly', name: 'Rodent Monthly Tiers', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: 77, medium: 92, large: 112, note: 'After 3% processing adjustment' }) },
-      { config_key: 'rodent_trapping', name: 'Rodent Trapping Base', category: 'rodent', sort_order: 2, data: JSON.stringify({ base: 361, floor: 361 }) },
+      { config_key: 'rodent_monthly', name: 'Rodent Monthly Tiers', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: 75, medium: 89, large: 109 }) },
+      { config_key: 'rodent_trapping', name: 'Rodent Trapping Base', category: 'rodent', sort_order: 2, data: JSON.stringify({ base: 350, floor: 350 }) },
       { config_key: 'rodent_waveguard', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 3, data: JSON.stringify({ tier_qualifier: false, exclude_from_pct_discount: true, setup_credit: 50 }) },
 
       // One-time
       { config_key: 'onetime_urgency', name: 'Urgency Multipliers', category: 'one_time', sort_order: 1, data: JSON.stringify({ routine: 1.0, soon: 1.25, soon_after_hours: 1.50, urgent: 1.50, urgent_after_hours: 2.0 }) },
       { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
-      { config_key: 'onetime_pest', name: 'One-Time Pest Floor', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 155, multiplier: 1.30 }) },
-      { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 88, fungicide_floor: 98, weed_mult: 1.15, fungicide_mult: 1.45 }) },
-      { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 5, data: JSON.stringify({ per_lf_dirt: 10, per_lf_concrete: 14, floor: 618, renewal: 335 }) },
+      { config_key: 'onetime_pest', name: 'One-Time Pest Floor', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 150, multiplier: 1.30 }) },
+      { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 85, fungicide_floor: 95, weed_mult: 1.15, fungicide_mult: 1.45 }) },
+      { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 5, data: JSON.stringify({ per_lf_dirt: 10, per_lf_concrete: 14, floor: 600, renewal: 325 }) },
       { config_key: 'onetime_boracare', name: 'Bora-Care Constants', category: 'one_time', sort_order: 6, data: JSON.stringify({ bc_gal: 91.98, bc_cov: 275, bc_equip: 17.50 }) },
       { config_key: 'onetime_preslab', name: 'Pre-Slab Termidor', category: 'one_time', sort_order: 7, data: JSON.stringify({ ps_btl: 174.72, ps_cov: 1250, ps_equip: 15, warranty_extended: 206 }) },
-      { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing', category: 'one_time', sort_order: 8, data: JSON.stringify({ simple: 39, moderate: 77, advanced: 155, floor: 155, inspection: 88 }) },
+      { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing', category: 'one_time', sort_order: 8, data: JSON.stringify({ simple: 37.5, moderate: 75, advanced: 150, floor: 150, inspection: 85 }) },
 
       // WaveGuard discount caps & ACH
       { config_key: 'waveguard_discount_caps', name: 'Service Discount Caps', category: 'waveguard', sort_order: 12, data: JSON.stringify({ lawn_care_enhanced: 0.15, lawn_care_premium: 0.15, rodent_bait: 0, palm_injection: 0, bed_bug_chemical: 0, bed_bug_heat: 0, bora_care: 0, pre_slab_termidor: 0, composite_cap: 0.25 }) },
-      { config_key: 'ach_discount', name: 'ACH Payment Discount', category: 'waveguard', sort_order: 13, data: JSON.stringify({ percentage: 0.03, exempt_from_composite_cap: true, payment_method: 'us_bank_account' }) },
+      { config_key: 'ach_discount', name: 'ACH Payment Discount (retired)', category: 'waveguard', sort_order: 13, data: JSON.stringify({ percentage: 0, exempt_from_composite_cap: true, payment_method: 'us_bank_account', note: 'Retired — card surcharge now applied at checkout' }) },
     ];
     for (const c of configs) { await db('pricing_config').insert(c).onConflict('config_key').ignore(); }
   }

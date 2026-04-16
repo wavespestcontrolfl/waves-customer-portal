@@ -19,6 +19,32 @@ function getStripe() {
   return _stripe;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Credit card processing surcharge
+// ACH pays the quoted amount; cards / wallets pay base × 1.03.
+// ═══════════════════════════════════════════════════════════════
+const CARD_SURCHARGE_RATE = 0.03;
+
+// Accepts a stored payment_methods.method_type ('card' | 'ach')
+// OR a Stripe Payment Element type ('card' | 'us_bank_account' | 'apple_pay' | 'google_pay' | 'link')
+function isCardMethodType(methodType) {
+  if (!methodType) return false;
+  const m = String(methodType).toLowerCase();
+  if (m === 'ach' || m === 'us_bank_account' || m === 'bank' || m === 'bank_account') return false;
+  // card, apple_pay, google_pay, link, and anything else default to card-family (surcharged)
+  return true;
+}
+
+function computeChargeAmount(baseAmountDollars, methodType) {
+  const base = Math.round(Number(baseAmountDollars) * 100) / 100;
+  if (!isCardMethodType(methodType)) {
+    return { base, surcharge: 0, total: base };
+  }
+  const surcharge = Math.round(base * CARD_SURCHARGE_RATE * 100) / 100;
+  const total = Math.round((base + surcharge) * 100) / 100;
+  return { base, surcharge, total };
+}
+
 const StripeService = {
   // =========================================================================
   // AVAILABILITY
@@ -286,7 +312,12 @@ const StripeService = {
     }
 
     const stripeCustomerId = await this.ensureStripeCustomer(customerId);
-    const amountCents = Math.round(amountDollars * 100);
+
+    // Apply 3% processing surcharge when the stored autopay method is card-family.
+    // ACH methods are charged the quoted amount with no surcharge.
+    const { base: baseAmount, surcharge: surchargeAmount, total: totalAmount } =
+      computeChargeAmount(amountDollars, card.method_type);
+    const amountCents = Math.round(totalAmount * 100);
 
     // Step 1: Charge via Stripe
     let paymentIntent;
@@ -298,9 +329,13 @@ const StripeService = {
         payment_method: card.stripe_payment_method_id,
         off_session: true,
         confirm: true,
-        description,
+        description: surchargeAmount > 0
+          ? `${description} (includes $${surchargeAmount.toFixed(2)} card processing fee)`
+          : description,
         metadata: {
           waves_customer_id: customerId,
+          base_amount: String(baseAmount),
+          card_surcharge: String(surchargeAmount),
           ...metadata,
         },
       });
@@ -312,11 +347,16 @@ const StripeService = {
         payment_method_id: card.id,
         processor: 'stripe',
         payment_date: new Date().toISOString().split('T')[0],
-        amount: amountDollars,
+        amount: totalAmount,
         status: 'failed',
         description: `${description} — FAILED`,
         failure_reason: err.message,
-        metadata: JSON.stringify({ error: err.message, code: err.code }),
+        metadata: JSON.stringify({
+          error: err.message,
+          code: err.code,
+          base_amount: baseAmount,
+          card_surcharge: surchargeAmount,
+        }),
       }).returning('*');
       throw Object.assign(new Error('Payment processing failed'), { paymentRecord: failedRecord });
     }
@@ -331,15 +371,19 @@ const StripeService = {
         stripe_payment_intent_id: paymentIntent.id,
         stripe_charge_id: paymentIntent.latest_charge || null,
         payment_date: new Date().toISOString().split('T')[0],
-        amount: amountDollars,
+        amount: totalAmount,
         status,
-        description,
+        description: surchargeAmount > 0
+          ? `${description} (includes $${surchargeAmount.toFixed(2)} card processing fee)`
+          : description,
         metadata: JSON.stringify({
           stripe_receipt_url: paymentIntent.charges?.data?.[0]?.receipt_url || null,
+          base_amount: baseAmount,
+          card_surcharge: surchargeAmount,
         }),
       }).returning('*');
 
-      logger.info(`[stripe] Charge processed: $${amountDollars} for ${customerId}, PI: ${paymentIntent.id}`);
+      logger.info(`[stripe] Charge processed: base=$${baseAmount} surcharge=$${surchargeAmount} total=$${totalAmount} for ${customerId}, PI: ${paymentIntent.id}`);
       return paymentRecord;
     } catch (dbErr) {
       // CRITICAL: Stripe charged the customer but DB insert failed
@@ -349,7 +393,7 @@ const StripeService = {
         payment_method_id: card.id,
         processor: 'stripe',
         stripe_payment_intent_id: paymentIntent.id,
-        amount: amountDollars,
+        amount: totalAmount,
         status,
         description,
         _db_error: dbErr.message,
@@ -481,9 +525,14 @@ const StripeService = {
     if (invoice.status === 'paid') throw new Error('Invoice already paid');
 
     const customer = await db('customers').where({ id: invoice.customer_id }).first();
-    const amountCents = Math.round(parseFloat(invoice.total) * 100);
 
-    // Optionally link to Stripe customer if they exist
+    // Create the PaymentIntent at the base invoice total. When the customer
+    // picks a card/wallet on the Payment Element, the client calls
+    // `updateInvoicePaymentIntentMethod` below to bump the amount by 3%.
+    // ACH stays at the base amount.
+    const baseAmount = parseFloat(invoice.total);
+    const amountCents = Math.round(baseAmount * 100);
+
     let stripeCustomerId = customer?.stripe_customer_id || null;
 
     const piParams = {
@@ -495,6 +544,8 @@ const StripeService = {
         waves_invoice_id: invoiceId,
         invoice_number: invoice.invoice_number,
         waves_customer_id: invoice.customer_id,
+        base_amount: String(baseAmount),
+        card_surcharge: '0',
       },
     };
 
@@ -503,12 +554,9 @@ const StripeService = {
     }
 
     try {
-      // Idempotency key: ensures duplicate POSTs don't create duplicate PIs.
-      // Scoped per invoice + amount so amount changes (rare) still create a fresh PI.
       const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${stripeCustomerId || 'nocust'}`;
       const paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
-      // Store PI reference on invoice
       await db('invoices')
         .where({ id: invoiceId })
         .update({
@@ -516,15 +564,65 @@ const StripeService = {
           stripe_payment_intent_id: paymentIntent.id,
         });
 
-      logger.info(`[stripe] Invoice PaymentIntent created: ${paymentIntent.id} for invoice ${invoice.invoice_number}`);
+      logger.info(`[stripe] Invoice PaymentIntent created: ${paymentIntent.id} for invoice ${invoice.invoice_number} (base=$${baseAmount})`);
       return {
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
-        amount: parseFloat(invoice.total),
+        amount: baseAmount,
+        baseAmount,
+        cardSurchargeRate: CARD_SURCHARGE_RATE,
       };
     } catch (err) {
       logger.error(`[stripe] Invoice PaymentIntent failed for invoice ${invoiceId} (amount=${amountCents}, customer=${stripeCustomerId || 'none'}): ${err.type || 'Error'} — ${err.message}${err.code ? ` [code=${err.code}]` : ''}${err.param ? ` [param=${err.param}]` : ''}`);
       throw new Error(`Failed to create payment intent for invoice: ${err.message}`);
+    }
+  },
+
+  /**
+   * Update an open invoice PaymentIntent's amount based on the payment method
+   * the customer picked on the Payment Element.
+   *
+   * - Card / Apple Pay / Google Pay / Link → base × 1.03
+   * - us_bank_account (ACH) → base × 1.00
+   *
+   * @param {string} invoiceId
+   * @param {string} paymentIntentId
+   * @param {string} methodCategory — Stripe Payment Element "change" event type
+   *   (e.g. 'card', 'us_bank_account', 'apple_pay', 'google_pay', 'link')
+   */
+  async updateInvoicePaymentIntentMethod(invoiceId, paymentIntentId, methodCategory) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+
+    const invoice = await db('invoices').where({ id: invoiceId }).first();
+    if (!invoice) throw new Error('Invoice not found');
+    if (invoice.status === 'paid') throw new Error('Invoice already paid');
+
+    const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), methodCategory);
+    const amountCents = Math.round(total * 100);
+
+    try {
+      const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, {
+        amount: amountCents,
+        metadata: {
+          waves_invoice_id: invoiceId,
+          invoice_number: invoice.invoice_number,
+          base_amount: String(base),
+          card_surcharge: String(surcharge),
+          selected_method_category: String(methodCategory || 'unknown'),
+        },
+      });
+      logger.info(`[stripe] PI ${paymentIntentId} updated → base=$${base} surcharge=$${surcharge} total=$${total} (method=${methodCategory})`);
+      return {
+        paymentIntentId: paymentIntent.id,
+        base,
+        surcharge,
+        total,
+        cardSurchargeRate: CARD_SURCHARGE_RATE,
+      };
+    } catch (err) {
+      logger.error(`[stripe] PI update failed for ${paymentIntentId}: ${err.message}`);
+      throw new Error(`Failed to update payment amount: ${err.message}`);
     }
   },
 

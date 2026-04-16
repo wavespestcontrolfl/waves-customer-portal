@@ -1477,7 +1477,7 @@ WHAT WE FOUND
 Do not include the client name as a header. Do not add greetings, sign-offs, or any text outside these two sections.`;
 
     const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 800,
       messages: [{ role: 'user', content: prompt }],
     });
