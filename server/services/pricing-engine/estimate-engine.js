@@ -355,6 +355,11 @@ function generateEstimate(input) {
   const waveGuardTier = determineWaveGuardTier(activeServiceKeys);
 
   // ── 5. Apply discounts to each line item ───────────────────
+  // paymentMethod is no longer a pricing input (ACH discount retired in an
+  // earlier session) but is still echoed in the output payload below for
+  // downstream card-processing-fee display.
+  const paymentMethod = input.paymentMethod || 'card';
+
   for (const item of lineItems) {
     const serviceKey = resolveDiscountKey(item);
     const isOneTime = !item.annual; // One-time services have .price, not .annual
