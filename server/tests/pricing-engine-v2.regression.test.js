@@ -1,17 +1,26 @@
 /**
  * v4.3 Session 2 — Pricing Engine v2 (property-lookup-v2) regression suite.
  *
- * Runs 12 deterministic cases against POST /api/admin/estimator/calculate-estimate
- * on prod. This endpoint is Virginia's hot path (address → lookup → full tiered
- * estimate) and is NOT scheduled for retirement until Session 11. The suite
- * exists to catch any drift in v2's output during Sessions 3-10 as we modify
- * cost inputs and zone logic that touch shared state.
+ * Runs 14 deterministic cases. Two invocation modes:
+ *   LOCAL=1            — in-process: imports calculateEstimate from
+ *                        pricing-engine-v2 and pipes output through
+ *                        mapV2ToLegacyShape (the same helper the route uses).
+ *                        Catches module-load errors (ReferenceError, import
+ *                        errors, syntax errors) BEFORE push. Preferred for
+ *                        pre-commit / pre-deploy validation.
+ *   PROD_URL + ADMIN_TOKEN — HTTP: hits POST /api/admin/estimator/calculate-estimate
+ *                        on prod. Validates the full request path. Preferred
+ *                        for post-deploy verification.
+ *
+ * Default is LOCAL=1 when PROD_URL is unset.
  *
  * v2 is called via property-lookup-v2.js which remaps v2's native output into
- * a v1-compatible shape before returning. We assert on the remapped shape
+ * a v1-compatible shape before returning. The remap lives in
+ * server/services/pricing-engine/v2-legacy-mapper.js (extracted Session 6)
+ * and is shared by the route and LOCAL mode. We assert on the remapped shape
  * because that is what the admin UI actually consumes.
  *
- * Required env: same as v1 suite — PROD_URL, ADMIN_TOKEN, optional CAPTURE_BASELINE=1.
+ * CAPTURE_BASELINE=1 writes baseline instead of diffing (either mode).
  *
  * NOTE on commercial paths:
  *   v2's calculateEstimate destructures commBuildingType/commPestFreq/
@@ -19,6 +28,14 @@
  *   them anywhere else in the file. Skipped from this suite intentionally —
  *   testing ghost scaffolding would false-positive on nothing. Session 11
  *   should design commercial pricing fresh.
+ *
+ * Env:
+ *   LOCAL=1            (optional — default when PROD_URL unset)
+ *   PROD_URL           — e.g. https://portal.wavespestcontrol.com (HTTP mode)
+ *   ADMIN_TOKEN        — admin JWT, required in HTTP mode
+ *   DATABASE_URL       — optional in LOCAL mode; when set, v2's loadPricingConfig()
+ *                        pulls live pricing_config for math parity with prod
+ *   CAPTURE_BASELINE=1 — write baseline instead of diffing
  */
 
 const fs = require('fs');
@@ -29,9 +46,17 @@ const PROD_URL = (process.env.PROD_URL || '').replace(/\/$/, '');
 const RAW_TOKEN = process.env.ADMIN_TOKEN || '';
 const ADMIN_TOKEN = RAW_TOKEN.replace(/^Bearer\s+/i, '');
 const CAPTURE_MODE = process.env.CAPTURE_BASELINE === '1';
+const LOCAL_MODE = process.env.LOCAL === '1' || !PROD_URL;
 
-if (!PROD_URL) throw new Error('PROD_URL env var required');
-if (!ADMIN_TOKEN) throw new Error('ADMIN_TOKEN env var required');
+if (!LOCAL_MODE && !ADMIN_TOKEN) {
+  throw new Error('ADMIN_TOKEN env var required in HTTP mode (set LOCAL=1 to run in-process instead)');
+}
+
+// In LOCAL mode, import v2 engine + legacy mapper at module load. A
+// ReferenceError or import-time crash in either will throw here, failing the
+// suite before any case runs — this is the whole point of LOCAL mode.
+const localV2 = LOCAL_MODE ? require('../services/pricing-engine-v2') : null;
+const localMapper = LOCAL_MODE ? require('../services/pricing-engine/v2-legacy-mapper') : null;
 
 function round(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return n;
@@ -179,6 +204,11 @@ const REGRESSION_CASES = [
 ];
 
 async function postCalculateEstimate({ profile, selectedServices, options }) {
+  if (LOCAL_MODE) {
+    // In-process invocation. Mirrors property-lookup-v2.js /calculate-estimate.
+    const v2 = await localV2.calculateEstimate(profile, selectedServices || [], options || {});
+    return localMapper.mapV2ToLegacyShape(v2, selectedServices || []);
+  }
   const url = `${PROD_URL}/api/admin/estimator/calculate-estimate`;
   const res = await fetch(url, {
     method: 'POST',
@@ -193,6 +223,21 @@ async function postCalculateEstimate({ profile, selectedServices, options }) {
     throw new Error(`POST ${url} -> ${res.status}: ${body.slice(0, 300)}`);
   }
   return res.json();
+}
+
+// Setup/teardown shared by both describe blocks below. In LOCAL mode, destroy
+// the knex pool in afterAll so jest exits cleanly. v2's calculateEstimate
+// triggers loadPricingConfig() on first call, which lazy-requires models/db.
+function wireLocalModeHooks() {
+  if (!LOCAL_MODE) return;
+  beforeAll(() => {
+    if (!process.env.DATABASE_URL) {
+      console.warn('[LOCAL mode] DATABASE_URL unset — v2 will fall back to DEFAULT_ constants for global rates and skip pricing_config overrides. Baseline parity with prod NOT guaranteed; set DATABASE_URL for math parity.');
+    }
+  });
+  afterAll(async () => {
+    try { await require('../models/db').destroy(); } catch { /* ignore */ }
+  });
 }
 
 // v2 output is remapped by property-lookup-v2.js into a v1-shaped envelope.
@@ -259,6 +304,7 @@ if (CAPTURE_MODE) {
   const captured = {};
 
   describe('pricing engine v2 regression — CAPTURE BASELINE', () => {
+    wireLocalModeHooks();
     for (const tc of REGRESSION_CASES) {
       test(`capture ${tc.name}`, async () => {
         const result = await postCalculateEstimate({
@@ -289,6 +335,7 @@ if (CAPTURE_MODE) {
   const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
 
   describe('pricing engine v2 regression — diff vs baseline', () => {
+    wireLocalModeHooks();
     for (const tc of REGRESSION_CASES) {
       test(tc.name, async () => {
         const result = await postCalculateEstimate({

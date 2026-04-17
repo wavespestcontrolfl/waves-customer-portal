@@ -1,19 +1,35 @@
 /**
  * v4.3 Session 2 — Pricing Engine (v1 modular) regression suite.
  *
- * Runs 12 deterministic cases against POST /api/admin/pricing-config/estimate
- * on prod. In CAPTURE_BASELINE=1 mode, records responses to
- * pricing-engine.baseline.json. In normal mode, diffs responses against the
- * committed baseline and fails on drift.
+ * Diffs generateEstimate output against pricing-engine.baseline.json.
  *
- * Baseline is captured pre-session and is the yardstick for Sessions 3-10.
- * A failing test means a real pricing change, NOT a baseline bug — investigate
- * before updating the baseline.
+ * Two invocation modes:
+ *   LOCAL=1            — in-process: imports generateEstimate directly.
+ *                        Catches module-load errors (ReferenceError, import
+ *                        errors, syntax errors) BEFORE push. Preferred for
+ *                        pre-commit / pre-deploy validation. If DATABASE_URL
+ *                        is set, syncs live pricing_config for byte-identical
+ *                        math parity with HTTP mode.
+ *   PROD_URL + ADMIN_TOKEN — HTTP: hits POST /api/admin/pricing-config/estimate.
+ *                        Validates the full request path (route handler,
+ *                        middleware, auth, DB sync, response shape). Preferred
+ *                        for post-deploy verification.
  *
- * Required env:
- *   PROD_URL       — e.g. https://portal.wavespestcontrol.com
- *   ADMIN_TOKEN    — valid admin JWT (Bearer value, with or without "Bearer " prefix)
- *   CAPTURE_BASELINE=1   (optional) — writes baseline instead of diffing
+ * Default is LOCAL=1 when PROD_URL is unset.
+ *
+ * CAPTURE_BASELINE=1 writes baseline instead of diffing (either mode).
+ *
+ * A failing diff means a real pricing change, NOT a baseline bug — investigate
+ * before updating the baseline. Intentional baseline updates require a
+ * pricing_changelog entry.
+ *
+ * Env:
+ *   LOCAL=1            (optional — default when PROD_URL unset)
+ *   PROD_URL           — e.g. https://portal.wavespestcontrol.com (HTTP mode)
+ *   ADMIN_TOKEN        — admin JWT, required in HTTP mode
+ *   DATABASE_URL       — optional in LOCAL mode; when set, LOCAL runs DB sync
+ *                        for math parity with prod
+ *   CAPTURE_BASELINE=1 — write baseline instead of diffing
  */
 
 const fs = require('fs');
@@ -24,9 +40,16 @@ const PROD_URL = (process.env.PROD_URL || '').replace(/\/$/, '');
 const RAW_TOKEN = process.env.ADMIN_TOKEN || '';
 const ADMIN_TOKEN = RAW_TOKEN.replace(/^Bearer\s+/i, '');
 const CAPTURE_MODE = process.env.CAPTURE_BASELINE === '1';
+const LOCAL_MODE = process.env.LOCAL === '1' || !PROD_URL;
 
-if (!PROD_URL) throw new Error('PROD_URL env var required (e.g. https://portal.wavespestcontrol.com)');
-if (!ADMIN_TOKEN) throw new Error('ADMIN_TOKEN env var required');
+if (!LOCAL_MODE && !ADMIN_TOKEN) {
+  throw new Error('ADMIN_TOKEN env var required in HTTP mode (set LOCAL=1 to run in-process instead)');
+}
+
+// In LOCAL mode, import the engine once at module load. A ReferenceError or
+// import-time crash in engine code will throw here, failing the suite before
+// any case runs — this is the whole point of LOCAL mode.
+const localEngine = LOCAL_MODE ? require('../services/pricing-engine') : null;
 
 function round(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return n;
@@ -195,7 +218,13 @@ const REGRESSION_CASES = [
   },
 ];
 
-async function postEstimate(input) {
+async function getEstimate(input) {
+  if (LOCAL_MODE) {
+    // In-process invocation. Mirrors the route handler at
+    // server/routes/admin-pricing-config.js POST /estimate.
+    return localEngine.generateEstimate(input);
+  }
+  // HTTP invocation against prod.
   const url = `${PROD_URL}/api/admin/pricing-config/estimate`;
   const res = await fetch(url, {
     method: 'POST',
@@ -209,7 +238,6 @@ async function postEstimate(input) {
     const body = await res.text().catch(() => '');
     throw new Error(`POST ${url} -> ${res.status}: ${body.slice(0, 300)}`);
   }
-  // Server wraps as { estimate: {...} }
   const body = await res.json();
   if (!body || !body.estimate) {
     throw new Error(`Response missing .estimate wrapper: ${JSON.stringify(body).slice(0, 300)}`);
@@ -238,15 +266,38 @@ function extractAssertions(estimate) {
   };
 }
 
+// Setup/teardown shared by both describe blocks below. In LOCAL mode with
+// DATABASE_URL set, sync live pricing_config into the engine before running
+// any cases (mirrors the route handler's behavior). In afterAll, destroy the
+// knex pool so jest exits cleanly.
+function wireLocalModeHooks() {
+  if (!LOCAL_MODE) return;
+  beforeAll(async () => {
+    if (!process.env.DATABASE_URL) {
+      console.warn('[LOCAL mode] DATABASE_URL unset — running against in-memory constants. Baseline parity with prod NOT guaranteed; set DATABASE_URL for math parity.');
+      return;
+    }
+    try {
+      await localEngine.syncConstantsFromDB();
+    } catch (err) {
+      console.warn(`[LOCAL mode] DB sync failed (${err.message}); falling back to in-memory constants.`);
+    }
+  }, 30_000);
+  afterAll(async () => {
+    try { await require('../models/db').destroy(); } catch { /* ignore */ }
+  });
+}
+
 if (CAPTURE_MODE) {
   // Capture mode — jest still runs the describe, but each test writes to an
   // accumulator and the afterAll hook flushes to disk.
   const captured = {};
 
   describe('pricing engine regression — CAPTURE BASELINE', () => {
+    wireLocalModeHooks();
     for (const tc of REGRESSION_CASES) {
       test(`capture ${tc.name}`, async () => {
-        const estimate = await postEstimate(tc.input);
+        const estimate = await getEstimate(tc.input);
         captured[tc.name] = extractAssertions(estimate);
         expect(captured[tc.name].summary.year1Total).toEqual(expect.any(Number));
       }, 30_000);
@@ -264,9 +315,10 @@ if (CAPTURE_MODE) {
   const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
 
   describe('pricing engine regression — diff vs baseline', () => {
+    wireLocalModeHooks();
     for (const tc of REGRESSION_CASES) {
       test(tc.name, async () => {
-        const estimate = await postEstimate(tc.input);
+        const estimate = await getEstimate(tc.input);
         const actual = extractAssertions(estimate);
         const expected = baseline[tc.name];
         if (!expected) throw new Error(`No baseline entry for ${tc.name}`);

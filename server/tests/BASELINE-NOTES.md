@@ -114,6 +114,53 @@ See pricing_changelog id=6 for the full rationale.
 
 ---
 
+## Session 6 harness hardening — LOCAL mode (2026-04-17)
+
+Regression suites (v1 + v2) gained a LOCAL execution mode alongside the existing HTTP mode. Trigger via `LOCAL=1 npx jest server/tests/pricing-engine.regression.test.js` (or the v2 file).
+
+### Why LOCAL mode exists
+
+HTTP mode exercises the full stack (route → engine → DB) but requires a running server, a valid admin JWT, and prod DB access. When Session 6 shipped the `paymentMethod` hotfix, that fix could not be regression-tested pre-deploy from a clean checkout — the tests only run against a live URL. LOCAL mode closes that gap: engine logic is exercised in-process, with no HTTP round-trip, no server boot, no JWT required. Loader-level bugs (undefined symbols, missing imports, syntax errors in hot paths) are now caught by `jest` directly.
+
+### Architecture
+
+- **v1 suite** — `pricing-engine.regression.test.js`: HTTP mode posts to `/api/admin/pricing/calculate`. LOCAL mode calls `generateEstimate()` from `server/services/pricing-engine/estimate-engine.js` directly, with the same fixtures.
+- **v2 suite** — `pricing-engine-v2.regression.test.js`: HTTP mode posts to `/api/lookup/property/calculate-estimate-v2`. LOCAL mode calls `calculateEstimate()` from `server/services/pricing-engine-v2.js` and pipes the result through `mapV2ToLegacyShape()` from `server/services/pricing-engine/v2-legacy-mapper.js`. The mapper was extracted verbatim from `property-lookup-v2.js` during Session 6 to give both modes a shared remap surface.
+
+### v2 legacy mapper extraction — Gate 1 proof
+
+Extraction was behavior-preserving by construction. The 170-line inline remap (previously at `property-lookup-v2.js:1097-1258`) was moved to `server/services/pricing-engine/v2-legacy-mapper.js` with only indentation normalized (4-space nested → 2-space top-level). Byte-equivalence confirmed via `diff -w /tmp/v2-inline-old.js /tmp/v2-helper-new.js` → empty output. No logic reordering, no scope changes, no variable renames.
+
+### Parity between modes
+
+**Structural parity:** proven. LOCAL and HTTP produce envelopes with identical keys, types, and array shapes.
+
+**Numeric parity:** data-state dependent. LOCAL mode reads `pricing_config` from the local DB, which lags prod. Cases touching DB-driven values (zone multipliers, lawn brackets, pest base rates, discount tiers) will diverge numerically in LOCAL runs until a prod-mirror seed script lands. See `project_prod_mirror_local_db.md` memory — tracked as a Session 9 dependency. Until then, treat LOCAL-mode numeric diffs as data-state drift, not engine regressions; use HTTP mode against prod for numeric baseline verification.
+
+### Gate 3 — deliberate-break verification
+
+LOCAL mode catches engine-level bugs that HTTP mode would only surface post-deploy.
+
+**v1 suite:** injected `const _deliberateBreak = intentionallyUndefinedVariable;` at `server/services/pricing-engine/discount-engine.js:41`. `LOCAL=1` jest failed with:
+
+```
+ReferenceError: intentionallyUndefinedVariable is not defined
+  at server/services/pricing-engine/discount-engine.js:41:28
+  at Object.getEffectiveDiscount [as generateEstimate] (server/services/pricing-engine/estimate-engine.js:367:22)
+```
+
+**v2 suite:** injected `const _deliberateBreakV2 = intentionallyUndefinedV2Variable;` at `server/services/pricing-engine-v2.js:111`. `LOCAL=1` jest failed with:
+
+```
+ReferenceError: intentionallyUndefinedV2Variable is not defined
+  at calculateEstimate (server/services/pricing-engine-v2.js:111:30)
+  at postCalculateEstimate (server/tests/pricing-engine-v2.regression.test.js:209:16)
+```
+
+Both breaks produced file + line + symbol in the error. Both were reverted before committing.
+
+---
+
 ## Governance note
 
 Discovering prod Platinum at 20% instead of the expected 18% is a governance signal: either docs drifted from code, or live admin-UI edits bypassed the changelog. Going forward (post v4.3 ship), every pricing change — including manual admin-UI edits — must land a `pricing_changelog` row with rationale. Session 9's approval-queue-to-pricing-config wiring automates this for cost changes; rule and discount changes made manually still need manual changelog entries.
