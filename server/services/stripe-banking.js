@@ -192,7 +192,7 @@ async function syncPayouts(limit = 50) {
       }
     }
 
-    logger.info(`[stripe-banking] Synced ${synced} payouts across ${Math.min(MAX_PAGES, Math.ceil(synced / limit) || 1)} page(s)`);
+    if (synced > 0) logger.info(`[stripe-banking] Synced ${synced} payouts across ${Math.min(MAX_PAGES, Math.ceil(synced / limit) || 1)} page(s)`);
     return { synced, has_more: hasMore };
   } catch (err) {
     logger.error('[stripe-banking] syncPayouts failed:', err.message);
