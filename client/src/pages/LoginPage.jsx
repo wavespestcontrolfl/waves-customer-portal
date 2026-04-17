@@ -57,16 +57,25 @@ export default function LoginPage() {
       fontFamily: FONTS.body,
       padding: 20,
     }}>
-      {/* Branding block */}
-      <div style={{ textAlign: 'center', marginBottom: 28 }}>
+      {/* Hero branding block — Luckiest Guy title like wavespestcontrol.com heroes */}
+      <div style={{ textAlign: 'center', marginBottom: 32 }}>
         <img
           src="/waves-logo.png"
           alt="Waves Lawn & Pest"
-          style={{ width: 140, height: 'auto', marginBottom: 12, filter: 'drop-shadow(0 4px 12px rgba(0,0,0,0.3))' }}
+          style={{ width: 140, height: 'auto', marginBottom: 14, filter: 'drop-shadow(0 4px 12px rgba(0,0,0,0.3))' }}
         />
-        <div style={{ fontSize: 32, fontWeight: 900, color: '#fff', fontFamily: FONTS.heading, marginTop: 6, letterSpacing: 0.5 }}>
+        <h1 style={{
+          fontSize: 48,                      // matches Astro H1 (--text-5xl)
+          fontFamily: FONTS.display,         // Luckiest Guy
+          fontWeight: 400,                   // Luckiest Guy only has 400
+          color: B.white,
+          letterSpacing: '0.02em',           // 0.96px at 48px
+          lineHeight: 1.05,
+          margin: '0 0 24px',                // Astro H1 mb-6
+          textShadow: '0 2px 12px rgba(0,0,0,0.25)',
+        }}>
           Client Services Portal
-        </div>
+        </h1>
       </div>
 
       {/* Login card */}
@@ -105,11 +114,11 @@ export default function LoginPage() {
               disabled={!phoneReady || sending}
               style={{
                 ...BUTTON_BASE, width: '100%', padding: 16,
-                background: B.red,
-                color: B.white,
+                background: B.yellow,
+                color: B.blueDeeper,
                 fontSize: 15, marginTop: 16,
                 opacity: sending ? 0.7 : 1,
-                boxShadow: `0 4px 15px ${B.red}40`,
+                boxShadow: '0 4px 14px rgba(0,0,0,0.15)',
               }}
             >
               {sending ? 'Sending...' : 'Send Verification Code'}
@@ -146,11 +155,11 @@ export default function LoginPage() {
               disabled={!codeReady || sending}
               style={{
                 ...BUTTON_BASE, width: '100%', padding: 16,
-                background: B.red,
-                color: B.white,
+                background: B.yellow,
+                color: B.blueDeeper,
                 fontSize: 15, marginTop: 16,
                 opacity: sending ? 0.7 : 1,
-                boxShadow: `0 4px 15px ${B.red}40`,
+                boxShadow: '0 4px 14px rgba(0,0,0,0.15)',
               }}
             >
               {sending ? 'Verifying...' : 'Sign In'}
