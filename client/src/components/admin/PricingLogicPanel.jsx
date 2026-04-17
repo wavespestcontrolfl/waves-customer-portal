@@ -33,6 +33,7 @@ const TABS = [
   { key: 'one_time', label: 'One-Time', icon: '⚡' },
   { key: 'waveguard', label: 'WaveGuard', icon: '🛡️' },
   { key: 'products', label: 'Products', icon: '📦' },
+  { key: 'proposals', label: 'Proposals', icon: '📋' },
   { key: 'changelog', label: 'Changelog', icon: '📜' },
 ];
 
@@ -170,6 +171,283 @@ function ChangelogTab() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Proposals Tab ──
+function ProposalsTab() {
+  const [proposals, setProposals] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState('pending');
+  const [selected, setSelected] = useState(null);
+  const [reviewNotes, setReviewNotes] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  const loadProposals = useCallback(() => {
+    setLoading(true);
+    af(`/admin/pricing-proposals?status=${encodeURIComponent(statusFilter)}&limit=50`)
+      .then(d => { setProposals(d.proposals || []); setLoading(false); })
+      .catch(() => { setProposals([]); setLoading(false); });
+  }, [statusFilter]);
+
+  useEffect(() => { loadProposals(); }, [loadProposals]);
+
+  const formatDate = (iso) => {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
+  const formatValue = (v) => {
+    if (v === null || v === undefined) return '—';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  };
+
+  const pctBadge = (pct) => {
+    if (pct == null) return null;
+    const n = Number(pct);
+    const color = Math.abs(n) >= 10 ? D.amber : D.muted;
+    return (
+      <span style={{
+        fontSize: 10, padding: '2px 8px', borderRadius: 12, fontWeight: 700,
+        background: `${color}18`, color, border: `1px solid ${color}55`,
+        fontFamily: "'JetBrains Mono', monospace",
+      }}>{n > 0 ? '+' : ''}{n.toFixed(1)}%</span>
+    );
+  };
+
+  const statusPill = (status) => {
+    const color = status === 'pending' ? D.amber : status === 'approved' ? D.green : status === 'rejected' ? D.red : D.muted;
+    return (
+      <span style={{
+        fontSize: 10, padding: '2px 8px', borderRadius: 12, fontWeight: 700,
+        background: `${color}18`, color, border: `1px solid ${color}55`,
+        textTransform: 'uppercase', letterSpacing: 0.3,
+      }}>{status}</span>
+    );
+  };
+
+  const submitAction = async (action) => {
+    if (!selected) return;
+    setSubmitting(true);
+    try {
+      const res = await af(`/admin/pricing-proposals/${selected.id}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({ review_notes: reviewNotes || null }),
+      });
+      if (res && res.success) {
+        setToast({ kind: 'success', msg: action === 'approve' ? `Proposal ${selected.id} approved. Changelog id=${res.changelog_id}. Engine caches busted.` : `Proposal ${selected.id} rejected.` });
+        setSelected(null);
+        setReviewNotes('');
+        loadProposals();
+      } else {
+        setToast({ kind: 'error', msg: res?.error || 'Action failed' });
+      }
+    } catch (err) {
+      setToast({ kind: 'error', msg: err.message || 'Action failed' });
+    }
+    setSubmitting(false);
+    setTimeout(() => setToast(null), 5000);
+  };
+
+  const statusOptions = ['pending', 'approved', 'rejected', 'all'];
+
+  return (
+    <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A' }}>Pricing Proposals</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {statusOptions.map(s => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(s)}
+              style={{
+                padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                border: `1px solid ${statusFilter === s ? D.teal : D.border}`,
+                background: statusFilter === s ? D.teal : 'transparent',
+                color: statusFilter === s ? D.white : D.muted,
+                cursor: 'pointer', textTransform: 'capitalize',
+              }}
+            >{s}</button>
+          ))}
+        </div>
+      </div>
+
+      {toast && (
+        <div style={{
+          padding: '8px 12px', marginBottom: 12, borderRadius: 6, fontSize: 12, fontWeight: 600,
+          background: toast.kind === 'success' ? `${D.green}18` : `${D.red}18`,
+          color: toast.kind === 'success' ? D.green : D.red,
+          border: `1px solid ${toast.kind === 'success' ? D.green : D.red}55`,
+        }}>{toast.msg}</div>
+      )}
+
+      {loading ? (
+        <div style={{ color: D.muted, padding: 40, textAlign: 'center', fontSize: 13 }}>Loading proposals...</div>
+      ) : proposals.length === 0 ? (
+        <div style={{ color: D.muted, padding: 40, textAlign: 'center', fontSize: 13 }}>
+          No {statusFilter === 'all' ? '' : statusFilter} proposals.
+        </div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Config Key</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Change</th>
+                <th style={{ padding: '8px 10px', textAlign: 'center', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>% Δ</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Source</th>
+                <th style={{ padding: '8px 10px', textAlign: 'center', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Status</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Created</th>
+                <th style={{ padding: '8px 10px', textAlign: 'center', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {proposals.map(p => (
+                <tr key={p.id} style={{ borderBottom: `1px solid ${D.border}22`, cursor: 'pointer' }}
+                    onClick={() => { setSelected(p); setReviewNotes(p.review_notes || ''); }}>
+                  <td style={{ padding: '8px 10px', color: '#0F172A', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 600 }}>{p.config_key}</td>
+                  <td style={{ padding: '8px 10px', color: D.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
+                    <span style={{ color: D.muted }}>{formatValue(p.current_value)}</span>
+                    <span style={{ margin: '0 6px', color: D.muted }}>→</span>
+                    <span style={{ color: '#0F172A', fontWeight: 600 }}>{formatValue(p.proposed_value)}</span>
+                  </td>
+                  <td style={{ padding: '8px 10px', textAlign: 'center' }}>{pctBadge(p.pct_change)}</td>
+                  <td style={{ padding: '8px 10px', color: D.muted, fontSize: 11 }}>{p.trigger_source || '—'}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'center' }}>{statusPill(p.status)}</td>
+                  <td style={{ padding: '8px 10px', color: D.muted, fontSize: 11 }}>{formatDate(p.created_at)}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                    {p.status === 'pending' && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setSelected(p); setReviewNotes(p.review_notes || ''); }}
+                        style={{
+                          padding: '4px 10px', borderRadius: 4, border: 'none', cursor: 'pointer',
+                          fontSize: 11, fontWeight: 600, background: D.teal, color: D.white,
+                        }}
+                      >Review</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {selected && (
+        <div onClick={() => !submitting && setSelected(null)} style={{
+          position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)', zIndex: 50,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: D.card, borderRadius: 12, border: `1px solid ${D.border}`,
+            padding: 24, maxWidth: 640, width: '100%', maxHeight: '90vh', overflowY: 'auto',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#0F172A' }}>
+                Proposal #{selected.id}
+              </div>
+              {statusPill(selected.status)}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px 12px', fontSize: 12, marginBottom: 16 }}>
+              <div style={{ color: D.muted, fontWeight: 600 }}>Config Key</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: '#0F172A' }}>{selected.config_key}</div>
+
+              <div style={{ color: D.muted, fontWeight: 600 }}>Current</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: D.text }}>{formatValue(selected.current_value)}</div>
+
+              <div style={{ color: D.muted, fontWeight: 600 }}>Proposed</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: '#0F172A', fontWeight: 600 }}>{formatValue(selected.proposed_value)}</div>
+
+              <div style={{ color: D.muted, fontWeight: 600 }}>% Change</div>
+              <div>{pctBadge(selected.pct_change) || <span style={{ color: D.muted }}>—</span>}</div>
+
+              <div style={{ color: D.muted, fontWeight: 600 }}>Source</div>
+              <div style={{ color: D.text }}>{selected.trigger_source || '—'}</div>
+
+              <div style={{ color: D.muted, fontWeight: 600 }}>Created</div>
+              <div style={{ color: D.text }}>{formatDate(selected.created_at)}</div>
+
+              {selected.reviewed_at && (
+                <>
+                  <div style={{ color: D.muted, fontWeight: 600 }}>Reviewed</div>
+                  <div style={{ color: D.text }}>{formatDate(selected.reviewed_at)} by tech {selected.reviewed_by}</div>
+                </>
+              )}
+            </div>
+
+            {selected.evidence && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12, color: D.muted, fontWeight: 600, marginBottom: 4 }}>Evidence</div>
+                <pre style={{ background: D.bg, padding: 10, borderRadius: 6, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: D.text, overflowX: 'auto', margin: 0, maxHeight: 160 }}>
+                  {JSON.stringify(typeof selected.evidence === 'string' ? JSON.parse(selected.evidence) : selected.evidence, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            {selected.price_impact && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12, color: D.muted, fontWeight: 600, marginBottom: 4 }}>Price Impact</div>
+                <pre style={{ background: D.bg, padding: 10, borderRadius: 6, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: D.text, overflowX: 'auto', margin: 0, maxHeight: 160 }}>
+                  {JSON.stringify(typeof selected.price_impact === 'string' ? JSON.parse(selected.price_impact) : selected.price_impact, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: D.muted, fontWeight: 600, marginBottom: 4 }}>Review Notes</div>
+              <textarea
+                value={reviewNotes}
+                onChange={(e) => setReviewNotes(e.target.value)}
+                disabled={selected.status !== 'pending' || submitting}
+                placeholder="Optional notes captured with approval/rejection (included in changelog rationale on approve)"
+                style={{
+                  width: '100%', minHeight: 80, padding: 10, borderRadius: 6,
+                  border: `1px solid ${D.border}`, background: D.input, color: '#0F172A',
+                  fontSize: 12, fontFamily: "'DM Sans', sans-serif", resize: 'vertical', outline: 'none',
+                }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => !submitting && setSelected(null)}
+                disabled={submitting}
+                style={{
+                  padding: '8px 16px', borderRadius: 6, border: `1px solid ${D.border}`,
+                  background: D.white, color: D.text, fontSize: 12, fontWeight: 600,
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                }}
+              >Close</button>
+              {selected.status === 'pending' && (
+                <>
+                  <button
+                    onClick={() => { if (window.confirm(`Reject proposal #${selected.id}? This cannot be undone.`)) submitAction('reject'); }}
+                    disabled={submitting}
+                    style={{
+                      padding: '8px 16px', borderRadius: 6, border: 'none',
+                      background: D.red, color: D.white, fontSize: 12, fontWeight: 700,
+                      cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.6 : 1,
+                    }}
+                  >Reject</button>
+                  <button
+                    onClick={() => { if (window.confirm(`Approve proposal #${selected.id}?\n\nThis will:\n• UPDATE pricing_config (${selected.config_key})\n• INSERT pricing_changelog entry\n• Bust engine caches (takes effect immediately)`)) submitAction('approve'); }}
+                    disabled={submitting}
+                    style={{
+                      padding: '8px 16px', borderRadius: 6, border: 'none',
+                      background: D.green, color: D.white, fontSize: 12, fontWeight: 700,
+                      cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.6 : 1,
+                    }}
+                  >{submitting ? 'Working...' : 'Approve'}</button>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -686,10 +964,12 @@ export default function PricingLogicPanel() {
           {activeTab === 'products' && <ProductsTab />}
 
           {/* Changelog tab */}
+          {activeTab === 'proposals' && <ProposalsTab />}
+
           {activeTab === 'changelog' && <ChangelogTab />}
 
           {/* Config cards for this category */}
-          {activeTab !== 'products' && activeTab !== 'changelog' && filteredConfigs.length > 0 && (
+          {activeTab !== 'products' && activeTab !== 'changelog' && activeTab !== 'proposals' && filteredConfigs.length > 0 && (
             <div>
               {activeTab !== 'lawn' && activeTab !== 'waveguard' && (
                 <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>
@@ -704,7 +984,7 @@ export default function PricingLogicPanel() {
             </div>
           )}
 
-          {activeTab !== 'products' && activeTab !== 'changelog' && filteredConfigs.length === 0 && activeTab !== 'lawn' && activeTab !== 'waveguard' && (
+          {activeTab !== 'products' && activeTab !== 'changelog' && activeTab !== 'proposals' && filteredConfigs.length === 0 && activeTab !== 'lawn' && activeTab !== 'waveguard' && (
             <div style={{ color: D.muted, padding: 20, textAlign: 'center', fontSize: 13 }}>
               No configuration data for this category yet. Run the pricing_config migration to seed data.
             </div>

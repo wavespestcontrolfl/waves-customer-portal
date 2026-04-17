@@ -281,6 +281,7 @@ app.use('/api/admin/dashboard-ops', require('./routes/admin-dashboard-ops'));
 app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
+app.use('/api/admin/pricing-proposals', require('./routes/admin-pricing-proposals'));
 app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
 app.use('/api/notification-prefs', require('./routes/notification-prefs'));
