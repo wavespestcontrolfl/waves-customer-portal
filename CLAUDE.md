@@ -38,7 +38,7 @@ Waves Pest Control & Lawn Care — a family-owned company serving SW Florida (Ma
 - **Payments:** Stripe (Payment Element — card/Apple Pay/Google Pay/ACH). Square is fully phased out.
 - **SMS/Voice:** Twilio (Programmable Messaging, ConversationRelay, Lookup)
 - **AI:** Anthropic Claude API (Opus 4.6 for admin, Sonnet for tech/drafting)
-- **Deployment:** Railway (server + client + PostgreSQL)
+- **Deployment:** Railway (portal server + client + PostgreSQL). **Spoke fleet (15 sites):** Astro on Cloudflare Pages/Workers.
 - **No Zapier** — all automation is built natively in this monorepo
 
 ## Key Team Members
@@ -446,8 +446,10 @@ Only add an embedded bar if the page is data-rich and frequently used. For small
 ## Managed Agents (6 agents)
 Built on Anthropic's Claude Managed Agents API. Configs in `server/services/agents/`. Blog Content Engine, Backlink Strategy, Customer Assistant, Lead Response, Customer Retention, Weekly BI Briefing.
 
-## WordPress Fleet (15 sites)
-Hub-and-spoke SEO network. Pest control, exterminator, lawn care verticals across SWFL markets. Fleet monitoring, multi-domain GSC integration, multi-site publishing. DataForSEO rank tracking. Blog content engine with 157-post calendar.
+## Spoke Fleet — Astro on Cloudflare (15 sites)
+Hub-and-spoke SEO network. 15 spoke domains covering pest control, exterminator, and lawn care verticals across SWFL markets (Bradenton, Parrish, Palmetto, Sarasota, Venice, North Port). Each spoke is an **Astro** site deployed to **Cloudflare Pages/Workers**. Fleet monitoring, multi-domain GSC integration, multi-site publishing, DataForSEO rank tracking, and a blog content engine with a 157-post calendar.
+
+> **Legacy naming note:** The admin page is still `WordPressSitesPage.jsx` and routes/APIs still use `/admin/wordpress/*` for historical reasons. The underlying platform is Astro + Cloudflare — do not reintroduce WordPress. Rename only on explicit instruction.
 
 ## Pricing Engine
 Loaded labor rate: $35/hr. Interpolated bracket pricing. Service types: pest control, lawn care (5 grass tracks: A/B/C1/C2/D), tree & shrub, mosquito (WaveGuard tiers), termite, rodent, WDO, specialty. WaveGuard loyalty tiers: Bronze/Silver/Gold/Platinum with tiered discounts.
