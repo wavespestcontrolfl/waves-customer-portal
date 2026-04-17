@@ -922,7 +922,6 @@ function calcTermiteBait(footprint, p, mods) {
   // ── NEW: Foundation adjustment ──
   const foundAdj = mods.termiteFoundationAdj || 0;
 
-  const hexproInstall  = Math.round((stations * 8.69 + stations * 5.25 + stations * 0.75) * 1.75 * conMult) + foundAdj;
   const advanceInstall = Math.round((stations * 14 + stations * 5.25 + stations * 0.75) * 1.75 * conMult) + foundAdj;
   const trelonaInstall = Math.round((stations * 24 + stations * 5.25 + stations * 0.75) * 1.75 * conMult) + foundAdj;
 
@@ -932,7 +931,6 @@ function calcTermiteBait(footprint, p, mods) {
     stations,
     constructionMult: conMult,
     foundationAdj: foundAdj,
-    hexpro:  { install: hexproInstall,  basicMo: 35, premierMo: 65 },
     advance: { install: advanceInstall, basicMo: 35, premierMo: 65 },
     trelona: { install: trelonaInstall, basicMo: 35, premierMo: 65 },
     wgMonthly: 35 // Basic tier default
@@ -1390,13 +1388,11 @@ function calcTotals(result, manualDiscount = null) {
     otItems.push({ name: 'WaveGuard Membership', price: membershipFee, waivedWithPrepay: true });
   }
 
-  // Termite bait install (default to trelona; caller can override via termiteSystem)
-  const termiteSystem = options?.termiteSystem || 'trelona';
-  const tmInstall = rec.termiteBait?.[termiteSystem]?.install || rec.termiteBait?.trelona?.install || 0;
-  const tmSystemLabel = { hexpro: 'Hex-Pro', advance: 'Advance', trelona: 'Trelona' }[termiteSystem] || 'Trelona';
+  // Termite bait install
+  const tmInstall = rec.termiteBait?.trelona?.install || 0;
   if (tmInstall > 0) {
     oneTimeTotal += tmInstall;
-    otItems.push({ name: `${tmSystemLabel} Install`, price: tmInstall });
+    otItems.push({ name: 'Trelona Install', price: tmInstall });
   }
 
   const totalOneTimeAndSpecialty = oneTimeTotal + specialtyTotal;
