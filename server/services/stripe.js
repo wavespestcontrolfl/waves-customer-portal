@@ -524,16 +524,12 @@ const StripeService = {
     if (!invoice) throw new Error('Invoice not found');
     if (invoice.status === 'paid') throw new Error('Invoice already paid');
 
-    const customer = await db('customers').where({ id: invoice.customer_id }).first();
-
-    // Create the PaymentIntent at the base invoice total. When the customer
-    // picks a card/wallet on the Payment Element, the client calls
-    // `updateInvoicePaymentIntentMethod` below to bump the amount by 3%.
-    // ACH stays at the base amount.
+    // One-off charge via the public pay link. Intentionally does NOT attach
+    // a Stripe customer — Waves admin is the source of truth; we link the
+    // charge back via waves_customer_id in metadata. Immune to stale
+    // stripe_customer_id values left over from Square → Stripe migration.
     const baseAmount = parseFloat(invoice.total);
     const amountCents = Math.round(baseAmount * 100);
-
-    let stripeCustomerId = customer?.stripe_customer_id || null;
 
     const piParams = {
       amount: amountCents,
@@ -549,12 +545,8 @@ const StripeService = {
       },
     };
 
-    if (stripeCustomerId) {
-      piParams.customer = stripeCustomerId;
-    }
-
     try {
-      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${stripeCustomerId || 'nocust'}`;
+      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}`;
       const paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
       await db('invoices')
@@ -573,7 +565,7 @@ const StripeService = {
         cardSurchargeRate: CARD_SURCHARGE_RATE,
       };
     } catch (err) {
-      logger.error(`[stripe] Invoice PaymentIntent failed for invoice ${invoiceId} (amount=${amountCents}, customer=${stripeCustomerId || 'none'}): ${err.type || 'Error'} — ${err.message}${err.code ? ` [code=${err.code}]` : ''}${err.param ? ` [param=${err.param}]` : ''}`);
+      logger.error(`[stripe] Invoice PaymentIntent failed for invoice ${invoiceId} (amount=${amountCents}): ${err.type || 'Error'} — ${err.message}${err.code ? ` [code=${err.code}]` : ''}${err.param ? ` [param=${err.param}]` : ''}`);
       throw new Error(`Failed to create payment intent for invoice: ${err.message}`);
     }
   },
