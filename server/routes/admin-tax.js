@@ -4,6 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
+const { etParts, etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -797,11 +798,16 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
       return res.status(400).json({ error: 'quarter parameter required (Q1, Q2, Q3, or Q4)' });
     }
     const now = new Date();
-    const year = now.getFullYear();
+    // Use ET year so the quarter doesn't roll over to next year late on Dec 31 ET.
+    const year = etParts(now).year;
     const qNum = parseInt(quarter.replace('Q', ''));
     const startMonth = (qNum - 1) * 3;
-    const startDate = new Date(year, startMonth, 1).toISOString().split('T')[0];
-    const endDate = new Date(year, startMonth + 3, 0).toISOString().split('T')[0];
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const startDate = `${year}-${pad2(startMonth + 1)}-01`;
+    // Day 0 of the month after the quarter's last = last day of quarter.
+    const qEnd = new Date(Date.UTC(year, startMonth + 3, 0, 12, 0, 0));
+    const qEndP = etParts(qEnd);
+    const endDate = `${qEndP.year}-${pad2(qEndP.month)}-${pad2(qEndP.day)}`;
     const ytdStart = `${year}-01-01`;
 
     const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [ytdStart, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
@@ -839,43 +845,49 @@ router.get('/pnl', async (req, res, next) => {
   try {
     const { period = 'mtd', start_date, end_date } = req.query;
     const now = new Date();
+    // Use ET calendar for all period boundaries — server runs UTC.
+    const et = etParts(now);
+    const pad = (n) => String(n).padStart(2, '0');
     let startDate, endDate;
 
     switch (period) {
       case 'monthly':
       case 'mtd':
-        startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-        endDate = now.toISOString().split('T')[0];
+        startDate = `${et.year}-${pad(et.month)}-01`;
+        endDate = etDateString(now);
         break;
       case 'last_month': {
-        const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        startDate = `${lm.getFullYear()}-${String(lm.getMonth() + 1).padStart(2, '0')}-01`;
-        const lmEnd = new Date(now.getFullYear(), now.getMonth(), 0);
-        endDate = `${lmEnd.getFullYear()}-${String(lmEnd.getMonth() + 1).padStart(2, '0')}-${String(lmEnd.getDate()).padStart(2, '0')}`;
+        const lmMonth = et.month === 1 ? 12 : et.month - 1;
+        const lmYear = et.month === 1 ? et.year - 1 : et.year;
+        startDate = `${lmYear}-${pad(lmMonth)}-01`;
+        // Last day of last month = day 0 of this ET month (JS handles as UTC, but day/month values are ET-derived).
+        const lmEnd = new Date(Date.UTC(et.year, et.month - 1, 0, 12, 0, 0));
+        const lmEndP = etParts(lmEnd);
+        endDate = `${lmEndP.year}-${pad(lmEndP.month)}-${pad(lmEndP.day)}`;
         break;
       }
       case 'quarterly': {
-        const qMonth = Math.floor(now.getMonth() / 3) * 3;
-        startDate = `${now.getFullYear()}-${String(qMonth + 1).padStart(2, '0')}-01`;
-        endDate = now.toISOString().split('T')[0];
+        const qMonth = Math.floor((et.month - 1) / 3) * 3 + 1;
+        startDate = `${et.year}-${pad(qMonth)}-01`;
+        endDate = etDateString(now);
         break;
       }
       case 'ytd':
-        startDate = `${now.getFullYear()}-01-01`;
-        endDate = now.toISOString().split('T')[0];
+        startDate = `${et.year}-01-01`;
+        endDate = etDateString(now);
         break;
       case 'annual':
       case 'last_year':
-        startDate = `${now.getFullYear() - 1}-01-01`;
-        endDate = `${now.getFullYear() - 1}-12-31`;
+        startDate = `${et.year - 1}-01-01`;
+        endDate = `${et.year - 1}-12-31`;
         break;
       case 'custom':
         startDate = start_date;
         endDate = end_date;
         break;
       default:
-        startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-        endDate = now.toISOString().split('T')[0];
+        startDate = `${et.year}-${pad(et.month)}-01`;
+        endDate = etDateString(now);
     }
 
     if (!startDate || !endDate) {

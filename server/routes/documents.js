@@ -504,7 +504,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
 function formatDate(d) {
   if (!d) return '—';
   const dt = new Date(typeof d === 'string' ? d + 'T12:00:00' : d);
-  return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
 }
 
 // =========================================================================

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -168,7 +169,7 @@ router.get('/field-leads', async (req, res, next) => {
 /* ── 8. GET /weather — weather for a date ── */
 router.get('/weather', async (req, res, next) => {
   try {
-    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const date = req.query.date || etDateString();
     const alerts = [];
 
     // Strategy 1: Try weather_data table (FAWN)

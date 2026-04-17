@@ -4,6 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -54,7 +55,7 @@ async function ensureTables() {
 router.get('/', async (req, res, next) => {
   try {
     await ensureTables();
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString(new Date());
 
     // Active shifts
     const activeShifts = await db('time_entries')
@@ -88,12 +89,11 @@ router.get('/', async (req, res, next) => {
       .leftJoin('technicians', 'time_entry_daily_summary.technician_id', 'technicians.id')
       .select('time_entry_daily_summary.*', 'technicians.name as tech_name');
 
-    // This week's summaries
-    const dayOfWeek = new Date().getDay();
+    // This week's summaries — Monday-anchored week in ET.
+    const now = new Date();
+    const dayOfWeek = etParts(now).dayOfWeek;
     const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const weekStart = new Date();
-    weekStart.setDate(weekStart.getDate() + mondayOffset);
-    const weekStartStr = weekStart.toISOString().split('T')[0];
+    const weekStartStr = etDateString(addETDays(now, mondayOffset));
 
     const weekDailies = await db('time_entry_daily_summary')
       .where('work_date', '>=', weekStartStr)

@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
+const { etParts, etDateString } = require('../../utils/datetime-et');
 
 const TRACKED_COMPETITORS = ['turnerpest.com', 'hoskinspest.com', 'hometeampestdefense.com', 'orkin.com', 'terminix.com', 'trulynolen.com', 'nozzlenolen.com'];
 
@@ -9,8 +10,10 @@ class RankTracker {
    * Run daily rank check for priority-1 keywords (or all if weekly).
    */
   async trackRanks(priorityFilter = null) {
-    const today = new Date().toISOString().split('T')[0];
-    const dayOfWeek = new Date().getDay();
+    // Read ET — server runs UTC; Sunday-scan fired one day early at 8 PM ET Sat.
+    const now = new Date();
+    const today = etDateString(now);
+    const dayOfWeek = etParts(now).dayOfWeek;
 
     let query = db('seo_target_keywords');
     if (priorityFilter) {

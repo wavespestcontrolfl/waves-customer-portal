@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // Shared geocoder (same approach as admin-schedule-find-time.js)
 async function geocodeAddress(address) {
@@ -141,12 +142,11 @@ router.get('/availability', async (req, res, next) => {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
 
-    // Default date window from config
+    // Default date window from config — anchored to ET calendar days so the
+    // window doesn't shift by a day between 8 PM ET and midnight UTC.
     const today = new Date();
-    const defaultFrom = new Date(today);
-    defaultFrom.setDate(defaultFrom.getDate() + (config.advance_days_min ?? 1));
-    const defaultTo = new Date(today);
-    defaultTo.setDate(defaultTo.getDate() + (config.advance_days_max ?? 14));
+    const defaultFrom = etDateString(addETDays(today, config.advance_days_min ?? 1));
+    const defaultTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
 
     const duration = duration_minutes
       ? parseInt(duration_minutes)
@@ -156,8 +156,8 @@ router.get('/availability', async (req, res, next) => {
       lat: resolvedLat,
       lng: resolvedLng,
       durationMinutes: duration,
-      dateFrom: date_from || defaultFrom.toISOString().split('T')[0],
-      dateTo: date_to || defaultTo.toISOString().split('T')[0],
+      dateFrom: date_from || defaultFrom,
+      dateTo: date_to || defaultTo,
       dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
       dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
       topN: 200,

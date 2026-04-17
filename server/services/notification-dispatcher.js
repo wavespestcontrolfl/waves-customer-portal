@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etParts } = require('../utils/datetime-et');
 
 // Map notification types to their toggle column and channel column in notification_prefs
 const TYPE_MAP = {
@@ -47,10 +48,10 @@ const NotificationDispatcher = {
       return { sent: false, channel: null, results: { reason: 'type_disabled' } };
     }
 
-    // Check quiet hours
+    // Check quiet hours (prefs are ET wall-clock — server runs UTC)
     if (prefs?.quiet_hours_start && prefs?.quiet_hours_end) {
-      const now = new Date();
-      const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      const et = etParts(new Date());
+      const currentTime = `${String(et.hour).padStart(2, '0')}:${String(et.minute).padStart(2, '0')}`;
       const start = prefs.quiet_hours_start.substring(0, 5);
       const end = prefs.quiet_hours_end.substring(0, 5);
 

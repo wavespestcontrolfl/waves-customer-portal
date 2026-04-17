@@ -7,6 +7,8 @@
  * were imported from the prior Square Appointments system.
  */
 
+const { etDateString } = require('./datetime-et');
+
 // ─── SERVICE TYPE NORMALIZATION ──────────────────────────────────
 
 /**
@@ -210,8 +212,9 @@ function safeDate(d) {
   if (!d) return null;
   const date = new Date(d);
   if (isNaN(date.getTime())) return null;
-  // Return ISO date string (YYYY-MM-DD)
-  return date.toISOString().split('T')[0];
+  // Return ET calendar date (YYYY-MM-DD) — server runs UTC so naive toISOString
+  // shifts late-evening ET timestamps to the next day.
+  return etDateString(date);
 }
 
 /**

@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const logger = require('../services/logger');
+const { startOfETMonth } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -94,7 +95,7 @@ router.use(async (req, res, next) => {
 router.get('/analytics/overview', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const start = start_date ? new Date(start_date) : startOfETMonth();
     const end = end_date ? new Date(end_date) : new Date();
 
     const leads = await db('leads')
@@ -193,7 +194,7 @@ router.get('/analytics/by-channel', async (req, res, next) => {
 router.get('/analytics/funnel', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const start = start_date ? new Date(start_date) : startOfETMonth();
     const end = end_date ? new Date(end_date) : new Date();
 
     const stages = await db('leads')
@@ -309,7 +310,7 @@ router.get('/analytics/lost', async (req, res, next) => {
 // GET /api/admin/leads/sources — all sources with current month lead count
 router.get('/sources', async (req, res, next) => {
   try {
-    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const monthStart = startOfETMonth();
 
     const sources = await db('lead_sources')
       .select(
@@ -396,7 +397,7 @@ router.post('/sources/:id/cost', async (req, res, next) => {
     const { month, cost_amount, cost_category, notes } = req.body;
     const [cost] = await db('lead_source_costs').insert({
       lead_source_id: req.params.id,
-      month: month || new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+      month: month || startOfETMonth(),
       cost_amount: cost_amount || 0,
       cost_category: cost_category || 'monthly_fee',
       notes,

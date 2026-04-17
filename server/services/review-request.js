@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { etParts, parseETDateTime, addETDays } = require('../utils/datetime-et');
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -41,24 +42,24 @@ function generateToken() {
  * @returns {Date} optimal send timestamp
  */
 function calculateReviewSendTime(completedAt, serviceType) {
-  const hour = completedAt.getHours();
-  const day = completedAt.getDay(); // 0=Sun, 6=Sat
+  // Read ET wall-clock — server runs UTC, so getHours/getDay would be 4-5h off.
+  const { hour, dayOfWeek: day } = etParts(completedAt);
 
   // ±15 min jitter so messages don't all land at the same second
   const jitter = () => Math.floor(Math.random() * 31) - 15;
 
+  // Build a Date at ET hour H of `date`'s ET calendar day (respecting DST).
   function atHour(date, targetHour) {
-    const d = new Date(date);
+    const p = etParts(date);
     const h = Math.floor(targetHour);
     const m = Math.round((targetHour - h) * 60) + jitter();
-    d.setHours(h, Math.max(0, m), 0, 0);
-    return d;
+    const mm = Math.max(0, Math.min(59, m));
+    const naive = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    return parseETDateTime(naive);
   }
 
   function nextDayAtHour(date, targetHour) {
-    const d = new Date(date);
-    d.setDate(d.getDate() + 1);
-    return atHour(d, targetHour);
+    return atHour(addETDays(date, 1), targetHour);
   }
 
   function addMins(date, mins) {
@@ -87,8 +88,8 @@ function calculateReviewSendTime(completedAt, serviceType) {
   // WDO / first-time inspections: high anxiety → high relief, capture it fast
   if (svc.includes('wdo')) {
     const send = addMins(completedAt, 90);
-    // Guard: never after 8 PM
-    if (send.getHours() >= 20) return nextDayAtHour(completedAt, MORNING);
+    // Guard: never after 8 PM ET
+    if (etParts(send).hour >= 20) return nextDayAtHour(completedAt, MORNING);
     return send;
   }
 
@@ -96,9 +97,7 @@ function calculateReviewSendTime(completedAt, serviceType) {
 
   // Saturday service → Sunday 10:30 AM
   if (day === 6) {
-    const d = new Date(completedAt);
-    d.setDate(d.getDate() + 1);
-    return atHour(d, 10.5);
+    return atHour(addETDays(completedAt, 1), 10.5);
   }
 
   // Friday afternoon → Saturday 10 AM

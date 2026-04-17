@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
 class BudgetManager {
   /**
@@ -10,8 +11,8 @@ class BudgetManager {
    */
   async adjustBudgets() {
     const now = new Date();
-    const dayOfWeek = now.getDay(); // 0 = Sunday
-    const hour = now.getHours();
+    // Read ET wall-clock — server is UTC, getDay/getHours would be 4-5h off.
+    const { dayOfWeek, hour } = etParts(now);
 
     let checkDate;
 
@@ -19,17 +20,13 @@ class BudgetManager {
       // SUNDAY: Always check Monday's capacity. No time-of-day logic.
       // People plan their week ahead on Sunday — run ads at full power
       // if Monday has availability.
-      const monday = new Date(now);
-      monday.setDate(monday.getDate() + 1);
-      checkDate = monday.toISOString().split('T')[0];
+      checkDate = etDateString(addETDays(now, 1));
     } else if (hour < 14) {
-      // Weekday morning: check today's capacity
-      checkDate = now.toISOString().split('T')[0];
+      // Weekday morning (ET): check today's capacity
+      checkDate = etDateString(now);
     } else {
-      // Weekday afternoon: check tomorrow's capacity
-      const tomorrow = new Date(now);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      checkDate = tomorrow.toISOString().split('T')[0];
+      // Weekday afternoon (ET): check tomorrow's capacity
+      checkDate = etDateString(addETDays(now, 1));
     }
 
     logger.info(`Budget adjust: checking capacity for ${checkDate} (${dayOfWeek === 0 ? 'Sunday→Monday' : hour < 14 ? 'today' : 'tomorrow'})`);

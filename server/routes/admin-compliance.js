@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const LimitChecker = require('../services/application-limits');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { etDateString, etParts } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -96,8 +97,9 @@ router.get('/reports/nitrogen', async (req, res, next) => {
 router.get('/reports/usage', async (req, res, next) => {
   try {
     const { startDate, endDate, productId, technicianId } = req.query;
-    const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0];
-    const end = endDate || new Date().toISOString().split('T')[0];
+    const { year, month } = etParts();
+    const start = startDate || `${year}-${String(month).padStart(2, '0')}-01`;
+    const end = endDate || etDateString();
 
     let query = db('property_application_history')
       .where('application_date', '>=', start)
