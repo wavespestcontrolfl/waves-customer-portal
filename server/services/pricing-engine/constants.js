@@ -333,20 +333,44 @@ const ONE_TIME = {
 // ============================================================
 // SPECIALTY SERVICES
 // ============================================================
+//
+// Pricing formula (margin-based, NOT markup-based):
+//
+//   price = cost / (1 - targetMargin)
+//
+// `marginDivisor` below is the (1 - targetMargin) value — the fraction of
+// price left over after cost. Examples:
+//   marginDivisor: 0.45  →  55% target margin  →  price = cost / 0.45
+//   marginDivisor: 0.35  →  65% target margin  →  price = cost / 0.35
+//   marginDivisor: 0.40  →  60% target margin  →  price = cost / 0.40
+//   marginDivisor: 0.55  →  45% target margin  →  price = cost / 0.55
+//
+// DO NOT interpret the divisor as a markup percentage. Margin and markup
+// are different:
+//   - markup = (price - cost) / cost       e.g., 100% markup = 50% margin
+//   - margin = (price - cost) / price      e.g., 50% margin  = 100% markup
+// A 55% target margin is NOT equivalent to a 55% markup.
+//
+// v2 engine (pricing-engine-v2.js) uses the same formula family but inlines
+// the divisor (cost / 0.45) rather than naming it. Both engines are
+// mathematically equivalent; the named constants here are preferred for
+// future maintenance.
+//
+// ============================================================
 const SPECIALTY = {
   plugging: {
     spacingRates: { '6inch': 4.00, '9inch': 1.78, '12inch': 1.00 },
     costPerPlug: 19.99 / 18, // $1.111
     plugsPerTray: 18,
     laborPerPlugs: 150, // plugs per labor unit
-    marginDivisor: 0.55,
+    marginDivisor: 0.55,  // 45% target margin
     floor: r(250),
   },
   topDressing: {
-    eighth: { formula: 'standard', floor: r(250), marginDivisor: 0.40, sandRate: 4.09, deliveryRate: 2.62 },
-    quarter: { formula: 'double', floor: r(450), marginDivisor: 0.35, sandRate: 4.09, deliveryRate: 5.24 },
+    eighth: { formula: 'standard', floor: r(250), marginDivisor: 0.40, sandRate: 4.09, deliveryRate: 2.62 },  // 60% target margin
+    quarter: { formula: 'double', floor: r(450), marginDivisor: 0.35, sandRate: 4.09, deliveryRate: 5.24 },  // 65% target margin
   },
-  dethatching: { floor: r(150), marginDivisor: 0.40, materialPer1K: 2.10 },
+  dethatching: { floor: r(150), marginDivisor: 0.40, materialPer1K: 2.10 },  // 60% target margin
   trenching: {
     dirtPerLF: r(10),
     concretePerLF: r(14),
@@ -362,13 +386,13 @@ const SPECIALTY = {
     galCost: 91.98,
     coverage: 275,  // sqft/gal
     equipCost: 17.50,
-    marginDivisor: 0.45,
+    marginDivisor: 0.45,  // 55% target margin
   },
   preSlabTermidor: {
     bottleCost: 174.72,
     coverage: 1250,
     equipCost: 15,
-    marginDivisor: 0.45,
+    marginDivisor: 0.45,  // 55% target margin
     volumeDiscounts: { '10plus': 0.85, '5plus': 0.90, none: 1.00 },
     warrantyExtended: r(200),
   },
@@ -382,7 +406,7 @@ const SPECIALTY = {
       { maxPoints: 20, cans: 4, laborHrs: 3.0, label: 'Full Perimeter' },
     ],
     floor: r(250),
-    marginDivisor: 0.45,
+    marginDivisor: 0.45,  // 55% target margin
   },
   germanRoach: {
     base: r(450),
@@ -396,7 +420,7 @@ const SPECIALTY = {
   bedBug: {
     chemical: {
       materialPerRoom: 50.42,
-      marginDivisor: 0.35,
+      marginDivisor: 0.35,  // 65% target margin
       floorBase: r(400),
       floorPerExtraRoom: r(250),
       footprintMult: { over2500: 1.10, over1800: 1.05 },
