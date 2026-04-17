@@ -49,11 +49,12 @@ When you audit a page, **always check which of these are outranking Waves** for 
 
 ## Technical baseline (what the site is built on)
 
-- WordPress-powered marketing site at wavespestcontrol.com (part of a 15-site hub-and-spoke fleet across SWFL markets and service verticals).
-- Customer portal is a separate React/Vite PWA — **not** the subject of local SEO audits unless explicitly scoped.
+- **Marketing site:** wavespestcontrol.com — Astro 6 static site on Cloudflare Pages. 436+ pages (service pages, city/area landing pages, blog). Built by Claude Code.
+- **Admin portal:** Separate React/Vite + Express/Node.js PWA on Railway — **not** the subject of local SEO audits unless explicitly scoped.
+- **Content Engine:** AI-driven content pipeline in the admin portal. Semantic SEO approach — concept clusters, entity completeness, FAQ expansion from SERP consensus, schema accuracy, freshness signals.
 - Structured data is expected on every service-area and service page: `LocalBusiness`, `Service`, `FAQPage` where applicable, `BreadcrumbList`, `Review`/`AggregateRating` where honest ratings exist.
 - Google Business Profiles: four physical service-area profiles across the SWFL footprint, each with its own tracking number. GBP categories should match the primary service of the page being audited.
-- Tracking numbers are managed in Twilio — don't recommend swapping the phone number on the page without checking which GBP/campaign it's tied to.
+- Location-aware phone numbers: 8 locations (Bradenton, Lakewood Ranch, Parrish, Ellenton, Sarasota, Venice, North Port, Port Charlotte) each with dedicated Twilio tracking numbers. Don't recommend swapping the phone number on the page without checking which GBP/campaign it's tied to.
 
 ## Tool access available to you
 
