@@ -1830,14 +1830,21 @@ function DashboardTab({ customer, onSwitchTab }) {
         backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
         borderRadius: 20, padding: '28px 24px 40px', color: '#fff',
       }}>
+        {/* Hero video — waves-hero-service.mp4 */}
+        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
+          aria-hidden="true">
+          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+        </video>
         {/* Wave motif at bottom */}
         <div style={{
-          position: 'absolute', bottom: 0, left: 0, right: 0, height: 30,
+          position: 'absolute', bottom: 0, left: 0, right: 0, height: 30, zIndex: 1,
           background: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120'%3E%3Cpath d='M0,60 C200,120 400,0 600,60 C800,120 1000,0 1200,60 L1200,120 L0,120Z' fill='%232196F3' fill-opacity='0.15'/%3E%3C/svg%3E") no-repeat bottom`,
           backgroundSize: '100% 100%',
         }} />
-        <div style={{ fontSize: 14, color: B.blueLight, fontFamily: FONTS.body }}>Hey there,</div>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: B.blueLight, fontFamily: FONTS.body }}>Hey there,</div>
         <h1 style={{
+          position: 'relative', zIndex: 1,
           fontFamily: FONTS.display, fontWeight: 400,
           fontSize: 'clamp(32px, 7vw, 44px)', color: '#fff',
           letterSpacing: '0.02em', lineHeight: 1.05,
@@ -1848,6 +1855,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         </h1>
         {tier && (
           <div style={{
+            position: 'relative', zIndex: 1,
             marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
             padding: '5px 14px', borderRadius: 24, fontSize: 13, fontWeight: 700,
             fontFamily: FONTS.heading,
@@ -1857,7 +1865,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             textShadow: '0 1px 3px rgba(0,0,0,0.3)',
           }}>🛡️ WaveGuard {customer.tier}</div>
         )}
-        <div style={{ marginTop: 12, fontSize: 13, color: '#fff', lineHeight: 1.6 }}>
+        <div style={{ position: 'relative', zIndex: 1, marginTop: 12, fontSize: 13, color: '#fff', lineHeight: 1.6 }}>
           {customer.address?.line1}, {customer.address?.city}, {customer.address?.state} {customer.address?.zip}<br/>
           <span style={{ color: B.blueLight }}>{(customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || 'Lawn'} · {customer.property?.propertySqFt?.toLocaleString()} sq ft · {customer.property?.lotSqFt?.toLocaleString()} sq ft lot</span>
         </div>

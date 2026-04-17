@@ -95,18 +95,25 @@ export default function ReviewPage() {
   return (
     <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Nunito', sans-serif" }}>
       {/* Header — brand fonts loaded globally via client/index.html */}
-      <div style={{ background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative' }}>
-        <div style={{ position: 'absolute', bottom: -2, left: 0, right: 0, height: 24 }}>
+      <div style={{ background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+        {/* Hero video — waves-hero-service.mp4 */}
+        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
+          aria-hidden="true">
+          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+        </video>
+        <div style={{ position: 'absolute', bottom: -2, left: 0, right: 0, height: 24, zIndex: 2 }}>
           <svg viewBox="0 0 1440 48" fill="none" style={{ width: '100%', height: '100%', display: 'block' }}>
             <path d="M0 24 C360 0 720 48 1080 24 C1260 12 1380 0 1440 8 L1440 48 L0 48 Z" fill={W.offWhite} />
           </svg>
         </div>
         <h1 style={{
+          position: 'relative', zIndex: 1,
           fontSize: 36, fontFamily: "'Luckiest Guy', 'Baloo 2', cursive", fontWeight: 400,
           color: W.white, letterSpacing: '0.04em', lineHeight: 1, margin: 0,
           textShadow: '0 2px 8px rgba(0,0,0,0.2)',
         }}>WAVES</h1>
-        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
       </div>
 
       <div style={{ maxWidth: 440, margin: '0 auto', padding: '0 20px 60px' }}>

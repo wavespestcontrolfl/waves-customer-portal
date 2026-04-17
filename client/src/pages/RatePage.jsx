@@ -411,8 +411,14 @@ export default function RatePage() {
 
 function Page({ children }) {
   return (
-    <div style={{ minHeight: '100dvh', background: '#097ABD', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: "'Nunito', -apple-system, sans-serif" }}>
-      <div style={{ width: '100%', padding: '22px 20px 12px', textAlign: 'center' }}>
+    <div style={{ minHeight: '100dvh', background: '#097ABD', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: "'Nunito', -apple-system, sans-serif", position: 'relative', overflow: 'hidden' }}>
+      {/* Hero video — waves-hero-service.mp4 */}
+      <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.25, zIndex: 0, pointerEvents: 'none' }}
+        aria-hidden="true">
+        <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+      </video>
+      <div style={{ position: 'relative', zIndex: 1, width: '100%', padding: '22px 20px 12px', textAlign: 'center' }}>
         <h1 style={{
           fontFamily: "'Luckiest Guy', 'Baloo 2', cursive", fontWeight: 400,
           fontSize: 36, color: '#F1F5F9', letterSpacing: '0.03em', lineHeight: 1,
@@ -422,11 +428,11 @@ function Page({ children }) {
         </h1>
         <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,.85)', letterSpacing: 1, fontStyle: 'italic', marginTop: 6 }}>Wave Goodbye to Pests!</div>
       </div>
-      <div style={{ width: 'calc(100% - 24px)', maxWidth: 420, background: '#fff', borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
+      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: '#fff', borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
         <div style={{ height: 5, background: 'linear-gradient(90deg, #C0392B, #C0392B, #F59E0B, #FFD700)' }} />
         <div style={{ padding: '28px 22px 24px' }}>{children}</div>
       </div>
-      <div style={{ textAlign: 'center', padding: '20px 16px 32px' }}>
+      <div style={{ position: 'relative', zIndex: 1, textAlign: 'center', padding: '20px 16px 32px' }}>
         <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 15, fontWeight: 800, color: 'rgba(255,255,255,.85)' }}>Waves <span style={{ color: '#C0392B' }}>Pest Control</span></div>
         <div style={{ fontSize: 11, color: 'rgba(255,255,255,.5)', marginTop: 2, fontWeight: 600 }}>Serving Southwest Florida</div>
       </div>

@@ -318,14 +318,21 @@ export default function OnboardingPage() {
       backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(180deg, ${B.blueDark} 0%, #1976D2 100%)`,
       backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
       fontFamily: FONTS.body,
+      position: 'relative', overflow: 'hidden',
     }}>
+      {/* Hero video — waves-hero-service.mp4 */}
+      <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.25, zIndex: 0, pointerEvents: 'none' }}
+        aria-hidden="true">
+        <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+      </video>
       {/* Header */}
-      <div style={{ padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ position: 'relative', zIndex: 1, padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 8 }}>
         <img src="/waves-logo.png" alt="" style={{ height: 28 }} />
         <div style={{ fontSize: 12, fontWeight: 700, color: B.blueLight, fontFamily: FONTS.heading }}>WAVES LAWN & PEST</div>
       </div>
 
-      <ProgressDots current={screen} total={4} />
+      <div style={{ position: 'relative', zIndex: 1 }}><ProgressDots current={screen} total={4} /></div>
 
       {/* Save toast */}
       {saved && (
@@ -336,7 +343,7 @@ export default function OnboardingPage() {
         }}>Saved ✓</div>
       )}
 
-      <div style={{ maxWidth: 480, margin: '0 auto', padding: '0 20px 40px' }}>
+      <div style={{ position: 'relative', zIndex: 1, maxWidth: 480, margin: '0 auto', padding: '0 20px 40px' }}>
 
         {/* SCREEN 0 — Welcome */}
         {screen === 0 && (

@@ -1134,11 +1134,18 @@ export default function EstimateViewPage() {
         backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
         backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
         padding: '28px 20px 48px', textAlign: 'center', color: '#fff',
-        position: 'relative',
+        position: 'relative', overflow: 'hidden',
       }}>
-        <img src="/waves-logo.png" alt="Waves" style={{ height: 44, marginBottom: 12 }} />
+        {/* Hero video — waves-hero-service.mp4 */}
+        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
+          aria-hidden="true">
+          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+        </video>
+        <img src="/waves-logo.png" alt="Waves" style={{ position: 'relative', zIndex: 1, height: 44, marginBottom: 12 }} />
 
         <h1 style={{
+          position: 'relative', zIndex: 1,
           fontFamily: FONTS.display, fontWeight: 400,
           fontSize: 'clamp(32px, 6.5vw, 44px)', color: '#fff',
           letterSpacing: '0.02em', lineHeight: 1.05,
@@ -1148,17 +1155,17 @@ export default function EstimateViewPage() {
           Hey {firstName}, here's your custom plan.
         </h1>
 
-        <div style={{ fontSize: 14, color: B.blueLight, marginTop: 8, fontWeight: 600 }}>{(e.address || '').replace(/, USA$/i, '')}</div>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: B.blueLight, marginTop: 8, fontWeight: 600 }}>{(e.address || '').replace(/, USA$/i, '')}</div>
 
         {(property.homeSqFt || property.lotSqFt) && (
-          <div style={{ fontSize: 13, color: B.blueLight, marginTop: 4 }}>
+          <div style={{ position: 'relative', zIndex: 1, fontSize: 13, color: B.blueLight, marginTop: 4 }}>
             {property.homeSqFt ? `${Number(property.homeSqFt).toLocaleString()} sq ft home` : ''}
             {property.homeSqFt && property.lotSqFt ? ' · ' : ''}
             {property.lotSqFt ? `${Number(property.lotSqFt).toLocaleString()} sq ft lot` : ''}
           </div>
         )}
 
-        <div style={{ marginTop: 16 }}>
+        <div style={{ position: 'relative', zIndex: 1, marginTop: 16 }}>
           {recurring.savings > 0 && preDiscountMonthly > 0 && (
             <div style={{ fontSize: 16, color: '#ffffff88', textDecoration: 'line-through', fontFamily: FONTS.ui }}>
               {fmt(preDiscountMonthly)}/mo
@@ -1170,21 +1177,22 @@ export default function EstimateViewPage() {
         </div>
 
         {recurring.savings > 0 && e.tier && (
-          <div style={{ fontSize: 14, color: B.green, fontWeight: 700, marginTop: 6 }}>
+          <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: B.green, fontWeight: 700, marginTop: 6 }}>
             You save {fmt(recurring.savings / 12)}/mo with {e.tier}
           </div>
         )}
 
-        <div style={{ fontSize: 13, color: '#ffffffcc', marginTop: 6 }}>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 13, color: '#ffffffcc', marginTop: 6 }}>
           That's just ${dailyCost}/day for complete home protection
         </div>
 
-        <div style={{ fontSize: 12, color: '#ffffffaa', marginTop: 8, fontStyle: 'italic', fontFamily: FONTS.body }}>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 12, color: '#ffffffaa', marginTop: 8, fontStyle: 'italic', fontFamily: FONTS.body }}>
           Try us risk-free — 90-day money-back guarantee
         </div>
 
         {e.tier && (
           <div style={{
+            position: 'relative', zIndex: 1,
             display: 'inline-block', marginTop: 12, padding: '6px 16px', borderRadius: 20,
             background: `${B.yellow}25`, color: B.yellow, fontSize: 13, fontWeight: 700,
             fontFamily: FONTS.heading,

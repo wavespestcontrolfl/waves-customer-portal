@@ -436,8 +436,14 @@ export default function PayPage() {
       {/* Brand fonts loaded globally via client/index.html */}
 
       {/* ── Header ── */}
-      <div style={{ background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: isMobile ? '24px 16px' : '32px 24px', textAlign: 'center' }}>
-        <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: isMobile ? 40 : 48, maxWidth: '80%', objectFit: 'contain' }} />
+      <div style={{ position: 'relative', overflow: 'hidden', background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: isMobile ? '24px 16px' : '32px 24px', textAlign: 'center' }}>
+        {/* Hero video — waves-hero-service.mp4 */}
+        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
+          aria-hidden="true">
+          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+        </video>
+        <img src="/waves-logo.png" alt="Waves Pest Control" style={{ position: 'relative', zIndex: 1, height: isMobile ? 40 : 48, maxWidth: '80%', objectFit: 'contain' }} />
       </div>
 
       <div style={{ maxWidth: 560, margin: '0 auto', padding: isMobile ? '0 12px 40px' : '0 16px 60px' }}>

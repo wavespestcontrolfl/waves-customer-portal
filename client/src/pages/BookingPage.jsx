@@ -152,13 +152,21 @@ export default function BookingPage() {
 
       {/* ── Header ── */}
       <div style={{
+        position: 'relative', overflow: 'hidden',
         background: BRAND.navy,
         padding: "20px 24px",
         display: "flex",
         alignItems: "center",
         gap: 12,
       }}>
+        {/* Hero video — waves-hero-service.mp4 */}
+        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
+          aria-hidden="true">
+          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+        </video>
         <div style={{
+          position: 'relative', zIndex: 1,
           width: 36, height: 36, borderRadius: "50%",
           background: BRAND.teal, display: "flex",
           alignItems: "center", justifyContent: "center",
@@ -168,7 +176,7 @@ export default function BookingPage() {
             <path d="M8 12c1.5-3 3-4.5 4.5-4.5S15 9 16.5 12c-1.5 3-3 4.5-4.5 4.5S9.5 15 8 12z"/>
           </svg>
         </div>
-        <div>
+        <div style={{ position: 'relative', zIndex: 1 }}>
           <h1 style={{
             color: "#fff",
             fontFamily: "'Luckiest Guy', 'Baloo 2', cursive",

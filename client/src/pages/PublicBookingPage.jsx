@@ -204,13 +204,20 @@ export default function PublicBookingPage() {
       `}</style>
 
       {/* Header */}
-      <div style={{ background: BRAND.navy, padding: '18px 24px', display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ position: 'relative', overflow: 'hidden', background: BRAND.navy, padding: '18px 24px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        {/* Hero video — waves-hero-service.mp4 */}
+        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
+          aria-hidden="true">
+          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+        </video>
         <div style={{
+          position: 'relative', zIndex: 1,
           width: 36, height: 36, borderRadius: '50%', background: BRAND.teal,
           display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff',
           fontWeight: 700, fontSize: 16,
         }}>W</div>
-        <div>
+        <div style={{ position: 'relative', zIndex: 1 }}>
           <h1 style={{
             color: '#fff',
             fontFamily: "'Luckiest Guy', 'Baloo 2', cursive",

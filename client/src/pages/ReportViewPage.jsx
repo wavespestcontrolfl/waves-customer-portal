@@ -38,11 +38,18 @@ export default function ReportViewPage() {
     <div style={{ minHeight: '100vh', background: B.offWhite, fontFamily: FONTS.body }}>
       {/* Header */}
       <div style={{
+        position: 'relative', overflow: 'hidden',
         background: B.blueDark, padding: '14px 20px',
         backgroundImage: HALFTONE_PATTERN, backgroundSize: HALFTONE_SIZE,
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {/* Hero video — waves-hero-service.mp4 */}
+        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
+          aria-hidden="true">
+          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
+        </video>
+        <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', gap: 10 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 28 }} />
           <div>
             <h1 style={{
@@ -54,7 +61,8 @@ export default function ReportViewPage() {
           </div>
         </div>
         <a href={pdfUrl} download style={{
-          ...BUTTON_BASE, padding: '0 18px', height: 36, fontSize: 13,
+          ...BUTTON_BASE, position: 'relative', zIndex: 1,
+          padding: '0 18px', height: 36, fontSize: 13,
           borderRadius: 999, background: B.yellow, color: B.blueDeeper,
           textDecoration: 'none', fontWeight: 800, display: 'inline-flex',
           alignItems: 'center',
