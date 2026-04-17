@@ -12,19 +12,26 @@ if (!process.env.DATABASE_URL) {
   if (process.env.DATABASE_URL) console.log('[knexfile] Resolved DATABASE_URL from Railway Postgres vars');
 }
 
-module.exports = {
-  development: {
-    client: 'pg',
-    connection: process.env.DATABASE_URL,
-    pool: { min: 2, max: 10 },
-    migrations: {
-      directory: './models/migrations',
-      tableName: 'knex_migrations',
-    },
-    seeds: {
-      directory: '../scripts/seeds',
-    },
+const development = {
+  client: 'pg',
+  connection: process.env.DATABASE_URL,
+  pool: { min: 2, max: 10 },
+  migrations: {
+    directory: './models/migrations',
+    tableName: 'knex_migrations',
   },
+  seeds: {
+    directory: '../scripts/seeds',
+  },
+};
+
+module.exports = {
+  development,
+
+  // Jest sets NODE_ENV=test automatically; without this alias, knex(undefined)
+  // throws and the LOCAL=1 regression harness falls back to engine defaults
+  // silently. See TODO.md — "LOCAL=1 regression harness silently falls back".
+  test: development,
 
   production: {
     client: 'pg',
