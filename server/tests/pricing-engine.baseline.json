@@ -1,9 +1,9 @@
 {
   "baseline_single_family_zone_a_quarterly_pest_enhanced_lawn": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1047.6,
-      "recurringMonthlyAfterDiscount": 87.3,
-      "year1Total": 1048
+      "recurringAnnualAfterDiscount": 1083.6,
+      "recurringMonthlyAfterDiscount": 90.3,
+      "year1Total": 1084
     },
     "waveGuard": {
       "tier": "silver",
@@ -12,8 +12,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 468,
-        "monthly": 39
+        "annual": 508,
+        "monthly": 42.33
       },
       "lawn_care": {
         "annual": 696,
@@ -23,9 +23,9 @@
   },
   "zone_b_monthly_pest_bermuda_premium": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2358.9,
-      "recurringMonthlyAfterDiscount": 196.57,
-      "year1Total": 2359
+      "recurringAnnualAfterDiscount": 2551.5,
+      "recurringMonthlyAfterDiscount": 212.63,
+      "year1Total": 2552
     },
     "waveGuard": {
       "tier": "silver",
@@ -34,8 +34,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1462,
-        "monthly": 121.83
+        "annual": 1676,
+        "monthly": 139.67
       },
       "lawn_care": {
         "annual": 1159,
@@ -45,9 +45,9 @@
   },
   "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
     "summary": {
-      "recurringAnnualAfterDiscount": 3731.5,
-      "recurringMonthlyAfterDiscount": 310.96,
-      "year1Total": 3732
+      "recurringAnnualAfterDiscount": 3777.4,
+      "recurringMonthlyAfterDiscount": 314.78,
+      "year1Total": 3777
     },
     "waveGuard": {
       "tier": "gold",
@@ -56,8 +56,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 759,
-        "monthly": 63.25
+        "annual": 813,
+        "monthly": 67.75
       },
       "lawn_care": {
         "annual": 712,
@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 8732.8,
-      "recurringMonthlyAfterDiscount": 727.73,
-      "year1Total": 8733
+      "recurringAnnualAfterDiscount": 8915.2,
+      "recurringMonthlyAfterDiscount": 742.93,
+      "year1Total": 8915
     },
     "waveGuard": {
       "tier": "platinum",
@@ -122,8 +122,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1560,
-        "monthly": 130
+        "annual": 1788,
+        "monthly": 149
       },
       "lawn_care": {
         "annual": 1344,
@@ -177,9 +177,9 @@
   },
   "platinum_bundle_4_qualifying_services_zone_a": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2821.6,
-      "recurringMonthlyAfterDiscount": 235.13,
-      "year1Total": 2822
+      "recurringAnnualAfterDiscount": 2853.6,
+      "recurringMonthlyAfterDiscount": 237.8,
+      "year1Total": 2854
     },
     "waveGuard": {
       "tier": "platinum",
@@ -188,8 +188,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 468,
-        "monthly": 39
+        "annual": 508,
+        "monthly": 42.33
       },
       "lawn_care": {
         "annual": 696,
@@ -209,7 +209,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 0,
       "recurringMonthlyAfterDiscount": 0,
-      "year1Total": 304
+      "year1Total": 330
     },
     "waveGuard": {
       "tier": "bronze",
@@ -239,7 +239,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 0,
       "recurringMonthlyAfterDiscount": 0,
-      "year1Total": 152
+      "year1Total": 165
     },
     "waveGuard": {
       "tier": "bronze",
@@ -252,9 +252,9 @@
   },
   "baseline_unknown_zone_minimal": {
     "summary": {
-      "recurringAnnualAfterDiscount": 468,
-      "recurringMonthlyAfterDiscount": 39,
-      "year1Total": 468
+      "recurringAnnualAfterDiscount": 508,
+      "recurringMonthlyAfterDiscount": 42.33,
+      "year1Total": 508
     },
     "waveGuard": {
       "tier": "bronze",
@@ -263,8 +263,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 468,
-        "monthly": 39
+        "annual": 508,
+        "monthly": 42.33
       }
     }
   }
