@@ -19,7 +19,8 @@
     "test": "cd server && npm test",
     "test:contracts": "node server/contract-tests/index.js",
     "test:contracts:list": "node server/contract-tests/index.js --list",
-    "models:check": "node scripts/check-models.js"
+    "models:check": "node scripts/check-models.js",
+    "seed:pricing": "node scripts/seed-local-pricing.js"
   },
   "engines": {
     "node": ">=20"
