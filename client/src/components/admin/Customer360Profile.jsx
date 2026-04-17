@@ -247,6 +247,12 @@ export default function Customer360Profile({ customerId, onClose }) {
             </div>
             <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', padding: '0 4px', lineHeight: 1 }} aria-label="Close">x</button>
           </div>
+          {(c.phone || c.email) && (
+            <div className="c360-header-meta" style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: D.muted, marginBottom: 6 }}>
+              {c.phone && <a href={`tel:${c.phone}`} style={{ color: D.teal, textDecoration: 'none', fontFamily: MONO }}>{c.phone}</a>}
+              {c.email && <a href={`mailto:${c.email}`} style={{ color: D.teal, textDecoration: 'none' }}>{c.email}</a>}
+            </div>
+          )}
           <div className="c360-header-meta" style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: D.muted, marginBottom: 10 }}>
             <span>{c.address?.line1}, {c.address?.city}, {c.address?.state} {c.address?.zip}</span>
             <span style={{ color: D.green, fontFamily: MONO }}>{fmtCurrency(c.monthlyRate)}/mo</span>
