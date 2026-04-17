@@ -12,7 +12,7 @@ const GLOBAL = {
   LABOR_RATE: 35.00,          // $/hr loaded (wages + benefits + WC + vehicle + insurance)
   DRIVE_TIME: 20,             // minutes per visit
   ADMIN_ANNUAL: 51,           // $/service/yr (billing, scheduling, CRM)
-  MARGIN_FLOOR: 0.35,         // 35% minimum contribution margin
+  MARGIN_FLOOR: 0.35,         // 35% minimum contribution margin. TODO(v4.4): document rationale for 35% threshold (vs 30%/40%) — the single most load-bearing policy value in the engine.
   MARGIN_TARGET_TS: 0.43,     // Tree & Shrub conservative target
   CONDITIONAL_CEILING: 60,    // $/property/yr max conditional material before reprice
 };
@@ -20,6 +20,8 @@ const GLOBAL = {
 // ── Zone Multipliers ──────────────────────────────────────────
 // Must match modifiers.zoneMultiplier(). Startup assertion in
 // estimate-engine.js verifies alignment at module load.
+// Session 3 aligned v1, v2, and DB to these values (changelog id=3).
+// Prior v1 had Zone C at 1.10 (vs 1.12 in v2/DB) and was missing Zone D entirely.
 const ZONES = {
   A: { name: 'Manatee/Sarasota core', multiplier: 1.00 },
   B: { name: 'Extended service area', multiplier: 1.05 },
@@ -29,6 +31,9 @@ const ZONES = {
 };
 
 // ── Urgency Multipliers ──────────────────────────────────────
+// TODO(v4.4): document rationale for multiplier values (why 1.25/1.50
+// standard, 1.50/2.00 afterHours — not 1.20/1.40 or 1.30/1.60). These
+// are customer-facing policy values deserving written justification.
 const URGENCY = {
   NONE:            { standard: 1.00, afterHours: null },
   SOON:            { standard: 1.25, afterHours: 1.50 },
@@ -76,6 +81,8 @@ const TURF_FACTORS = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33
 // PEST CONTROL
 // ============================================================
 const PEST = {
+  // TODO(v4.4): document rationale for base/floor values (market analysis,
+  // competitor comparison, or historical anchor). v4.3 operator baseline.
   base: r(117),
   floor: r(89),
   footprintBrackets: [
@@ -102,7 +109,8 @@ const PEST = {
   },
   roachModifier: { german: 0.25, regular: 0.10, none: 0 },
   frequencyDiscounts: {
-    v1: { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 },
+    // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
+    v1: { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 },  //  8% / 15% off per-visit for higher cadence
     v2: { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 },  // Was 0.85/0.70. Test for one quarter.
   },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
@@ -205,13 +213,15 @@ const TREE_SHRUB = {
     premium:   { freq: 12, floor: r(80), label: 'Premium' },
   },
   accessMinutes: { easy: 0, moderate: 8, difficult: 15 },
-  marginTarget: 0.43,
+  marginTarget: 0.43,  // TODO(v4.4): document why Tree & Shrub targets 43% vs the 35% global MARGIN_FLOOR.
 };
 
 // ============================================================
 // PALM INJECTION — Tiered pricing (updated per vendor cost audit)
 // ============================================================
 const PALM = {
+  // TODO(v4.4): document per-palm pricing methodology (cost-plus margin,
+  // competitor benchmark, or historical anchor). v4.3 operator baseline.
   treatmentTypes: {
     nutrition:   { pricePerPalm: r(35),  label: 'Nutrition Only', appsPerYear: 2 },
     insecticide: { pricePerPalm: r(45),  label: 'Preventive Insecticide', appsPerYear: 2 },
@@ -268,6 +278,8 @@ const TERMITE = {
     trelona: { stationCost: 24, laborMaterial: 5.25, misc: 0.75, label: 'Trelona (Termite)' },
   },
   installMultiplier: 1.75,  // Updated from 1.45 per margin audit (was only 11% margin)
+  // TODO(v4.4): document monitoring subscription pricing policy
+  // (basic=$35, premier=$65 MRR — what each tier includes, why these values).
   monitoring: {
     basic:   { monthly: r(35), label: 'Basic' },
     premier: { monthly: r(65), label: 'Premier' },
@@ -283,6 +295,8 @@ const RODENT = {
     lot_20000plus: 2, lot_12000plus: 1,
     nearWater: 1, trees_heavy: 1,
   },
+  // TODO(v4.4): document monthly bait subscription pricing policy
+  // (small=$75, medium=$89, large=$109 — station count × service frequency justification).
   baitMonthly: {
     small:  { maxScore: 1, monthly: r(75),  label: 'Small' },
     medium: { maxScore: 2, monthly: r(89),  label: 'Medium' },
@@ -309,6 +323,9 @@ const RODENT = {
 // ONE-TIME SERVICES
 // ============================================================
 const ONE_TIME = {
+  // TODO(v4.4): document one-time pricing policy — the 1.30x multiplier on
+  // recurring rates and floor values. These are the minimum prices customers
+  // see for standalone service without a WaveGuard bundle.
   pest: {
     multiplier: 1.30,
     floor: r(150),
