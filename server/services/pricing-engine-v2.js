@@ -1073,7 +1073,7 @@ function calcBoraCare(atticSqft, applyOT) {
 // PRE-SLAB
 // ─────────────────────────────────────────────
 function calcPreslab(slabSqft, warranty, volume, applyOT) {
-  const PS_BTL = 174.72, PS_COV = 1250, PS_EQUIP = 15;
+  const PS_BTL = 152.10, PS_COV = 1250, PS_EQUIP = 15;
   const bottles = Math.max(1, Math.ceil(slabSqft / PS_COV));
   const lhr = Math.min(5, Math.max(1, 0.5 + slabSqft / 1500));
   const cost = bottles * PS_BTL + lhr * LABOR_RATE + PS_EQUIP;

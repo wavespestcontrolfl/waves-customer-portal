@@ -667,7 +667,7 @@ export function calculateEstimate(inputs) {
   /* ── Pre-Slab Termidor ───────────────────────────────────── */
   if (svcPreslab && psSqft > 0) {
     hasOT = true;
-    const PS_BTL = 174.72, PS_COV = 1250, PS_EQUIP = 15;
+    const PS_BTL = 152.10, PS_COV = 1250, PS_EQUIP = 15;
     const btl = Math.max(1, Math.ceil(psSqft / PS_COV));
     const lhr = Math.min(5, Math.max(1, 0.5 + psSqft / 1500));
     const cost = btl * PS_BTL + lhr * LABOR + PS_EQUIP;

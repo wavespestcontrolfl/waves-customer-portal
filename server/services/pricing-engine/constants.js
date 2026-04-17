@@ -392,7 +392,7 @@ const SPECIALTY = {
     marginDivisor: 0.45,  // 55% target margin
   },
   preSlabTermidor: {
-    bottleCost: 174.72,
+    bottleCost: 152.10,
     coverage: 1250,
     equipCost: 15,
     marginDivisor: 0.45,  // 55% target margin
