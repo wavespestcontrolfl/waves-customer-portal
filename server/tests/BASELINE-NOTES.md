@@ -60,6 +60,60 @@ See pricing_changelog id=5 for full rationale.
 
 ---
 
+## Session 6 intentional baseline updates (2026-04-17)
+
+Discount engine rewritten from stacked/capped to single-source. Four cases in the v1 suite drifted — all explained, all intentional, all documented in pricing_changelog id=6.
+
+### The larger story: frequency-stack double-count
+
+Pre-Session-6 `estimate-engine.js` passed `frequencyDiscount: 1 - item.freqMult` into `getEffectiveDiscount()`, where it was stacked multiplicatively onto the WaveGuard tier:
+
+```js
+discountStack = 1 - (1 - discountStack) * (1 - frequencyDiscount);
+```
+
+But `freqMult` is already baked into the per-visit price (`perApp = basePrice * freqMult`), which rolls up into `annual`. The "frequency discount" in the stack was double-counting the bulk benefit — customers on monthly/bimonthly pest were effectively getting the frequency reduction twice. Session 6 removes this. It's strictly a correctness fix, not a policy change.
+
+Affected pest frequencies (v1 multipliers):
+- `quarterly` — freqMult 1.00, stack contribution 0% → no behavior change
+- `bimonthly` — freqMult 0.92, stack contribution 8% → small price ↑ post-fix
+- `monthly` — freqMult 0.85, stack contribution 15% → larger price ↑ post-fix
+
+The composite cap (0.25) was NOT engaging in any regression case — it was effectively dead code. The real behavioral change is the frequency-stack removal.
+
+### Per-case diffs
+
+| Case # | Name | Tier | Old total | New total | Δ | Cause |
+|---|---|---|---|---|---|---|
+| 2 | `zone_b_monthly_pest_bermuda_premium` | Silver | $2,161.53 | $2,358.90 | **+$197.37** | Monthly-pest frequency double-count removed. Pest line went from effective 23.5% to 10% (`1 − 0.9·0.85 = 0.235` → `0.10`). Cap not engaged. |
+| 3 | `zone_c_bimonthly_pest_zoysia_standard_treeshrub` | Gold | $3,679.89 | $3,731.50 | **+$51.61** | Bimonthly-pest frequency double-count removed. Pest line went from effective 21.8% to 15% (`1 − 0.85·0.92 = 0.218` → `0.15`). Cap not engaged. |
+| 6 | `edge_large_footprint_5500sf_platinum_bundle` | Platinum | $8,722.00 | $8,732.80 | **+$10.80** | Compound: Platinum 18→20 pushes total ↓; monthly-pest frequency removal pushes ↑; lawn-Enhanced cap removal pushes ↓. Frequency removal dominates slightly. |
+| 9 | `platinum_bundle_4_qualifying_services_zone_a` | Platinum | $2,856.40 | $2,821.60 | **−$34.80** | Platinum 18→20 + lawn-Enhanced cap removed. Lawn Enhanced now gets the full 20% (was capped at 15%). Quarterly pest → no frequency-stack effect. |
+
+### Math reconciliation for Cases 2 and 3
+
+Line items (pre-discount annuals) are byte-identical pre/post Session 6 — pricing layer unchanged. Diffs live entirely in the discount application layer.
+
+Case 2 (Silver monthly): `1462·(1−x) + 1159·0.90 = 2161.53` ⇒ `x = 0.2350`. Matches old stack exactly: `1 − (1−0.10)(1−0.15) = 0.235`. New code: `0.10` flat.
+
+Case 3 (Gold bimonthly): `759·(1−x) + (712+2919)·0.85 = 3679.89` ⇒ `x = 0.2180`. Matches old stack exactly: `1 − (1−0.15)(1−0.08) = 0.218`. New code: `0.15` flat.
+
+### Customer impact (estimated, not precise)
+
+Intelligence Bar tools don't surface `scheduled_services.recurring_pattern`, so exact count requires psql-direct — skipped as precision wouldn't change the decision.
+
+Tool-visible counts: 692 total active records, but only 5 have any WaveGuard tier and only 3 have any pest service history populated. Vast majority are untagged Square imports — they'll see the new prices on their next re-quote, not a change from existing billing.
+
+Best estimate: ~20 real recurring pest customers potentially affected by the frequency-stack removal, at ~$50–$200/year price increase each. Aggregate impact **~$3K/year**, probably less. Silver monthly pest is the most-affected segment (~+13% on pest line).
+
+### Cases unaffected
+
+Cases 1, 4, 5, 7, 8, 10, 11, 12, 13 byte-identical pre/post Session 6. All use quarterly pest (freqMult 1.00 → zero stack contribution) or no pest at all, so none exercised the double-count path. Line-item `annual` values are identical across all 13 cases, confirming Session 6 is a pure discount-layer change with no pricing-layer drift.
+
+See pricing_changelog id=6 for the full rationale.
+
+---
+
 ## Governance note
 
 Discovering prod Platinum at 20% instead of the expected 18% is a governance signal: either docs drifted from code, or live admin-UI edits bypassed the changelog. Going forward (post v4.3 ship), every pricing change — including manual admin-UI edits — must land a `pricing_changelog` row with rationale. Session 9's approval-queue-to-pricing-config wiring automates this for cost changes; rule and discount changes made manually still need manual changelog entries.

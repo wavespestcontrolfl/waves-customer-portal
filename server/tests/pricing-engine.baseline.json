@@ -23,9 +23,9 @@
   },
   "zone_b_monthly_pest_bermuda_premium": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2161.53,
-      "recurringMonthlyAfterDiscount": 180.13,
-      "year1Total": 2162
+      "recurringAnnualAfterDiscount": 2358.9,
+      "recurringMonthlyAfterDiscount": 196.57,
+      "year1Total": 2359
     },
     "waveGuard": {
       "tier": "silver",
@@ -45,9 +45,9 @@
   },
   "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
     "summary": {
-      "recurringAnnualAfterDiscount": 3679.89,
-      "recurringMonthlyAfterDiscount": 306.66,
-      "year1Total": 3680
+      "recurringAnnualAfterDiscount": 3731.5,
+      "recurringMonthlyAfterDiscount": 310.96,
+      "year1Total": 3732
     },
     "waveGuard": {
       "tier": "gold",
@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 8722,
-      "recurringMonthlyAfterDiscount": 726.83,
-      "year1Total": 8722
+      "recurringAnnualAfterDiscount": 8732.8,
+      "recurringMonthlyAfterDiscount": 727.73,
+      "year1Total": 8733
     },
     "waveGuard": {
       "tier": "platinum",
@@ -177,9 +177,9 @@
   },
   "platinum_bundle_4_qualifying_services_zone_a": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2856.4,
-      "recurringMonthlyAfterDiscount": 238.03,
-      "year1Total": 2856
+      "recurringAnnualAfterDiscount": 2821.6,
+      "recurringMonthlyAfterDiscount": 235.13,
+      "year1Total": 2822
     },
     "waveGuard": {
       "tier": "platinum",
