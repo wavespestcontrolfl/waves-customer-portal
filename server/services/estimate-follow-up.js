@@ -128,7 +128,7 @@ const EstimateFollowUp = {
         try {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const expDate = new Date(est.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+          const expDate = new Date(est.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
           const body = await renderTemplate('estimate_followup_expiring',
             { first_name: firstName, estimate_url: url, expires_at: expDate },
             `Hi ${firstName}! Just a heads up — your Waves Pest Control estimate expires on ${expDate}.\n\n${url}\n\nLet us know if you'd like to move forward! (941) 318-7612 🌊`

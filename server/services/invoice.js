@@ -238,9 +238,17 @@ const InvoiceService = {
     let formattedDate = '';
     if (invoice.service_date) {
       try {
-        formattedDate = new Date(invoice.service_date + 'T12:00:00').toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
-        });
+        // Knex returns DATE as a Date object (UTC midnight). Avoid the broken
+        // `date + 'T12:00:00'` string concat and always format in ET.
+        const d = invoice.service_date instanceof Date
+          ? invoice.service_date
+          : new Date(invoice.service_date + 'T12:00:00');
+        if (!isNaN(d.getTime())) {
+          formattedDate = d.toLocaleDateString('en-US', {
+            weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+            timeZone: 'America/New_York',
+          });
+        }
       } catch { formattedDate = ''; }
     }
 

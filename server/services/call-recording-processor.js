@@ -23,6 +23,7 @@ function capitalizeName(name) {
 const TwilioService = require('./twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
+const { parseETDateTime, formatETDate, formatETTime } = require('../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -115,7 +116,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "zip": "string or null",
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
-  "preferred_date_time": "the specific date AND time confirmed, or null",
+  "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
   "is_voicemail": true/false,
   "is_spam": true/false,
   "sentiment": "positive/neutral/negative/frustrated",
@@ -467,10 +468,10 @@ const CallRecordingProcessor = {
           // Parse separate date/time from preferred_date_time for template compatibility
           let parsedDate = '', parsedTime = '';
           try {
-            const dt = new Date(extracted.preferred_date_time);
+            const dt = parseETDateTime(extracted.preferred_date_time);
             if (!isNaN(dt.getTime())) {
-              parsedDate = dt.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric' });
-              parsedTime = dt.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+              parsedDate = formatETDate(dt);
+              parsedTime = formatETTime(dt);
             } else {
               // Fallback: extract from string
               const dateMatch = extracted.preferred_date_time.match(/(\w+day,?\s+\w+\s+\d+|\w+\s+\d+)/);
@@ -504,10 +505,10 @@ const CallRecordingProcessor = {
 
           // Create the scheduled_services record so it appears on the schedule
           try {
-            const parsedDate = new Date(extracted.preferred_date_time);
+            const parsedDate = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
             if (!isNaN(parsedDate.getTime())) {
-              // Use Eastern Time for scheduling (server may be UTC)
+              // Render the absolute moment back into ET wall-clock components.
               const etOptions = { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false };
               const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(parsedDate);
               scheduledDate = etDate; // YYYY-MM-DD in Eastern

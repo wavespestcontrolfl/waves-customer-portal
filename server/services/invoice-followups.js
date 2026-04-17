@@ -201,7 +201,7 @@ async function fireStep(row) {
 
   const amount = parseFloat(row.total || 0).toFixed(2);
   const serviceDate = row.service_date
-    ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+    ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
     : '';
 
   const body = await resolveBody(step, {

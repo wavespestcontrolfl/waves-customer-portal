@@ -15,8 +15,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-
-const TZ = 'America/New_York';
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 
 /**
  * Render an SMS body from sms_templates, falling back to the provided default
@@ -33,19 +32,11 @@ async function renderTemplate(templateKey, vars, fallback) {
   return fallback;
 }
 
-// ── Date formatting helpers ──
-
-function formatDay(dt) {
-  return dt.toLocaleDateString('en-US', { weekday: 'long', timeZone: TZ });
-}
-
-function formatDate(dt) {
-  return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: TZ });
-}
-
-function formatTime(dt) {
-  return dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TZ });
-}
+// Date formatting helpers live in utils/datetime-et.js — re-aliased here to
+// keep the existing call sites below unchanged.
+const formatDay = formatETDay;
+const formatDate = formatETDate;
+const formatTime = formatETTime;
 
 // ── Landline detection ──
 
@@ -152,7 +143,7 @@ const AppointmentReminders = {
         return existing;
       }
 
-      const apptTime = new Date(appointmentTime);
+      const apptTime = parseETDateTime(appointmentTime);
       if (isNaN(apptTime.getTime())) {
         logger.error(`[appt-remind] Invalid appointment time: ${appointmentTime}`);
         return null;
@@ -352,7 +343,7 @@ const AppointmentReminders = {
         return null;
       }
 
-      const newApptTime = new Date(newTime);
+      const newApptTime = parseETDateTime(newTime);
       if (isNaN(newApptTime.getTime())) {
         logger.error(`[appt-remind] Reschedule: invalid time ${newTime}`);
         return null;
