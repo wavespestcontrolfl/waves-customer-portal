@@ -225,10 +225,11 @@ export default function RatePage() {
           </div>
           <button onClick={handleHighlightsNext} disabled={submitting} style={{
             display: 'inline-flex', alignItems: 'center', gap: 10, padding: '14px 28px',
-            background: '#C0392B', color: '#fff', border: 'none', borderRadius: 12,
-            fontSize: 16, fontWeight: 800, cursor: 'pointer', boxShadow: '0 4px 14px rgba(232,93,58,.35)',
+            background: '#FFD700', color: '#04395E', border: 'none', borderRadius: 9999,
+            fontSize: 16, fontWeight: 800, cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
+            fontFamily: "'Baloo 2', 'Nunito', sans-serif",
           }}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="white"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#04395E"/></svg>
             {submitting ? 'Sending...' : 'Leave a Google Review'}
           </button>
           <button onClick={() => { setScreen('success'); handleSubmit(); }} style={{ display: 'block', margin: '14px auto 0', fontSize: 13, color: '#64748B', background: 'none', border: 'none', cursor: 'pointer' }}>Skip for now</button>
@@ -330,9 +331,10 @@ export default function RatePage() {
               </div>
 
               <button onClick={handleGoToGoogle} style={{
-                width: '100%', padding: 14, border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 800,
-                color: '#fff', cursor: 'pointer', background: '#C0392B',
-                boxShadow: '0 4px 14px rgba(232,93,58,.35)',
+                width: '100%', padding: 14, border: 'none', borderRadius: 9999, fontSize: 16, fontWeight: 800,
+                color: '#04395E', cursor: 'pointer', background: '#FFD700',
+                boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
+                fontFamily: "'Baloo 2', 'Nunito', sans-serif",
               }}>
                 Go to Google Reviews
               </button>
@@ -374,9 +376,10 @@ export default function RatePage() {
             fontSize: 15, color: '#04395E', resize: 'vertical', outline: 'none', boxSizing: 'border-box',
           }} />
           <button onClick={handleSubmit} disabled={submitting} style={{
-            width: '100%', padding: 14, border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 800,
-            color: '#fff', cursor: 'pointer', marginTop: 12,
-            background: score <= 3 ? '#C0392B' : '#C0392B',
+            width: '100%', padding: 14, border: 'none', borderRadius: 9999, fontSize: 16, fontWeight: 800,
+            color: '#04395E', cursor: 'pointer', marginTop: 12,
+            background: '#FFD700',
+            fontFamily: "'Baloo 2', 'Nunito', sans-serif",
           }}>{submitting ? 'Sending...' : 'Send Feedback'}</button>
         </div>
       )}

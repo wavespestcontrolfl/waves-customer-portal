@@ -284,7 +284,7 @@ export default function OnboardingPage() {
       <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
         <div style={{ fontSize: 32 }}>😕</div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>{error}</div>
-        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 20px', background: B.red, color: '#fff', textDecoration: 'none', display: 'inline-flex' }}>Call (941) 318-7612</a>
+        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 318-7612</a>
       </div>
     </div>
   );
@@ -443,7 +443,7 @@ export default function OnboardingPage() {
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                     {!svc.confirmed && !data.status.serviceConfirmed ? (
                       <>
-                        <button onClick={handleConfirm} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: B.red, color: '#fff' }}>✅ Confirm</button>
+                        <button onClick={handleConfirm} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: B.yellow, color: B.blueDeeper }}>✅ Confirm</button>
                         <button style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: 'transparent', color: B.wavesBlue, border: `1.5px solid ${B.wavesBlue}` }}>📅 Reschedule</button>
                       </>
                     ) : (
@@ -633,8 +633,8 @@ export default function OnboardingPage() {
 
             <a href="/" style={{
               ...BUTTON_BASE, width: '100%', padding: 16, marginTop: 20,
-              background: B.red, color: '#fff', fontSize: 16, textDecoration: 'none',
-              display: 'flex', boxShadow: `0 4px 15px ${B.red}40`,
+              background: B.yellow, color: B.blueDeeper, fontSize: 16, textDecoration: 'none',
+              display: 'flex', boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
             }}>Explore Your Portal →</a>
 
             {/* Referral card */}
@@ -642,8 +642,9 @@ export default function OnboardingPage() {
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>Know someone who needs pest control? 🏡</div>
               <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4 }}>Share your link — you both get $25</div>
               <a href={`sms:?body=${encodeURIComponent(`Hey! I just signed up with Waves Pest Control and they're awesome. Use my referral link and we both get $25 off: https://wavespestcontrol.com?ref=${c.referralCode}`)}`} style={{
-                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13, marginTop: 10,
-                background: B.red, color: '#fff', textDecoration: 'none', display: 'inline-flex',
+                ...BUTTON_BASE, padding: '9px 20px', fontSize: 13, marginTop: 10,
+                borderRadius: 9999, background: B.yellow, color: B.blueDeeper,
+                textDecoration: 'none', display: 'inline-flex', fontWeight: 800,
               }}>💬 Text a Friend</a>
             </div>
 

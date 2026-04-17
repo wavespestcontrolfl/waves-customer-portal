@@ -968,7 +968,7 @@ export default function EstimateViewPage() {
       <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
         <div style={{ fontSize: 32 }}>😕</div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>Estimate not found</div>
-        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 20px', background: B.red, color: '#fff', textDecoration: 'none', display: 'inline-flex' }}>Call (941) 318-7612</a>
+        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 318-7612</a>
       </div>
     </div>
   );
@@ -980,7 +980,7 @@ export default function EstimateViewPage() {
         <div style={{ fontSize: 32 }}>⏰</div>
         <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, marginTop: 8 }}>This estimate has expired</div>
         <div style={{ fontSize: 14, color: B.grayDark, marginTop: 6 }}>Contact us for a fresh quote.</div>
-        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 20px', background: B.red, color: '#fff', textDecoration: 'none', display: 'inline-flex' }}>Call (941) 318-7612</a>
+        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 318-7612</a>
       </div>
     </div>
   );
@@ -1834,8 +1834,9 @@ export default function EstimateViewPage() {
           <div style={{ textAlign: 'center', marginTop: 12 }}>
             <div style={{ fontSize: 13, color: B.grayDark }}>Still have a question?</div>
             <a href="sms:+19413187612?body=Hi%2C%20I%20have%20a%20question%20about%20my%20Waves%20estimate" style={{
-              ...BUTTON_BASE, padding: '10px 20px', fontSize: 13, marginTop: 6,
-              background: B.red, color: '#fff', textDecoration: 'none', display: 'inline-flex',
+              ...BUTTON_BASE, padding: '10px 22px', fontSize: 13, marginTop: 6,
+              borderRadius: 9999, background: B.yellow, color: B.blueDeeper,
+              textDecoration: 'none', display: 'inline-flex', fontWeight: 800,
             }}>💬 Text Us — (941) 318-7612</a>
           </div>
         </div>
@@ -1852,8 +1853,8 @@ export default function EstimateViewPage() {
             <>
               <button onClick={handleAccept} disabled={accepting} style={{
                 ...BUTTON_BASE, width: '100%', padding: 18, fontSize: 17,
-                background: B.red, color: '#fff', opacity: accepting ? 0.7 : 1,
-                boxShadow: `0 4px 15px ${B.red}40`,
+                background: B.yellow, color: B.blueDeeper, opacity: accepting ? 0.7 : 1,
+                boxShadow: `0 4px 15px ${B.yellow}66`,
               }}>
                 {accepting ? 'Processing...' : 'Accept Estimate'}
               </button>
@@ -1945,7 +1946,7 @@ export default function EstimateViewPage() {
             </div>
             <button onClick={handleAccept} disabled={accepting} style={{
               ...BUTTON_BASE, padding: '12px 24px', fontSize: 14,
-              background: B.red, color: '#fff', opacity: accepting ? 0.7 : 1,
+              background: B.yellow, color: B.blueDeeper, opacity: accepting ? 0.7 : 1,
               animation: 'wavesPulse 2s ease-in-out infinite',
               whiteSpace: 'nowrap',
             }}>

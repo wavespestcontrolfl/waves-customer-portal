@@ -27,7 +27,7 @@ export default function ReportViewPage() {
       <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
         <div style={{ fontSize: 32 }}>📄</div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>Report not found</div>
-        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 20px', background: B.red, color: '#fff', textDecoration: 'none', display: 'inline-flex' }}>Call (941) 318-7612</a>
+        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 318-7612</a>
       </div>
     </div>
   );
@@ -45,8 +45,12 @@ export default function ReportViewPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 28 }} />
           <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: FONTS.heading }}>Service Report</div>
-            <div style={{ fontSize: 11, color: B.blueLight }}>{data.customerName}</div>
+            <h1 style={{
+              fontFamily: FONTS.display, fontWeight: 400,
+              fontSize: 20, color: '#fff',
+              letterSpacing: '0.02em', lineHeight: 1, margin: 0,
+            }}>Service Report</h1>
+            <div style={{ fontSize: 11, color: B.blueLight, marginTop: 4 }}>{data.customerName}</div>
           </div>
         </div>
         <a href={pdfUrl} download style={{

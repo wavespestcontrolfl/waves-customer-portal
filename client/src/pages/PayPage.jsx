@@ -86,7 +86,7 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
               colorBackground: W.white,
               colorText: W.navy,
               colorDanger: W.red,
-              fontFamily: "'Poppins', sans-serif",
+              fontFamily: "'Nunito', sans-serif",
               borderRadius: '10px',
               spacingUnit: '4px',
             },
@@ -410,7 +410,7 @@ export default function PayPage() {
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{ width: 40, height: 40, border: `3px solid ${W.border}`, borderTopColor: W.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 16px' }} />
-        <div style={{ color: W.textCaption, fontFamily: "'Poppins', sans-serif", fontSize: 14 }}>Loading your service details...</div>
+        <div style={{ color: W.textCaption, fontFamily: "'Nunito', sans-serif", fontSize: 14 }}>Loading your service details...</div>
         <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
       </div>
     </div>
@@ -421,7 +421,7 @@ export default function PayPage() {
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center', maxWidth: 400 }}>
         <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontSize: 20, fontWeight: 700, color: W.navy, marginBottom: 8 }}>Invoice Not Found</div>
-        <div style={{ fontFamily: "'Poppins', sans-serif", fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a> if you need help.</div>
+        <div style={{ fontFamily: "'Nunito', sans-serif", fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a> if you need help.</div>
       </div>
     </div>
   );
@@ -432,8 +432,8 @@ export default function PayPage() {
   const tierColors = TIER_COLORS[tier] || TIER_COLORS.Bronze;
 
   return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Poppins', sans-serif" }}>
-      <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Poppins:wght@400;500;600&display=swap" rel="stylesheet" />
+    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Nunito', sans-serif" }}>
+      {/* Brand fonts loaded globally via client/index.html */}
 
       {/* ── Header ── */}
       <div style={{ background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: isMobile ? '24px 16px' : '32px 24px', textAlign: 'center' }}>

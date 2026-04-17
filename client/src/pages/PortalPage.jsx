@@ -1785,7 +1785,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
                     <button onClick={handleSatFeedback} disabled={satSubmitting} style={{
                       ...BUTTON_BASE, padding: '10px 20px', flex: 1, fontSize: 13,
-                      background: B.red, color: '#fff',
+                      background: B.yellow, color: B.blueDeeper,
                       opacity: satSubmitting ? 0.7 : 1,
                     }}>{satSubmitting ? 'Sending...' : 'Send Feedback'}</button>
                     <button onClick={() => setSatPhase('thanks')} style={{
@@ -2875,7 +2875,7 @@ function ScheduleTab({ customer }) {
     return (
       <button onClick={() => handleConfirm(s.id)} disabled={busy} style={{
         ...BUTTON_BASE, padding: compact ? '6px 14px' : '9px 18px', flex: compact ? undefined : 1,
-        background: B.red, color: '#fff', fontSize: 12,
+        background: B.yellow, color: B.blueDeeper, fontSize: 12,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
       }}>{busy ? 'Confirming…' : `${'✓'} Confirm`}</button>
     );
@@ -4258,8 +4258,8 @@ function RequestTab({ customer, onSwitchTab }) {
             }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: B.red }}>Need help right now?</div>
               <a href="tel:+19413187612" style={{
-                ...BUTTON_BASE, display: 'inline-block', padding: '10px 20px', fontSize: 14, marginTop: 8,
-                background: B.red, color: '#fff', textDecoration: 'none',
+                ...BUTTON_BASE, display: 'inline-block', padding: '10px 22px', fontSize: 14, marginTop: 8,
+                borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
               }}>Call (941) 318-7612 directly</a>
               <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
                 For urgent issues, calling gets the fastest response.
@@ -5483,8 +5483,8 @@ function LearnTab({ customer }) {
           }}>
             <div style={{ fontSize: 13, color: B.grayDark }}>Still have questions?</div>
             <a href="sms:+19413187612" style={{
-              ...BUTTON_BASE, padding: '9px 18px', fontSize: 13, marginTop: 8,
-              background: B.red, color: '#fff', textDecoration: 'none',
+              ...BUTTON_BASE, padding: '9px 20px', fontSize: 13, marginTop: 8,
+              borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
               display: 'inline-flex',
             }}>💬 Text Us</a>
           </div>
@@ -6025,7 +6025,7 @@ function MyPlanTab({ customer }) {
                   }}
                   style={{
                     ...BUTTON_BASE, marginTop: 12, padding: '9px 18px', fontSize: 13,
-                    background: B.red, color: '#fff',
+                    background: B.yellow, color: B.blueDeeper,
                     opacity: addonSubmitting[addon.id] ? 0.6 : 1,
                     cursor: addonSubmitting[addon.id] ? 'wait' : 'pointer',
                   }}>{addonSubmitting[addon.id] ? 'Sending…' : 'Add to My Plan'}</button>
@@ -6100,7 +6100,7 @@ function MyPlanTab({ customer }) {
                         }}
                         style={{
                           ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 11,
-                          background: B.red, color: '#fff',
+                          background: B.yellow, color: B.blueDeeper,
                           opacity: upgradeSubmitting[tn] ? 0.6 : 1,
                           cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
                         }}>{upgradeSubmitting[tn] ? 'Sending…' : 'Upgrade'}</button>
@@ -6673,7 +6673,7 @@ function ServiceTracker() {
               <div style={{ fontSize: 9, color: '#90A4AE' }}>Open 24 hrs</div>
             </div>
             <div style={{ display: 'flex', gap: 6 }}>
-              <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.red, color: '#fff', textDecoration: 'none' }}>📞 Call</a>
+              <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.yellow, color: B.blueDeeper, textDecoration: 'none' }}>📞 Call</a>
               <a href={`sms:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}>💬 Text</a>
             </div>
           </div>
@@ -6771,7 +6771,7 @@ function ServiceTracker() {
       {/* Demo controls */}
       {step < 7 && (
         <div style={{ padding: '6px 14px 8px', background: B.white, borderTop: `1px solid ${B.grayLight}`, display: 'flex', gap: 6, alignItems: 'center' }}>
-          <button onClick={handleAdvance} style={{ ...BUTTON_BASE, padding: '8px 14px', fontSize: 11, background: B.red, color: '#fff', flexShrink: 0 }}>Next Step →</button>
+          <button onClick={handleAdvance} style={{ ...BUTTON_BASE, padding: '8px 14px', fontSize: 11, background: B.yellow, color: B.blueDeeper, flexShrink: 0 }}>Next Step →</button>
           <input type="text" value={demoNote} onChange={e => setDemoNote(e.target.value)} placeholder="Add note..." style={{ flex: 1, padding: '7px 10px', borderRadius: 8, fontSize: 11, border: `1px solid ${B.grayLight}`, outline: 'none', fontFamily: FONTS.body, color: B.navy, boxSizing: 'border-box' }} onKeyDown={e => e.key === 'Enter' && handleAddNote()} />
           <button onClick={handleAddNote} disabled={!demoNote.trim()} style={{ ...BUTTON_BASE, padding: '8px 10px', fontSize: 11, background: B.wavesBlue, color: '#fff', flexShrink: 0, opacity: demoNote.trim() ? 1 : 0.5 }}>+Note</button>
         </div>
@@ -6962,7 +6962,7 @@ function ReferTab({ customer, onSwitchTab }) {
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <a href={`sms:?body=${encodeURIComponent(shareText)}`} style={{
             ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
-            background: B.red, color: '#fff', textDecoration: 'none', textAlign: 'center',
+            background: B.yellow, color: B.blueDeeper, textDecoration: 'none', textAlign: 'center',
           }}>💬 Text</a>
           <a href={`mailto:?subject=${encodeURIComponent('$25 off Waves Pest Control')}&body=${encodeURIComponent(shareText)}`} style={{
             ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
@@ -7369,12 +7369,12 @@ function DocumentsTab({ customer, onSwitchTab }) {
         </div>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 12 }}>
           <a href="tel:+19413187612" style={{
-            ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
-            background: B.red, color: '#fff', textDecoration: 'none',
+            ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
+            background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
           }}>Call</a>
           <a href="sms:+19413187612" style={{
-            ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
-            background: B.red, color: '#fff', textDecoration: 'none',
+            ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
+            background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
           }}>Text</a>
         </div>
         <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>
@@ -8231,20 +8231,20 @@ export default function PortalPage() {
       }}>
         <a href="tel:+19413187612" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.red, color: '#fff', fontSize: 12, textAlign: 'center',
-          boxShadow: `0 4px 15px ${B.red}40`, minHeight: 44,
+          background: B.yellow, color: B.blueDeeper, fontSize: 12, textAlign: 'center',
+          boxShadow: `0 4px 15px ${B.yellow}55`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'📞'} Call</a>
         <a href="sms:+19413187612" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.red, color: '#fff', fontSize: 12,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
+          background: B.yellow, color: B.blueDeeper, fontSize: 12,
+          textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'💬'} Text</a>
         <button onClick={() => setShowChat(true)} style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.red, color: '#fff', fontSize: 12,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
+          background: B.yellow, color: B.blueDeeper, fontSize: 12,
+          textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'🤖'} Chat</button>
         <a href="mailto:contact@wavespestcontrol.com"
@@ -8254,8 +8254,8 @@ export default function PortalPage() {
           }}
           style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.red, color: '#fff', fontSize: 12,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.red}30`, minHeight: 44,
+          background: B.yellow, color: B.blueDeeper, fontSize: 12,
+          textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           textDecoration: 'none',
         }}>{'✉️'} Email</a>
