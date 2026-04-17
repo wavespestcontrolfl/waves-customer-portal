@@ -135,8 +135,8 @@ class SmsScheduler {
     const context = {
       customerName: customer.first_name,
       sessionState: session.state,
-      offeredSlots: session.offered_slots ? JSON.parse(session.offered_slots) : null,
-      pendingSlot: session.pending_slot ? JSON.parse(session.pending_slot) : null,
+      offeredSlots: session.offered_slots || null,
+      pendingSlot: session.pending_slot || null,
     };
 
     // Get the existing appointment being rescheduled (if any)
@@ -256,7 +256,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
    * Handle "pick_slot" — customer chose one of the offered options.
    */
   async handlePickSlot(session, customer, result, fromPhone, toPhone) {
-    const offered = session.offered_slots ? JSON.parse(session.offered_slots) : [];
+    const offered = session.offered_slots || [];
     const idx = (result.picked_slot_index || 0) - 1; // convert 1-indexed to 0-indexed
 
     if (idx < 0 || idx >= offered.length) {
@@ -282,7 +282,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
    * Handle "confirm_yes" — lock in the booking.
    */
   async handleConfirm(session, customer, fromPhone, toPhone) {
-    const slot = session.pending_slot ? JSON.parse(session.pending_slot) : null;
+    const slot = session.pending_slot || null;
     if (!slot) {
       const reply = `I don't have a pending time to confirm. Want to see available slots? 🌊`;
       await this.sendReply(fromPhone, toPhone, reply, customer.id);
