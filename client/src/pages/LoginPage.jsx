@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
+import { COLORS as B, FONTS, BUTTON_BASE } from '../theme-brand';
 
 export default function LoginPage() {
   const { sendCode, verifyCode, error, isAuthenticated } = useAuth();
@@ -49,16 +49,38 @@ export default function LoginPage() {
 
   return (
     <div style={{
+      position: 'relative',
       minHeight: '100vh',
+      overflow: 'hidden',
+      background: B.sky,                              // brand-sky base (matches Astro Hero)
       display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      background: `linear-gradient(180deg, ${B.blueDeeper} 0%, ${B.blueDark} 40%, ${B.wavesBlue} 100%)`,
-      backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(180deg, ${B.blueDeeper} 0%, ${B.blueDark} 40%, ${B.wavesBlue} 100%)`,
-      backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
       fontFamily: FONTS.body,
       padding: 20,
     }}>
+      {/* Hero video background — matches wavespestcontrol.com Hero.astro */}
+      <video
+        autoPlay
+        muted
+        loop
+        playsInline
+        preload="none"
+        poster="/brand/waves-ford-2.webp"
+        style={{
+          position: 'absolute', inset: 0, width: '100%', height: '100%',
+          objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none',
+        }}
+        aria-hidden="true"
+      >
+        <source src="/brand/waves-van-hero-section.mp4" type="video/mp4" />
+      </video>
+      {/* Gradient overlay: brand-sky/90 → brand-blue/60 → brand-blueLight/40 */}
+      <div style={{
+        position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
+        background: 'linear-gradient(135deg, rgba(77,201,246,0.9) 0%, rgba(9,122,189,0.6) 55%, rgba(227,245,253,0.4) 100%)',
+      }} />
+
       {/* Hero branding block — Luckiest Guy title like wavespestcontrol.com heroes */}
-      <div style={{ textAlign: 'center', marginBottom: 32 }}>
+      <div style={{ position: 'relative', zIndex: 2, textAlign: 'center', marginBottom: 32 }}>
         <img
           src="/waves-logo.png"
           alt="Waves Lawn & Pest"
@@ -80,12 +102,13 @@ export default function LoginPage() {
 
       {/* Login card */}
       <div style={{
+        position: 'relative', zIndex: 2,
         background: B.white,
         borderRadius: 20,
         padding: '32px 28px',
         maxWidth: 380,
         width: '100%',
-        boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
+        boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)',
       }}>
         {step === 'phone' ? (
           <>
@@ -192,7 +215,7 @@ export default function LoginPage() {
       </div>
 
       {/* Bottom links */}
-      <div style={{ marginTop: 28, textAlign: 'center' }}>
+      <div style={{ position: 'relative', zIndex: 2, marginTop: 28, textAlign: 'center' }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', fontFamily: FONTS.heading }}>
           Looking for new service?{' '}
           <a href="https://wavespestcontrol.com" target="_blank" rel="noopener noreferrer"
