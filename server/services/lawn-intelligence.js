@@ -23,6 +23,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { etDateString } = require('../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -623,7 +624,7 @@ If no contradictions, return: { "contradictions": [] }`
 
   // ── 11. Assessment completion tracking ──────────────────────
   async trackAssessmentCompletion(date) {
-    const trackingDate = date || new Date().toISOString().split('T')[0];
+    const trackingDate = date || etDateString();
     try {
       // Get all techs
       const techs = await db('technicians').where('active', true).select('id', 'name', 'email');
@@ -904,7 +905,7 @@ If no contradictions, return: { "contradictions": [] }`
       // Also flag the customer's future assessments
       const nextAssessment = await db('scheduled_services')
         .where({ customer_id: customerId })
-        .where('scheduled_date', '>=', new Date().toISOString().split('T')[0])
+        .where('scheduled_date', '>=', etDateString())
         .where('service_type', 'ilike', '%lawn%')
         .orderBy('scheduled_date', 'asc')
         .first();

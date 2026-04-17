@@ -3,6 +3,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');
 const TwilioService = require('./twilio');
+const { etDateString, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 /**
  * Initialize all time-tracking cron jobs.
@@ -15,9 +16,7 @@ function initTimeTrackingCrons() {
   cron.schedule('0 0 * * *', async () => {
     logger.info('[time-tracking-cron] Running nightly daily summary computation');
     try {
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const dateStr = yesterday.toISOString().split('T')[0];
+      const dateStr = etDateString(addETDays(new Date(), -1));
 
       const techs = await db('technicians').where({ active: true }).select('id', 'name');
       let computed = 0;
@@ -52,13 +51,9 @@ function initTimeTrackingCrons() {
   cron.schedule('0 5 * * 1', async () => {
     logger.info('[time-tracking-cron] Running weekly summary + approval SMS');
     try {
-      // Previous week's Monday
-      const lastMonday = new Date();
-      lastMonday.setDate(lastMonday.getDate() - 7);
-      const day = lastMonday.getDay();
-      const diff = day === 0 ? -6 : 1 - day;
-      lastMonday.setDate(lastMonday.getDate() + diff);
-      const weekStartStr = lastMonday.toISOString().split('T')[0];
+      // Previous week's Monday (ET calendar)
+      const weekStartStr = etWeekStart(addETDays(new Date(), -7));
+      const weekEndStr = etDateString(addETDays(parseETDateTime(weekStartStr + 'T12:00'), 6));
 
       const techs = await db('technicians').where({ active: true }).select('id', 'name');
       let computed = 0;
@@ -69,7 +64,7 @@ function initTimeTrackingCrons() {
           const hasDailies = await db('time_entry_daily_summary')
             .where({ technician_id: tech.id })
             .where('work_date', '>=', weekStartStr)
-            .where('work_date', '<=', new Date(lastMonday.getTime() + 6 * 86400000).toISOString().split('T')[0])
+            .where('work_date', '<=', weekEndStr)
             .first();
 
           if (hasDailies) {
@@ -172,7 +167,7 @@ function initTimeTrackingCrons() {
               updated_at: now,
             });
 
-          const workDate = new Date(shift.clock_in).toISOString().split('T')[0];
+          const workDate = etDateString(new Date(shift.clock_in));
           await timeTracking.computeDailySummary(shift.technician_id, workDate);
 
           // Notify tech

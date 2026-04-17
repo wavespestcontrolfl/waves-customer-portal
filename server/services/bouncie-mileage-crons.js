@@ -9,6 +9,7 @@ const cron = require('node-cron');
 const db = require('../models/db');
 const logger = require('./logger');
 const mileageService = require('./bouncie-mileage');
+const { etDateString } = require('../utils/datetime-et');
 
 /**
  * Initialize all Bouncie mileage cron jobs.
@@ -123,7 +124,7 @@ function initBouncieMileageCrons() {
       for (const trip of unmatchedTrips) {
         try {
           const tripDate = !trip.trip_date
-            ? new Date().toISOString().split('T')[0]
+            ? etDateString()
             : typeof trip.trip_date === 'string'
               ? trip.trip_date
               : trip.trip_date.toISOString().split('T')[0];

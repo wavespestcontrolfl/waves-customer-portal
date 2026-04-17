@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // ---------------------------------------------------------------------------
 // Alert rule definitions
@@ -306,7 +307,7 @@ async function executeAction(alertId, actionIndex) {
         status: 'pending',
         price: 0,
         notes: `Complimentary service — Health alert retention #${alertId}`,
-        scheduled_date: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+        scheduled_date: etDateString(addETDays(new Date(), 7)),
         created_at: new Date(),
       });
       result = { success: true, message: `Complimentary service scheduled for ${customer.first_name}` };

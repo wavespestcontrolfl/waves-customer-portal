@@ -224,7 +224,7 @@ function safeDateLabel(d) {
   const safe = safeDate(d);
   if (!safe) return null;
   const date = new Date(safe + 'T12:00:00');
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 }
 
 

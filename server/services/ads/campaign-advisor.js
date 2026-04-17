@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const BudgetManager = require('./budget-manager');
 const MODELS = require('../../config/models');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -26,8 +27,8 @@ class CampaignAdvisor {
     }
 
     const now = new Date();
-    const d7 = new Date(now - 7 * 86400000).toISOString().split('T')[0];
-    const d30 = new Date(now - 30 * 86400000).toISOString().split('T')[0];
+    const d7 = etDateString(addETDays(now, -7));
+    const d30 = etDateString(addETDays(now, -30));
 
     const last7days = await db('ad_performance_daily').where('date', '>=', d7);
     const last30days = await db('ad_performance_daily').where('date', '>=', d30);
@@ -161,7 +162,7 @@ Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary
 
         messages: [{
           role: 'user',
-          content: `Daily ads review for ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}:
+          content: `Daily ads review for ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}:
 
 CAMPAIGN PERFORMANCE:
 ${JSON.stringify(campaignSummaries, null, 2)}
@@ -216,7 +217,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
         advice = { raw: response.content[0].text, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse structured output.' };
       }
 
-      advice.date = now.toISOString().split('T')[0];
+      advice.date = etDateString(now);
       await this.storeReport(advice);
       await this.sendSummary(advice);
 
@@ -252,7 +253,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     }
 
     return {
-      date: new Date().toISOString().split('T')[0],
+      date: etDateString(),
       grade: recommendations.length === 0 ? 'B' : 'C',
       overall_assessment: `Auto-generated report: ${summaries.length} campaigns reviewed, ${recommendations.length} actions identified.`,
       recommendations,
@@ -266,7 +267,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
   async storeReport(advice) {
     try {
       await db('ad_advisor_reports').insert({
-        date: advice.date || new Date().toISOString().split('T')[0],
+        date: advice.date || etDateString(),
         report_data: JSON.stringify(advice),
         grade: advice.grade,
         recommendation_count: advice.recommendations?.length || 0,
@@ -355,7 +356,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
       const date = new Date(Date.now() + d * 86400000);
       const cap = await BudgetManager.getCapacityForArea('general', date.toISOString().split('T')[0]);
       days.push({
-        day: date.toLocaleDateString('en-US', { weekday: 'short' }),
+        day: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
         date: date.toISOString().split('T')[0],
         ...cap,
       });

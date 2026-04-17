@@ -9,6 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { etDateString } = require('../../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -308,7 +309,7 @@ async function draftEmailReply(emailId, threadId, fromName, instructions) {
           .orderBy('service_date', 'desc').first();
         const nextService = await db('scheduled_services')
           .where('customer_id', customer.id)
-          .where('scheduled_date', '>=', new Date().toISOString().split('T')[0])
+          .where('scheduled_date', '>=', etDateString())
           .whereNotIn('status', ['cancelled'])
           .orderBy('scheduled_date').first();
 
@@ -330,7 +331,7 @@ Address: ${customer.address_line1 || ''}, ${customer.city || ''}`;
     }
 
     const threadText = thread.map(t =>
-      `FROM: ${t.from_name || t.from_address} (${new Date(t.received_at).toLocaleDateString()})\n${(t.body_text || '').substring(0, 1000)}`
+      `FROM: ${t.from_name || t.from_address} (${new Date(t.received_at).toLocaleDateString('en-US', { timeZone: 'America/New_York' })})\n${(t.body_text || '').substring(0, 1000)}`
     ).join('\n---\n');
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {

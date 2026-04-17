@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
+const { etDateString } = require('../../utils/datetime-et');
 
 class SERPAnalyzer {
   async analyzeKeyword(keywordId) {
@@ -40,7 +41,7 @@ class SERPAnalyzer {
 
     const analysis = {
       keyword_id: keywordId,
-      analysis_date: new Date().toISOString().split('T')[0],
+      analysis_date: etDateString(),
       top_10_results: JSON.stringify(top10),
       map_pack_results: JSON.stringify(mapResults),
       dominant_page_type: this.getDominantType(top10),

@@ -198,7 +198,7 @@ class AppointmentTagger {
   }
 
   getPrepSMS(pestType, service) {
-    const date = new Date(service.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+    const date = new Date(service.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
     const msgs = {
       cockroach: `Hi ${service.first_name}! Your cockroach treatment is ${date}. To prep:\n• Clear under sinks and behind appliances\n• Remove items from cabinet bases\n• Clean food debris, take out trash night before\n• Leave home 2-4h after treatment (pets too)\n• Don't clean treated areas for 2 weeks\nQuestions? Reply here. — Waves`,
       bed_bug: `Hi ${service.first_name}! Bed bug treatment prep for ${date} is CRITICAL:\n• Strip bedding — wash/dry on HIGH HEAT (130°F+)\n• Remove items from nightstands/dressers near bed\n• Pull beds 6" from walls\n• Bag all clothing — wash/dry HIGH HEAT\n• Vacuum mattress, box spring, baseboards — empty vacuum outside\n• DO NOT move items to other rooms\nQuestions? Reply here. — Adam, Waves`,

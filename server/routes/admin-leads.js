@@ -777,7 +777,7 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
     await db('lead_activities').insert({
       lead_id: req.params.id,
       activity_type: 'callback_scheduled',
-      description: `Callback scheduled for ${callbackAt.toLocaleString()}${notes ? ' — ' + notes : ''}`,
+      description: `Callback scheduled for ${callbackAt.toLocaleString('en-US', { timeZone: 'America/New_York' })}${notes ? ' — ' + notes : ''}`,
       performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
       metadata: JSON.stringify({ date, time, notes, callback_at: callbackAt.toISOString() }),
     });

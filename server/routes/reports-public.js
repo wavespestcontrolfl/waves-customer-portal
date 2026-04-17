@@ -142,7 +142,7 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
 
   doc.font('Helvetica-Bold').text('Service Details:');
   doc.font('Helvetica');
-  doc.text(`Date: ${new Date(typeof service.service_date === 'string' ? service.service_date + 'T12:00:00' : service.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`);
+  doc.text(`Date: ${new Date(typeof service.service_date === 'string' ? service.service_date + 'T12:00:00' : service.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`);
   doc.text(`Type: ${service.service_type}`);
   doc.text(`Technician: ${service.technician_name || 'Waves Team'}`);
   doc.moveDown(1);
@@ -219,7 +219,7 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   doc.moveDown(0.5);
   doc.fontSize(8).font('Helvetica').fillColor('#999');
   doc.text('This report is provided for your records. For questions contact Waves Pest Control at (941) 318-7612.', { align: 'center' });
-  doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`, { align: 'center' });
+  doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`, { align: 'center' });
 
   doc.end();
 }

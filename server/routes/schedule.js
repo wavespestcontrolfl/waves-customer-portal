@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { normalizeServiceType, cleanSquareNotes } = require('../utils/service-normalizer');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(authenticate);
 
@@ -26,7 +27,7 @@ router.get('/', async (req, res, next) => {
     const upcoming = await db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId })
       .whereIn('scheduled_services.status', ['pending', 'confirmed', 'rescheduled'])
-      .where('scheduled_services.scheduled_date', '>=', new Date().toISOString().split('T')[0])
+      .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoff.toISOString().split('T')[0])
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(
@@ -144,7 +145,7 @@ router.get('/next', async (req, res, next) => {
     const nextService = await db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId })
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
-      .where('scheduled_services.scheduled_date', '>=', new Date().toISOString().split('T')[0])
+      .where('scheduled_services.scheduled_date', '>=', etDateString())
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'technicians.name as technician_name')
       .orderBy('scheduled_services.scheduled_date', 'asc')

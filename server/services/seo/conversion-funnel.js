@@ -1,9 +1,10 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 class ConversionFunnel {
   async aggregate(days = 30) {
-    const since = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -days));
 
     // GSC clicks by landing page
     const gscPages = await db('gsc_pages')

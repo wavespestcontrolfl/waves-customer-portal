@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { etDateString } = require('../../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -173,7 +174,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     const article = await db('knowledge_base').where('path', refs[0]).first();
     if (!article) return { filed: false, reason: 'Referenced article not found' };
 
-    const enrichment = `\n\n---\n\n### Q&A Addition (${new Date().toISOString().split('T')[0]})\n\n**Q:** ${q.query}\n\n**A:** ${q.answer}\n`;
+    const enrichment = `\n\n---\n\n### Q&A Addition (${etDateString()})\n\n**Q:** ${q.query}\n\n**A:** ${q.answer}\n`;
 
     await db('knowledge_base').where('id', article.id).update({
       content: article.content + enrichment,

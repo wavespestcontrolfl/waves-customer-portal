@@ -3,6 +3,7 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { etDateString } = require('../../utils/datetime-et');
 
 const anthropic = new Anthropic();
 
@@ -100,7 +101,7 @@ async function processVendorInvoice(email, classification) {
   const invoiceDateValid = parsedDate && !Number.isNaN(parsedDate.getTime());
   const invoiceDate = invoiceDateValid
     ? parsedDate.toISOString().split('T')[0]
-    : new Date().toISOString().split('T')[0];
+    : etDateString();
   const taxYear = (invoiceDateValid ? parsedDate : new Date()).getFullYear().toString();
 
   if (amount > 0) {

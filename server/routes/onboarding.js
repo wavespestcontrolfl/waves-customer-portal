@@ -347,7 +347,7 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
       .orderBy('scheduled_date', 'asc')
       .first();
 
-    const svcDate = svc ? new Date(svc.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'TBD';
+    const svcDate = svc ? new Date(svc.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' }) : 'TBD';
 
     // Welcome SMS
     try {

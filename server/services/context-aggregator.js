@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 class ContextAggregator {
   async getFullCustomerContext(phone) {
@@ -16,7 +17,7 @@ class ContextAggregator {
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services').where({ customer_id: customer.id }).where('scheduled_date', '>=', new Date().toISOString().split('T')[0]).whereNotIn('status', ['cancelled', 'completed']).orderBy('scheduled_date').limit(3),
+      db('scheduled_services').where({ customer_id: customer.id }).where('scheduled_date', '>=', etDateString()).whereNotIn('status', ['cancelled', 'completed']).orderBy('scheduled_date').limit(3),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       db('payments').where({ 'payments.customer_id': customer.id }).orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
@@ -66,8 +67,8 @@ class ContextAggregator {
 
   buildSummary(c, flags, lastSvc, upcoming, balance) {
     let s = `${c.first_name} ${c.last_name} | ${c.waveguard_tier || 'No tier'} ($${c.monthly_rate || 0}/mo) | ${c.pipeline_stage}`;
-    if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString()}`;
-    if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString()}`;
+    if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
+    if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;
     if (flags.some(f => f.type === 'open_complaint')) s += ` | ⚠️ Open complaint`;
     if (flags.some(f => f.type === 'cancel_save_active')) s += ` | 🚨 Cancel save active`;

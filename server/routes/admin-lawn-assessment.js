@@ -17,6 +17,7 @@ const LawnIntel = require('../services/lawn-intelligence');
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
 const config = require('../config');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
@@ -27,7 +28,7 @@ router.use(requireTechOrAdmin);
 router.get('/customers', async (req, res, next) => {
   try {
     const { q } = req.query;
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
 
     // Try today's scheduled services first, fall back to all customers if none found
     let query;
@@ -194,7 +195,7 @@ router.post('/assess', async (req, res, next) => {
     const [assessment] = await db('lawn_assessments').insert({
       customer_id: customerId,
       technician_id: req.technicianId,
-      service_date: now.toISOString().split('T')[0],
+      service_date: etDateString(now),
       season,
       photos: JSON.stringify(photoMeta),
       claude_raw: JSON.stringify(validResults.map(r => r.claude)),

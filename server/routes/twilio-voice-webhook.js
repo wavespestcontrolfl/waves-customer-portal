@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { etDateString } = require('../utils/datetime-et');
 
 function capitalizeName(name) {
   if (!name) return '';
@@ -57,7 +58,7 @@ router.post('/voice', async (req, res) => {
                 pipeline_stage_changed_at: new Date(),
                 last_contact_date: new Date(),
                 last_contact_type: 'call_inbound',
-                member_since: new Date().toISOString().split('T')[0],
+                member_since: etDateString(),
                 waveguard_tier: null,
                 crm_notes: `Auto-created from Twilio Lookup: ${callerName}`,
               }).returning('*');

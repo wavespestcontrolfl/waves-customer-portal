@@ -1224,7 +1224,7 @@ router.get('/export/pnl', async (req, res, next) => {
       const now = new Date();
       const year = now.getFullYear();
       const startDate = req.query.start_date || `${year}-01-01`;
-      const endDate = req.query.end_date || now.toISOString().split('T')[0];
+      const endDate = req.query.end_date || etDateString(now);
 
       let serviceRevenue = 0;
       try {
@@ -1268,7 +1268,7 @@ router.get('/export/pnl', async (req, res, next) => {
 
     const csvStr = csv.pnlToCSV(pnlRes);
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="waves-pnl-${req.query.period || 'ytd'}-${new Date().toISOString().split('T')[0]}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="waves-pnl-${req.query.period || 'ytd'}-${etDateString()}.csv"`);
     res.send(csvStr);
   } catch (err) { next(err); }
 });

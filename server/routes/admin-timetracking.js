@@ -237,7 +237,7 @@ async function notifyTechOfApproval(summary, action, reason) {
   try {
     const tech = await db('technicians').where({ id: summary.technician_id }).first();
     if (!tech?.phone) return;
-    const dateStr = new Date(summary.work_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const dateStr = new Date(summary.work_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
     const hrs = ((summary.total_shift_minutes || 0) / 60).toFixed(2);
     const TwilioService = require('../services/twilio');
     let body;
@@ -455,7 +455,7 @@ router.get('/analytics', async (req, res, next) => {
   try {
     const { startDate, endDate, technicianId } = req.query;
     const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
-    const end = endDate || new Date().toISOString().split('T')[0];
+    const end = endDate || etDateString();
 
     // Actual vs estimated by service type
     let svcQuery = db('time_entries')
@@ -544,7 +544,7 @@ router.get('/analytics/comparison', async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
     const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
-    const end = endDate || new Date().toISOString().split('T')[0];
+    const end = endDate || etDateString();
 
     const comparison = await db('time_entries')
       .where('time_entries.entry_type', 'job')

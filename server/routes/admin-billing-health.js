@@ -6,6 +6,7 @@ const logger = require('../services/logger');
 const PaymentRouter = require('../services/payment-router');
 const TwilioService = require('../services/twilio');
 const { logAutopay } = require('../services/autopay-log');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
@@ -147,7 +148,7 @@ router.get('/billing-health', async (req, res, next) => {
       .where({ active: true, autopay_enabled: true })
       .where('monthly_rate', '>', 0)
       .whereNotNull('autopay_paused_until')
-      .where('autopay_paused_until', '>=', now.toISOString().split('T')[0])
+      .where('autopay_paused_until', '>=', etDateString(now))
       .count('* as n').first();
 
     // Customers with no autopay payment method

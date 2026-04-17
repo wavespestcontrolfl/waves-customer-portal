@@ -18,6 +18,7 @@ const {
   getSessionByCallSid, injectMessage,
 } = require('../services/voice-agent/agent');
 const { analyzeSentiment } = require('../services/call-sentiment');
+const { etDateString } = require('../utils/datetime-et');
 
 // Properly capitalize a name: "BILLY" → "Billy", "mcdonald" → "McDonald"
 function capitalizeName(name) {
@@ -93,7 +94,7 @@ async function sendMissedCallSMS(callerPhone, callerName, callSid) {
 
     // Rate limit: check if we already sent a missed call SMS to this number today
     try {
-      const today = new Date().toISOString().split('T')[0];
+      const today = etDateString();
       const existing = await db('sms_log')
         .where({ to_phone: callerPhone, message_type: 'missed_call_followup' })
         .whereRaw("created_at::date = ?", [today])

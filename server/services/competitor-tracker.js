@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 /**
  * Competitor Review Tracker
@@ -30,7 +31,7 @@ async function syncOne(competitorId) {
   const row = await db('competitor_businesses').where({ id: competitorId }).first();
   if (!row) throw new Error('Competitor not found');
   const details = await fetchPlaceDetails(row.google_place_id);
-  const today = new Date().toISOString().split('T')[0];
+  const today = etDateString();
 
   await db('competitor_businesses').where({ id: competitorId }).update({
     current_rating: details.rating,

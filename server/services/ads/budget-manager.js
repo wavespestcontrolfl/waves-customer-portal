@@ -217,8 +217,8 @@ class BudgetManager {
 
         heatmap[area].days.push({
           date: dateStr,
-          dayName: date.toLocaleDateString('en-US', { weekday: 'short' }),
-          dayLabel: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          dayName: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
+          dayLabel: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' }),
           booked: cap.booked,
           slots: cap.slots,
           utilizationPct: Math.round(cap.utilizationPct),

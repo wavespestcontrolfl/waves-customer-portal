@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
+const { etDateString } = require('../../utils/datetime-et');
 
 const TOXIC_DOMAINS = /casino|poker|pharma|pills|crypto|bitcoin|adult|xxx|gambling|cheap-/i;
 const SPAM_TLDS = /\.xyz$|\.top$|\.buzz$|\.click$|\.site$|\.online$/i;
@@ -26,13 +27,13 @@ class BacklinkMonitor {
         source_url: link.url_from, source_domain: link.domain_from, target_url: link.url_to,
         anchor_text: link.anchor, domain_rating: link.domain_from_rank,
         toxicity_score: toxicity.score, toxicity_reasons: JSON.stringify(toxicity.reasons),
-        severity: toxicity.severity, last_checked: new Date().toISOString().split('T')[0],
+        severity: toxicity.severity, last_checked: etDateString(),
       };
 
       if (existing) {
         await db('seo_backlinks').where('id', existing.id).update({ ...record, updated_at: new Date() });
       } else {
-        record.first_seen = new Date().toISOString().split('T')[0];
+        record.first_seen = etDateString();
         record.status = 'active';
         await db('seo_backlinks').insert(record);
         if (toxicity.severity === 'critical') newCritical++;
@@ -122,7 +123,7 @@ class BacklinkMonitor {
    * Take a snapshot of current backlink profile for trend tracking.
    */
   async takeSnapshot() {
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
     const all = await db('seo_backlinks').where('status', 'active');
     const domains = new Set(all.map(b => b.source_domain));
     const anchors = { branded: 0, keyword_rich: 0, naked_url: 0, generic: 0, other: 0 };
@@ -209,7 +210,7 @@ class BacklinkMonitor {
 
       if (existing) {
         await db('seo_competitor_backlinks').where('id', existing.id).update({
-          last_checked: new Date().toISOString().split('T')[0],
+          last_checked: etDateString(),
           waves_has_link: hasWavesLink,
           updated_at: new Date(),
         });
@@ -223,8 +224,8 @@ class BacklinkMonitor {
           target_url: link.url_to,
           link_type: this.classifyLinkType({ source_domain: link.domain_from, source_url: link.url_from }),
           is_dofollow: link.dofollow !== false,
-          first_seen: link.first_seen || new Date().toISOString().split('T')[0],
-          last_checked: new Date().toISOString().split('T')[0],
+          first_seen: link.first_seen || etDateString(),
+          last_checked: etDateString(),
           waves_has_link: hasWavesLink,
           prospect_priority: !hasWavesLink && (link.domain_from_rank || 0) > 30 ? 'high' : 'medium',
         });
@@ -275,7 +276,7 @@ class BacklinkMonitor {
             waves_mentioned: wavesMentioned,
             competitors_mentioned: JSON.stringify(competitors),
             sentiment: wavesMentioned ? 'positive' : 'neutral',
-            check_date: new Date().toISOString().split('T')[0],
+            check_date: etDateString(),
           });
         }
       } catch { /* non-critical */ }

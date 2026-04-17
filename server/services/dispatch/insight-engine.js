@@ -1,4 +1,6 @@
 // server/services/dispatch/insight-engine.js
+const { etDateString, addETDays } = require('../../utils/datetime-et');
+
 let db;
 function getDb() {
   if (!db) db = require('../../models/db');
@@ -6,7 +8,7 @@ function getDb() {
 }
 
 async function getDashboardMetrics(days = 30) {
-  const since = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+  const since = etDateString(addETDays(new Date(), -days));
 
   const techs = await getDb()('dispatch_technicians').where('active', true);
 

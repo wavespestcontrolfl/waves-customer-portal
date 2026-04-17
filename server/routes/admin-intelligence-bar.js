@@ -32,6 +32,7 @@ const { BANKING_TOOLS, executeBankingTool } = require('../services/intelligence-
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
 
@@ -551,7 +552,7 @@ SCHEDULING INTELLIGENCE:
 - When scheduling, prefer clustering by zone/city on the same day for route efficiency
 - Morning window = 8AM-12PM, Afternoon = 12PM-5PM
 
-The current date is ${new Date().toISOString().split('T')[0]}.`;
+The current date is ${etDateString()}.`;
 
 
 // ─── MAIN QUERY ENDPOINT ────────────────────────────────────────

@@ -24,7 +24,7 @@ class ResponseDrafter {
     const resp = await client.messages.create({
       model: MODELS.FLAGSHIP, max_tokens: 500,
       system: `You are Adam Benetti's AI assistant for Waves Pest Control. Draft SMS replies Adam will review before sending. Write as Adam — direct, knowledgeable, friendly. Keep under 300 chars when possible. Reference actual service data. Sign off "— Adam" or "— Waves". FLAGS:\n${flagsSummary}`,
-      messages: [{ role: 'user', content: `CUSTOMER: ${context.summary}\n\nLAST SERVICE: ${context.lastService ? `${context.lastService.type} on ${new Date(context.lastService.date).toLocaleDateString()} — "${(context.lastService.notes || '').slice(0, 150)}"` : 'None'}\n\nNEXT: ${context.upcomingServices?.[0] ? `${context.upcomingServices[0].type} ${new Date(context.upcomingServices[0].date).toLocaleDateString()}` : 'Nothing'}\n\nBALANCE: ${context.billing?.outstandingBalance > 0 ? `$${context.billing.outstandingBalance.toFixed(2)} overdue` : 'Current'}\n\nRECENT SMS:\n${conversation}\n\nINTENT: ${intent?.intent || 'UNKNOWN'}\n\nNEW MESSAGE: "${inboundMessage}"\n\nDraft reply as Adam:` }],
+      messages: [{ role: 'user', content: `CUSTOMER: ${context.summary}\n\nLAST SERVICE: ${context.lastService ? `${context.lastService.type} on ${new Date(context.lastService.date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} — "${(context.lastService.notes || '').slice(0, 150)}"` : 'None'}\n\nNEXT: ${context.upcomingServices?.[0] ? `${context.upcomingServices[0].type} ${new Date(context.upcomingServices[0].date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : 'Nothing'}\n\nBALANCE: ${context.billing?.outstandingBalance > 0 ? `$${context.billing.outstandingBalance.toFixed(2)} overdue` : 'Current'}\n\nRECENT SMS:\n${conversation}\n\nINTENT: ${intent?.intent || 'UNKNOWN'}\n\nNEW MESSAGE: "${inboundMessage}"\n\nDraft reply as Adam:` }],
     });
 
     return { draft: resp.content[0].text, context: context.summary, flags: context.flags, intent: intent?.intent };
@@ -39,7 +39,7 @@ class ResponseDrafter {
       case 'SCHEDULE_INQUIRY':
         if (context.upcomingServices?.length) {
           const next = context.upcomingServices[0];
-          draft = `Hi ${name}! Your next ${next.type} is scheduled for ${new Date(next.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}${next.window ? ` ${next.window}` : ''}. Anything else? — Adam`;
+          draft = `Hi ${name}! Your next ${next.type} is scheduled for ${new Date(next.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' })}${next.window ? ` ${next.window}` : ''}. Anything else? — Adam`;
         } else {
           draft = `Hi ${name}! Let me check your schedule and get back to you shortly. — Adam`;
         }

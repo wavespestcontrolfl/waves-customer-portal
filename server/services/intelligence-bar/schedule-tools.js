@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const SCHEDULE_TOOLS = [
   {
@@ -394,8 +395,8 @@ async function findScheduleGaps(input) {
   const { date, date_from, date_to, service_type } = input;
   const MAX_STOPS_PER_DAY = 10;
 
-  const from = date || date_from || new Date().toISOString().split('T')[0];
-  const to = date || date_to || (() => { const d = new Date(); d.setDate(d.getDate() + 6); return d.toISOString().split('T')[0]; })();
+  const from = date || date_from || etDateString();
+  const to = date || date_to || etDateString(addETDays(new Date(), 6));
 
   const techs = await db('technicians').where({ active: true }).select('id', 'name');
 
@@ -413,7 +414,7 @@ async function findScheduleGaps(input) {
     const dow = d.getDay();
     if (dow !== 0) { // skip Sundays
       const dateStr = d.toISOString().split('T')[0];
-      const dayName = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      const dayName = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
       const dayServices = services.filter(s => s.scheduled_date === dateStr || (s.scheduled_date && s.scheduled_date.toISOString && s.scheduled_date.toISOString().split('T')[0] === dateStr));
 
       const techSlots = techs.map(t => {
@@ -610,8 +611,8 @@ async function findAvailableSlotsTool(input) {
     technician_id = tech.id;
   }
 
-  const today = new Date().toISOString().split('T')[0];
-  const weekOut = (() => { const d = new Date(); d.setDate(d.getDate() + 7); return d.toISOString().split('T')[0]; })();
+  const today = etDateString();
+  const weekOut = etDateString(addETDays(new Date(), 7));
 
   return await findAvailableSlots({
     lat, lng,

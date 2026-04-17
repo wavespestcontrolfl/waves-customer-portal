@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const CSRCoach = require('../services/csr/csr-coach');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -26,7 +27,7 @@ router.get('/overview', async (req, res, next) => {
 router.get('/scores', async (req, res, next) => {
   try {
     const { csr, days = 30, limit = 50 } = req.query;
-    const since = new Date(Date.now() - parseInt(days) * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -parseInt(days)));
     let query = db('csr_call_scores').where('call_date', '>=', since);
     if (csr) query = query.where('csr_name', csr);
     const scores = await query.orderBy('created_at', 'desc').limit(parseInt(limit));
@@ -89,7 +90,7 @@ router.put('/follow-up-tasks/:id', async (req, res, next) => {
 router.get('/lead-quality', async (req, res, next) => {
   try {
     const days = parseInt(req.query.days || 30);
-    const since = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -days));
 
     const scores = await db('csr_call_scores').where('call_date', '>=', since);
     const losses = scores.filter(s => s.call_outcome !== 'booked');
@@ -146,7 +147,7 @@ router.get('/leaderboard', async (req, res, next) => {
 router.get('/first-call-rates', async (req, res, next) => {
   try {
     const days = parseInt(req.query.days || 30);
-    const since = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -days));
 
     const scores = await db('csr_call_scores')
       .where('call_date', '>=', since)

@@ -5,6 +5,7 @@ const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -416,7 +417,7 @@ router.post('/', async (req, res, next) => {
       first_name: firstName, last_name: lastName, phone, email,
       address_line1: addressLine1 || '', city: city || '', state: state || 'FL', zip: zip || '',
       waveguard_tier: tier || null, monthly_rate: monthlyRate || 0,
-      member_since: new Date().toISOString().split('T')[0],
+      member_since: etDateString(),
       referral_code: code, lead_source: leadSource,
       pipeline_stage: pipelineStage || 'new_lead',
       pipeline_stage_changed_at: new Date(),

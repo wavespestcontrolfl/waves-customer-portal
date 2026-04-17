@@ -8,6 +8,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
 
 const TECH_TOOLS = [
   {
@@ -134,7 +135,7 @@ async function executeTechTool(toolName, input, techContext) {
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 
 async function getMyRoute(techId, techName, date) {
-  const d = date || new Date().toISOString().split('T')[0];
+  const d = date || etDateString();
 
   let query = db('scheduled_services')
     .where({ 'scheduled_services.scheduled_date': d })
@@ -220,7 +221,7 @@ async function getStopDetails(input) {
     .select('service_date', 'service_type', 'notes', 'products_used', 'technician_name');
 
   // Today's scheduled service
-  const today = new Date().toISOString().split('T')[0];
+  const today = etDateString();
   const todayService = await db('scheduled_services')
     .where({ customer_id: customer.id, scheduled_date: today })
     .whereNotIn('status', ['cancelled']).first();

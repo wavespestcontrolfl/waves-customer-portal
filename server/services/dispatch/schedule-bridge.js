@@ -9,6 +9,7 @@ function getDb() {
 }
 
 const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
 
 /**
  * Sync today's (or a given date's) scheduled_services into dispatch_jobs.
@@ -28,7 +29,7 @@ const logger = require('../logger');
  *   scheduled_services.notes         → dispatch_jobs.notes
  */
 async function syncJobsFromSchedule(date) {
-  const d = date || new Date().toISOString().split('T')[0];
+  const d = date || etDateString();
   const knex = getDb();
 
   const services = await knex('scheduled_services')

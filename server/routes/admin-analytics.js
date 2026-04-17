@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const GA4 = require('../services/analytics/google-analytics');
 const logger = require('../services/logger');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -93,7 +94,7 @@ router.get('/conversions', async (req, res, next) => {
 router.get('/trends', async (req, res, next) => {
   try {
     const period = parseInt(req.query.period || 30);
-    const since = new Date(Date.now() - period * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -period));
 
     const rows = await db('ga4_daily_metrics')
       .where('date', '>=', since)

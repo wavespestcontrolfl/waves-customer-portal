@@ -192,7 +192,7 @@ async function buildDynamicPrompt() {
   // 3. Current seasonal pest pressure (month-based for SW Florida)
   const month = new Date().getMonth(); // 0=Jan
   const seasonalPressure = getSeasonalPressure(month);
-  sections.push(`## CURRENT SEASONAL PEST PRESSURE (${new Date().toLocaleString('en-US', { month: 'long' })})\n${seasonalPressure}`);
+  sections.push(`## CURRENT SEASONAL PEST PRESSURE (${new Date().toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' })})\n${seasonalPressure}`);
 
   // 4. Active promotions
   try {

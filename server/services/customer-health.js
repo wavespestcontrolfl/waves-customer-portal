@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // ---------------------------------------------------------------------------
 // Weights for composite score
@@ -501,7 +502,7 @@ function estimateDaysUntilChurn(risk) {
 // ---------------------------------------------------------------------------
 async function computeTrend(customerId) {
   try {
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+    const thirtyDaysAgo = etDateString(addETDays(new Date(), -30));
     const history = await db('customer_health_history')
       .where('customer_id', customerId)
       .where('scored_at', '>=', thirtyDaysAgo)
@@ -584,7 +585,7 @@ async function scoreCustomer(customerId) {
     const daysUntilChurn = estimateDaysUntilChurn(churnRisk);
 
     const now = new Date();
-    const today = now.toISOString().split('T')[0];
+    const today = etDateString(now);
 
     // Upsert into customer_health_scores
     const record = {

@@ -5,6 +5,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(authenticate);
 
@@ -99,7 +100,7 @@ router.get('/active', async (req, res, next) => {
 // =========================================================================
 router.get('/today', async (req, res, next) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
 
     // Check for existing tracker
     let tracker = await db('service_tracking')

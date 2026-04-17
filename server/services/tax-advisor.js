@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { etDateString } = require('../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -44,7 +45,7 @@ class TaxAdvisor {
       taxRates,
       exemptions,
       procurement,
-      reportDate: new Date().toISOString().split('T')[0],
+      reportDate: etDateString(),
     };
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
@@ -337,8 +338,8 @@ Please search for current FL and federal tax changes, then provide your analysis
   async storeReport(report, analysisData, rawResponse) {
     try {
       const [saved] = await db('tax_advisor_reports').insert({
-        report_date: report.report_date || new Date().toISOString().split('T')[0],
-        period: report.period || `Week of ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`,
+        report_date: report.report_date || etDateString(),
+        period: report.period || `Week of ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`,
         grade: report.grade || 'N/A',
         executive_summary: report.executive_summary || '',
         financial_snapshot: JSON.stringify(report.financial_snapshot || {}),
@@ -421,8 +422,8 @@ Please search for current FL and federal tax changes, then provide your analysis
   generateFallbackReport(data) {
     const upcoming = (data.deadlines || []).filter(d => d.status === 'upcoming');
     return {
-      report_date: new Date().toISOString().split('T')[0],
-      period: `Week of ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`,
+      report_date: etDateString(),
+      period: `Week of ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`,
       grade: 'N/A',
       executive_summary: `Data-only report (AI unavailable). ${upcoming.length} upcoming filing deadlines. Revenue: $${data.snapshot?.ytdRevenue?.toLocaleString() || '0'} YTD. Tax collected: $${data.snapshot?.ytdTaxCollected?.toLocaleString() || '0'}.`,
       financial_snapshot: data.snapshot || {},
@@ -430,7 +431,7 @@ Please search for current FL and federal tax changes, then provide your analysis
       savings_opportunities: [],
       deduction_gaps: [],
       compliance_alerts: upcoming.map(d => ({
-        alert: `${d.title} due ${new Date(d.dueDate).toLocaleDateString()}`,
+        alert: `${d.title} due ${new Date(d.dueDate).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`,
         severity: new Date(d.dueDate) < new Date(Date.now() + 14 * 86400000) ? 'high' : 'medium',
         deadline: d.dueDate, action: `Prepare and file ${d.type}`,
       })),

@@ -7,6 +7,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { v4: uuidv4 } = require('uuid');
+const { etDateString } = require('../utils/datetime-et');
 
 // ─── Nightly Maintenance Check ───────────────────────────────────
 /**
@@ -419,7 +420,7 @@ async function generateMaintenanceAlert(schedule, isOverdue) {
     let description = '';
     if (schedule.next_due_at) {
       const dueDate = new Date(schedule.next_due_at);
-      description += `Due date: ${dueDate.toLocaleDateString()}. `;
+      description += `Due date: ${dueDate.toLocaleDateString('en-US', { timeZone: 'America/New_York' })}. `;
     }
     if (schedule.next_due_miles) description += `Due at ${schedule.next_due_miles.toLocaleString()} miles. `;
     if (schedule.next_due_hours) description += `Due at ${schedule.next_due_hours} hours. `;
@@ -574,7 +575,7 @@ async function checkWarrantyExpirations() {
   try {
     const thirtyDaysFromNow = new Date();
     thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
     const futureDate = thirtyDaysFromNow.toISOString().split('T')[0];
 
     const expiringWarranties = await db('equipment')
@@ -599,8 +600,8 @@ async function checkWarrantyExpirations() {
         equipment_id: eq.id,
         alert_type: 'warranty_expiring',
         severity: 'medium',
-        title: `Warranty Expiring: ${eq.name} ${eq.asset_tag || ''} — ${new Date(eq.warranty_expiration).toLocaleDateString()}`.trim(),
-        description: `Warranty expires on ${new Date(eq.warranty_expiration).toLocaleDateString()}. ${eq.warranty_details || ''}`.trim(),
+        title: `Warranty Expiring: ${eq.name} ${eq.asset_tag || ''} — ${new Date(eq.warranty_expiration).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`.trim(),
+        description: `Warranty expires on ${new Date(eq.warranty_expiration).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}. ${eq.warranty_details || ''}`.trim(),
         status: 'new',
         created_at: db.fn.now(),
         updated_at: db.fn.now(),

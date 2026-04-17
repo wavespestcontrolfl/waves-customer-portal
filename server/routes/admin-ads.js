@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
 let _BudgetManager, _CampaignAdvisor, _googleAds;
@@ -25,8 +25,8 @@ router.get('/campaigns', async (req, res, next) => {
       .orderBy('campaign_name');
 
     // Attach 7d & 30d perf summaries
-    const d7 = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
-    const d30 = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+    const d7 = etDateString(addETDays(new Date(), -7));
+    const d30 = etDateString(addETDays(new Date(), -30));
     const perf7 = await db('ad_performance_daily').where('date', '>=', d7);
     const perf30 = await db('ad_performance_daily').where('date', '>=', d30);
 
@@ -160,7 +160,7 @@ router.post('/sync', async (req, res, next) => {
 router.get('/service-lines', async (req, res, next) => {
   try {
     const periodDays = parseInt(req.query.period?.replace('d', '') || 30);
-    const since = new Date(Date.now() - periodDays * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -periodDays));
 
     const attributions = await db('ad_service_attribution').where('lead_date', '>=', since);
 
@@ -249,7 +249,7 @@ router.get('/funnel', async (req, res, next) => {
   try {
     const { service, bucket, period } = req.query;
     const periodDays = parseInt((period || '90d').replace('d', ''));
-    const since = new Date(Date.now() - periodDays * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -periodDays));
 
     let query = db('ad_service_attribution').where('lead_date', '>=', since);
     if (service) query = query.where('specific_service', service);
@@ -362,7 +362,7 @@ router.get('/capacity-heatmap', async (req, res, next) => {
 router.get('/revenue-attribution', async (req, res, next) => {
   try {
     const periodDays = req.query.period === 'quarter' ? 90 : req.query.period === 'ytd' ? 365 : 30;
-    const since = new Date(Date.now() - periodDays * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -periodDays));
 
     const attributions = await db('ad_service_attribution')
       .where('lead_date', '>=', since)

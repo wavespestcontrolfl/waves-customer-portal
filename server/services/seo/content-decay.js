@@ -1,12 +1,13 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 class ContentDecayDetector {
   async detect() {
     logger.info('Content decay detection running...');
     const now = new Date();
-    const d30 = new Date(now - 30 * 86400000).toISOString().split('T')[0];
-    const d60 = new Date(now - 60 * 86400000).toISOString().split('T')[0];
+    const d30 = etDateString(addETDays(now, -30));
+    const d60 = etDateString(addETDays(now, -60));
 
     // Get pages with data in both periods
     const current = await db('gsc_pages')

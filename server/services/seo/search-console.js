@@ -11,6 +11,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // Lazy-load googleapis (~71MB) — only when first GSC method is called
 let google;
@@ -357,8 +358,8 @@ class SearchConsoleService {
    * Get aggregated GSC data for a period (used by SEO advisor and dashboard).
    */
   async getPerformanceSummary(periodDays = 28) {
-    const since = new Date(Date.now() - periodDays * 86400000).toISOString().split('T')[0];
-    const prevSince = new Date(Date.now() - periodDays * 2 * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -periodDays));
+    const prevSince = etDateString(addETDays(new Date(), -periodDays * 2));
 
     // Current period sitewide
     const current = await db('gsc_performance_daily')

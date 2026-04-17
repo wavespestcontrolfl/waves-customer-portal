@@ -14,6 +14,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
@@ -244,8 +245,8 @@ async function computeProtocolPerformance() {
 
 async function computeCompletionRates(dateFrom, dateTo) {
   try {
-    const from = dateFrom || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-    const to = dateTo || new Date().toISOString().split('T')[0];
+    const from = dateFrom || etDateString(addETDays(new Date(), -30));
+    const to = dateTo || etDateString();
 
     // Get all lawn services in date range
     const services = await db('scheduled_services')
@@ -343,7 +344,7 @@ async function computeROI() {
     const nonAssessed = allLawn.filter(id => !assessed.includes(id));
 
     // Retention: active in last 90 days
-    const ninetyDaysAgo = new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0];
+    const ninetyDaysAgo = etDateString(addETDays(new Date(), -90));
 
     const assessedActive = assessed.length ? await db('service_records')
       .whereIn('customer_id', assessed)

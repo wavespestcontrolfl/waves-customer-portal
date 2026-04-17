@@ -8,6 +8,7 @@ const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 
 const { aiTriageLead } = require('../services/lead-triage');
+const { etDateString } = require('../utils/datetime-et');
 
 function capitalizeName(name) {
   if (!name) return '';
@@ -145,7 +146,7 @@ router.post('/', async (req, res) => {
       pipeline_stage_changed_at: new Date(),
       last_contact_date: new Date(),
       last_contact_type: 'form_submission',
-      member_since: new Date().toISOString().split('T')[0],
+      member_since: etDateString(),
       waveguard_tier: null,
     }).returning('*');
 
@@ -378,7 +379,7 @@ router.post('/', async (req, res) => {
         service_line: inferServiceLine(serviceInterest),
         specific_service: inferSpecificService(serviceInterest),
         service_bucket: inferServiceBucket(serviceInterest),
-        lead_date: new Date().toISOString().split('T')[0],
+        lead_date: etDateString(),
         lead_source: leadSource.source,
         lead_source_detail: leadSource.detail,
         gclid: body.gclid || body['Gclid'] || null,

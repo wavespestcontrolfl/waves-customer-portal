@@ -8,6 +8,7 @@
  */
 
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 
 // ═══════════════════════════════════════════════════════════════
@@ -27,7 +28,7 @@ function generateOFX(payouts, startDate, endDate) {
   try {
     const dtStart = formatOFXDate(startDate);
     const dtEnd = formatOFXDate(endDate);
-    const dtServer = formatOFXDate(new Date().toISOString().split('T')[0]);
+    const dtServer = formatOFXDate(etDateString());
 
     // Calculate ledger balance from payouts
     const ledgerBal = payouts.reduce((s, p) => s + parseFloat(p.amount || 0), 0);
@@ -205,7 +206,7 @@ function generateCSV(payouts, transactions) {
     }
 
     const content = rows.join('\n');
-    const now = new Date().toISOString().split('T')[0];
+    const now = etDateString();
     const filename = `waves-payouts-export-${now}.csv`;
 
     return {

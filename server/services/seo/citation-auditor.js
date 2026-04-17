@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
 
 // Canonical NAP from locations.js
 const CANONICAL_NAP = {
@@ -20,7 +21,7 @@ class CitationAuditor {
       if (cit.status === 'unchecked') {
         // Mark as needs manual check
         await db('seo_citations').where('id', cit.id).update({
-          last_checked: new Date().toISOString().split('T')[0],
+          last_checked: etDateString(),
           status: 'unchecked', // stays unchecked until manually verified
         });
       } else if (cit.nap_consistent === true) {
@@ -65,7 +66,7 @@ class CitationAuditor {
       updates.status = updates.nap_consistent ? 'active' : 'inconsistent';
     }
 
-    await db('seo_citations').where('id', citationId).update({ ...updates, last_checked: new Date().toISOString().split('T')[0], updated_at: new Date() });
+    await db('seo_citations').where('id', citationId).update({ ...updates, last_checked: etDateString(), updated_at: new Date() });
   }
 }
 

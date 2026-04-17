@@ -9,6 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const REVIEW_TOOLS = [
   {
@@ -301,7 +302,7 @@ async function submitReviewReply(reviewId, replyText) {
 async function getOutreachCandidates(input) {
   const { location, min_tier, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 20, 100);
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = etDateString(addETDays(new Date(), -30));
 
   let query = db('customers')
     .where('customers.active', true)
@@ -439,7 +440,7 @@ async function getReviewTrends(months) {
   for (let i = months - 1; i >= 0; i--) {
     const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
-    const label = start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    const label = start.toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'America/New_York' });
 
     const stats = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')

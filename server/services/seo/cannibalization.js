@@ -1,10 +1,11 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 class CannibalizationDetector {
   async detect() {
     logger.info('Cannibalization detection running...');
-    const since = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -30));
 
     // Find queries where multiple URLs got impressions
     const queryPages = await db('gsc_pages')

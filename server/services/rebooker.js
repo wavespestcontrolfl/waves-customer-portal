@@ -51,8 +51,8 @@ class SmartRebooker {
 
       options.push({
         date: dateStr,
-        dayOfWeek: candidateDate.toLocaleDateString('en-US', { weekday: 'long' }),
-        displayDate: candidateDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+        dayOfWeek: candidateDate.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }),
+        displayDate: candidateDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }),
         currentLoad: load,
         sameAreaServices: sameAreaCount,
         suggestedWindow: window,

@@ -215,10 +215,10 @@ router.get('/availability', async (req, res, next) => {
       const d = new Date(date + 'T12:00:00');
       days.push({
         date,
-        dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short' }),
+        dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
         dayNum: d.getDate(),
-        month: d.toLocaleDateString('en-US', { month: 'short' }),
-        fullDate: d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }),
+        month: d.toLocaleDateString('en-US', { month: 'short', timeZone: 'America/New_York' }),
+        fullDate: d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
         slots: slots.map(s => ({
           ...s,
           is_best_fit: s === best,
@@ -384,7 +384,7 @@ router.post('/confirm', async (req, res, next) => {
     try {
       const TwilioService = require('../services/twilio');
       const dateLabel = new Date(slot_date + 'T12:00:00').toLocaleDateString('en-US', {
-        weekday: 'long', month: 'long', day: 'numeric',
+        weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
       const startLabel = minToTime12(timeToMin(slot_start));
       const endLabel = minToTime12(endMin);

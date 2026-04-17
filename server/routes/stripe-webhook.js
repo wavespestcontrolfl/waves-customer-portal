@@ -557,7 +557,7 @@ async function handleDisputeCreated(dispute) {
       recipient_type: 'admin',
       category: 'dispute',
       title: `\u26A0\uFE0F Dispute opened: $${amount}`,
-      body: `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString() : 'soon'}. Charge: ${chargeId}`,
+      body: `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
       icon: '\u26A0\uFE0F',
       link: '/admin/invoices',
     });

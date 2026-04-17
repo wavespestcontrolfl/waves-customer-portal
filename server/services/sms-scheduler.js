@@ -149,7 +149,7 @@ class SmsScheduler {
     if (existingAppt) {
       const d = new Date(existingAppt.scheduled_date + 'T12:00:00');
       context.existingAppointment = {
-        date: d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }),
+        date: d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
         time: existingAppt.window_start || 'TBD',
         serviceType: existingAppt.service_type,
       };

@@ -176,8 +176,8 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   }
   // Time in / time out
   if (service.check_in_time) {
-    const inTime = new Date(service.check_in_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-    const outTime = service.check_out_time ? new Date(service.check_out_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '—';
+    const inTime = new Date(service.check_in_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
+    const outTime = service.check_out_time ? new Date(service.check_out_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : '—';
     y2 = infoRow(doc, 'Time In/Out:', `${inTime} — ${outTime}`, colMid + 8, y2, 80, 170);
   }
   if (visitDuration) {

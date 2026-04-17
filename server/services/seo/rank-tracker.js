@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
-const { etParts, etDateString } = require('../../utils/datetime-et');
+const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
 const TRACKED_COMPETITORS = ['turnerpest.com', 'hoskinspest.com', 'hometeampestdefense.com', 'orkin.com', 'terminix.com', 'trulynolen.com', 'nozzlenolen.com'];
 
@@ -143,7 +143,7 @@ class RankTracker {
    * Get rankings dashboard data.
    */
   async getDashboard(days = 7) {
-    const since = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -days));
 
     const keywords = await db('seo_target_keywords').orderBy('priority').orderBy('keyword');
 

@@ -19,7 +19,7 @@ class RescheduleSMS {
     const opt2 = options[1] || options[0];
 
     const originalDate = new Date(typeof service.scheduled_date === 'string' ? service.scheduled_date + 'T12:00:00' : service.scheduled_date)
-      .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
     let smsBody;
     if (reasonCode.startsWith('weather')) {
@@ -97,7 +97,7 @@ class RescheduleSMS {
       );
 
       const customer = await db('customers').where({ id: customerId }).first();
-      const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
       await TwilioService.sendSMS(customer.phone,
         `Confirmed! Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}. We'll remind you the day before. — Waves 🌊`,

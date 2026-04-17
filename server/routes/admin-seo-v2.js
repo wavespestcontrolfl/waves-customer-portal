@@ -5,6 +5,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const SearchConsole = require('../services/seo/search-console');
 const SEOAdvisor = require('../services/seo/seo-advisor');
 const logger = require('../services/logger');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -30,7 +31,7 @@ router.get('/dashboard', async (req, res, next) => {
 router.get('/queries', async (req, res, next) => {
   try {
     const { period = 28, branded, service, city, device, sort = 'clicks', limit = 100 } = req.query;
-    const since = new Date(Date.now() - parseInt(period) * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -parseInt(period)));
 
     let query = db('gsc_queries')
       .where('date', '>=', since)
@@ -67,7 +68,7 @@ router.get('/queries', async (req, res, next) => {
 router.get('/pages', async (req, res, next) => {
   try {
     const { period = 28, type, service, city, sort = 'clicks', limit = 50 } = req.query;
-    const since = new Date(Date.now() - parseInt(period) * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -parseInt(period)));
 
     let query = db('gsc_pages')
       .where('date', '>=', since)
@@ -143,7 +144,7 @@ router.get('/indexing', async (req, res, next) => {
 router.get('/gbp', async (req, res, next) => {
   try {
     const period = parseInt(req.query.period || 28);
-    const since = new Date(Date.now() - period * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -period));
 
     const rows = await db('gbp_performance_daily').where('date', '>=', since);
 
@@ -238,7 +239,7 @@ router.post('/sync', async (req, res, next) => {
 router.get('/opportunities', async (req, res, next) => {
   try {
     const period = parseInt(req.query.period || 28);
-    const since = new Date(Date.now() - period * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -period));
 
     const rows = await db('gsc_queries')
       .where('date', '>=', since)
@@ -537,7 +538,7 @@ router.get('/audit/pages', async (req, res, next) => {
   try {
     const latest = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').first();
     if (!latest) return res.json({ pages: [] });
-    const date = latest.run_date.toISOString?.().split('T')[0] || new Date().toISOString().split('T')[0];
+    const date = latest.run_date.toISOString?.().split('T')[0] || etDateString();
     const pages = await db('seo_page_audits').where('audit_date', date).orderBy('technical_health_score', 'asc');
     res.json({ pages, auditDate: date });
   } catch (err) { next(err); }

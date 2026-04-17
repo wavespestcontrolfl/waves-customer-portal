@@ -1,12 +1,13 @@
 const db = require('../../models/db');
 const TwilioService = require('../twilio');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 class BalanceReminder {
 
   async dailyCheck() {
-    const today = new Date().toISOString().split('T')[0];
-    const day7 = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
+    const today = etDateString();
+    const day7 = etDateString(addETDays(new Date(), 7));
 
     const upcoming = await db('scheduled_services')
       .where('scheduled_date', '>=', today)
@@ -54,7 +55,7 @@ class BalanceReminder {
     const outstanding = await db('payments')
       .where({ 'payments.customer_id': customerId })
       .whereIn('status', ['failed', 'upcoming'])
-      .where('payment_date', '<', new Date().toISOString().split('T')[0])
+      .where('payment_date', '<', etDateString())
       .orderBy('payment_date', 'asc');
 
     if (!outstanding.length) return null;
@@ -73,7 +74,7 @@ class BalanceReminder {
   }
 
   async sendReminder(service, balance, tier, daysUntil) {
-    const datePretty = new Date(service.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+    const datePretty = new Date(service.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
     const amt = balance.totalBalance.toFixed(2);
     const link = balance.oldestInvoiceUrl;
 
@@ -135,7 +136,7 @@ class BalanceReminder {
       let completedOn = '';
       if (oldestInvoice?.service_date) {
         try {
-          completedOn = new Date(oldestInvoice.service_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+          completedOn = new Date(oldestInvoice.service_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
         } catch { completedOn = ''; }
       }
       const dateClause = completedOn ? ` completed on ${completedOn}` : '';

@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // ─── TOOL DEFINITIONS (Anthropic format) ────────────────────────
 
@@ -461,7 +462,7 @@ async function getCustomerDetail(customerId) {
 
   const upcoming = await db('scheduled_services')
     .where({ customer_id: customerId })
-    .where('scheduled_date', '>=', new Date().toISOString().split('T')[0])
+    .where('scheduled_date', '>=', etDateString())
     .whereNotIn('status', ['cancelled'])
     .orderBy('scheduled_date', 'asc')
     .limit(10);
@@ -655,8 +656,8 @@ async function queryRevenue(input) {
 
 async function compareTechnicians(input) {
   const { date_from, date_to, tech_names } = input;
-  const from = date_from || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-  const to = date_to || new Date().toISOString().split('T')[0];
+  const from = date_from || etDateString(addETDays(new Date(), -30));
+  const to = date_to || etDateString();
 
   let query = db('service_records')
     .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')

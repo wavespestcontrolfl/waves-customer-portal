@@ -17,6 +17,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const SearchConsole = require('./search-console');
 const MODELS = require('../../config/models');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -32,7 +33,7 @@ class SEOAdvisor {
     const gsc = await SearchConsole.getPerformanceSummary(28);
 
     const gbp = await db('gbp_performance_daily')
-      .where('date', '>=', new Date(Date.now() - 28 * 86400000).toISOString().split('T')[0])
+      .where('date', '>=', etDateString(addETDays(new Date(), -28)))
       .orderBy('date', 'desc');
 
     // GBP by location
@@ -51,7 +52,7 @@ class SEOAdvisor {
 
     if (!hasData) {
       const emptyReport = {
-        date: new Date().toISOString().split('T')[0],
+        date: etDateString(),
         grade: 'N/A',
         overall_assessment: 'No GSC or GBP data available yet. Connect Google Search Console and sync data to enable SEO analysis.',
         recommendations: [],
@@ -161,7 +162,7 @@ Return JSON: {
 
         messages: [{
           role: 'user',
-          content: `Weekly SEO review for ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}:
+          content: `Weekly SEO review for ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}:
 
 SITEWIDE PERFORMANCE (last 28 days):
 ${JSON.stringify(analysisData.sitewide, null, 2)}
@@ -204,7 +205,7 @@ Analyze and provide specific, prioritized recommendations.`
         report = { raw: response.content[0].text, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse.' };
       }
 
-      report.date = new Date().toISOString().split('T')[0];
+      report.date = etDateString();
       await this.storeReport(report);
       await this.sendSummary(report);
 
@@ -248,7 +249,7 @@ Analyze and provide specific, prioritized recommendations.`
     }
 
     return {
-      date: new Date().toISOString().split('T')[0],
+      date: etDateString(),
       period: 'Last 28 days',
       grade: recommendations.length === 0 ? 'B' : 'C',
       overall_assessment: `Auto-generated SEO report. ${data.sitewide?.clicks || 0} total clicks, ${(data.page2Opportunities || []).length} page-2 opportunities found, ${(data.decliningQueries || []).length} declining queries detected.`,
@@ -271,7 +272,7 @@ Analyze and provide specific, prioritized recommendations.`
   async storeReport(report) {
     try {
       await db('seo_advisor_reports').insert({
-        date: report.date || new Date().toISOString().split('T')[0],
+        date: report.date || etDateString(),
         period_type: 'weekly',
         report_data: JSON.stringify(report),
         grade: report.grade,

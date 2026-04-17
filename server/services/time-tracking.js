@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 const WEEKLY_OT_THRESHOLD = 2400; // 40 hours in minutes
 
@@ -237,7 +238,7 @@ async function getStatus(technicianId) {
     .first();
 
   // Today's summary
-  const today = new Date().toISOString().split('T')[0];
+  const today = etDateString();
   const todayEntries = await db('time_entries')
     .where({ technician_id: technicianId })
     .where('status', '!=', 'voided')

@@ -7,6 +7,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const crypto = require('crypto');
+const { etDateString } = require('../../utils/datetime-et');
 
 const SITE_URL = process.env.WORDPRESS_URL || 'https://wavespestcontrol.com';
 const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];
@@ -68,7 +69,7 @@ class SiteAuditor {
           const audit = await this.auditPage(page.url, html, statusCode, responseTime, page.keyword, page.city, page.type);
 
           await db('seo_page_audits').insert({
-            ...audit, audit_date: new Date().toISOString().split('T')[0],
+            ...audit, audit_date: etDateString(),
           }).onConflict(['url', 'audit_date']).merge();
 
           auditResults.push(audit);
@@ -134,7 +135,7 @@ class SiteAuditor {
           affected_urls: JSON.stringify(trend.urls),
           affected_count: trend.urls.length,
           recommendation: trend.recommendation,
-          first_detected: new Date().toISOString().split('T')[0],
+          first_detected: etDateString(),
         });
       }
 
@@ -329,7 +330,7 @@ class SiteAuditor {
     if (!latestRun) return { hasData: false };
 
     const pages = await db('seo_page_audits')
-      .where('audit_date', latestRun.run_date.toISOString?.().split('T')[0] || new Date().toISOString().split('T')[0])
+      .where('audit_date', latestRun.run_date.toISOString?.().split('T')[0] || etDateString())
       .orderBy('technical_health_score', 'asc');
 
     const issues = await db('seo_audit_issue_trends')

@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 /**
  * Revenue Forecasting Service
@@ -8,7 +9,7 @@ const logger = require('./logger');
 
 async function getForecast() {
   const now = new Date();
-  const todayStr = now.toISOString().split('T')[0];
+  const todayStr = etDateString(now);
 
   // --- MRR / ARR ---
   const mrrResult = await db('customers')

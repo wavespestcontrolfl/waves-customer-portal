@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 class LeadScorer {
   async calculateScore(customerId) {
@@ -50,7 +51,7 @@ class LeadScorer {
 
     // Risk deductions
     const failedPay = await db('payments').where({ customer_id: customerId, status: 'failed' })
-      .where('payment_date', '>', new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0])
+      .where('payment_date', '>', etDateString(addETDays(new Date(), -90)))
       .count('* as count').first();
     score -= parseInt(failedPay?.count || 0) * 5;
 

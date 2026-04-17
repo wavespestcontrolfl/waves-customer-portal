@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 class PipelineManager {
   async onEvent(customerId, eventType, eventData = {}) {
@@ -45,8 +46,8 @@ class PipelineManager {
 
   async checkStaleCustomers() {
     const now = new Date();
-    const d60 = new Date(now - 60 * 86400000).toISOString().split('T')[0];
-    const d120 = new Date(now - 120 * 86400000).toISOString().split('T')[0];
+    const d60 = etDateString(addETDays(now, -60));
+    const d120 = etDateString(addETDays(now, -120));
 
     const atRisk = await db('customers')
       .where({ pipeline_stage: 'active_customer', active: true })

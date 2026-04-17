@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const db = require('../models/db');
 const TwilioService = require('./twilio');
 const logger = require('./logger');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
@@ -258,9 +259,8 @@ function initScheduledJobs() {
     logger.info('Running: tax deadline alert check');
     try {
       const now = new Date();
-      const in14Days = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
-      const today = now.toISOString().split('T')[0];
-      const futureDate = in14Days.toISOString().split('T')[0];
+      const today = etDateString(now);
+      const futureDate = etDateString(addETDays(now, 14));
 
       // Find filings due in the next 14 days that haven't been reminded yet
       const upcomingFilings = await db('tax_filing_calendar')
@@ -283,7 +283,7 @@ function initScheduledJobs() {
         const dueDate = new Date(f.due_date);
         const daysUntil = Math.ceil((dueDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
         const amountStr = f.amount_due ? ` ($${parseFloat(f.amount_due).toLocaleString()})` : '';
-        return `- ${f.title}${amountStr} — due ${dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} (${daysUntil} day${daysUntil !== 1 ? 's' : ''})`;
+        return `- ${f.title}${amountStr} — due ${dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })} (${daysUntil} day${daysUntil !== 1 ? 's' : ''})`;
       });
 
       const message = `Tax Deadline Alert:\n\n${lines.join('\n')}\n\nReview in the admin portal.`;
@@ -347,7 +347,7 @@ function initScheduledJobs() {
       for (const cust of customers) {
         const nextMonth = new Date();
         nextMonth.setMonth(nextMonth.getMonth() + 1);
-        const chargeDate = `${nextMonth.toLocaleDateString('en-US', { month: 'long' })} 1`;
+        const chargeDate = `${nextMonth.toLocaleDateString('en-US', { month: 'long', timeZone: 'America/New_York' })} 1`;
 
         try {
           await TwilioService.sendBillingReminder(cust.id, cust.monthly_rate, chargeDate);
@@ -421,7 +421,7 @@ function initScheduledJobs() {
       logger.info(`Health: ${healthResult.atRisk} at-risk, ${healthResult.critical} critical`);
 
       // Step 3: Generate retention outreach for at-risk customers
-      const today = new Date().toISOString().split('T')[0];
+      const today = etDateString();
       const atRisk = await db('customer_health_scores')
         .where('scored_at', today)
         .whereIn('churn_risk', ['at_risk', 'critical'])
@@ -762,7 +762,7 @@ function initScheduledJobs() {
   cron.schedule('0 4 * * 0', async () => {
     logger.info('Running: health history cleanup');
     try {
-      const cutoff = new Date(Date.now() - 365 * 86400000).toISOString().split('T')[0];
+      const cutoff = etDateString(addETDays(new Date(), -365));
       const deleted = await db('customer_health_history').where('scored_at', '<', cutoff).del();
       logger.info(`Health history cleanup: ${deleted} old records deleted`);
     } catch (err) {
@@ -874,7 +874,7 @@ function initScheduledJobs() {
       const missedAppointment = require('./workflows/missed-appointment');
       if (missedAppointment.onSkip) {
         // Find today's services that were scheduled but not completed
-        const today = new Date().toISOString().split('T')[0];
+        const today = etDateString();
         const missedServices = await db('scheduled_services')
           .where({ scheduled_date: today })
           .whereIn('status', ['pending', 'confirmed'])

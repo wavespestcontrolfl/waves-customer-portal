@@ -3,6 +3,8 @@
  * Each function takes an array of data objects and returns a CSV string.
  */
 
+const { etDateString } = require('../utils/datetime-et');
+
 function esc(val) {
   if (val == null) return '';
   let s = String(val);
@@ -155,7 +157,7 @@ function pnlToCSV(pnlData) {
 }
 
 function generateReadme(year, pnlData) {
-  const now = new Date().toISOString().split('T')[0];
+  const now = etDateString();
   const lines = [
     `Waves Pest Control — ${year} Tax Package`,
     `Generated: ${now}`,

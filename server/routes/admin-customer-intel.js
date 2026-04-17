@@ -6,13 +6,14 @@ const SignalDetector = require('../services/customer-intelligence/signal-detecto
 const HealthScorer = require('../services/customer-intelligence/health-scorer');
 const RetentionEngine = require('../services/customer-intelligence/retention-engine');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/customers/intelligence — full overview
 router.get('/', async (req, res, next) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
 
     // Get latest health scores
     const healthScores = await db('customer_health_scores as h')

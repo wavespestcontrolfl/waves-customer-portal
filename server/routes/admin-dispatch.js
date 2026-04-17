@@ -6,6 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -25,7 +26,7 @@ router.get('/:date?', async (req, res, next) => {
     // Validate date param — reject non-date strings like "technicians", "products", etc.
     const rawDate = req.params.date;
     if (rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) return next();
-    const date = rawDate || new Date().toISOString().split('T')[0];
+    const date = rawDate || etDateString();
 
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })

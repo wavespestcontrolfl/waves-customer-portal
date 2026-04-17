@@ -4,6 +4,7 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
@@ -144,7 +145,7 @@ router.post('/sms', async (req, res) => {
           nearest_location_id: numberConfig.location || loc.id,
           pipeline_stage: 'new_lead', pipeline_stage_changed_at: new Date(),
           last_contact_date: new Date(), last_contact_type: Body ? 'sms_inbound' : 'call_inbound',
-          member_since: new Date().toISOString().split('T')[0],
+          member_since: etDateString(),
           crm_notes: `Inbound ${Body ? 'SMS' : 'call'} from ${numberConfig.domain || 'van wrap'}. ${Body ? 'Message: ' + Body : ''}`,
         }).returning('*');
 
@@ -337,7 +338,7 @@ router.post('/sms', async (req, res) => {
 
             // Find the lightest day
             const lightestDay = dailyLoad[0]?.scheduled_date || tomorrow.toISOString().split('T')[0];
-            const datePretty = new Date(lightestDay + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+            const datePretty = new Date(lightestDay + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
             // Append suggestion to the draft
             draft.draft += `\n\nI can get you scheduled for ${datePretty} — morning or afternoon works better for you?`;

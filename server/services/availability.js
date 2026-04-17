@@ -95,10 +95,10 @@ class AvailabilityEngine {
       if (slots.length > 0) {
         days.push({
           date: dateStr,
-          dayOfWeek: date.toLocaleDateString('en-US', { weekday: 'short' }),
+          dayOfWeek: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
           dayNum: date.getDate(),
-          month: date.toLocaleDateString('en-US', { month: 'short' }),
-          fullDate: date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }),
+          month: date.toLocaleDateString('en-US', { month: 'short', timeZone: 'America/New_York' }),
+          fullDate: date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
           slots: slots.map(s => ({
             start: this.minToTime12(s.start),
             end: this.minToTime12(s.end),
@@ -200,7 +200,7 @@ class AvailabilityEngine {
     // Send SMS notifications
     try {
       const TwilioService = require('./twilio');
-      const dateLabel = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+      const dateLabel = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
 
       // Customer confirmation
       await TwilioService.sendSMS(customer.phone,

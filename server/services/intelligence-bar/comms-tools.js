@@ -9,6 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { etDateString } = require('../../utils/datetime-et');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -482,7 +483,7 @@ async function draftSmsReply(input) {
 
   // Get customer context
   const lastService = await db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').first();
-  const nextService = await db('scheduled_services').where({ customer_id: customer.id }).where('scheduled_date', '>=', new Date().toISOString().split('T')[0]).whereNotIn('status', ['cancelled']).orderBy('scheduled_date').first();
+  const nextService = await db('scheduled_services').where({ customer_id: customer.id }).where('scheduled_date', '>=', etDateString()).whereNotIn('status', ['cancelled']).orderBy('scheduled_date').first();
 
   const Anthropic = require('@anthropic-ai/sdk');
   if (!process.env.ANTHROPIC_API_KEY) return { error: 'ANTHROPIC_API_KEY not set' };
@@ -609,7 +610,7 @@ async function getTodaysActivity() {
   ]);
 
   return {
-    date: new Date().toISOString().split('T')[0],
+    date: etDateString(),
     sms_received: parseInt(smsIn?.c || 0),
     sms_sent: parseInt(smsOut?.c || 0),
     calls_total: parseInt(calls?.total || 0),

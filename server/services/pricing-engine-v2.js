@@ -318,7 +318,7 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
   if (p.isNewHomeowner) {
     result.notes.push({
       type: 'SALES',
-      text: `New homeowner (purchased ${p.lastSaleDate ? new Date(p.lastSaleDate).toLocaleDateString() : 'recently'}). High bundle potential — recommend WaveGuard Platinum pitch.`,
+      text: `New homeowner (purchased ${p.lastSaleDate ? new Date(p.lastSaleDate).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'recently'}). High bundle potential — recommend WaveGuard Platinum pitch.`,
       priority: 'HIGH'
     });
   }

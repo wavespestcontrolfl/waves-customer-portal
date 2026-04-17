@@ -16,6 +16,7 @@ const { scoreAll } = require('../services/dispatch/job-scorer');
 const { simulate } = require('../services/dispatch/tech-matcher');
 const { getRecommendedSlots } = require('../services/dispatch/csr-booker');
 const { getDashboardMetrics } = require('../services/dispatch/insight-engine');
+const { etDateString } = require('../utils/datetime-et');
 
 let db;
 function getDb() {
@@ -26,7 +27,7 @@ function getDb() {
 // GET /api/dispatch/routes?date=YYYY-MM-DD&mode=mixed&zone=all
 router.get('/routes', async (req, res) => {
   try {
-    const { date = new Date().toISOString().split('T')[0], mode = 'mixed', zone = 'all' } = req.query;
+    const { date = etDateString(), mode = 'mixed', zone = 'all' } = req.query;
     const routes = await optimizeDay(date, { mode, zone });
     res.json({ routes, date, mode, zone });
   } catch (err) {
@@ -37,7 +38,7 @@ router.get('/routes', async (req, res) => {
 // POST /api/dispatch/routes/reoptimize
 router.post('/routes/reoptimize', async (req, res) => {
   try {
-    const { date = new Date().toISOString().split('T')[0], mode = 'mixed', zone = 'all' } = req.body;
+    const { date = etDateString(), mode = 'mixed', zone = 'all' } = req.body;
     const routes = await optimizeDay(date, { mode, zone });
     res.json({ routes, message: 'Route reoptimized' });
   } catch (err) {
@@ -99,7 +100,7 @@ router.get('/jobs', async (req, res) => {
 // POST /api/dispatch/jobs/:id/score
 router.post('/jobs/:id/score', async (req, res) => {
   try {
-    const { date = new Date().toISOString().split('T')[0] } = req.body;
+    const { date = etDateString() } = req.body;
     const job = await getDb()('dispatch_jobs').where('id', req.params.id).first();
     if (!job) return res.status(404).json({ error: 'Job not found' });
     const { scoreJob } = require('../services/dispatch/job-scorer');

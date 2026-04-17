@@ -10,6 +10,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -132,7 +133,7 @@ router.post('/equipment/:id/maintenance', async (req, res, next) => {
       parts_used: parts_used || null,
       performed_by: performed_by || req.technician?.name || null,
       notes: notes || null,
-      service_date: service_date || new Date().toISOString().split('T')[0],
+      service_date: service_date || etDateString(),
     }).returning('*');
 
     // Update equipment record
@@ -176,7 +177,7 @@ router.post('/equipment/:id/calibration', async (req, res, next) => {
       cost: 0,
       performed_by: performed_by || req.technician?.name || null,
       notes: calibrationNotes,
-      service_date: service_date || new Date().toISOString().split('T')[0],
+      service_date: service_date || etDateString(),
     }).returning('*');
 
     logger.info(`Calibration logged for ${equipment.name}`);
@@ -533,7 +534,7 @@ router.post('/job-costs/auto-calculate/:serviceRecordId', async (req, res, next)
     const [job] = await db('job_costs').insert({
       service_record_id: req.params.serviceRecordId,
       customer_id: serviceRecord.customer_id,
-      service_date: serviceRecord.service_date || new Date().toISOString().split('T')[0],
+      service_date: serviceRecord.service_date || etDateString(),
       service_type: serviceRecord.service_type || null,
       products_cost: productsCost,
       labor_cost: laborCost,

@@ -3,6 +3,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const TaxCalculator = require('./tax-calculator');
 const DiscountEngine = require('./discount-engine');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -73,7 +74,7 @@ const InvoiceService = {
 
         // Auto-generate title from service type if not provided
         if (!title) {
-          const dateStr = new Date(sr.service_date).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+          const dateStr = new Date(sr.service_date).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' });
           title = `${sr.service_type} — ${dateStr}`;
         }
       }
@@ -132,7 +133,7 @@ const InvoiceService = {
       tax_amount: taxAmount,
       total,
       notes: notes || null,
-      due_date: dueDate || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
+      due_date: dueDate || etDateString(addETDays(new Date(), 30)),
       status: 'draft',
       ...serviceData,
     }).returning('*');

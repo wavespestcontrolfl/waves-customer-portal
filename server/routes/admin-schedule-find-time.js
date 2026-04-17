@@ -19,6 +19,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -77,7 +78,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Could not resolve lat/lng from customerId, address, or lat/lng params' });
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
     const weekOut = (() => {
       const d = new Date(); d.setDate(d.getDate() + 7);
       return d.toISOString().split('T')[0];

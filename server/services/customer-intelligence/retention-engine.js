@@ -38,7 +38,7 @@ class RetentionEngine {
         .where('status', 'completed')
         .orderBy('service_date', 'desc')
         .first();
-      if (lastSvc) lastServiceNote = `Last service: ${lastSvc.service_type} on ${new Date(lastSvc.service_date).toLocaleDateString()} — "${(lastSvc.tech_notes || '').substring(0, 200)}"`;
+      if (lastSvc) lastServiceNote = `Last service: ${lastSvc.service_type} on ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} — "${(lastSvc.tech_notes || '').substring(0, 200)}"`;
     } catch { /* */ }
 
     let recentSMS = '';

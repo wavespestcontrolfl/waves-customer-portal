@@ -5,6 +5,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -162,7 +163,7 @@ router.put('/:token/accept', async (req, res, next) => {
             city: '', state: 'FL', zip: '',
             waveguard_tier: estimate.waveguard_tier || 'Bronze',
             monthly_rate: estimate.monthly_total || 0,
-            member_since: new Date().toISOString().split('T')[0],
+            member_since: etDateString(),
             referral_code: code,
           }).returning('*');
           customerId = newCust.id;

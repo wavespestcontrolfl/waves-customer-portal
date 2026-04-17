@@ -5,6 +5,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 const GOOGLE_KEY = process.env.GOOGLE_CALENDAR_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'c_5c16252ee04075f3fa68df16b64b93a0bf260fb164a84adbbcf5203e59e57609@group.calendar.google.com';
@@ -63,7 +64,7 @@ async function findOrCreateCustomer({ name, phone, email, source }) {
       first_name: firstName, last_name: lastName,
       phone: cleanPhone, email: email || null,
       referral_code: code, pipeline_stage: 'new_lead', pipeline_stage_changed_at: new Date(),
-      lead_source: source || 'calendar', member_since: new Date().toISOString().split('T')[0],
+      lead_source: source || 'calendar', member_since: etDateString(),
     }).returning('*');
     logger.info(`[cal-sync] Created customer: ${firstName} ${lastName}`);
     return cust.id;

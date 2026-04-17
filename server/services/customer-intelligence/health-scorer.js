@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { SIGNAL_TYPES } = require('./signal-detector');
+const { etDateString } = require('../../utils/datetime-et');
 
 class HealthScorer {
 
@@ -91,7 +92,7 @@ class HealthScorer {
     const ltv = customer.monthly_rate ? parseFloat(customer.monthly_rate) * 12 * (1 - churnProbability) : 0;
 
     // Save (upsert for today)
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
     const existing = await db('customer_health_scores')
       .where('customer_id', customerId)
       .where('scored_at', today)

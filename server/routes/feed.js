@@ -299,7 +299,7 @@ router.get('/monthly-tip', async (req, res, next) => {
   };
 
   const tip = TIPS[month] || TIPS[0];
-  res.json({ ...tip, month: new Date().toLocaleString('en-US', { month: 'long' }) });
+  res.json({ ...tip, month: new Date().toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' }) });
 });
 
 // =========================================================================

@@ -7,6 +7,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
 
 // Tool definitions in Anthropic format
 const TOOLS = [
@@ -149,7 +150,7 @@ async function getUpcomingServices(customerId) {
   if (!customerId) return { services: [] };
   const services = await db('scheduled_services')
     .where('customer_id', customerId)
-    .where('scheduled_date', '>=', new Date().toISOString().split('T')[0])
+    .where('scheduled_date', '>=', etDateString())
     .whereNotIn('status', ['cancelled'])
     .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
     .select('scheduled_services.scheduled_date', 'scheduled_services.service_type',

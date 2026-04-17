@@ -68,7 +68,7 @@ const LatePaymentService = {
       if (inv.service_date) {
         try {
           formattedDate = new Date(inv.service_date).toLocaleDateString('en-US', {
-            month: 'short', day: 'numeric', year: 'numeric',
+            month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
           });
         } catch { /* ignore */ }
       }

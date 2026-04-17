@@ -10,6 +10,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -195,7 +196,7 @@ router.post('/sync', async (req, res, next) => {
     const bouncie = BouncieService.default || BouncieService;
     const instance = typeof bouncie === 'function' ? new bouncie() : bouncie;
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
     const startDate = req.body.start_date || today;
     const endDate = req.body.end_date || today;
 

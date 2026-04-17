@@ -9,6 +9,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -186,7 +187,7 @@ async function processTripWebhook(event) {
 
     const tripDate = trip.startTime
       ? new Date(trip.startTime).toISOString().split('T')[0]
-      : new Date().toISOString().split('T')[0];
+      : etDateString();
 
     const tripId = trip.transactionId || trip.id || `${imei}-${trip.startTime || Date.now()}`;
 
@@ -493,7 +494,7 @@ async function computeMonthlySummary(equipmentId, monthDate) {
  */
 async function getDashboard() {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
     const monthStart = today.slice(0, 7) + '-01';
 
     // Today's trips

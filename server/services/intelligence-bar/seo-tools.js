@@ -8,6 +8,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const SEO_TOOLS = [
   {
@@ -221,8 +222,8 @@ async function executeSeoTool(toolName, input) {
 
 async function queryGscPerformance(input) {
   const { domain, period_days = 28, compare = false, group_by = 'domain' } = input;
-  const since = new Date(Date.now() - period_days * 86400000).toISOString().split('T')[0];
-  const today = new Date().toISOString().split('T')[0];
+  const since = etDateString(addETDays(new Date(), -period_days));
+  const today = etDateString();
 
   async function fetchPeriod(from, to, groupBy) {
     let query = db('gsc_performance_daily').whereBetween('date', [from, to]);
@@ -251,9 +252,9 @@ async function queryGscPerformance(input) {
   const current = await fetchPeriod(since, today, group_by);
   let previous = null;
   if (compare) {
-    const prevEnd = new Date(Date.now() - period_days * 86400000);
-    const prevStart = new Date(prevEnd.getTime() - period_days * 86400000).toISOString().split('T')[0];
-    previous = await fetchPeriod(prevStart, prevEnd.toISOString().split('T')[0], group_by);
+    const prevEnd = etDateString(addETDays(new Date(), -period_days));
+    const prevStart = etDateString(addETDays(new Date(), -period_days * 2));
+    previous = await fetchPeriod(prevStart, prevEnd, group_by);
   }
 
   const fmt = rows => (Array.isArray(rows) ? rows : [rows]).map(r => ({
@@ -278,7 +279,7 @@ async function queryGscPerformance(input) {
 async function queryTopQueries(input) {
   const { domain, period_days = 28, branded, service_category, city, sort = 'clicks', limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 20, 100);
-  const since = new Date(Date.now() - period_days * 86400000).toISOString().split('T')[0];
+  const since = etDateString(addETDays(new Date(), -period_days));
 
   let query = db('gsc_queries').where('date', '>=', since)
     .select('query', 'is_branded', 'service_category', 'city_target', 'intent_type')
@@ -316,7 +317,7 @@ async function queryTopQueries(input) {
 async function queryTopPages(input) {
   const { domain, period_days = 28, page_type, service_category, sort = 'clicks', limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 20, 100);
-  const since = new Date(Date.now() - period_days * 86400000).toISOString().split('T')[0];
+  const since = etDateString(addETDays(new Date(), -period_days));
 
   let query = db('gsc_pages').where('date', '>=', since)
     .select('page_url', 'page_type', 'service_category', 'city_target')
@@ -349,7 +350,7 @@ async function queryTopPages(input) {
 async function querySeoRankings(input) {
   const { keyword, service_category, city, only_drops, only_gains, days_back = 7, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 30, 100);
-  const compareDate = new Date(Date.now() - days_back * 86400000).toISOString().split('T')[0];
+  const compareDate = etDateString(addETDays(new Date(), -days_back));
 
   let kwQuery = db('seo_target_keywords as k')
     .leftJoin(db.raw(`(SELECT keyword_id, organic_position, map_pack_position, ai_overview_cited FROM seo_rank_history WHERE check_date = (SELECT MAX(check_date) FROM seo_rank_history)) as latest ON k.id = latest.keyword_id`))
@@ -513,8 +514,8 @@ async function queryBlogPerformance(input) {
 
 async function getContentPipeline(input) {
   const { weeks_ahead = 4 } = input;
-  const today = new Date().toISOString().split('T')[0];
-  const futureDate = new Date(Date.now() + weeks_ahead * 7 * 86400000).toISOString().split('T')[0];
+  const today = etDateString();
+  const futureDate = etDateString(addETDays(new Date(), weeks_ahead * 7));
 
   const statusCounts = await db('blog_posts').select('status').count('* as count').groupBy('status');
   const counts = {};
@@ -632,7 +633,7 @@ async function compareDomains(input) {
   }
 
   // GSC metrics (clicks or impressions)
-  const since = new Date(Date.now() - period_days * 86400000).toISOString().split('T')[0];
+  const since = etDateString(addETDays(new Date(), -period_days));
   const gscData = await db('gsc_performance_daily')
     .where('date', '>=', since)
     .select('domain')
@@ -840,7 +841,7 @@ async function getSemanticConceptMap(input) {
       pest_control: 'pest', lawn_care: 'lawn', mosquito: 'mosquito',
       termite: 'termite', tree_shrub: 'tree_shrub', rodent: 'rodent',
     };
-    const since = new Date(Date.now() - 28 * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -28));
     gscData = await db('gsc_top_queries')
       .where('service_category', categoryMap[service_line] || service_line)
       .where('date', '>=', since)
@@ -874,8 +875,8 @@ async function scorePageRefreshPriority(input) {
   const limit = Math.min(rawLimit || 15, 50);
 
   // Pull pages with ranking data
-  const since = new Date(Date.now() - 28 * 86400000).toISOString().split('T')[0];
-  const prevSince = new Date(Date.now() - 56 * 86400000).toISOString().split('T')[0];
+  const since = etDateString(addETDays(new Date(), -28));
+  const prevSince = etDateString(addETDays(new Date(), -56));
 
   let currentQuery = db('gsc_top_pages')
     .where('date', '>=', since)
@@ -1003,7 +1004,7 @@ async function getContentWorkflowBrief(input) {
   // Pull GSC data for this keyword
   let gscData = null;
   try {
-    const since = new Date(Date.now() - 28 * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -28));
     gscData = await db('gsc_top_queries')
       .whereILike('query', `%${target_keyword}%`)
       .where('date', '>=', since)

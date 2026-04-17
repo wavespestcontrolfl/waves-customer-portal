@@ -67,7 +67,7 @@ class ApplicationLimitChecker {
         const lastApp = new Date(history[0].application_date + 'T12:00:00');
         const daysSince = Math.floor((proposedDate - lastApp) / 86400000);
         const minDays = limit.limit_value;
-        if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString()}.`, current: daysSince, max: minDays };
+        if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}.`, current: daysSince, max: minDays };
         if (daysSince < minDays + 7) return { approaching: true, message: `${product.name}: ${daysSince} days since last app (min ${minDays}). Just cleared.`, current: daysSince, max: minDays };
         return { violated: false, current: daysSince, max: minDays };
       }

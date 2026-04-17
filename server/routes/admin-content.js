@@ -7,6 +7,7 @@ const BlogAuditor = require('../services/content/blog-auditor');
 const WordPressSync = require('../services/content/wordpress-sync');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -236,8 +237,8 @@ router.get('/blog/analytics', async (req, res, next) => {
     const avgWordCount = published.filter(p => p.word_count).reduce((s, p) => s + p.word_count, 0) / (published.filter(p => p.word_count).length || 1);
 
     // Upcoming (next 7 days)
-    const today = new Date().toISOString().split('T')[0];
-    const weekOut = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
+    const today = etDateString();
+    const weekOut = etDateString(addETDays(new Date(), 7));
     const upcoming = await db('blog_posts')
       .where('publish_date', '>=', today)
       .where('publish_date', '<=', weekOut)

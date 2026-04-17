@@ -7,6 +7,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const PORTAL_DOMAIN = process.env.PORTAL_DOMAIN || 'portal.wavespestcontrol.com';
 
@@ -279,7 +280,7 @@ Generate the reply now.`;
 // GET /api/admin/reviews/outreach-candidates — customers eligible for review request
 router.get('/outreach-candidates', async (req, res, next) => {
   try {
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+    const thirtyDaysAgo = etDateString(addETDays(new Date(), -30));
 
     // Active customers with completed services in last 30 days who haven't left a review
     const customers = await db('customers')

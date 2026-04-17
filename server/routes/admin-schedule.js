@@ -9,6 +9,7 @@ const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
   cleanSquareNotes, isNewCustomer, safeDate,
 } = require('../utils/service-normalizer');
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -23,9 +24,9 @@ function sanitizeServiceType(serviceType) {
 // Returns a YYYY-MM-DD string.
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { nth, weekday, intervalDays } = opts;
-  const safeBaseStr = baseDateStr ? String(baseDateStr).split('T')[0] : new Date().toISOString().split('T')[0];
+  const safeBaseStr = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
   const base = new Date(safeBaseStr + 'T12:00:00');
-  if (isNaN(base.getTime())) return new Date().toISOString().split('T')[0];
+  if (isNaN(base.getTime())) return etDateString();
   const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
   const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
   const intNum = (intervalDays != null && intervalDays !== '' && !isNaN(parseInt(intervalDays))) ? parseInt(intervalDays) : null;
@@ -87,7 +88,7 @@ const ZONE_LABELS = {
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
-    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const date = req.query.date || etDateString();
 
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })
@@ -230,7 +231,7 @@ router.get('/', async (req, res, next) => {
 // GET /api/admin/schedule/week
 router.get('/week', async (req, res, next) => {
   try {
-    const startDate = req.query.start || new Date().toISOString().split('T')[0];
+    const startDate = req.query.start || etDateString();
     const start = new Date(startDate + 'T12:00:00');
     const days = [];
 
@@ -255,7 +256,7 @@ router.get('/week', async (req, res, next) => {
 
       days.push({
         date: dateStr,
-        dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short' }),
+        dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
         dayNum: d.getDate(),
         services: services.map(s => {
           const svcType = normalizeServiceType(s.service_type);
@@ -280,7 +281,7 @@ router.get('/week', async (req, res, next) => {
 // GET /api/admin/schedule/month — month calendar view
 router.get('/month', async (req, res, next) => {
   try {
-    const yearMonth = req.query.month || new Date().toISOString().slice(0, 7); // "2026-04"
+    const yearMonth = req.query.month || etDateString().slice(0, 7); // "2026-04"
     const [year, month] = yearMonth.split('-').map(Number);
 
     // Get first and last day of the month
@@ -362,7 +363,7 @@ router.get('/month', async (req, res, next) => {
           date: dateStr,
           dayNum: currentDate.getDate(),
           isCurrentMonth: currentDate.getMonth() === month - 1,
-          isToday: dateStr === new Date().toISOString().split('T')[0],
+          isToday: dateStr === etDateString(),
           isWeekend: currentDate.getDay() === 0 || currentDate.getDay() === 6,
           services: daySvcs,
           count: daySvcs.length,
@@ -404,7 +405,7 @@ router.get('/month', async (req, res, next) => {
 
     res.json({
       yearMonth,
-      monthName: firstDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+      monthName: firstDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' }),
       weeks,
       summary,
     });
@@ -639,7 +640,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       if (parent) {
         const baseDateStr = parent.scheduled_date
           ? String(parent.scheduled_date).split('T')[0]
-          : new Date().toISOString().split('T')[0];
+          : etDateString();
         const rOpts = {
           nth: recurringNth != null ? recurringNth : parent.recurring_nth,
           weekday: recurringWeekday != null ? recurringWeekday : parent.recurring_weekday,
@@ -950,7 +951,7 @@ router.post('/optimize', async (req, res, next) => {
   try {
     const RouteOptimizer = require('../services/route-optimizer');
     const { date, technicianId } = req.body;
-    const dateStr = date || new Date().toISOString().split('T')[0];
+    const dateStr = date || etDateString();
 
     const services = await db('scheduled_services')
       .where({ scheduled_date: dateStr })
@@ -1042,7 +1043,7 @@ router.post('/optimize-route', async (req, res, next) => {
       return res.status(400).json({ error: 'technicianId is required' });
     }
 
-    const dateStr = date || new Date().toISOString().split('T')[0];
+    const dateStr = date || etDateString();
 
     const services = await db('scheduled_services')
       .where({ scheduled_date: dateStr, technician_id: technicianId })
@@ -1120,7 +1121,7 @@ router.post('/optimize-route', async (req, res, next) => {
 // GET /api/admin/schedule/zone-density
 router.get('/zone-density', async (req, res, next) => {
   try {
-    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const date = req.query.date || etDateString();
     const density = await db('scheduled_services')
       .where({ scheduled_date: date }).whereNotIn('status', ['cancelled'])
       .select('zone').count('* as count').groupBy('zone');
@@ -1670,9 +1671,8 @@ router.get('/recurring-alerts', async (req, res, next) => {
     try {
       const cols = await db('scheduled_services').columnInfo();
       if (cols.recurring_ongoing) {
-        const soon = new Date(); soon.setDate(soon.getDate() + 14);
-        const today = new Date().toISOString().split('T')[0];
-        const soonStr = soon.toISOString().split('T')[0];
+        const today = etDateString();
+        const soonStr = etDateString(addETDays(new Date(), 14));
         const ending = await db('scheduled_services as s')
           .leftJoin('customers as c', 's.customer_id', 'c.id')
           .where('s.is_recurring', true)
@@ -1758,7 +1758,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
       .orderBy('scheduled_date', 'desc').first();
     const baseDateStr = latest?.scheduled_date
       ? String(latest.scheduled_date).split('T')[0]
-      : new Date().toISOString().split('T')[0];
+      : etDateString();
 
     let created = 0;
     if (action === 'extend') {

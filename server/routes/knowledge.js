@@ -103,7 +103,7 @@ router.post('/queries/:id/file-back', async (req, res) => {
       if (first) {
         const q = sanitizeMarkdown(query.query, 1000);
         const a = sanitizeMarkdown(query.answer, 4000);
-        const appendText = `\n\n---\n## Q&A (filed ${new Date().toLocaleDateString()})\n**Q:** ${q}\n\n**A:** ${a}`;
+        const appendText = `\n\n---\n## Q&A (filed ${new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' })})\n**Q:** ${q}\n\n**A:** ${a}`;
         // Cap word_count contribution so an oversized answer can't poison the column.
         const addedWords = Math.min(appendText.split(/\s+/).length, 1000);
         await getDb()('knowledge_base').where('id', first.id).update({
