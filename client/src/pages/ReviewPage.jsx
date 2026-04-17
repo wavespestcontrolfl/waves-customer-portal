@@ -81,7 +81,7 @@ export default function ReviewPage() {
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}>🌊</div>
-        <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 18, color: W.navy }}>Link Expired</div>
+        <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 18, color: W.navy }}>Link Expired</div>
         <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>This review link is no longer available. Call us at <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a>.</div>
       </div>
     </div>
@@ -93,18 +93,20 @@ export default function ReviewPage() {
     : null;
 
   return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Poppins', sans-serif" }}>
-      <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Poppins:wght@400;500;600&display=swap" rel="stylesheet" />
-
-      {/* Header */}
+    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Nunito', sans-serif" }}>
+      {/* Header — brand fonts loaded globally via client/index.html */}
       <div style={{ background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative' }}>
         <div style={{ position: 'absolute', bottom: -2, left: 0, right: 0, height: 24 }}>
           <svg viewBox="0 0 1440 48" fill="none" style={{ width: '100%', height: '100%', display: 'block' }}>
             <path d="M0 24 C360 0 720 48 1080 24 C1260 12 1380 0 1440 8 L1440 48 L0 48 Z" fill={W.offWhite} />
           </svg>
         </div>
-        <div style={{ fontSize: 24, fontFamily: "'Montserrat', sans-serif", fontWeight: 800, color: W.white }}>WAVES</div>
-        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 1 }}>Pest Control</div>
+        <h1 style={{
+          fontSize: 36, fontFamily: "'Luckiest Guy', 'Baloo 2', cursive", fontWeight: 400,
+          color: W.white, letterSpacing: '0.04em', lineHeight: 1, margin: 0,
+          textShadow: '0 2px 8px rgba(0,0,0,0.2)',
+        }}>WAVES</h1>
+        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
       </div>
 
       <div style={{ maxWidth: 440, margin: '0 auto', padding: '0 20px 60px' }}>
@@ -119,13 +121,13 @@ export default function ReviewPage() {
             border: `3px solid ${W.white}`, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
           }}>
             {!techPhoto && (
-              <span style={{ color: W.white, fontSize: 28, fontFamily: "'Montserrat', sans-serif", fontWeight: 800 }}>
+              <span style={{ color: W.white, fontSize: 28, fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 800 }}>
                 {(techName || 'W').charAt(0)}
               </span>
             )}
           </div>
 
-          <div style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 20, fontWeight: 700, color: W.navy }}>
+          <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontSize: 20, fontWeight: 700, color: W.navy }}>
             {techName || 'Your Technician'}
           </div>
           <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
@@ -143,7 +145,7 @@ export default function ReviewPage() {
         {/* ── Rating Phase ── */}
         {phase === 'rate' && (
           <div style={{ background: W.white, borderRadius: 20, border: `1px solid ${W.border}`, padding: '28px 24px', textAlign: 'center', boxShadow: '0 2px 12px rgba(0,0,0,0.06)' }}>
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 17, fontWeight: 700, color: W.navy, marginBottom: 4 }}>
+            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontSize: 17, fontWeight: 700, color: W.navy, marginBottom: 4 }}>
               How was your experience?
             </div>
             <div style={{ fontSize: 13, color: W.textCaption, marginBottom: 20 }}>
@@ -166,7 +168,7 @@ export default function ReviewPage() {
                       border: `2px solid ${isHovered || isSelected ? color : W.border}`,
                       background: isHovered || isSelected ? `${color}15` : W.white,
                       color: isHovered || isSelected ? color : W.textBody,
-                      fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 18,
+                      fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 18,
                       cursor: 'pointer', transition: 'all 0.15s',
                       transform: isHovered ? 'scale(1.08)' : 'scale(1)',
                     }}>
@@ -194,7 +196,7 @@ export default function ReviewPage() {
         {phase === 'redirecting' && (
           <div style={{ background: W.white, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${W.green}` }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}>🙏</div>
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 18, fontWeight: 700, color: W.navy, marginBottom: 8 }}>
+            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontSize: 18, fontWeight: 700, color: W.navy, marginBottom: 8 }}>
               Thank you, {customerFirstName}!
             </div>
             <div style={{ fontSize: 14, color: W.textBody, lineHeight: 1.6, marginBottom: 16 }}>
@@ -213,7 +215,7 @@ export default function ReviewPage() {
         {phase === 'feedback' && (
           <div style={{ background: W.white, borderRadius: 20, padding: 28, textAlign: 'center', border: `1px solid ${W.border}` }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>💬</div>
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 17, fontWeight: 700, color: W.navy, marginBottom: 8 }}>
+            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontSize: 17, fontWeight: 700, color: W.navy, marginBottom: 8 }}>
               We appreciate your honesty
             </div>
             <div style={{ fontSize: 14, color: W.textBody, marginBottom: 16, lineHeight: 1.6 }}>
@@ -225,7 +227,7 @@ export default function ReviewPage() {
               rows={4}
               style={{
                 width: '100%', padding: 14, borderRadius: 12, border: `1px solid ${W.border}`,
-                fontFamily: "'Poppins', sans-serif", fontSize: 14, color: W.navy, resize: 'vertical',
+                fontFamily: "'Nunito', sans-serif", fontSize: 14, color: W.navy, resize: 'vertical',
                 outline: 'none', boxSizing: 'border-box',
               }}
             />
@@ -233,7 +235,7 @@ export default function ReviewPage() {
               <button onClick={handleFeedback} disabled={submittingFeedback}
                 style={{
                   flex: 1, padding: 14, borderRadius: 12, border: 'none',
-                  background: W.blue, color: W.white, fontFamily: "'Montserrat', sans-serif",
+                  background: W.blue, color: W.white, fontFamily: "'Baloo 2', 'Nunito', sans-serif",
                   fontWeight: 700, fontSize: 15, cursor: 'pointer',
                   opacity: submittingFeedback ? 0.6 : 1,
                 }}>
@@ -254,7 +256,7 @@ export default function ReviewPage() {
         {phase === 'thankyou' && (
           <div style={{ background: W.greenLight, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${W.green}` }}>
             <div style={{ fontSize: 40, marginBottom: 8 }}>🌊</div>
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 18, fontWeight: 700, color: '#2E7D32' }}>
+            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontSize: 18, fontWeight: 700, color: '#2E7D32' }}>
               Thank you{customerFirstName ? `, ${customerFirstName}` : ''}!
             </div>
             <div style={{ fontSize: 14, color: W.textBody, marginTop: 8, lineHeight: 1.6 }}>

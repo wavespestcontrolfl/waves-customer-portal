@@ -1315,9 +1315,9 @@ function PromotionCards() {
                   disabled={interacting === promo.id}
                   style={{
                     ...BUTTON_BASE, width: '100%', padding: 13, marginTop: 12, fontSize: 14,
-                    background: B.red,
-                    color: '#fff',
-                    boxShadow: `0 4px 15px ${B.red}30`,
+                    background: B.yellow,
+                    color: B.blueDeeper,
+                    boxShadow: `0 4px 15px ${B.yellow}55`,
                     opacity: interacting === promo.id ? 0.7 : 1,
                   }}
                 >
@@ -1837,9 +1837,15 @@ function DashboardTab({ customer, onSwitchTab }) {
           backgroundSize: '100% 100%',
         }} />
         <div style={{ fontSize: 14, color: B.blueLight, fontFamily: FONTS.body }}>Hey there,</div>
-        <div style={{ fontSize: 32, fontWeight: 800, fontFamily: FONTS.heading, letterSpacing: -0.5 }}>
+        <h1 style={{
+          fontFamily: FONTS.display, fontWeight: 400,
+          fontSize: 'clamp(32px, 7vw, 44px)', color: '#fff',
+          letterSpacing: '0.02em', lineHeight: 1.05,
+          margin: 0,
+          textShadow: '0 2px 12px rgba(0,0,0,0.25)',
+        }}>
           {customer.firstName}! 👋
-        </div>
+        </h1>
         {tier && (
           <div style={{
             marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -2187,7 +2193,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         </div>
         <button onClick={() => onSwitchTab?.('refer')} style={{
           ...BUTTON_BASE, padding: '9px 16px', fontSize: 12, flexShrink: 0,
-          background: B.red, color: '#fff',
+          background: B.yellow, color: B.blueDeeper,
         }}>Refer Now</button>
       </div>
     </div>

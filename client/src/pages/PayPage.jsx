@@ -274,7 +274,7 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
           width: '100%', padding: 16,
           background: processing ? W.textCaption : W.blue,
           color: W.white, border: 'none', borderRadius: 12,
-          fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 16,
+          fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 16,
           cursor: (isDisabled || syncingAmount) ? 'default' : 'pointer',
           opacity: (isDisabled || syncingAmount) ? 0.6 : 1,
           transition: 'all 0.2s',
@@ -420,7 +420,7 @@ export default function PayPage() {
   if (error) return (
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center', maxWidth: 400 }}>
-        <div style={{ fontFamily: "'Montserrat', sans-serif", fontSize: 20, fontWeight: 700, color: W.navy, marginBottom: 8 }}>Invoice Not Found</div>
+        <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontSize: 20, fontWeight: 700, color: W.navy, marginBottom: 8 }}>Invoice Not Found</div>
         <div style={{ fontFamily: "'Poppins', sans-serif", fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a> if you need help.</div>
       </div>
     </div>
@@ -445,7 +445,7 @@ export default function PayPage() {
         {/* ── Paid Banner ── */}
         {isPaid && (
           <div style={{ background: W.greenLight, border: `1px solid ${W.green}`, borderRadius: 12, padding: '16px 20px', marginTop: -16, marginBottom: 20, textAlign: 'center' }}>
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
+            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
             <div style={{ fontSize: 13, color: W.textBody, marginTop: 4 }}>
               Paid {invoice.paidAt ? new Date(invoice.paidAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
               {invoice.cardBrand && invoice.cardLastFour ? ` — ${invoice.cardBrand} ****${invoice.cardLastFour}` : ''}
@@ -453,12 +453,16 @@ export default function PayPage() {
           </div>
         )}
 
-        {/* ── Customer Greeting ── */}
+        {/* ── Customer Greeting (hero H1) ── */}
         <div style={{ marginTop: isPaid ? 16 : 24, marginBottom: 24 }}>
-          <div style={{ fontFamily: "'Montserrat', sans-serif", fontSize: isMobile ? 18 : 22, fontWeight: 700, color: W.navy }}>
+          <h1 style={{
+            fontFamily: "'Luckiest Guy', 'Baloo 2', cursive", fontWeight: 400,
+            fontSize: isMobile ? 32 : 40, color: W.blue,
+            letterSpacing: '0.02em', lineHeight: 1.05, margin: 0,
+          }}>
             {isPaid ? `Thank you, ${customer.firstName}!` : `Hi ${customer.firstName}!`}
-          </div>
-          <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
+          </h1>
+          <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>
             We appreciate the opportunity to serve you and thank you for choosing Waves!
           </div>
         </div>
@@ -484,7 +488,7 @@ export default function PayPage() {
         {(service.type || service.techName) && (
           <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
             <div style={{ background: W.bluePale, padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
-              <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Service Completed</div>
+              <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Service Completed</div>
               <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 13, color: W.textBody, flexWrap: 'wrap' }}>
                 {service.date && <span>{new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</span>}
                 {service.techName && <span>Tech: {service.techName}</span>}
@@ -545,7 +549,7 @@ export default function PayPage() {
         <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
           <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
-              <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Invoice</div>
+              <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Invoice</div>
               <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>{invoice.invoiceNumber}</div>
             </div>
             {!isPaid && (() => {
@@ -588,7 +592,7 @@ export default function PayPage() {
                 </div>
               )}
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: isMobile ? 18 : 20, fontFamily: "'Montserrat', sans-serif", fontWeight: 800, color: W.navy, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${W.navy}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: isMobile ? 18 : 20, fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 800, color: W.navy, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${W.navy}` }}>
                 <span>Total</span><span>${invoice.total.toFixed(2)}</span>
               </div>
             </div>
@@ -599,7 +603,7 @@ export default function PayPage() {
         {!isPaid && paymentState !== 'success' && (
           <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
             <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
-              <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Pay Now</div>
+              <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Pay Now</div>
               <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>Card, Apple Pay, Google Pay, or bank transfer</div>
             </div>
 
@@ -640,7 +644,7 @@ export default function PayPage() {
         {/* ── Payment Success ── */}
         {paymentState === 'success' && (
           <div style={{ background: W.greenLight, borderRadius: 16, border: `1px solid ${W.green}`, padding: 28, textAlign: 'center', marginBottom: 20 }}>
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 20, color: '#2E7D32', marginBottom: 8 }}>Payment Successful!</div>
+            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 20, color: '#2E7D32', marginBottom: 8 }}>Payment Successful!</div>
             <div style={{ fontSize: 15, color: W.textBody, marginBottom: 4 }}>
               {paymentResult?.amount
                 ? `$${paymentResult.amount.toFixed(2)} paid for ${paymentResult.invoiceNumber || invoice.invoiceNumber}`
@@ -656,7 +660,7 @@ export default function PayPage() {
         {/* ── WaveGuard Upgrade Nudge (Bronze only, not paid) ── */}
         {tier === 'Bronze' && !isPaid && paymentState !== 'success' && (
           <div style={{ background: `linear-gradient(135deg, ${W.sand} 0%, #FFF8E1 100%)`, borderRadius: 14, border: '1px solid #E8D5B7', padding: '18px 20px', marginBottom: 20 }}>
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: '#8D6E63', marginBottom: 4 }}>
+            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 14, color: '#8D6E63', marginBottom: 4 }}>
               Save on every visit
             </div>
             <div style={{ fontSize: 13, color: W.textBody, lineHeight: 1.5 }}>
@@ -668,7 +672,7 @@ export default function PayPage() {
 
         {/* ── Footer ── */}
         <div style={{ textAlign: 'center', padding: '24px 0 8px' }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: W.navy, fontFamily: "'Montserrat', sans-serif", marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: W.navy, fontFamily: "'Baloo 2', 'Nunito', sans-serif", marginBottom: 14 }}>
             🌊 Stay in the loop
           </div>
           <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap', marginBottom: 20 }}>
@@ -687,7 +691,7 @@ export default function PayPage() {
               </a>
             ))}
           </div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: W.navy, fontFamily: "'Montserrat', sans-serif", marginBottom: 6, padding: '0 16px' }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: W.navy, fontFamily: "'Baloo 2', 'Nunito', sans-serif", marginBottom: 6, padding: '0 16px' }}>
             We appreciate the opportunity to serve you and thank you for choosing Waves!
           </div>
           <div style={{ fontSize: 11, color: W.textCaption, marginTop: 10 }}>

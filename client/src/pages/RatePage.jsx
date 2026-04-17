@@ -410,10 +410,14 @@ function Page({ children }) {
   return (
     <div style={{ minHeight: '100dvh', background: '#097ABD', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: "'Nunito', -apple-system, sans-serif" }}>
       <div style={{ width: '100%', padding: '22px 20px 12px', textAlign: 'center' }}>
-        <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 26, fontWeight: 800, color: '#F1F5F9', textTransform: 'uppercase', letterSpacing: 1.5, textShadow: '2px 2px 0 #04395E' }}>
-          Waves <span style={{ color: '#C0392B' }}>Lawn & Pest</span>
-        </div>
-        <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,.75)', letterSpacing: 1, fontStyle: 'italic', marginTop: 4 }}>Wave Goodbye to Pests!</div>
+        <h1 style={{
+          fontFamily: "'Luckiest Guy', 'Baloo 2', cursive", fontWeight: 400,
+          fontSize: 36, color: '#F1F5F9', letterSpacing: '0.03em', lineHeight: 1,
+          margin: 0, textShadow: '2px 2px 0 #04395E',
+        }}>
+          Waves <span style={{ color: '#FFD700' }}>Lawn & Pest</span>
+        </h1>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,.85)', letterSpacing: 1, fontStyle: 'italic', marginTop: 6 }}>Wave Goodbye to Pests!</div>
       </div>
       <div style={{ width: 'calc(100% - 24px)', maxWidth: 420, background: '#fff', borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
         <div style={{ height: 5, background: 'linear-gradient(90deg, #C0392B, #C0392B, #F59E0B, #FFD700)' }} />

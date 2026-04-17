@@ -169,10 +169,16 @@ export default function BookingPage() {
           </svg>
         </div>
         <div>
-          <div style={{ color: "#fff", fontSize: 16, fontWeight: 600, letterSpacing: "-0.3px" }}>
+          <h1 style={{
+            color: "#fff",
+            fontFamily: "'Luckiest Guy', 'Baloo 2', cursive",
+            fontWeight: 400, fontSize: 22,
+            letterSpacing: "0.02em", lineHeight: 1,
+            margin: 0,
+          }}>
             Waves Pest Control
-          </div>
-          <div style={{ color: BRAND.gray400, fontSize: 12 }}>
+          </h1>
+          <div style={{ color: BRAND.gray400, fontSize: 12, marginTop: 4 }}>
             Book your service
           </div>
         </div>
@@ -260,14 +266,16 @@ export default function BookingPage() {
               onClick={() => setStep(1)}
               style={{
                 width: "100%", padding: "14px 0",
-                background: BRAND.teal, color: "#fff",
-                border: "none", borderRadius: 10,
-                fontSize: 15, fontWeight: 600,
+                background: "#FFD700", color: BRAND.navy,
+                border: "none", borderRadius: 9999,
+                fontSize: 15, fontWeight: 800,
+                letterSpacing: "0.02em",
                 cursor: "pointer",
-                transition: "background 0.2s",
+                transition: "background 0.15s cubic-bezier(0.4,0,0.2,1)",
+                fontFamily: "'Baloo 2', 'Nunito', sans-serif",
               }}
-              onMouseEnter={(e) => (e.target.style.background = BRAND.tealDark)}
-              onMouseLeave={(e) => (e.target.style.background = BRAND.teal)}
+              onMouseEnter={(e) => (e.target.style.background = "#FFF176")}
+              onMouseLeave={(e) => (e.target.style.background = "#FFD700")}
             >
               Show available times
             </button>
@@ -492,15 +500,17 @@ export default function BookingPage() {
                 onClick={() => setStep(3)}
                 style={{
                   width: "100%", marginTop: 24, padding: "14px 0",
-                  background: BRAND.teal, color: "#fff",
-                  border: "none", borderRadius: 10,
-                  fontSize: 15, fontWeight: 600,
+                  background: "#FFD700", color: BRAND.navy,
+                  border: "none", borderRadius: 9999,
+                  fontSize: 15, fontWeight: 800,
+                  letterSpacing: "0.02em",
                   cursor: "pointer",
                   animation: "slideUp 0.3s ease-out",
-                  transition: "background 0.2s",
+                  transition: "background 0.15s cubic-bezier(0.4,0,0.2,1)",
+                  fontFamily: "'Baloo 2', 'Nunito', sans-serif",
                 }}
-                onMouseEnter={(e) => (e.target.style.background = BRAND.tealDark)}
-                onMouseLeave={(e) => (e.target.style.background = BRAND.teal)}
+                onMouseEnter={(e) => (e.target.style.background = "#FFF176")}
+                onMouseLeave={(e) => (e.target.style.background = "#FFD700")}
               >
                 Continue
               </button>
@@ -624,13 +634,15 @@ export default function BookingPage() {
               disabled={loading}
               style={{
                 width: "100%", padding: "15px 0",
-                background: loading ? BRAND.gray300 : BRAND.teal,
-                color: "#fff",
-                border: "none", borderRadius: 10,
-                fontSize: 16, fontWeight: 600,
+                background: loading ? BRAND.gray300 : "#FFD700",
+                color: loading ? "#fff" : BRAND.navy,
+                border: "none", borderRadius: 9999,
+                fontSize: 16, fontWeight: 800,
+                letterSpacing: "0.02em",
                 cursor: loading ? "wait" : "pointer",
-                transition: "all 0.2s",
+                transition: "all 0.15s cubic-bezier(0.4,0,0.2,1)",
                 position: "relative",
+                fontFamily: "'Baloo 2', 'Nunito', sans-serif",
               }}
             >
               {loading ? (

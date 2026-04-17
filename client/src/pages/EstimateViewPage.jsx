@@ -1138,9 +1138,15 @@ export default function EstimateViewPage() {
       }}>
         <img src="/waves-logo.png" alt="Waves" style={{ height: 44, marginBottom: 12 }} />
 
-        <div style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, lineHeight: 1.3, maxWidth: 380, margin: '0 auto' }}>
+        <h1 style={{
+          fontFamily: FONTS.display, fontWeight: 400,
+          fontSize: 'clamp(32px, 6.5vw, 44px)', color: '#fff',
+          letterSpacing: '0.02em', lineHeight: 1.05,
+          maxWidth: 420, margin: '0 auto',
+          textShadow: '0 2px 12px rgba(0,0,0,0.25)',
+        }}>
           Hey {firstName}, here's your custom plan.
-        </div>
+        </h1>
 
         <div style={{ fontSize: 14, color: B.blueLight, marginTop: 8, fontWeight: 600 }}>{(e.address || '').replace(/, USA$/i, '')}</div>
 
@@ -1320,8 +1326,8 @@ export default function EstimateViewPage() {
           <div style={{ marginTop: 12 }}>
             <button onClick={handleAccept} disabled={accepting} style={{
               ...BUTTON_BASE, width: '100%', padding: 18, fontSize: 17,
-              background: B.red, color: '#fff', opacity: accepting ? 0.7 : 1,
-              boxShadow: `0 4px 15px ${B.red}40`,
+              background: B.yellow, color: B.blueDeeper, opacity: accepting ? 0.7 : 1,
+              boxShadow: `0 4px 15px ${B.yellow}66`,
               animation: 'wavesPulse 2s ease-in-out infinite',
             }}>
               {accepting ? 'Processing...' : 'Accept Estimate'}
@@ -1762,8 +1768,8 @@ export default function EstimateViewPage() {
           <div style={{ marginTop: 24 }}>
             <button onClick={handleAccept} disabled={accepting} style={{
               ...BUTTON_BASE, width: '100%', padding: 18, fontSize: 17,
-              background: B.red, color: '#fff', opacity: accepting ? 0.7 : 1,
-              boxShadow: `0 4px 15px ${B.red}40`,
+              background: B.yellow, color: B.blueDeeper, opacity: accepting ? 0.7 : 1,
+              boxShadow: `0 4px 15px ${B.yellow}66`,
               animation: 'wavesPulse 2s ease-in-out infinite',
             }}>
               {accepting ? 'Processing...' : 'Accept Estimate'}

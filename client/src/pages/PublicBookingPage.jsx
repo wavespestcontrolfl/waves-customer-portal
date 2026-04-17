@@ -166,11 +166,14 @@ export default function PublicBookingPage() {
 
   // ── shared styles ──
   const btnPrimary = (disabled) => ({
-    width: '100%', padding: '14px 20px', borderRadius: 10,
-    background: disabled ? BRAND.gray300 : BRAND.teal, color: '#fff',
-    border: 'none', fontSize: 15, fontWeight: 600,
+    width: '100%', padding: '14px 20px', borderRadius: 9999,
+    background: disabled ? BRAND.gray300 : '#FFD700',
+    color: disabled ? '#fff' : BRAND.navy,
+    border: 'none', fontSize: 15, fontWeight: 800,
+    letterSpacing: '0.02em',
     cursor: disabled ? 'not-allowed' : 'pointer',
-    transition: 'background 0.2s',
+    transition: 'background 0.15s cubic-bezier(0.4,0,0.2,1)',
+    fontFamily: "'Baloo 2', 'Nunito', sans-serif",
   });
   const btnSecondary = {
     padding: '10px 16px', borderRadius: 8, background: 'transparent',
@@ -208,10 +211,16 @@ export default function PublicBookingPage() {
           fontWeight: 700, fontSize: 16,
         }}>W</div>
         <div>
-          <div style={{ color: '#fff', fontSize: 16, fontWeight: 600, letterSpacing: '-0.3px' }}>
+          <h1 style={{
+            color: '#fff',
+            fontFamily: "'Luckiest Guy', 'Baloo 2', cursive",
+            fontWeight: 400, fontSize: 22,
+            letterSpacing: '0.02em', lineHeight: 1,
+            margin: 0,
+          }}>
             Waves Pest Control
-          </div>
-          <div style={{ color: BRAND.gray400, fontSize: 12 }}>Book your service online</div>
+          </h1>
+          <div style={{ color: BRAND.gray400, fontSize: 12, marginTop: 4 }}>Book your service online</div>
         </div>
       </div>
 

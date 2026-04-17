@@ -342,9 +342,13 @@ export default function OnboardingPage() {
         {screen === 0 && (
           <div style={{ textAlign: 'center' }}>
             <img src="/waves-logo.png" alt="" style={{ width: 80, height: 'auto', margin: '20px auto 12px' }} />
-            <div style={{ fontSize: 28, fontWeight: 800, color: '#fff', fontFamily: FONTS.heading }}>
+            <h1 style={{
+              fontSize: 'clamp(36px, 7vw, 48px)', fontFamily: FONTS.display, fontWeight: 400,
+              color: '#fff', letterSpacing: '0.02em', lineHeight: 1.05,
+              margin: '0 0 8px', textShadow: '0 2px 12px rgba(0,0,0,0.25)',
+            }}>
               Welcome, {c.firstName}! 🌊
-            </div>
+            </h1>
             <div style={{ fontSize: 16, color: B.blueLight, marginTop: 4 }}>
               Your {q.serviceType.split('—')[0].trim()} is confirmed.
             </div>
@@ -366,8 +370,8 @@ export default function OnboardingPage() {
 
             <button onClick={() => setScreen(1)} style={{
               ...BUTTON_BASE, width: '100%', padding: 16, marginTop: 20,
-              background: B.red, color: '#fff', fontSize: 16,
-              boxShadow: `0 4px 15px ${B.red}40`,
+              background: B.yellow, color: B.blueDeeper, fontSize: 16,
+              boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
             }}>Let's Get You Set Up</button>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: 8 }}>Takes about 2 minutes</div>
           </div>
@@ -583,9 +587,13 @@ export default function OnboardingPage() {
             ))}
 
             <div style={{ fontSize: 48, marginTop: 20 }}>🎉</div>
-            <div style={{ fontSize: 26, fontWeight: 800, color: '#fff', fontFamily: FONTS.heading, marginTop: 8 }}>
+            <h1 style={{
+              fontSize: 'clamp(36px, 7vw, 48px)', fontFamily: FONTS.display, fontWeight: 400,
+              color: '#fff', letterSpacing: '0.02em', lineHeight: 1.05,
+              margin: '8px 0 0', textShadow: '0 2px 12px rgba(0,0,0,0.25)',
+            }}>
               You're all set, {c.firstName}!
-            </div>
+            </h1>
             <div style={{ fontSize: 16, color: B.blueLight, marginTop: 4 }}>Welcome to the Waves family.</div>
 
             <div style={{ background: '#fff', borderRadius: 16, padding: 24, marginTop: 20, textAlign: 'left' }}>

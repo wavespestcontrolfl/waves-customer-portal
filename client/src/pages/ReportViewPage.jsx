@@ -50,8 +50,10 @@ export default function ReportViewPage() {
           </div>
         </div>
         <a href={pdfUrl} download style={{
-          ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
-          background: B.red, color: '#fff', textDecoration: 'none',
+          ...BUTTON_BASE, padding: '0 18px', height: 36, fontSize: 13,
+          borderRadius: 999, background: B.yellow, color: B.blueDeeper,
+          textDecoration: 'none', fontWeight: 800, display: 'inline-flex',
+          alignItems: 'center',
         }}>⬇ Download PDF</a>
       </div>
 
@@ -117,8 +119,10 @@ export default function ReportViewPage() {
         <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
           <div style={{ fontSize: 13, color: B.grayDark }}>Questions about your service?</div>
           <a href="sms:+19413187612" style={{
-            ...BUTTON_BASE, padding: '10px 20px', fontSize: 13, marginTop: 8,
-            background: B.red, color: '#fff', textDecoration: 'none', display: 'inline-flex',
+            ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14, marginTop: 8,
+            borderRadius: 999, background: B.yellow, color: B.blueDeeper,
+            textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
+            fontWeight: 800,
           }}>💬 Text Us — (941) 318-7612</a>
         </div>
 
