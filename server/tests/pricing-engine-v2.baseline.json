@@ -1,0 +1,508 @@
+{
+  "v2_baseline_zone_a_quarterly_pest_lawn": {
+    "recurring": {
+      "tier": "Silver",
+      "discount": 0.1,
+      "annualBeforeDiscount": 1112,
+      "annualAfterDiscount": 1000.8,
+      "monthlyTotal": 83.4,
+      "savings": 111.2,
+      "serviceCount": 2
+    },
+    "results": {
+      "lawn": [
+        {
+          "mo": 35,
+          "recommended": false,
+          "name": "4x"
+        },
+        {
+          "mo": 45,
+          "recommended": false,
+          "name": "6x"
+        },
+        {
+          "mo": 55,
+          "recommended": true,
+          "name": "9x"
+        },
+        {
+          "mo": 73,
+          "recommended": false,
+          "name": "12x"
+        }
+      ],
+      "pestTiers": [
+        {
+          "mo": 37.67,
+          "apps": 4,
+          "recommended": true,
+          "label": "Quarterly"
+        },
+        {
+          "mo": 48.03,
+          "apps": 6,
+          "recommended": false,
+          "label": "Bi-Monthly"
+        },
+        {
+          "mo": 79.1,
+          "apps": 12,
+          "recommended": false,
+          "label": "Monthly"
+        }
+      ],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 99,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 1099.8,
+      "year2": 1000.8
+    }
+  },
+  "v2_platinum_bundle_4_services_zone_a": {
+    "recurring": {
+      "tier": "Platinum",
+      "discount": 0.2,
+      "annualBeforeDiscount": 4280,
+      "annualAfterDiscount": 3424,
+      "monthlyTotal": 285.33,
+      "savings": 856,
+      "serviceCount": 4
+    },
+    "results": {
+      "lawn": [
+        {
+          "mo": 35,
+          "recommended": false,
+          "name": "4x"
+        },
+        {
+          "mo": 45,
+          "recommended": false,
+          "name": "6x"
+        },
+        {
+          "mo": 55,
+          "recommended": false,
+          "name": "9x"
+        },
+        {
+          "mo": 73,
+          "recommended": true,
+          "name": "12x"
+        }
+      ],
+      "pestTiers": [
+        {
+          "mo": 42.67,
+          "apps": 4,
+          "recommended": true,
+          "label": "Quarterly"
+        },
+        {
+          "mo": 54.4,
+          "apps": 6,
+          "recommended": false,
+          "label": "Bi-Monthly"
+        },
+        {
+          "mo": 89.6,
+          "apps": 12,
+          "recommended": false,
+          "label": "Monthly"
+        }
+      ],
+      "ts": [
+        {
+          "mo": 38,
+          "recommended": false,
+          "name": "4x"
+        },
+        {
+          "mo": 46,
+          "recommended": true,
+          "name": "6x"
+        }
+      ],
+      "mq": [
+        {
+          "mo": 125,
+          "recommended": false
+        },
+        {
+          "mo": 138,
+          "recommended": false
+        },
+        {
+          "mo": 195,
+          "recommended": true
+        },
+        {
+          "mo": 239.42,
+          "recommended": false
+        }
+      ],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 99,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 3523,
+      "year2": 3424
+    }
+  },
+  "v2_boracare_attic_2000sf": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
+      "savings": 0,
+      "serviceCount": 0
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 1946,
+      "tmInstall": 0,
+      "items": [
+        {
+          "name": "Attic Termite Remediation (Bora-Care)",
+          "price": 1946
+        }
+      ],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 1946,
+      "year2": 0
+    }
+  },
+  "v2_preslab_2000sf_basic_warranty": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
+      "savings": 0,
+      "serviceCount": 0
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 952,
+      "tmInstall": 0,
+      "items": [
+        {
+          "name": "Pre-Slab Termite (Termidor SC)",
+          "price": 952
+        }
+      ],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 952,
+      "year2": 0
+    }
+  },
+  "v2_stinging_wasp_ground_tier2": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
+      "savings": 0,
+      "serviceCount": 0
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 0,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": [
+        {
+          "name": "Stinging Insect — Paper Wasps",
+          "price": 250
+        }
+      ]
+    },
+    "totals": {
+      "year1": 250,
+      "year2": 0
+    }
+  },
+  "v2_bedbug_3rooms_both_methods": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
+      "savings": 0,
+      "serviceCount": 0
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 0,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": [
+        {
+          "name": "Bed Bug Treatment (Chemical)",
+          "price": 1101
+        },
+        {
+          "name": "Bed Bug Treatment (Heat)",
+          "price": 2250
+        }
+      ]
+    },
+    "totals": {
+      "year1": 3351,
+      "year2": 0
+    }
+  },
+  "v2_exclusion_moderate_waive_inspection": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
+      "savings": 0,
+      "serviceCount": 0
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 0,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": [
+        {
+          "name": "Rodent Exclusion",
+          "price": 450
+        }
+      ]
+    },
+    "totals": {
+      "year1": 450,
+      "year2": 0
+    }
+  },
+  "v2_onetime_pest_urgent_afterhours": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
+      "savings": 0,
+      "serviceCount": 0
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 300,
+      "tmInstall": 0,
+      "items": [
+        {
+          "name": "One-Time Pest",
+          "price": 300
+        }
+      ],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 300,
+      "year2": 0
+    }
+  },
+  "v2_onetime_pest_recurring_customer": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
+      "savings": 0,
+      "serviceCount": 0
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 128,
+      "tmInstall": 0,
+      "items": [
+        {
+          "name": "One-Time Pest",
+          "price": 128
+        }
+      ],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 128,
+      "year2": 0
+    }
+  },
+  "v2_mosquito_waterfront_heavy_pressure": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 3780,
+      "annualAfterDiscount": 3780,
+      "monthlyTotal": 315,
+      "savings": 0,
+      "serviceCount": 1
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [
+        {
+          "mo": 196,
+          "recommended": false
+        },
+        {
+          "mo": 217,
+          "recommended": false
+        },
+        {
+          "mo": 315,
+          "recommended": true
+        },
+        {
+          "mo": 396.67,
+          "recommended": false
+        }
+      ],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 0,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 3780,
+      "year2": 3780
+    }
+  },
+  "v2_termite_bait_three_systems": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 420,
+      "annualAfterDiscount": 420,
+      "monthlyTotal": 35,
+      "savings": 0,
+      "serviceCount": 1
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": {
+        "ai": 875,
+        "ti": 1313,
+        "bmo": 35,
+        "pmo": 65
+      }
+    },
+    "oneTime": {
+      "total": 1313,
+      "tmInstall": 1313,
+      "items": [],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 1733,
+      "year2": 420
+    }
+  },
+  "v2_rodent_bait_large_footprint": {
+    "recurring": {
+      "tier": "Bronze",
+      "discount": 0,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
+      "savings": 0,
+      "serviceCount": 0
+    },
+    "results": {
+      "lawn": [],
+      "pestTiers": [],
+      "ts": [],
+      "mq": [],
+      "tmBait": null,
+      "rodBaitMo": 70
+    },
+    "oneTime": {
+      "total": 0,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 840,
+      "year2": 840
+    }
+  }
+}

@@ -29,20 +29,24 @@
 import { adminFetch } from './adminFetch';
 
 export async function generateEstimate(input) {
-  const { estimate } = await adminFetch('/admin/pricing-config/estimate', {
+  const r = await adminFetch('/admin/pricing-config/estimate', {
     method: 'POST',
     body: JSON.stringify(input || {}),
   });
+  if (!r.ok) throw new Error(`Estimate failed: ${r.status}`);
+  const { estimate } = await r.json();
   return estimate;
 }
 
 export async function quickQuote(input) {
-  const { quote } = await adminFetch('/admin/pricing-config/quick-quote', {
+  const r = await adminFetch('/admin/pricing-config/quick-quote', {
     method: 'POST',
     body: JSON.stringify(input || {}),
   });
+  if (!r.ok) throw new Error(`Quick quote failed: ${r.status}`);
+  const { quote } = await r.json();
   return quote;
 }
 
 // Re-export formatters so callers don't need a second import
-export { fmt, fmtInt } from './estimateEngine';
+export { fmt, fmtInt } from './pricingFormatters';

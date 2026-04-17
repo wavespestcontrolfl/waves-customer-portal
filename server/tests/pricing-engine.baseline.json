@@ -1,0 +1,253 @@
+{
+  "baseline_single_family_zone_a_quarterly_pest_enhanced_lawn": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 1047.6,
+      "recurringMonthlyAfterDiscount": 87.3,
+      "year1Total": 1048
+    },
+    "waveGuard": {
+      "tier": "silver",
+      "discount": 0.1,
+      "qualifyingCount": 2
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 468,
+        "monthly": 39
+      },
+      "lawn_care": {
+        "annual": 696,
+        "monthly": 58
+      }
+    }
+  },
+  "zone_b_monthly_pest_bermuda_premium": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 2161.53,
+      "recurringMonthlyAfterDiscount": 180.13,
+      "year1Total": 2162
+    },
+    "waveGuard": {
+      "tier": "silver",
+      "discount": 0.1,
+      "qualifyingCount": 2
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 1462,
+        "monthly": 121.83
+      },
+      "lawn_care": {
+        "annual": 1159,
+        "monthly": 96.58
+      }
+    }
+  },
+  "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 3679.89,
+      "recurringMonthlyAfterDiscount": 306.66,
+      "year1Total": 3680
+    },
+    "waveGuard": {
+      "tier": "gold",
+      "discount": 0.15,
+      "qualifyingCount": 3
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 759,
+        "monthly": 63.25
+      },
+      "lawn_care": {
+        "annual": 712,
+        "monthly": 59.33
+      },
+      "tree_shrub": {
+        "annual": 2919,
+        "monthly": 243.25
+      }
+    }
+  },
+  "zone_d_quarterly_pest_bahia_basic": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 885.6,
+      "recurringMonthlyAfterDiscount": 73.8,
+      "year1Total": 886
+    },
+    "waveGuard": {
+      "tier": "silver",
+      "discount": 0.1,
+      "qualifyingCount": 2
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 552,
+        "monthly": 46
+      },
+      "lawn_care": {
+        "annual": 432,
+        "monthly": 36
+      }
+    }
+  },
+  "edge_small_footprint_800sf_quarterly_pest": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 356,
+      "recurringMonthlyAfterDiscount": 29.67,
+      "year1Total": 356
+    },
+    "waveGuard": {
+      "tier": "bronze",
+      "discount": 0,
+      "qualifyingCount": 1
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 356,
+        "monthly": 29.67
+      }
+    }
+  },
+  "edge_large_footprint_5500sf_platinum_bundle": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 8722,
+      "recurringMonthlyAfterDiscount": 726.83,
+      "year1Total": 8722
+    },
+    "waveGuard": {
+      "tier": "platinum",
+      "discount": 0.2,
+      "qualifyingCount": 4
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 1560,
+        "monthly": 130
+      },
+      "lawn_care": {
+        "annual": 1344,
+        "monthly": 112
+      },
+      "tree_shrub": {
+        "annual": 4097,
+        "monthly": 341.42
+      },
+      "mosquito": {
+        "annual": 3915,
+        "monthly": 326.25
+      }
+    }
+  },
+  "mosquito_acre_waterfront_max_pressure": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 6480,
+      "recurringMonthlyAfterDiscount": 540,
+      "year1Total": 6480
+    },
+    "waveGuard": {
+      "tier": "bronze",
+      "discount": 0,
+      "qualifyingCount": 1
+    },
+    "lineItems": {
+      "mosquito": {
+        "annual": 6480,
+        "monthly": 540
+      }
+    }
+  },
+  "termite_basic_standard_perimeter": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 420,
+      "recurringMonthlyAfterDiscount": 35,
+      "year1Total": 1628
+    },
+    "waveGuard": {
+      "tier": "bronze",
+      "discount": 0,
+      "qualifyingCount": 1
+    },
+    "lineItems": {
+      "termite_bait": {
+        "annual": 420,
+        "monthly": 35
+      }
+    }
+  },
+  "platinum_bundle_4_qualifying_services_zone_a": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 2856.4,
+      "recurringMonthlyAfterDiscount": 238.03,
+      "year1Total": 2856
+    },
+    "waveGuard": {
+      "tier": "platinum",
+      "discount": 0.2,
+      "qualifyingCount": 4
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 468,
+        "monthly": 39
+      },
+      "lawn_care": {
+        "annual": 696,
+        "monthly": 58
+      },
+      "tree_shrub": {
+        "annual": 1223,
+        "monthly": 101.92
+      },
+      "mosquito": {
+        "annual": 1140,
+        "monthly": 95
+      }
+    }
+  },
+  "onetime_pest_urgent_afterhours": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 0,
+      "recurringMonthlyAfterDiscount": 0,
+      "year1Total": 304
+    },
+    "waveGuard": {
+      "tier": "bronze",
+      "discount": 0,
+      "qualifyingCount": 0
+    },
+    "lineItems": {
+      "one_time_pest": {}
+    }
+  },
+  "specialty_bora_care_2000sf_attic": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 0,
+      "recurringMonthlyAfterDiscount": 0,
+      "year1Total": 1946
+    },
+    "waveGuard": {
+      "tier": "bronze",
+      "discount": 0,
+      "qualifyingCount": 0
+    },
+    "lineItems": {
+      "bora_care": {}
+    }
+  },
+  "recurring_customer_onetime_pest_discount": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 0,
+      "recurringMonthlyAfterDiscount": 0,
+      "year1Total": 152
+    },
+    "waveGuard": {
+      "tier": "bronze",
+      "discount": 0,
+      "qualifyingCount": 0
+    },
+    "lineItems": {
+      "one_time_pest": {}
+    }
+  }
+}

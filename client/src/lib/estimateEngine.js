@@ -1,17 +1,20 @@
 /**
- * @deprecated Since 2026-04-15. Use `pricingEngineClient.js` for new code.
- *   It calls POST /admin/pricing-config/estimate which runs the modular
- *   server engine (pricing-engine/) with live DB-synced constants edited
- *   via 📐 Pricing Logic.
+ * @deprecated Since 2026-04-15. Retained until Session 11.
  *
- * This file remains ONLY because EstimatePage.jsx + EstimateViewPage.jsx
- * consume its synchronous flat-return shape. Migration blocker:
- *   - Convert both pages to async (server roundtrip).
- *   - Or add a result-shape adapter in pricingEngineClient to emit the
- *     same fields (monthly, annual, perVisit, etc. per service block).
+ * Consumed by EstimatePage.jsx and EstimateViewPage.jsx which depend on this
+ * file's flat-return shape ({ property, recurring, oneTime, results, totals,
+ * specItems, fieldVerify, urgency, urgLabel, urgMult, modifiers, ... }).
  *
- * DO NOT add new pricing features here. Add them to
- * server/services/pricing-engine/ and let the shim surface them.
+ * The server modular engine at POST /admin/pricing-config/estimate returns a
+ * different shape ({ summary, waveGuard, lineItems, ... }) and does not emit
+ * tier arrays, fieldVerify, urgency labels, modifiers, or specItems. A
+ * drop-in migration is not possible without extending the modular engine.
+ *
+ * Full retirement planned as part of Session 11 when v1's generateEstimate
+ * emits the full tier/specialty/urgency/modifiers shape needed by the UI.
+ * Session 11 also absorbs v2 server retirement + property-lookup-v2 rewrite.
+ *
+ * DO NOT extend. Add new pricing features to server/services/pricing-engine/.
  *
  * Waves Pest Control — Estimate Calculation Engine v1.5
  * Ported from waves-estimator.html weCalculate() function.
@@ -498,9 +501,10 @@ export function calculateEstimate(inputs) {
     let pm = (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
     const perim = Math.round(4 * Math.sqrt(fpEff) * pm);
     const sta = Math.max(8, Math.ceil(perim / 10));
+    const hi = Math.round((sta * 8.69 + sta * 5.25 + sta * 0.75) * 1.75);
     const ai = Math.round((sta * 14 + sta * 5.25 + sta * 0.75) * 1.75);
     const ti = Math.round((sta * 24 + sta * 5.25 + sta * 0.75) * 1.75);
-    R.tmBait = { ai, ti, bmo: 35, pmo: 65, perim, sta };
+    R.tmBait = { hi, ai, ti, bmo: 35, pmo: 65, perim, sta };
     wgServices.push({ name: 'Termite Bait (Basic)', mo: 35 });
   }
 
@@ -872,7 +876,7 @@ export function calculateEstimate(inputs) {
   let ot = 0;
   otItems.forEach(i => ot += i.price);
   specItems.forEach(s => { if (!s.onProg) ot += s.price; });
-  let tmInstall = R.tmBait ? R.tmBait.ti : 0;
+  let tmInstall = R.tmBait ? R.tmBait.ti : 0; // default Trelona; hi=HexPro, ai=Advance also available
   ot = Math.round(ot * 100) / 100;
 
   const rba = R.rodBaitMo ? R.rodBaitMo * 12 : 0;

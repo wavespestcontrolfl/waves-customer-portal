@@ -1,21 +1,21 @@
 /**
  * WAVES PEST CONTROL — Pricing Engine v2.0
  *
- * @deprecated Since 2026-04-15. The modular engine at
- *   server/services/pricing-engine/ is now the single source of truth:
- *   - DB-driven constants (edited via 📐 Pricing Logic)
- *   - Property modifiers ported from this file (see modifiers.js)
- *   - Called by client through POST /admin/pricing-config/estimate
+ * @deprecated Since 2026-04-15. Retained until Session 11.
  *
- * This file remains ONLY because property-lookup-v2.js /calculate-estimate
- * consumes v2's tiered output shape (rec.lawn.tiers[], rec.pest.tiers[])
- * which the modular engine doesn't emit yet. Migration blocker:
- *   - Add tier-array emission to pricing-engine/service-pricing.js for
- *     lawn/pest/treeShrub/mosquito/rodentBait (basic/standard/enhanced/premium).
- *   - Then swap property-lookup-v2 require() and delete this file.
+ * Used by property-lookup-v2.js for Virginia's primary lookup estimate flow
+ * (POST /api/admin/estimator/calculate-estimate). v2 emits a tiered output
+ * shape (rec.lawn.tiers[], rec.pest.tiers[], etc.) + specialty pricing
+ * (bedbug, exclusion, boracare, preslab, foam, stinging, plug, one-time
+ * lawn) that the modular engine at server/services/pricing-engine/ does not
+ * yet emit. ~40-50% of this file is specialty logic with no v1 equivalent.
  *
- * DO NOT add new features here. Add them to pricing-engine/modifiers.js
- * or pricing-engine/service-pricing.js.
+ * Full retirement planned as part of Session 11 v1 specialty/one-time
+ * service port. Session 11 also absorbs the client-side migration
+ * (EstimatePage.jsx + EstimateViewPage.jsx + estimateEngine.js deletion).
+ *
+ * DO NOT extend with new functionality. Add new pricing features to
+ * pricing-engine/modifiers.js or pricing-engine/service-pricing.js.
  */
 
 const DEFAULT_LABOR_RATE = 35;    // $/hr loaded rate
@@ -922,6 +922,7 @@ function calcTermiteBait(footprint, p, mods) {
   // ── NEW: Foundation adjustment ──
   const foundAdj = mods.termiteFoundationAdj || 0;
 
+  const hexproInstall  = Math.round((stations * 8.69 + stations * 5.25 + stations * 0.75) * 1.75 * conMult) + foundAdj;
   const advanceInstall = Math.round((stations * 14 + stations * 5.25 + stations * 0.75) * 1.75 * conMult) + foundAdj;
   const trelonaInstall = Math.round((stations * 24 + stations * 5.25 + stations * 0.75) * 1.75 * conMult) + foundAdj;
 
@@ -931,6 +932,7 @@ function calcTermiteBait(footprint, p, mods) {
     stations,
     constructionMult: conMult,
     foundationAdj: foundAdj,
+    hexpro:  { install: hexproInstall,  basicMo: 35, premierMo: 65 },
     advance: { install: advanceInstall, basicMo: 35, premierMo: 65 },
     trelona: { install: trelonaInstall, basicMo: 35, premierMo: 65 },
     wgMonthly: 35 // Basic tier default
@@ -1388,11 +1390,13 @@ function calcTotals(result, manualDiscount = null) {
     otItems.push({ name: 'WaveGuard Membership', price: membershipFee, waivedWithPrepay: true });
   }
 
-  // Termite bait install
-  const tmInstall = rec.termiteBait?.trelona?.install || 0;
+  // Termite bait install (default to trelona; caller can override via termiteSystem)
+  const termiteSystem = options?.termiteSystem || 'trelona';
+  const tmInstall = rec.termiteBait?.[termiteSystem]?.install || rec.termiteBait?.trelona?.install || 0;
+  const tmSystemLabel = { hexpro: 'Hex-Pro', advance: 'Advance', trelona: 'Trelona' }[termiteSystem] || 'Trelona';
   if (tmInstall > 0) {
     oneTimeTotal += tmInstall;
-    otItems.push({ name: 'Trelona Install', price: tmInstall });
+    otItems.push({ name: `${tmSystemLabel} Install`, price: tmInstall });
   }
 
   const totalOneTimeAndSpecialty = oneTimeTotal + specialtyTotal;
