@@ -33,7 +33,148 @@ const TABS = [
   { key: 'one_time', label: 'One-Time', icon: '⚡' },
   { key: 'waveguard', label: 'WaveGuard', icon: '🛡️' },
   { key: 'products', label: 'Products', icon: '📦' },
+  { key: 'changelog', label: 'Changelog', icon: '📜' },
 ];
+
+// Category pill color map for changelog entries
+const CATEGORY_COLORS = {
+  bug:            '#C0392B', // red
+  leak:           '#F0A500', // amber
+  rule:           '#0A7EC2', // blue
+  cost:           '#16A34A', // green
+  architecture:   '#7C3AED', // purple
+  documentation:  '#64748B', // gray
+  infrastructure: '#0EA5E9', // teal
+};
+
+// ── Changelog Tab ──
+function ChangelogTab() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState('all');
+  const [expandedId, setExpandedId] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    const qs = filter === 'all' ? '' : `?category=${encodeURIComponent(filter)}`;
+    af(`/admin/pricing-config/changelog${qs}`)
+      .then(d => { setEntries(d.entries || []); setLoading(false); })
+      .catch(() => { setEntries([]); setLoading(false); });
+  }, [filter]);
+
+  const formatDate = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
+  const catPill = (category) => {
+    const color = CATEGORY_COLORS[category] || D.muted;
+    return (
+      <span style={{
+        fontSize: 10, padding: '2px 8px', borderRadius: 12, fontWeight: 700,
+        background: `${color}18`, color, border: `1px solid ${color}55`,
+        textTransform: 'uppercase', letterSpacing: 0.3,
+      }}>{category}</span>
+    );
+  };
+
+  const filterOptions = ['all', 'bug', 'leak', 'rule', 'cost', 'architecture', 'documentation', 'infrastructure'];
+
+  return (
+    <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A' }}>Pricing Changelog</div>
+        <label style={{ fontSize: 12, color: D.muted }}>
+          Filter
+          <select value={filter} onChange={e => setFilter(e.target.value)} style={{
+            marginLeft: 8, padding: '6px 10px', background: D.input, border: `1px solid ${D.border}`,
+            borderRadius: 6, color: '#0F172A', fontSize: 12, outline: 'none',
+          }}>
+            {filterOptions.map(c => <option key={c} value={c}>{c === 'all' ? 'All categories' : c}</option>)}
+          </select>
+        </label>
+      </div>
+
+      {loading ? (
+        <div style={{ color: D.muted, padding: 40, textAlign: 'center', fontSize: 13 }}>Loading changelog...</div>
+      ) : entries.length === 0 ? (
+        <div style={{ color: D.muted, padding: 40, textAlign: 'center', fontSize: 13 }}>
+          No changelog entries{filter !== 'all' ? ` for category "${filter}"` : ''} yet.
+        </div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700, width: 150 }}>Changed At</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700, width: 120 }}>Version</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700, width: 130 }}>Category</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Summary</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700, width: 160 }}>Changed By</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(e => {
+                const isOpen = expandedId === e.id;
+                return (
+                  <React.Fragment key={e.id}>
+                    <tr
+                      onClick={() => setExpandedId(isOpen ? null : e.id)}
+                      style={{ borderBottom: `1px solid ${D.border}22`, cursor: 'pointer', background: isOpen ? `${D.teal}08` : 'transparent' }}
+                    >
+                      <td style={{ padding: '10px', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: D.text }}>{formatDate(e.changed_at)}</td>
+                      <td style={{ padding: '10px', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: D.text }}>
+                        {e.version_from}{e.version_from !== e.version_to ? ` → ${e.version_to}` : ''}
+                      </td>
+                      <td style={{ padding: '10px' }}>{catPill(e.category)}</td>
+                      <td style={{ padding: '10px', color: '#0F172A', fontSize: 13 }}>{e.summary}</td>
+                      <td style={{ padding: '10px', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: D.muted }}>{e.changed_by}</td>
+                    </tr>
+                    {isOpen && (
+                      <tr style={{ background: `${D.teal}06` }}>
+                        <td colSpan={5} style={{ padding: '14px 16px', borderBottom: `1px solid ${D.border}22` }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>Rationale</div>
+                          <div style={{ fontSize: 13, color: '#0F172A', lineHeight: 1.5, marginBottom: 14 }}>{e.rationale}</div>
+
+                          {Array.isArray(e.affected_services) && e.affected_services.length > 0 && (
+                            <>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>Affected Services</div>
+                              <div style={{ fontSize: 12, color: D.text, marginBottom: 14, fontFamily: "'JetBrains Mono', monospace" }}>
+                                {e.affected_services.join(', ')}
+                              </div>
+                            </>
+                          )}
+
+                          {(e.before_value != null || e.after_value != null) && (
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                              <div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>Before</div>
+                                <pre style={{ fontSize: 11, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: 10, margin: 0, overflow: 'auto', fontFamily: "'JetBrains Mono', monospace", color: D.text }}>
+                                  {e.before_value != null ? JSON.stringify(e.before_value, null, 2) : '—'}
+                                </pre>
+                              </div>
+                              <div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>After</div>
+                                <pre style={{ fontSize: 11, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: 10, margin: 0, overflow: 'auto', fontFamily: "'JetBrains Mono', monospace", color: D.text }}>
+                                  {e.after_value != null ? JSON.stringify(e.after_value, null, 2) : '—'}
+                                </pre>
+                              </div>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ── Reusable inline-edit cell ──
 function EditCell({ value, onSave, type = 'number', width = 70 }) {
@@ -544,8 +685,11 @@ export default function PricingLogicPanel() {
           {/* Products tab */}
           {activeTab === 'products' && <ProductsTab />}
 
+          {/* Changelog tab */}
+          {activeTab === 'changelog' && <ChangelogTab />}
+
           {/* Config cards for this category */}
-          {activeTab !== 'products' && filteredConfigs.length > 0 && (
+          {activeTab !== 'products' && activeTab !== 'changelog' && filteredConfigs.length > 0 && (
             <div>
               {activeTab !== 'lawn' && activeTab !== 'waveguard' && (
                 <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>
@@ -560,7 +704,7 @@ export default function PricingLogicPanel() {
             </div>
           )}
 
-          {activeTab !== 'products' && filteredConfigs.length === 0 && activeTab !== 'lawn' && activeTab !== 'waveguard' && (
+          {activeTab !== 'products' && activeTab !== 'changelog' && filteredConfigs.length === 0 && activeTab !== 'lawn' && activeTab !== 'waveguard' && (
             <div style={{ color: D.muted, padding: 20, textAlign: 'center', fontSize: 13 }}>
               No configuration data for this category yet. Run the pricing_config migration to seed data.
             </div>

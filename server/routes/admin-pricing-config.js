@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -49,7 +50,7 @@ async function ensureTable() {
       { config_key: 'mosquito_tiers', name: 'Mosquito Tier Visits & Pressure', category: 'mosquito', sort_order: 2, data: JSON.stringify({ visits: { bronze: 12, silver: 12, gold: 15, platinum: 18 }, pressure_cap: 1.80 }) },
 
       // Termite
-      { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.75, advance_bait: 14, trelona_bait: 24, labor_per_station: 5.25, misc_per_station: 0.75 }) },
+      { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.75, hexpro_bait: 8.69, advance_bait: 14, trelona_bait: 24, labor_per_station: 5.25, misc_per_station: 0.75 }) },
       { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 35, premier: 65 }) },
 
       // Rodent
@@ -157,6 +158,22 @@ router.get('/audit-log', async (req, res, next) => {
     res.json({ logs });
   } catch (err) {
     res.json({ logs: [] });
+  }
+});
+
+// GET /changelog — pricing_changelog entries (v4.3 Session 1)
+router.get('/changelog', async (req, res, next) => {
+  try {
+    const { category } = req.query;
+    const requested = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(requested) && requested > 0 ? Math.min(requested, 500) : 100;
+    let query = db('pricing_changelog').orderBy('changed_at', 'desc').limit(limit);
+    if (category && category !== 'all') query = query.where({ category });
+    const rows = await query;
+    res.json({ entries: rows });
+  } catch (err) {
+    logger.error('[admin-pricing-config] changelog fetch failed', err);
+    res.status(500).json({ error: 'Failed to load changelog', entries: [] });
   }
 });
 
