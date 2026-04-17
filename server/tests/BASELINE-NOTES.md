@@ -46,6 +46,20 @@ Baselines captured 2026-04-17 post-Session-3 deploy (`70a3109` hotfix). The pre-
 
 ---
 
+## Session 5 intentional baseline updates (2026-04-17)
+
+Bermuda and Zoysia flat bracket segments at 4K-7K sqft were regenerated using each tier's native 8K→10K scaling rate (Basic $3/K, Standard $4.50/K, Enhanced $7/K). 4K Basic clamped to $32/mo for both grasses (raw $30 regeneration = 33% margin, below 35% floor). Premium tier untouched (already correctly progressive). 8K+ brackets untouched.
+
+Customer impact: zero. No active customer has `lawn_type` set to bermuda or zoysia (verified via prod query pre-deploy). Fix is forward-only.
+
+Cases with updated baselines:
+- **v1 regression suite:** none. All 12 cases confirmed byte-identical — none of them exercise Bermuda/Zoysia at 4K-7K derived lawn sqft (Case 2 `zone_b_monthly_pest_bermuda_premium` uses Premium tier which was unchanged; Case 3 `zone_c_bimonthly_pest_zoysia_standard_treeshrub` resolves to a lawn sqft outside 4K-7K).
+- **v2 regression suite:** `v2_zone_c_bimonthly_pest_lawn_treeshrub` — the only v2 case using Zoysia at low-sqft (2000 home × 10000 lot, 5000 estimatedTurfSf). Lawn tier prices dropped from `[40, 50, 60, 75]` to `[32, 44, 55, 75]` (Basic, Standard, Enhanced, Premium). Monthly recurring total dropped $134.97 → $130.72 (−$4.25/mo; Gold 15% discount applied to Zone C 1.12× multiplied total). All deltas trace to the regenerated Zoysia 4K-knot values. All other 13 v2 cases byte-identical.
+
+See pricing_changelog id=5 for full rationale.
+
+---
+
 ## Governance note
 
 Discovering prod Platinum at 20% instead of the expected 18% is a governance signal: either docs drifted from code, or live admin-UI edits bypassed the changelog. Going forward (post v4.3 ship), every pricing change — including manual admin-UI edits — must land a `pricing_changelog` row with rationale. Session 9's approval-queue-to-pricing-config wiring automates this for cost changes; rule and discount changes made manually still need manual changelog entries.
