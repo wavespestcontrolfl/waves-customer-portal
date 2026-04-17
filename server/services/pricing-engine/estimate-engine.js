@@ -355,18 +355,13 @@ function generateEstimate(input) {
   const waveGuardTier = determineWaveGuardTier(activeServiceKeys);
 
   // ── 5. Apply discounts to each line item ───────────────────
-  const paymentMethod = input.paymentMethod || 'card';
-
   for (const item of lineItems) {
     const serviceKey = resolveDiscountKey(item);
     const isOneTime = !item.annual; // One-time services have .price, not .annual
 
     const discount = getEffectiveDiscount(serviceKey, waveGuardTier, {
-      promoDiscount: input.promoDiscount || 0,
-      frequencyDiscount: item.freqMult ? (1 - item.freqMult) : 0,
       isRecurringCustomer,
       isOneTimeService: isOneTime,
-      paymentMethod,
     });
 
     item.discount = discount;
@@ -469,9 +464,6 @@ function resolveDiscountKey(item) {
     const tier = item.tier || 'enhanced';
     if (tier === 'enhanced' || tier === 'premium') return `lawn_care_${tier}`;
     return 'lawn_care';
-  }
-  if (item.maxWaveGuardDiscount !== undefined && item.maxWaveGuardDiscount !== null) {
-    return `${item.service}_capped`;
   }
   return item.service;
 }

@@ -150,7 +150,7 @@ async function syncConstantsFromDB(dbInstance) {
       if (config.onetime_urgency.urgent_after_hours) constants.URGENCY.URGENT.afterHours = config.onetime_urgency.urgent_after_hours;
     }
     if (config.onetime_recurring_discount?.multiplier) {
-      constants.WAVEGUARD.recurringCustomerDiscount = 1 - config.onetime_recurring_discount.multiplier;
+      constants.WAVEGUARD.recurringCustomerOneTimePerk = 1 - config.onetime_recurring_discount.multiplier;
     }
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;

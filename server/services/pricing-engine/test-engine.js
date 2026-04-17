@@ -157,32 +157,31 @@ console.log('─'.repeat(70));
 const goldTier = determineWaveGuardTier(['pest_control', 'lawn_care', 'mosquito']);
 const platTier = determineWaveGuardTier(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito']);
 
-// Normal service at Gold
-let disc = getEffectiveDiscount('pest_control', goldTier, { paymentMethod: 'card' });
-console.log(`  Pest @ Gold, card: ${pct(disc.effectiveDiscount)} discount`);
+// Normal recurring service at Gold
+let disc = getEffectiveDiscount('pest_control', goldTier);
+console.log(`  Pest @ Gold: ${pct(disc.effectiveDiscount)} discount`);
 
-// Lawn Enhanced at Platinum (should be capped at Gold = 15%)
-disc = getEffectiveDiscount('lawn_care_enhanced', platTier, { paymentMethod: 'card' });
-console.log(`  Lawn Enhanced @ Platinum: ${pct(disc.effectiveDiscount)} (should be capped at 15%)`);
-console.log(`    Cap applied: ${disc.cappedAt ? 'YES' : 'no'}`);
+// Lawn Enhanced at Platinum (Session 6: full 20%, no cap)
+disc = getEffectiveDiscount('lawn_care_enhanced', platTier);
+console.log(`  Lawn Enhanced @ Platinum: ${pct(disc.effectiveDiscount)} (should be 20%, no cap)`);
 
 // Rodent (excluded from %)
-disc = getEffectiveDiscount('rodent_bait', goldTier, { paymentMethod: 'card' });
-console.log(`  Rodent Bait @ Gold: ${pct(disc.effectiveDiscount)} discount (should be 0%)`);
+disc = getEffectiveDiscount('rodent_bait', goldTier);
+console.log(`  Rodent Bait @ Gold: ${pct(disc.effectiveDiscount)} discount (should be 0%) + setup credit: $${disc.setupCredit || 0}`);
 
 // Palm (excluded, flat credit)
-disc = getEffectiveDiscount('palm_injection', goldTier, { paymentMethod: 'card' });
+disc = getEffectiveDiscount('palm_injection', goldTier);
 console.log(`  Palm @ Gold: ${pct(disc.effectiveDiscount)} + flat credit: $${disc.flatCredit || 0}/palm/yr`);
 
-// ACH discount
-disc = getEffectiveDiscount('pest_control', goldTier, { paymentMethod: 'us_bank_account' });
-console.log(`  Pest @ Gold, ACH: service ${pct(disc.effectiveDiscount)} + ACH ${pct(disc.achDiscount)} = total ${pct(disc.totalDiscount)}`);
-
-// Composite cap test: Gold + recurring + promo
-disc = getEffectiveDiscount('pest_control', goldTier, {
-  isOneTimeService: true, isRecurringCustomer: true, promoDiscount: 0.10,
+// Recurring customer one-time perk
+disc = getEffectiveDiscount('one_time_pest', goldTier, {
+  isOneTimeService: true, isRecurringCustomer: true,
 });
-console.log(`  One-time pest @ Gold + recurring(15%) + promo(10%): base ${pct(disc.baseDiscount)} → capped ${pct(disc.effectiveDiscount)}`);
+console.log(`  One-time pest, recurring customer @ Gold: ${pct(disc.effectiveDiscount)} perk (no tier stacking)`);
+
+// One-time, non-recurring customer (no discount)
+disc = getEffectiveDiscount('one_time_pest', goldTier, { isOneTimeService: true, isRecurringCustomer: false });
+console.log(`  One-time pest, non-recurring @ Gold: ${pct(disc.effectiveDiscount)} (should be 0%)`);
 
 // ── FULL ESTIMATE ──
 console.log('\n' + '═'.repeat(70));

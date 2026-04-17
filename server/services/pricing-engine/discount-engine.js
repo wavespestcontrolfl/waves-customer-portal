@@ -1,8 +1,27 @@
 // ============================================================
-// discount-engine.js — Waves Discount Engine
-// Handles WaveGuard bundle, frequency, promo, ACH, composite cap
+// discount-engine.js — Waves Discount Engine (v4.3 single-source)
+//
+// Two discount mechanics:
+//   1. WaveGuard tier discount on qualifying recurring services.
+//      Bronze 0%, Silver 10%, Gold 15%, Platinum 20%.
+//      Qualifying services: pest, lawn, tree_shrub, mosquito, termite_bait.
+//
+//   2. Recurring customer one-time perk. Flat 15% off one-time services
+//      when customer has active recurring services. Does NOT stack with
+//      WaveGuard tier (one-time services never see tier discount; recurring
+//      services never see the perk).
+//
+// Excluded services: rodent_bait, palm_injection, bed_bug_*, bora_care,
+//   pre_slab_termidor. No % discount. Flat credits where applicable.
+//
+// Removed in v4.3 Session 6:
+//   - Composite discount cap (was 0.25)
+//   - Service-specific caps (lawn_care_enhanced/premium at Gold 15%)
+//   - Promo code stacking
+//   - Frequency discount tracking in the stack
+//   - ACH discount plumbing (retired to 0% in an earlier session)
 // ============================================================
-const { WAVEGUARD, ACH_DISCOUNT, PALM, RODENT, GLOBAL } = require('./constants');
+const { WAVEGUARD, PALM, RODENT, GLOBAL } = require('./constants');
 
 // ── Determine WaveGuard tier from active services ─────────────
 function determineWaveGuardTier(activeServices = []) {
@@ -12,56 +31,50 @@ function determineWaveGuardTier(activeServices = []) {
   const count = qualifying.length;
 
   if (count >= 4) return { tier: 'platinum', discount: WAVEGUARD.tiers.platinum.discount, qualifyingCount: count };
-  if (count >= 3) return { tier: 'gold', discount: WAVEGUARD.tiers.gold.discount, qualifyingCount: count };
-  if (count >= 2) return { tier: 'silver', discount: WAVEGUARD.tiers.silver.discount, qualifyingCount: count };
-  return { tier: 'bronze', discount: WAVEGUARD.tiers.bronze.discount, qualifyingCount: count };
+  if (count >= 3) return { tier: 'gold',     discount: WAVEGUARD.tiers.gold.discount,     qualifyingCount: count };
+  if (count >= 2) return { tier: 'silver',   discount: WAVEGUARD.tiers.silver.discount,   qualifyingCount: count };
+  return             { tier: 'bronze',       discount: WAVEGUARD.tiers.bronze.discount,   qualifyingCount: count };
 }
 
 // ── Get effective discount for a specific service line ─────────
 function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
   const {
-    promoDiscount = 0,         // Promo code percentage (0-1)
-    frequencyDiscount = 0,     // Frequency discount already applied (0-1)
     isRecurringCustomer = false,
     isOneTimeService = false,
-    paymentMethod = 'card',    // 'card' | 'us_bank_account'
   } = options;
 
   const result = {
     serviceKey,
     waveGuardTier: waveGuardTier.tier,
     appliedDiscounts: [],
-    baseDiscount: 0,        // Before any caps
-    effectiveDiscount: 0,   // After caps
-    achDiscount: 0,         // Separate — exempt from composite cap
-    totalDiscount: 0,       // Final effective
-    cappedAt: null,
+    effectiveDiscount: 0,
+    totalDiscount: 0,
   };
 
-  // ── Check service-specific exclusions ──────────────────────
-  const discountCap = WAVEGUARD.discountCaps[serviceKey];
-  const isExcludedFromPct = discountCap === 0;
-
-  // Services fully excluded from percentage discounts
-  if (isExcludedFromPct) {
+  // ── Excluded from % discount entirely ──
+  if (WAVEGUARD.excludedFromPercentDiscount[serviceKey]) {
     result.appliedDiscounts.push({ type: 'exclusion', reason: `${serviceKey} excluded from % discounts` });
 
-    // Check for flat credits (palm injection)
+    // Flat credits for eligible services
     if (serviceKey === 'palm_injection') {
       const tierRank = { bronze: 0, silver: 1, gold: 2, platinum: 3 };
       if (tierRank[waveGuardTier.tier] >= tierRank[PALM.flatCreditMinTier]) {
         result.flatCredit = PALM.flatCreditPerPalm;
-        result.appliedDiscounts.push({ type: 'flat_credit', amount: PALM.flatCreditPerPalm, reason: `$${PALM.flatCreditPerPalm}/palm/yr Gold+ loyalty credit` });
+        result.appliedDiscounts.push({
+          type: 'flat_credit',
+          amount: PALM.flatCreditPerPalm,
+          reason: `$${PALM.flatCreditPerPalm}/palm/yr Gold+ loyalty credit`,
+        });
       }
     }
-
-    // Rodent bait setup credit
     if (serviceKey === 'rodent_bait') {
       result.setupCredit = RODENT.setupCredit;
-      result.appliedDiscounts.push({ type: 'setup_credit', amount: RODENT.setupCredit, reason: `One-time $${RODENT.setupCredit} WaveGuard member credit` });
+      result.appliedDiscounts.push({
+        type: 'setup_credit',
+        amount: RODENT.setupCredit,
+        reason: `One-time $${RODENT.setupCredit} WaveGuard member credit`,
+      });
     }
-
-    // Bed bug flat member credit ($50 for Silver+)
     if (serviceKey === 'bed_bug_chemical' || serviceKey === 'bed_bug_heat') {
       const tierRank = { bronze: 0, silver: 1, gold: 2, platinum: 3 };
       if (tierRank[waveGuardTier.tier] >= tierRank.silver) {
@@ -70,126 +83,62 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
       }
     }
 
-    // ACH discount still applies to excluded services
-    if (paymentMethod === ACH_DISCOUNT.paymentMethod) {
-      result.achDiscount = ACH_DISCOUNT.percentage;
-      result.appliedDiscounts.push({ type: 'ach', amount: ACH_DISCOUNT.percentage, reason: 'Bank payment discount' });
-    }
-
-    result.totalDiscount = result.achDiscount;
+    // totalDiscount stays 0 — no % discount applies
     return result;
   }
 
-  // ── Build discount stack ──────────────────────────────────
-  let discountStack = 0;
-
-  // 1. WaveGuard tier discount
-  let wgDiscount = waveGuardTier.discount;
-  if (discountCap !== undefined && discountCap !== null && discountCap > 0) {
-    wgDiscount = Math.min(wgDiscount, discountCap);
-    if (wgDiscount < waveGuardTier.discount) {
+  // ── Apply discount based on service kind ──
+  if (isOneTimeService) {
+    // One-time services never get WaveGuard tier discount.
+    // Recurring customers get the flat 15% perk on one-time services.
+    if (isRecurringCustomer) {
+      result.effectiveDiscount = WAVEGUARD.recurringCustomerOneTimePerk;
       result.appliedDiscounts.push({
-        type: 'waveguard_capped',
-        original: waveGuardTier.discount,
-        capped: wgDiscount,
-        reason: `${serviceKey} capped at ${(wgDiscount * 100).toFixed(0)}%`,
+        type: 'recurring_customer_one_time_perk',
+        amount: WAVEGUARD.recurringCustomerOneTimePerk,
+      });
+    }
+  } else {
+    // Recurring services get WaveGuard tier discount. No caps, no stacking.
+    if (waveGuardTier.discount > 0) {
+      result.effectiveDiscount = waveGuardTier.discount;
+      result.appliedDiscounts.push({
+        type: 'waveguard',
+        amount: waveGuardTier.discount,
+        tier: waveGuardTier.tier,
       });
     }
   }
 
-  if (wgDiscount > 0) {
-    discountStack = wgDiscount;
-    result.appliedDiscounts.push({ type: 'waveguard', amount: wgDiscount, tier: waveGuardTier.tier });
-  }
-
-  // 2. Recurring customer discount on one-time services
-  if (isOneTimeService && isRecurringCustomer) {
-    // Recurring discount stacks with WaveGuard, but composite cap will catch it
-    const recDisc = WAVEGUARD.recurringCustomerDiscount;
-    discountStack = 1 - (1 - discountStack) * (1 - recDisc); // Multiplicative stacking
-    result.appliedDiscounts.push({ type: 'recurring_customer', amount: recDisc });
-  }
-
-  // 3. Promo code discount
-  if (promoDiscount > 0) {
-    discountStack = 1 - (1 - discountStack) * (1 - promoDiscount);
-    result.appliedDiscounts.push({ type: 'promo', amount: promoDiscount });
-  }
-
-  // Note: Frequency discounts are applied in the service pricing itself,
-  // not in the discount engine. They're a price multiplier, not a discount.
-  // But we track them for composite cap purposes.
-  if (frequencyDiscount > 0) {
-    discountStack = 1 - (1 - discountStack) * (1 - frequencyDiscount);
-    result.appliedDiscounts.push({ type: 'frequency', amount: frequencyDiscount, note: 'Applied in service pricing' });
-  }
-
-  result.baseDiscount = discountStack;
-
-  // ── Apply composite discount cap ──────────────────────────
-  if (discountStack > WAVEGUARD.compositeDiscountCap) {
-    result.effectiveDiscount = WAVEGUARD.compositeDiscountCap;
-    result.cappedAt = WAVEGUARD.compositeDiscountCap;
-    result.appliedDiscounts.push({
-      type: 'composite_cap',
-      original: discountStack,
-      capped: WAVEGUARD.compositeDiscountCap,
-      reason: `Composite cap: ${(WAVEGUARD.compositeDiscountCap * 100).toFixed(0)}% max`,
-    });
-  } else {
-    result.effectiveDiscount = discountStack;
-  }
-
-  // ── ACH discount (exempt from composite cap) ──────────────
-  if (paymentMethod === ACH_DISCOUNT.paymentMethod) {
-    result.achDiscount = ACH_DISCOUNT.percentage;
-    result.appliedDiscounts.push({ type: 'ach', amount: ACH_DISCOUNT.percentage, reason: 'Bank payment discount' });
-  }
-
-  // Total: service discounts + ACH (applied separately)
-  result.totalDiscount = 1 - (1 - result.effectiveDiscount) * (1 - result.achDiscount);
-
+  result.totalDiscount = result.effectiveDiscount;
   return result;
 }
 
 // ── Apply discount to a price ─────────────────────────────────
 function applyDiscount(basePrice, discountResult, priceFloor = 0) {
-  // Apply service discounts (capped)
   let price = basePrice * (1 - discountResult.effectiveDiscount);
-
-  // Apply flat credits if applicable
-  if (discountResult.flatCredit) {
-    price -= discountResult.flatCredit;
-  }
-
-  // Apply price floor before ACH
+  if (discountResult.flatCredit) price -= discountResult.flatCredit;
   price = Math.max(priceFloor, price);
-
-  // Apply ACH discount (separate from service discounts)
-  if (discountResult.achDiscount > 0) {
-    price = price * (1 - discountResult.achDiscount);
-  }
-
   return Math.round(price * 100) / 100;
 }
 
-// ── Validate discount for a full estimate ─────────────────────
+// ── Validate discount for a full estimate (margin floor check) ─
+// Kept for Session 10 (COGS-based margin validation). Fires when
+// item.costs.total is populated.
 function validateEstimateDiscounts(lineItems, waveGuardTier) {
   const warnings = [];
   for (const item of lineItems) {
-    if (item.discount && item.discount.effectiveDiscount > 0) {
+    if (item.discount && item.discount.effectiveDiscount > 0 && item.costs && item.costs.total) {
       const discountedPrice = item.price * (1 - item.discount.effectiveDiscount);
-      if (item.costs && item.costs.total) {
-        const margin = (discountedPrice - item.costs.total) / discountedPrice;
-        if (margin < GLOBAL.MARGIN_FLOOR) {
-          warnings.push({
-            service: item.service,
-            margin: Math.round(margin * 1000) / 1000,
-            discountedPrice: Math.round(discountedPrice),
-            cost: item.costs.total,
-            message: `${item.service} margin ${(margin * 100).toFixed(1)}% below ${(GLOBAL.MARGIN_FLOOR * 100).toFixed(0)}% floor after ${(item.discount.effectiveDiscount * 100).toFixed(0)}% discount`,
-          });
-        }
+      const margin = (discountedPrice - item.costs.total) / discountedPrice;
+      if (margin < GLOBAL.MARGIN_FLOOR) {
+        warnings.push({
+          service: item.service,
+          margin: Math.round(margin * 1000) / 1000,
+          discountedPrice: Math.round(discountedPrice),
+          cost: item.costs.total,
+          message: `${item.service} margin ${(margin * 100).toFixed(1)}% below ${(GLOBAL.MARGIN_FLOOR * 100).toFixed(0)}% floor after ${(item.discount.effectiveDiscount * 100).toFixed(0)}% discount`,
+        });
       }
     }
   }

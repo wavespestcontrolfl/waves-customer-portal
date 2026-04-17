@@ -224,8 +224,6 @@ function priceLawnCare(property, options = {}) {
     costs: { annualMaterial: scaledMaterial, annualLabor: Math.round(annualLabor), annualAdmin: GLOBAL.ADMIN_ANNUAL, total: Math.round(annualCost) },
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
-    // Discount cap: Enhanced/Premium capped at Gold (15%)
-    maxWaveGuardDiscount: (tier === 'enhanced' || tier === 'premium') ? 0.15 : null,
   };
 }
 
@@ -568,7 +566,7 @@ function priceOneTimePest(property, options = {}) {
 
 function WAVEGUARD_RECURRING_DISC() {
   const { WAVEGUARD } = require('./constants');
-  return WAVEGUARD.recurringCustomerDiscount;
+  return WAVEGUARD.recurringCustomerOneTimePerk;
 }
 
 // ============================================================

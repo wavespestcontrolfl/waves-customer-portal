@@ -13,7 +13,6 @@
  *     propertyType, features: { treeCount, hasPool, ... },
  *     zone: 'A' | 'B' | ... ,
  *     paymentMethod: 'card' | 'us_bank_account',
- *     promoDiscount: 0.05,
  *     services: {
  *       pest:       { frequency, roachType, version },
  *       lawn:       { track, tier, shadeClassification },

@@ -475,24 +475,27 @@ const WAVEGUARD = {
     bronze:   { minServices: 1, discount: 0.00 },
     silver:   { minServices: 2, discount: 0.10 },
     gold:     { minServices: 3, discount: 0.15 },
-    platinum: { minServices: 4, discount: 0.18 },  // Was 0.20. Recovers 2pts on every Platinum line.
+    platinum: { minServices: 4, discount: 0.20 },
   },
   qualifyingServices: [
     'lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait',
     // palm_injection and rodent_bait are NOT qualifiers
   ],
-  discountCaps: {
-    lawn_care_enhanced: 0.15,  // Capped at Gold
-    lawn_care_premium: 0.15,   // Capped at Gold
-    rodent_bait: 0,            // Excluded entirely
-    palm_injection: 0,         // Excluded — flat credit only
-    bed_bug_chemical: 0,       // Excluded — $50 flat member credit
-    bed_bug_heat: 0,           // Excluded — $50 flat member credit
-    bora_care: 0,              // Excluded from % discount
-    pre_slab_termidor: 0,      // Excluded from % discount
+  // Services excluded from percentage discounts (get flat credits instead, where applicable)
+  excludedFromPercentDiscount: {
+    rodent_bait: true,          // Flat $50 setup credit for WaveGuard members
+    palm_injection: true,       // $10/palm/yr Gold+ flat credit
+    bed_bug_chemical: true,     // $50 flat member credit
+    bed_bug_heat: true,         // $50 flat member credit
+    bora_care: true,            // Excluded — no discount
+    pre_slab_termidor: true,    // Excluded — no discount
   },
-  compositeDiscountCap: 0.25,  // Max total discount from all sources on any line
-  recurringCustomerDiscount: 0.15, // 15% off one-time for recurring customers
+  // One-time service perk for recurring customers. Flat 15% off one-time
+  // services only. Does NOT stack with WaveGuard tier discount (recurring
+  // services get tier discount; one-time services get this perk; no line
+  // item sees both). Bora-Care and Pre-Slab Termidor are excluded from this
+  // perk as well.
+  recurringCustomerOneTimePerk: 0.15,
 };
 
 // ── ACH Payment Discount ──────────────────────────────────────
