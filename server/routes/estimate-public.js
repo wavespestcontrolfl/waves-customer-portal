@@ -130,67 +130,74 @@ router.put('/:token/accept', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (estimate.status === 'accepted') return res.json({ success: true, alreadyAccepted: true });
 
-    await db('estimates').where({ id: estimate.id }).update({ status: 'accepted', accepted_at: db.fn.now() });
-
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
 
-    // Create customer if doesn't exist
-    let customerId = estimate.customer_id;
-    if (!customerId && estimate.customer_phone) {
-      const existing = await db('customers').where({ phone: estimate.customer_phone }).first();
-      if (existing) {
-        customerId = existing.id;
-      } else {
-        const nameParts = (estimate.customer_name || 'New Customer').split(' ');
-        const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
-        const [newCust] = await db('customers').insert({
-          first_name: nameParts[0] || 'New',
-          last_name: nameParts.slice(1).join(' ') || 'Customer',
-          phone: estimate.customer_phone,
-          email: estimate.customer_email || null,
-          address_line1: estimate.address || '',
-          city: '', state: 'FL', zip: '',
-          waveguard_tier: estimate.waveguard_tier || 'Bronze',
-          monthly_rate: estimate.monthly_total || 0,
-          member_since: new Date().toISOString().split('T')[0],
-          referral_code: code,
-        }).returning('*');
-        customerId = newCust.id;
-        await db('property_preferences').insert({ customer_id: customerId });
-        await db('notification_prefs').insert({ customer_id: customerId });
-      }
-      await db('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
-    }
-
-    // Parse estimate data + detect one-time-only vs recurring
+    // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     const estResult = estData?.result || estData || {};
     const recurringSvcList = estResult?.recurring?.services || [];
     const oneTimeList = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
     const isOneTimeOnly = recurringSvcList.length === 0 && oneTimeList.length > 0;
 
-    // Trigger onboarding — recurring customers only
-    let onboardingToken = null;
-    if (customerId && !isOneTimeOnly) {
-      const obToken = crypto.randomUUID();
-      const expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + 7);
+    // All DB mutations run atomically so a mid-flight failure can't leave a
+    // half-created customer without an onboarding session (or vice versa).
+    // SMS / notifications / auto-conversion are fired AFTER the commit below.
+    const txResult = await db.transaction(async (trx) => {
+      await trx('estimates').where({ id: estimate.id }).update({ status: 'accepted', accepted_at: trx.fn.now() });
 
-      const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
+      let customerId = estimate.customer_id;
+      if (!customerId && estimate.customer_phone) {
+        const existing = await trx('customers').where({ phone: estimate.customer_phone }).first();
+        if (existing) {
+          customerId = existing.id;
+        } else {
+          const nameParts = (estimate.customer_name || 'New Customer').split(' ');
+          const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+          const [newCust] = await trx('customers').insert({
+            first_name: nameParts[0] || 'New',
+            last_name: nameParts.slice(1).join(' ') || 'Customer',
+            phone: estimate.customer_phone,
+            email: estimate.customer_email || null,
+            address_line1: estimate.address || '',
+            city: '', state: 'FL', zip: '',
+            waveguard_tier: estimate.waveguard_tier || 'Bronze',
+            monthly_rate: estimate.monthly_total || 0,
+            member_since: new Date().toISOString().split('T')[0],
+            referral_code: code,
+          }).returning('*');
+          customerId = newCust.id;
+          await trx('property_preferences').insert({ customer_id: customerId });
+          await trx('notification_prefs').insert({ customer_id: customerId });
+        }
+        await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+      }
 
-      const [ob] = await db('onboarding_sessions').insert({
-        customer_id: customerId,
-        token: obToken,
-        service_type: `WaveGuard ${estimate.waveguard_tier || 'Bronze'} — ${svcType}`,
-        waveguard_tier: estimate.waveguard_tier,
-        monthly_rate: estimate.monthly_total,
-        status: 'started',
-        expires_at: expiresAt,
-      }).returning('*');
+      let onboardingToken = null;
+      if (customerId && !isOneTimeOnly) {
+        const obToken = crypto.randomUUID();
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 7);
 
-      await db('estimates').where({ id: estimate.id }).update({ onboarding_session_id: ob.id });
-      onboardingToken = obToken;
-    }
+        const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
+
+        const [ob] = await trx('onboarding_sessions').insert({
+          customer_id: customerId,
+          token: obToken,
+          service_type: `WaveGuard ${estimate.waveguard_tier || 'Bronze'} — ${svcType}`,
+          waveguard_tier: estimate.waveguard_tier,
+          monthly_rate: estimate.monthly_total,
+          status: 'started',
+          expires_at: expiresAt,
+        }).returning('*');
+
+        await trx('estimates').where({ id: estimate.id }).update({ onboarding_session_id: ob.id });
+        onboardingToken = obToken;
+      }
+
+      return { customerId, onboardingToken };
+    });
+
+    const { customerId, onboardingToken } = txResult;
 
     // Notify office
     if (customerId) {

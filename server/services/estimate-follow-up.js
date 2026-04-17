@@ -36,7 +36,7 @@ const EstimateFollowUp = {
         .where('sent_at', '<', new Date(Date.now() - 24 * 3600000))
         .where('sent_at', '>', new Date(Date.now() - 48 * 3600000))
         .whereNotNull('customer_phone')
-        .whereRaw('COALESCE(follow_up_count, 0) < 1');
+        .where(q => q.where('followup_unviewed_sent', false).orWhereNull('followup_unviewed_sent'));
 
       for (const est of unviewed) {
         try {
@@ -48,6 +48,7 @@ const EstimateFollowUp = {
           );
           await TwilioService.sendSMS(est.customer_phone, body);
           await db('estimates').where({ id: est.id }).update({
+            followup_unviewed_sent: true,
             follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
             last_follow_up_at: db.fn.now(),
           });
@@ -64,7 +65,7 @@ const EstimateFollowUp = {
         .where('viewed_at', '<', new Date(Date.now() - 48 * 3600000))
         .where('viewed_at', '>', new Date(Date.now() - 72 * 3600000))
         .whereNotNull('customer_phone')
-        .whereRaw('COALESCE(follow_up_count, 0) < 1');
+        .where(q => q.where('followup_viewed_sent', false).orWhereNull('followup_viewed_sent'));
 
       for (const est of viewedNotAccepted) {
         try {
@@ -76,6 +77,7 @@ const EstimateFollowUp = {
           );
           await TwilioService.sendSMS(est.customer_phone, body);
           await db('estimates').where({ id: est.id }).update({
+            followup_viewed_sent: true,
             follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
             last_follow_up_at: db.fn.now(),
           });
@@ -92,7 +94,7 @@ const EstimateFollowUp = {
         .where('viewed_at', '<', new Date(Date.now() - 5 * 86400000))
         .where('viewed_at', '>', new Date(Date.now() - 6 * 86400000))
         .whereNotNull('customer_phone')
-        .whereRaw('COALESCE(follow_up_count, 0) < 1');
+        .where(q => q.where('followup_final_sent', false).orWhereNull('followup_final_sent'));
 
       for (const est of finalNudge) {
         try {
@@ -104,6 +106,7 @@ const EstimateFollowUp = {
           );
           await TwilioService.sendSMS(est.customer_phone, body);
           await db('estimates').where({ id: est.id }).update({
+            followup_final_sent: true,
             follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
             last_follow_up_at: db.fn.now(),
           });
@@ -122,7 +125,7 @@ const EstimateFollowUp = {
           new Date(Date.now() + 1 * 86400000),
           new Date(Date.now() + 3 * 86400000),
         ])
-        .whereRaw('COALESCE(follow_up_count, 0) < 1');
+        .where(q => q.where('followup_expiring_sent', false).orWhereNull('followup_expiring_sent'));
 
       for (const est of expiring) {
         try {
@@ -135,6 +138,7 @@ const EstimateFollowUp = {
           );
           await TwilioService.sendSMS(est.customer_phone, body);
           await db('estimates').where({ id: est.id }).update({
+            followup_expiring_sent: true,
             follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
             last_follow_up_at: db.fn.now(),
           });
