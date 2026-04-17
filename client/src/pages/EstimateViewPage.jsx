@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
 import { calculateEstimate } from '../lib/estimateEngine';
+import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const SAND = '#FDF6EC';
@@ -1908,15 +1909,7 @@ export default function EstimateViewPage() {
         {/* ============================================================= */}
         {/* 12. FOOTER                                                     */}
         {/* ============================================================= */}
-        <div style={{ textAlign: 'center', marginTop: 32, paddingTop: 20, borderTop: `1px solid ${SAND_DARK}` }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6 }}>🌊 Stay in the loop</div>
-          <div style={{ fontSize: 15, color: B.wavesBlue, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 10 }}>Wave Goodbye to Pests! 🌊</div>
-          <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: 0.6, marginBottom: 6 }} />
-          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Waves Pest Control, LLC</div>
-          <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>Family-owned pest control &amp; lawn care · Southwest Florida</div>
-          <div style={{ fontSize: 12, color: B.grayDark, marginTop: 6, lineHeight: 1.6 }}>Lakewood Ranch · Parrish · Sarasota · Venice</div>
-          <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>© {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved</div>
-        </div>
+        <BrandFooter borderColor={SAND_DARK} />
       </div>
 
       {/* ============================================================= */}

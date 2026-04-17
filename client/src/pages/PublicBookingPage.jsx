@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -553,6 +554,8 @@ export default function PublicBookingPage() {
             </p>
           </div>
         )}
+
+        <BrandFooter />
       </div>
     </div>
   );

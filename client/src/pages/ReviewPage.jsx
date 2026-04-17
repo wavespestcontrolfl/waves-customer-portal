@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
+import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Mirrored from wavespestcontrol.com (Astro @theme brand tokens)
@@ -283,10 +284,7 @@ export default function ReviewPage() {
         )}
 
         {/* Footer */}
-        <div style={{ textAlign: 'center', padding: '32px 0 0', color: W.textCaption, fontSize: 12 }}>
-          <div>Waves Pest Control · Southwest Florida</div>
-          <div style={{ marginTop: 4 }}><a href="tel:+19413187612" style={{ color: W.blue, textDecoration: 'none' }}>(941) 318-7612</a></div>
-        </div>
+        <BrandFooter />
       </div>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>

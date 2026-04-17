@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
+import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -660,6 +661,8 @@ export default function OnboardingPage() {
             </div>
           </div>
         )}
+
+        <BrandFooter variant="dark" />
       </div>
     </div>
   );

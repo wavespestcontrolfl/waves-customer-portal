@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
+import BrandFooter from "../components/BrandFooter";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -757,6 +758,8 @@ export default function BookingPage() {
             </div>
           </div>
         )}
+
+        <BrandFooter />
       </div>
     </div>
   );

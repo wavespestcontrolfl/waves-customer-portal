@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
+import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -432,9 +433,8 @@ function Page({ children }) {
         <div style={{ height: 5, background: 'linear-gradient(90deg, #C0392B, #C0392B, #F59E0B, #FFD700)' }} />
         <div style={{ padding: '28px 22px 24px' }}>{children}</div>
       </div>
-      <div style={{ position: 'relative', zIndex: 1, textAlign: 'center', padding: '20px 16px 32px' }}>
-        <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 15, fontWeight: 800, color: 'rgba(255,255,255,.85)' }}>Waves <span style={{ color: '#C0392B' }}>Pest Control</span></div>
-        <div style={{ fontSize: 11, color: 'rgba(255,255,255,.5)', marginTop: 2, fontWeight: 600 }}>Serving Southwest Florida</div>
+      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, padding: '0 0 32px' }}>
+        <BrandFooter variant="dark" />
       </div>
       <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
     </div>

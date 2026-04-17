@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
+import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -138,11 +139,7 @@ export default function ReportViewPage() {
           }}>💬 Text Us — (941) 318-7612</a>
         </div>
 
-        {/* Footer */}
-        <div style={{ textAlign: 'center', padding: '16px 0 30px', borderTop: `1px solid ${B.grayLight}`, marginTop: 16 }}>
-          <img src="/waves-logo.png" alt="" style={{ height: 24, opacity: 0.5 }} />
-          <div style={{ fontSize: 11, color: B.grayMid, marginTop: 4 }}>Waves Lawn & Pest · Family-owned, SWFL-based</div>
-        </div>
+        <BrandFooter />
       </div>
     </div>
   );
