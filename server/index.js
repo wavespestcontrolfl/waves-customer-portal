@@ -208,6 +208,7 @@ app.use('/api/admin/communications', adminCommsRoutes);
 // /recording-status, /transcription, /outbound-admin-prompt — no path conflicts under same mount.
 app.use('/api/webhooks/twilio', twilioWebhookRoutes);
 app.use('/api/webhooks/lead', require('./routes/lead-webhook'));
+app.use('/api/leads', require('./routes/lead-webhook'));
 app.use('/api/reports', reportsPublicRoutes);
 app.use('/api/admin/inventory', adminInventoryRoutes);
 app.use('/api/admin/compliance', adminComplianceRoutes);
