@@ -161,8 +161,11 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
   const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
   const grassType = TRACK_MAP[_grassType] || _grassType || 'st_augustine';
 
-  // Zone-based drive time adjustment
-  const zoneMultipliers = { A: 1.0, B: 1.05, C: 1.10, UNKNOWN: 1.05 };
+  // Zone-based drive time adjustment.
+  // Must match v1 modifiers.zoneMultiplier() and constants.ZONES. v2 remains
+  // Virginia's property-lookup hot path until Session 11; keeping it aligned
+  // prevents customers from seeing different quotes on lookup vs admin paths.
+  const zoneMultipliers = { A: 1.0, B: 1.05, C: 1.12, D: 1.20, UNKNOWN: 1.05 };
   const zoneMult = zoneMultipliers[p.serviceZone] || 1.05;
 
   // Urgency/after-hours multiplier

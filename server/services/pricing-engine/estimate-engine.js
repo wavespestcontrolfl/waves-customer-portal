@@ -5,7 +5,7 @@
 // ============================================================
 const { GLOBAL, WAVEGUARD, ZONES, URGENCY } = require('./constants');
 const { calculatePropertyProfile } = require('./property-calculator');
-const { deriveModifiers, deriveNotes } = require('./modifiers');
+const { deriveModifiers, deriveNotes, zoneMultiplier } = require('./modifiers');
 const {
   pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
@@ -20,6 +20,25 @@ const {
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, validateEstimateDiscounts,
 } = require('./discount-engine');
+
+// ── Startup assertion — zone alignment ────────────────────────
+// Fail-fast at module load if constants.ZONES drifts from
+// modifiers.zoneMultiplier(). Without this, future edits to one
+// source and not the other would silently misprice quotes until
+// a regression test happened to notice.
+for (const zone of ['A', 'B', 'C', 'D']) {
+  const cz = ZONES[zone];
+  if (!cz) {
+    throw new Error(`[pricing-engine startup] Zone ${zone} missing from constants.ZONES`);
+  }
+  const mz = zoneMultiplier(zone);
+  if (Math.abs(cz.multiplier - mz) > 0.0001) {
+    throw new Error(
+      `[pricing-engine startup] Zone ${zone} multiplier mismatch: ` +
+      `constants.ZONES=${cz.multiplier}, modifiers.zoneMultiplier=${mz}`
+    );
+  }
+}
 
 // ── Generate Complete Estimate ────────────────────────────────
 function generateEstimate(input) {
@@ -54,9 +73,13 @@ function generateEstimate(input) {
   const structuralNotes = deriveNotes(property);
 
   // ── 3. Zone multiplier ────────────────────────────────────
-  // Prefer derived zone multiplier (supports A/B/C/D) with legacy ZONES fallback
-  const zone = ZONES[input.zone] || ZONES.UNKNOWN;
-  const zoneMult = modifiers.zoneMult || zone.multiplier;
+  // Strict use of modifiers.zoneMult (deriveModifiers always returns a value —
+  // defaults to 1.0 for unknown zones). constants.ZONES is no longer consulted
+  // here; it's now only a reference table verified against modifiers at startup.
+  const zoneMult = modifiers.zoneMult;
+  if (typeof zoneMult !== 'number') {
+    throw new Error(`No zone multiplier derived for zone ${input.zone}`);
+  }
 
   // ── 3. Price each requested service ────────────────────────
   const services = input.services || {};

@@ -27,8 +27,8 @@ async function ensureTable() {
       { config_key: 'waveguard_tiers', name: 'WaveGuard Bundle Discounts', category: 'waveguard', sort_order: 10, data: JSON.stringify({ bronze:{min_services:1,discount:0},silver:{min_services:2,discount:0.10},gold:{min_services:3,discount:0.15},platinum:{min_services:4,discount:0.18} }) },
       { config_key: 'waveguard_membership', name: 'WaveGuard Membership Fee', category: 'waveguard', sort_order: 11, data: JSON.stringify({ fee:99, waived_with_prepay:true }) },
       { config_key: 'lawn_st_augustine', name: 'St. Augustine', category: 'lawn', sort_order: 20, data: JSON.stringify([[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]]) },
-      // Zone multipliers
-      { config_key: 'zone_multipliers', name: 'Service Zone Multipliers', category: 'zone', sort_order: 1, data: JSON.stringify({ A: { name: 'Manatee/Sarasota core', multiplier: 1.00 }, B: { name: 'Extended service area', multiplier: 1.05 }, C: { name: 'Charlotte outskirts', multiplier: 1.10 }, UNKNOWN: { name: 'Default', multiplier: 1.05 } }) },
+      // Zone multipliers — must match constants.ZONES / modifiers.zoneMultiplier
+      { config_key: 'zone_multipliers', name: 'Service Zone Multipliers', category: 'zone', sort_order: 1, data: JSON.stringify({ A: { name: 'Manatee/Sarasota core', multiplier: 1.00 }, B: { name: 'Extended service area', multiplier: 1.05 }, C: { name: 'Charlotte outskirts', multiplier: 1.12 }, D: { name: 'Far reach', multiplier: 1.20 }, UNKNOWN: { name: 'Default', multiplier: 1.05 } }) },
 
       // Global constants
       { config_key: 'global_labor_rate', name: 'Loaded Labor Rate', category: 'global', sort_order: 1, data: JSON.stringify({ value: 35, unit: '$/hr', description: 'Wages + benefits + WC + vehicle + insurance' }) },
@@ -118,6 +118,14 @@ router.put('/lawn-brackets/:track', async (req, res, next) => {
     try {
       const modular = require('../services/pricing-engine');
       if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
+    } catch { /* non-fatal */ }
+    // Invalidate v2 cache so admin edits flow to the lookup path immediately.
+    // Session 2 removed this as DEAD_CODE on the premise that v2 was dying;
+    // Session 11 now owns v2 retirement. Restored here to prevent up-to-60s
+    // stale-quote windows on Virginia's hot path.
+    try {
+      const v2 = require('../services/pricing-engine-v2');
+      if (v2.invalidatePricingConfigCache) v2.invalidatePricingConfigCache();
     } catch { /* non-fatal */ }
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -273,6 +281,14 @@ router.put('/:key', async (req, res, next) => {
     try {
       const modular = require('../services/pricing-engine');
       if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
+    } catch { /* non-fatal */ }
+    // Invalidate v2 cache so admin edits flow to the lookup path immediately.
+    // Session 2 removed this as DEAD_CODE on the premise that v2 was dying;
+    // Session 11 now owns v2 retirement. Restored here to prevent up-to-60s
+    // stale-quote windows on Virginia's hot path.
+    try {
+      const v2 = require('../services/pricing-engine-v2');
+      if (v2.invalidatePricingConfigCache) v2.invalidatePricingConfigCache();
     } catch { /* non-fatal */ }
 
     // Audit log

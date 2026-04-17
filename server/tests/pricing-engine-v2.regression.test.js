@@ -158,6 +158,24 @@ const REGRESSION_CASES = [
     selectedServices: ['RODENT_BAIT'],
     options: {},
   },
+  // 13. Zone C (Charlotte outskirts) — exercises v2 zoneMultipliers C=1.12.
+  //     Added Session 3 to prevent silent regression on Virginia's Charlotte
+  //     County lookup path. Any future change to v2's zone C multiplier will
+  //     flip the tier monthlies here.
+  {
+    name: 'v2_zone_c_bimonthly_pest_lawn_treeshrub',
+    profile: { ...zoneA2000(), serviceZone: 'C' },
+    selectedServices: ['PEST', 'LAWN', 'TREE_SHRUB'],
+    options: { lawnFreq: 9, pestFreq: 6, grassType: 'zoysia' },
+  },
+  // 14. Zone D (far reach) — exercises v2 zoneMultipliers D=1.20. Added
+  //     Session 3 alongside the new D entry in v2's zoneMultipliers map.
+  {
+    name: 'v2_zone_d_quarterly_pest_bahia',
+    profile: { ...zoneA2000(), serviceZone: 'D' },
+    selectedServices: ['PEST', 'LAWN'],
+    options: { lawnFreq: 9, pestFreq: 4, grassType: 'bahia' },
+  },
 ];
 
 async function postCalculateEstimate({ profile, selectedServices, options }) {

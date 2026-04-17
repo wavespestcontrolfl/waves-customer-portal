@@ -18,11 +18,14 @@ const GLOBAL = {
 };
 
 // ── Zone Multipliers ──────────────────────────────────────────
+// Must match modifiers.zoneMultiplier(). Startup assertion in
+// estimate-engine.js verifies alignment at module load.
 const ZONES = {
   A: { name: 'Manatee/Sarasota core', multiplier: 1.00 },
   B: { name: 'Extended service area', multiplier: 1.05 },
-  C: { name: 'Charlotte outskirts', multiplier: 1.10 },
-  UNKNOWN: { name: 'Default', multiplier: 1.05 },
+  C: { name: 'Charlotte outskirts',   multiplier: 1.12 },
+  D: { name: 'Far reach',              multiplier: 1.20 },
+  UNKNOWN: { name: 'Default',          multiplier: 1.05 },
 };
 
 // ── Urgency Multipliers ──────────────────────────────────────
