@@ -222,11 +222,13 @@ function initScheduledJobs() {
       if (spam > 0) parts.push(`${spam} spam blocked`);
 
       await db('notifications').insert({
-        type: 'email_digest',
+        recipient_type: 'admin',
+        category: 'email_digest',
         title: 'Morning Email Digest',
-        message: `${emails.length} emails overnight. ${parts.join(', ')}. Check /admin/email for details.`,
-        severity: parseInt(unread?.c || 0) > 10 ? 'high' : 'low',
+        body: `${emails.length} emails overnight. ${parts.join(', ')}. Check /admin/email for details.`,
+        icon: '\uD83D\uDCE7',
         link: '/admin/email',
+        metadata: JSON.stringify({ severity: parseInt(unread?.c || 0) > 10 ? 'high' : 'low' }),
         created_at: new Date(),
       }).catch(() => {});
 
