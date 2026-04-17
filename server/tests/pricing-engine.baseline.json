@@ -249,5 +249,23 @@
     "lineItems": {
       "one_time_pest": {}
     }
+  },
+  "baseline_unknown_zone_minimal": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 468,
+      "recurringMonthlyAfterDiscount": 39,
+      "year1Total": 468
+    },
+    "waveGuard": {
+      "tier": "bronze",
+      "discount": 0,
+      "qualifyingCount": 1
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 468,
+        "monthly": 39
+      }
+    }
   }
 }

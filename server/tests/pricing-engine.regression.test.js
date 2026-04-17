@@ -177,6 +177,22 @@ const REGRESSION_CASES = [
       paymentMethod: 'card',
     },
   },
+  {
+    // Added pre-Session-6 per Session 3 hotfix lesson. Session 3's
+    // `ReferenceError: zone is not defined` slipped past the prior 12 cases
+    // because none exercised the missing-zone fallback. Session 6 rewrites
+    // the discount engine's control flow — same exposure class.
+    // zone intentionally omitted: currently produces zone.key='UNKNOWN' in
+    // output but runtime pricing uses modifiers.zoneMultiplier(undefined) → 1.0x.
+    name: 'baseline_unknown_zone_minimal',
+    input: {
+      homeSqFt: 2000, stories: 1, lotSqFt: 10000,
+      propertyType: 'single_family',
+      features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+      services: { pest: { frequency: 'quarterly' } },
+      paymentMethod: 'card',
+    },
+  },
 ];
 
 async function postEstimate(input) {
