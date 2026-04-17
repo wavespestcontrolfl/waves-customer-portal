@@ -237,3 +237,115 @@ v1-only alignment to v2. Customer-facing change: zero (0 Platinum mosquito custo
 ## Governance note
 
 Discovering prod Platinum at 20% instead of the expected 18% is a governance signal: either docs drifted from code, or live admin-UI edits bypassed the changelog. Going forward (post v4.3 ship), every pricing change — including manual admin-UI edits — must land a `pricing_changelog` row with rationale. Session 9's approval-queue-to-pricing-config wiring automates this for cost changes; rule and discount changes made manually still need manual changelog entries.
+
+---
+
+## Session 8.5 — `pricing_config` drift reconciliation (2026-04-17)
+
+Interlude between Sessions 8 and 9. Session 9's scoping (approval-queue wire-up) surfaced a divergence between `constants.js` and the `pricing_config` DB rows on 8 config_keys. Full drift audit ran; every drift aligned in the same direction (DB → code); reconciliation landed transactionally via SQL (no code changes). Baselines re-captured against reconciled state. See `pricing_changelog` id=9 for full rationale.
+
+### 8 config_keys reconciled — all DB → code
+
+**Category A** (4 keys / 16 field drifts — attributable to commit `9ddbd01` "Pricing overhaul" updating code without DB sync):
+
+| config_key | Fields changed | Direction |
+|---|---|---|
+| `pest_features` | `indoor` 10→15, `shrubs_heavy` 5→12, `shrubs_moderate` 0→5, `trees_heavy` 5→12, `trees_moderate` 0→5, `landscape_complex` 5→8 | Higher feature adjustments — prices UP where features present |
+| `pest_footprint` | 7 of 8 brackets: 800 −12→−15, 1200 −8→−10, 1500 −4→−5, 2500 4→8, 3000 8→14, 4000 12→21, 5500 16→31 (2000 unchanged) | Flatter small-home discount, steeper large-home premium |
+| `pest_frequency` | `v2_monthly` 0.70→0.78, `v2_bimonthly` 0.85→0.88 (v1 values `monthly`/`bimonthly`/`quarterly` unchanged) | Less aggressive v2 bulk discount — prices UP on recurring pest through v2 engine |
+| `pest_property_type` | `townhome_interior` −15→−12, `condo_ground` −20→−18, `condo_upper` −25→−22 | Smaller attached-unit discounts — prices UP for those types |
+
+**Category B** (4 keys — business decisions, direction locked by user sign-off during the 8.5 reconciliation):
+
+| config_key | Drift | Decision |
+|---|---|---|
+| `global_margin_floor` | 0.55 → 0.35 | 35% is the intended policy; 55% was not the operating benchmark. Code comments (`pc.json` notes: "At $89 floor: margin = 53% (above 35% floor)") reference 35% as the working threshold. |
+| `global_margin_target_ts` | 0.50 → 0.43 | 43% reflects T&S competitive-market reality. See Observation 1 below — this DB key turned out to be cosmetic. |
+| `pest_roach` | `german` 0.40→0.25, `regular` 0.15→0.10 | Less-aggressive roach markup. |
+| `waveguard_ach` | `percentage` 0.03 → 0 | Retirement completion. Code comment `// Retired. Kept at 0% so any legacy callers stay harmless.` — DB catches up. |
+
+**Orphan keys not touched:** `pest_features.trees_light` (−5), `pest_features.shrubs_light` (−5) exist in DB but not in `constants.js`. Leaving them alone was the disciplined choice (deletion could break an unexpected reader; retention is benign). Separate cleanup pass if ever needed.
+
+### Per-case diffs
+
+Recurring customer impact in the reconciliation window (Apr 14 → Apr 17): **zero** — Phase 1 audit confirmed 2 estimates (1 quarterly recurring, 1 draft with NULL data), 2 one-time pest invoices (1 voided, 1 $0.91 test), none exercising drifted recurring-pest paths. No re-quote, true-up, or outreach required.
+
+**v1 suite (13 cases):**
+
+| # | Case | Old Y1 | New Y1 | Δ | Why |
+|---|---|---|---|---|---|
+| 1 | `baseline_single_family_zone_a_quarterly_pest_enhanced_lawn` | $1,048 | $1,084 | **+$36 (+3.4%)** | `pest_features` moderate trees/shrubs 0→5. Quarterly, no freq drift. |
+| 2 | `zone_b_monthly_pest_bermuda_premium` | $2,359 | $2,552 | **+$193 (+8.2%)** | Heavy features + 2500 footprint + monthly freq compound. |
+| 3 | `zone_c_bimonthly_pest_zoysia_standard_treeshrub` | $3,732 | $3,777 | **+$45 (+1.2%)** | Pest modest bump from moderate features + 3000 footprint + bimonthly freq. T&S $2,919 unchanged (see Observation 1). |
+| 4 | `zone_d_quarterly_pest_bahia_basic` | $886 | $886 | **0** | homeSqFt 1800 interpolates 1500↔2000 footprint brackets; bracket delta (<$1/visit) rounds out after Silver. `light` features are orphan DB keys — untouched. |
+| 5 | `edge_small_footprint_800sf_quarterly_pest` | $356 | $356 | **0** | Pest floor $89 binds: `117 − 15 (new 800 footprint) − 18 (new condo_ground) = 84`, clamped to 89 — same clamp pre/post. |
+| 6 | `edge_large_footprint_5500sf_platinum_bundle` | $8,733 | $8,915 | **+$182 (+2.1%)** | Heavy features + 5500 footprint (+31 vs +16) + monthly freq. |
+| 7 | `mosquito_acre_waterfront_max_pressure` | $6,426 | $6,426 | **0** | Mosquito uses `MOSQUITO.pressureFactors`, not `pest_features`. No drift exposure. |
+| 8 | `termite_basic_standard_perimeter` | $1,628 | $1,628 | **0** | Termite not in drifted keys. |
+| 9 | `platinum_bundle_4_qualifying_services_zone_a` | $2,822 | $2,854 | **+$32 (+1.1%)** | `pest_features` moderate drift; quarterly, no freq drift. |
+| 10 | `onetime_pest_urgent_afterhours` | $304 | $330 | **+$26 (+8.6%)** | One-time pest uses recurring per-visit × 1.30 × URGENT (1.50) × afterHours (2.00). Moderate features drift compounds. |
+| 11 | `specialty_bora_care_2000sf_attic` | $1,946 | $1,946 | **0** | Bora-Care is specialty, no pest path. |
+| 12 | `recurring_customer_onetime_pest_discount` | $152 | $165 | **+$13 (+8.6%)** | Same as #10 mechanics × 0.85 recurring-customer perk. |
+| 13 | `baseline_unknown_zone_minimal` | $468 | $508 | **+$40 (+8.5%)** | `pest_features` moderate × UNKNOWN zone 1.05. No WaveGuard discount. |
+
+**v2 suite (14 cases):**
+
+| Case | Old Y1 | New Y1 | Δ | Why |
+|---|---|---|---|---|
+| `v2_baseline_zone_a_quarterly_pest_lawn` | $1,099.80 | $1,132.20 | **+$32.40 (+2.9%)** | Moderate features drift (v2 engine). |
+| `v2_platinum_bundle_4_services_zone_a` | $3,523.00 | $3,574.20 | **+$51.20 (+1.5%)** | Moderate features drift. |
+| `v2_boracare_attic_2000sf` | $1,946 | $1,946 | **0** | No pest path. |
+| `v2_preslab_2000sf_basic_warranty` | $852 | $852 | **0** | No pest path. |
+| `v2_stinging_wasp_ground_tier2` | $250 | $250 | **0** | No pest path. |
+| `v2_bedbug_3rooms_both_methods` | $3,351 | $3,351 | **0** | No pest path. |
+| `v2_exclusion_moderate_waive_inspection` | $450 | $450 | **0** | No pest path. |
+| `v2_onetime_pest_urgent_afterhours` | $300 | $318 | **+$18 (+6.0%)** | One-time pest with drifted features × urgency multiplier. |
+| `v2_onetime_pest_recurring_customer` | $128 | $135 | **+$7 (+5.5%)** | One-time pest + moderate features drift. |
+| `v2_mosquito_waterfront_heavy_pressure` | $3,780 | $3,780 | **0** | Mosquito engine doesn't read `pest_features`. |
+| `v2_termite_bait_three_systems` | $1,733 | $1,733 | **0** | Termite not in drifted keys. |
+| `v2_rodent_bait_large_footprint` | $840 | $840 | **0** | Rodent doesn't read `pest_features`. |
+| `v2_zone_c_bimonthly_pest_lawn_treeshrub` | $1,667.66 | $1,711.31 | **+$43.65 (+2.6%)** | `pest_frequency.v2_bimonthly` + moderate features drift compound. T&S unchanged (Observation 1). |
+| `v2_zone_d_quarterly_pest_bahia` | $1,127.16 | $1,166.04 | **+$38.88 (+3.4%)** | Drift exposure differs from v1 Case 4 — see Observation 2. |
+
+**Direction: 100% code-ward.** Every case that moved moved UP. Every case marked "should be byte-identical" was byte-identical. No wrong-direction drifts, no unexpected changes in safe cases.
+
+### Observation 1 — `global_margin_target_ts` is cosmetic in the DB
+
+T&S was **unchanged** in `zone_c_bimonthly_pest_zoysia_standard_treeshrub` (v1 Case 3, $2,919) and `v2_zone_c_bimonthly_pest_lawn_treeshrub` despite `global_margin_target_ts` drifting from 0.50 to 0.43. The engine reads `TREE_SHRUB.marginTarget` directly from `constants.js` (already 0.43); `db-bridge.js` does not sync the `global_margin_target_ts` row into the in-memory constants.
+
+Implication: the DB value was a dead/cosmetic field. The reconciliation cleaned it up for consistency with future readers but had zero engine-behavior impact. **Future-you: do NOT assume `global_margin_target_ts` is load-bearing.** If you need to change T&S margin target policy, edit `TREE_SHRUB.marginTarget` in `constants.js` — the DB row is a shadow.
+
+### Observation 2 — v1 and v2 engines read pest frequency from different sources
+
+v1 Case 4 (`zone_d_quarterly_pest_bahia_basic`) was unchanged, but `v2_zone_d_quarterly_pest_bahia` moved +$38.88 (+3.4%) despite identical-shape inputs. Not a reconciliation bug — the two engines have genuinely different read paths:
+
+- **v1 engine** reads `PEST.frequencyDiscounts.v1 = { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 }` from `constants.js`. The DB keys `pest_frequency.{monthly, bimonthly, quarterly}` sync to `.v1` and did NOT drift.
+- **v2 engine** reads `PEST.frequencyDiscounts.v2 = { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 }` from `constants.js`. The DB keys `pest_frequency.{v2_monthly, v2_bimonthly}` sync to `.v2` and DID drift.
+
+Same conceptual value — "frequency discount multiplier" — read from two different config shapes by two different engines. v2 exercises the drifted path for this fixture; v1 does not.
+
+**Resolution: Session 11 (v2 retirement) will consolidate these read paths.** Until then, v1 and v2 can respond differently to identical fixtures on pest-frequency changes. When diagnosing future pest-frequency regressions, check *which* engine is serving the fixture and *which* frequency key it reads.
+
+### Sanity-check gates
+
+**Gate 1 — pre-capture spot-check.** Quoted v1 Case 2 and Case 3 live against prod post-reconciliation/post-redeploy. Both returned code-ward values (+$193 and +$45 respectively) confirming the cache flushed and DB values flowed through. Direction and rough magnitude matched expectations.
+
+**Gate 2 — post-capture diff review.** 27 cases diffed old-vs-new: 16 byte-identical where expected, 11 moving in the code-ward direction, zero wrong-direction moves. Both engines behaved consistently given their respective read paths (Observation 2).
+
+Both gates passed before baselines were committed. "Drift becomes truth" moment gated by discipline, not trust.
+
+### Customer-impact audit
+
+Reconciliation window: 2026-04-14 22:39 → 2026-04-17. Phase 1 queries found:
+- 2 estimates total (1 sent Silver quarterly+lawn quote, 1 NULL-data draft)
+- 2 pest-touching invoices (1 voided one-time pest, 1 $0.91 test-transaction one-time pest)
+- 0 unique customers received a quote priced through a drifted recurring-pest code path
+- **$0 in drift-attributable revenue movement in the window**
+
+No customer communication required on reconciliation grounds. Documented per standing "Customer-impact query + sign-off before pricing edits" rule.
+
+### Why this session exists at all
+
+Session 8 shipped rationale comments + TODO(v4.4) markers assuming `constants.js` was the single source of truth. Session 9 scoping surfaced `pricing_config` had drifted from code on 8 keys — 6 of them from commit `9ddbd01` "Pricing overhaul" updating code values without a matching DB UPDATE. Regression baselines captured against this drifted state (Sessions 1-8) were validating the drift, not the intended behavior. Session 8.5 is the cleanup: reconcile DB to code, re-capture baselines against reconciled state, document in changelog id=9. Session 9's approval-queue work resumes against a trustworthy baseline.
+
+See `pricing_changelog` id=9 for the reconciliation SQL + rationale.
