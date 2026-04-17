@@ -41,6 +41,13 @@
 const fs = require('fs');
 const path = require('path');
 
+// Load .env explicitly so DATABASE_URL is populated BEFORE beforeAll runs its
+// env-check. knexfile also loads dotenv, but only when db.js is first required
+// — which is lazy inside loadPricingConfig(). Without this, beforeAll's
+// `if (!process.env.DATABASE_URL)` branch fires a false "unset" warning and
+// returns early, bypassing the boot assertion entirely.
+require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
+
 const BASELINE_PATH = path.join(__dirname, 'pricing-engine-v2.baseline.json');
 const PROD_URL = (process.env.PROD_URL || '').replace(/\/$/, '');
 const RAW_TOKEN = process.env.ADMIN_TOKEN || '';
@@ -230,9 +237,51 @@ async function postCalculateEstimate({ profile, selectedServices, options }) {
 // triggers loadPricingConfig() on first call, which lazy-requires models/db.
 function wireLocalModeHooks() {
   if (!LOCAL_MODE) return;
-  beforeAll(() => {
+  beforeAll(async () => {
     if (!process.env.DATABASE_URL) {
       console.warn('[LOCAL mode] DATABASE_URL unset — v2 will fall back to DEFAULT_ constants for global rates and skip pricing_config overrides. Baseline parity with prod NOT guaranteed; set DATABASE_URL for math parity.');
+      return;
+    }
+    // Boot assertion: every engine reference-data source the suite depends on
+    // must return real values — not silent fallback defaults. Each class of
+    // silent-fallback we've hit becomes a line here.
+    //
+    //   1. loadPricingConfig() — throws silently under Jest NODE_ENV=test when
+    //      knexfile has no 'test' key; empty cfg falls back to hardcoded
+    //      constants.js defaults. Check each field that drives pricing.
+    //   2. DiscountEngine.getDiscountForTier() — silent `|| 0` when the
+    //      discounts table is empty on local. Zero-discount Silver/Gold/Platinum
+    //      looks like a real result. Assert Silver != 0.
+    //
+    // Generalization: when a new reference-data source is added to the
+    // engine, add a not-empty-or-default check here at the same time.
+    require('../models/db'); // fail-loud if knexfile has no config for env
+
+    const cfg = await localV2.loadPricingConfig();
+    const missing = ['pestBase', 'pestFloor', 'pestFootprint', 'pestFeatures', 'pestPropertyType', 'lawnBrackets']
+      .filter(k => cfg[k] == null || (typeof cfg[k] === 'object' && !Array.isArray(cfg[k]) && Object.keys(cfg[k]).length === 0));
+    if (missing.length) {
+      throw new Error(
+        `[LOCAL mode] loadPricingConfig() returned empty/null for: ${missing.join(', ')}. ` +
+        `The engine would silently fall back to hardcoded defaults and this suite would validate stability, not correctness. ` +
+        `Check DATABASE_URL, knexfile env key, and that pricing_config is seeded (npm run seed:pricing).`
+      );
+    }
+
+    // Sentinel: Silver is a known WaveGuard tier with a non-zero discount (0.10).
+    // If tier names change (e.g., Silver -> Core), update this check to match a
+    // current tier. Purpose: fail loud if the discounts table is empty or
+    // misconfigured on local, preventing silent '|| 0' fallback to zero-discount
+    // Silver/Gold/Platinum results during LOCAL=1 regression.
+    const DiscountEngine = require('../services/discount-engine');
+    const silverPct = await DiscountEngine.getDiscountForTier('Silver');
+    if (!silverPct || silverPct <= 0) {
+      throw new Error(
+        `[LOCAL mode] DiscountEngine.getDiscountForTier('Silver') returned ${silverPct}. ` +
+        `The discounts table likely has no WaveGuard tier rows on local, and the engine's silent '|| 0' fallback ` +
+        `would produce zero-discount results for Silver/Gold/Platinum cases. ` +
+        `Run 'npm run seed:pricing' to mirror discount tier rows from prod.`
+      );
     }
   });
   afterAll(async () => {

@@ -1447,4 +1447,4 @@ function calcTotals(result, manualDiscount = null) {
 }
 
 
-module.exports = { calculateEstimate, invalidatePricingConfigCache };
+module.exports = { calculateEstimate, invalidatePricingConfigCache, loadPricingConfig };
