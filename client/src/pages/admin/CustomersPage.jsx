@@ -120,25 +120,39 @@ function Select({ value, onChange, options, style: extraStyle }) {
 }
 
 // --- Quick Add Modal ---
-function QuickAddModal({ onClose, onCreated }) {
+function QuickAddModal({ onClose, onCreated, onOpenExisting }) {
   const [form, setForm] = useState({
     firstName: '', lastName: '', phone: '', email: '', address: '',
     leadSource: 'referral', pipelineStage: 'new_lead', tags: '', notes: '',
   });
   const [submitting, setSubmitting] = useState(false);
+  const [existingMatch, setExistingMatch] = useState(null);
 
   const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!form.firstName.trim() || !form.lastName.trim()) return;
+    setExistingMatch(null);
     setSubmitting(true);
     try {
       const body = {
         ...form,
         tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
       };
-      await adminFetch('/admin/customers', { method: 'POST', body: JSON.stringify(body) });
+      const r = await fetch(`${API_BASE}/admin/customers`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (r.status === 409) {
+        const data = await r.json().catch(() => ({}));
+        if (data.existingCustomerId) {
+          setExistingMatch({ id: data.existingCustomerId, name: data.existingCustomerName || 'existing customer' });
+          return;
+        }
+      }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       onCreated();
       onClose();
     } catch (err) {
@@ -214,6 +228,20 @@ function QuickAddModal({ onClose, onCreated }) {
             <label style={labelStyle}>Notes</label>
             <textarea value={form.notes} onChange={e => set('notes', e.target.value)} rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
           </div>
+          {existingMatch && (
+            <div style={{
+              marginBottom: 16, padding: '12px 14px', borderRadius: 8,
+              background: '#FEF7E0', border: `1px solid ${D.amber}`, color: D.heading,
+              fontSize: 14, fontFamily: 'DM Sans, sans-serif',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+            }}>
+              <span>Phone already on file for <strong>{existingMatch.name}</strong>.</span>
+              <button type="button" onClick={() => { onOpenExisting?.(existingMatch.id); onClose(); }} style={{
+                padding: '6px 14px', background: D.teal, color: '#fff', border: 'none', borderRadius: 6,
+                fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'DM Sans, sans-serif',
+              }}>Open profile</button>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
             <button type="button" onClick={onClose} style={{
               padding: '10px 20px', background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
@@ -1454,6 +1482,7 @@ export default function CustomersPage() {
         <QuickAddModal
           onClose={() => setShowAddModal(false)}
           onCreated={() => { loadCustomers(); if (view === 'pipeline') loadPipeline(); }}
+          onOpenExisting={(id) => setSelected360Id(id)}
         />
       )}
 

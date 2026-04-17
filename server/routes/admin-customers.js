@@ -53,6 +53,21 @@ router.post('/quick-add', async (req, res, next) => {
       return res.status(400).json({ error: 'firstName, lastName, phone required' });
     }
 
+    const phoneDigits = String(phone).replace(/\D/g, '');
+    if (phoneDigits.length >= 10) {
+      const existing = await db('customers')
+        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits.slice(-10)}`])
+        .first();
+      if (existing) {
+        return res.status(409).json({
+          error: 'phone_exists',
+          message: `This phone is already on file for ${existing.first_name} ${existing.last_name}`,
+          existingCustomerId: existing.id,
+          existingCustomerName: `${existing.first_name} ${existing.last_name}`,
+        });
+      }
+    }
+
     const [customer] = await db('customers').insert({
       first_name: firstName,
       last_name: lastName,
@@ -379,6 +394,21 @@ router.post('/', async (req, res, next) => {
   try {
     const { firstName, lastName, phone, email, addressLine1, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType } = req.body;
     if (!firstName || !lastName || !phone) return res.status(400).json({ error: 'Name and phone required' });
+
+    const phoneDigits = String(phone).replace(/\D/g, '');
+    if (phoneDigits.length >= 10) {
+      const existing = await db('customers')
+        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits.slice(-10)}`])
+        .first();
+      if (existing) {
+        return res.status(409).json({
+          error: 'phone_exists',
+          message: `This phone is already on file for ${existing.first_name} ${existing.last_name}`,
+          existingCustomerId: existing.id,
+          existingCustomerName: `${existing.first_name} ${existing.last_name}`,
+        });
+      }
+    }
 
     const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
