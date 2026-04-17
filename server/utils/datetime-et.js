@@ -79,7 +79,49 @@ function startOfETMonth(date = new Date()) {
   return parseETDateTime(`${year}-${String(month).padStart(2, '0')}-01T00:00`);
 }
 
+// ET-calendar period helpers — every helper below returns a YYYY-MM-DD string
+// (the same shape as toISOString().split('T')[0]). These replace the
+// `new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0]`
+// idiom, which reads UTC from the Date and is off-by-one after 8 PM ET.
+//
+// Month offset: 0 = this month, -1 = last month, +1 = next month.
+function etMonthStart(date = new Date(), offset = 0) {
+  const { year, month } = etParts(date);
+  // month is 1-12; JS Date.UTC handles overflow cleanly.
+  const d = new Date(Date.UTC(year, month - 1 + offset, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-01`;
+}
+
+// Last day of the ET calendar month (offset = 0 this month, -1 last, etc.).
+function etMonthEnd(date = new Date(), offset = 0) {
+  const { year, month } = etParts(date);
+  // Day 0 of next month = last day of target month.
+  const d = new Date(Date.UTC(year, month + offset, 0));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+// First day of the ET calendar quarter containing `date`.
+function etQuarterStart(date = new Date()) {
+  const { year, month } = etParts(date);
+  const qMonth = Math.floor((month - 1) / 3) * 3 + 1; // 1, 4, 7, 10
+  return `${year}-${String(qMonth).padStart(2, '0')}-01`;
+}
+
+// First day of the ET calendar year containing `date`.
+function etYearStart(date = new Date()) {
+  return `${etParts(date).year}-01-01`;
+}
+
+// Monday (ISO week start) of the ET week containing `date`, as YYYY-MM-DD.
+function etWeekStart(date = new Date()) {
+  const { dayOfWeek } = etParts(date);
+  // Sun=0, Mon=1, ... Sat=6. Monday is the anchor; Sunday wraps back 6.
+  const offsetToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  return etDateString(addETDays(date, offsetToMonday));
+}
+
 module.exports = {
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime,
   etParts, etDateString, addETDays, startOfETMonth,
+  etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart,
 };

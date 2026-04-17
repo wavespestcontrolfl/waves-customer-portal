@@ -2,22 +2,25 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 function getPeriodDates(period, dateStr) {
-  const d = dateStr ? new Date(dateStr + 'T12:00:00') : new Date();
+  const d = dateStr ? parseETDateTime(dateStr + 'T12:00') : new Date();
   let start, end;
   if (period === 'month') {
-    start = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0];
-    end = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split('T')[0];
+    start = etMonthStart(d);
+    end = etMonthEnd(d);
   } else if (period === 'quarter') {
-    const q = Math.floor(d.getMonth() / 3);
-    start = new Date(d.getFullYear(), q * 3, 1).toISOString().split('T')[0];
-    end = new Date(d.getFullYear(), (q + 1) * 3, 0).toISOString().split('T')[0];
+    start = etQuarterStart(d);
+    const { year, month } = etParts(d);
+    const qEndMonth = Math.floor((month - 1) / 3) * 3 + 3; // 3, 6, 9, 12
+    const lastDay = new Date(Date.UTC(year, qEndMonth, 0)).getUTCDate();
+    end = `${year}-${String(qEndMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
   } else {
-    start = new Date(d.getFullYear(), 0, 1).toISOString().split('T')[0];
-    end = new Date(d.getFullYear(), 11, 31).toISOString().split('T')[0];
+    start = etYearStart(d);
+    end = `${etParts(d).year}-12-31`;
   }
   return { start, end };
 }
@@ -40,13 +43,14 @@ router.get('/overview', async (req, res, next) => {
     const { start, end } = getPeriodDates(period, date);
 
     // Get previous period for comparison
-    const d = new Date(start + 'T12:00:00');
+    const d = parseETDateTime(start + 'T12:00');
     let prevStart, prevEnd;
     if (period === 'month') {
-      prevStart = new Date(d.getFullYear(), d.getMonth() - 1, 1).toISOString().split('T')[0];
-      prevEnd = new Date(d.getFullYear(), d.getMonth(), 0).toISOString().split('T')[0];
+      prevStart = etMonthStart(d, -1);
+      prevEnd = etMonthEnd(d, -1);
     } else {
-      prevStart = new Date(d.getFullYear() - 1, d.getMonth(), 1).toISOString().split('T')[0];
+      const { year, month } = etParts(d);
+      prevStart = `${year - 1}-${String(month).padStart(2, '0')}-01`;
       prevEnd = start;
     }
 
@@ -105,7 +109,7 @@ router.get('/overview', async (req, res, next) => {
     // Daily chart
     const daily = {};
     services.forEach(s => {
-      const day = typeof s.service_date === 'string' ? s.service_date.split('T')[0] : new Date(s.service_date).toISOString().split('T')[0];
+      const day = typeof s.service_date === 'string' ? s.service_date.split('T')[0] : etDateString(new Date(s.service_date));
       if (!daily[day]) daily[day] = { date: day, revenue: 0, cost: 0, services: 0 };
       daily[day].revenue += parseFloat(s.revenue || 0);
       daily[day].cost += parseFloat(s.total_job_cost || 0);
@@ -124,7 +128,7 @@ router.get('/overview', async (req, res, next) => {
     });
 
     res.json({
-      period: { start, end, label: new Date(start + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) },
+      period: { start, end, label: parseETDateTime(start + 'T12:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' }) },
       topline: {
         totalRevenue: Math.round(totalRev * 100) / 100,
         totalCost: Math.round(totalCost * 100) / 100,
@@ -175,7 +179,7 @@ router.put('/settings', async (req, res, next) => {
   try {
     const { loadedLaborRate, driveCostPerStop, targetGrossMarginPct, targetRpmh } = req.body;
     await db('company_financials').insert({
-      effective_date: new Date().toISOString().split('T')[0],
+      effective_date: etDateString(),
       loaded_labor_rate: loadedLaborRate || 35,
       drive_cost_per_stop: driveCostPerStop || 6,
       target_gross_margin_pct: targetGrossMarginPct || 55,

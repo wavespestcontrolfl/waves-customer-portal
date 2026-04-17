@@ -8,46 +8,35 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 // ─── Date helpers ───────────────────────────────────────────────
 
 function dateRange(period) {
   const now = new Date();
-  const today = now.toISOString().split('T')[0];
-  const ranges = {};
+  const today = etDateString(now);
+  const ranges = { today };
 
-  // Current month
-  ranges.month_start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+  ranges.month_start = etMonthStart(now);
   ranges.month_end = today;
 
-  // Last month
-  const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  ranges.last_month_start = lm.toISOString().split('T')[0];
-  ranges.last_month_end = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0];
+  ranges.last_month_start = etMonthStart(now, -1);
+  ranges.last_month_end = etMonthEnd(now, -1);
 
-  // This week (Mon-Sun)
-  const day = now.getDay();
-  const mon = new Date(now); mon.setDate(mon.getDate() - day + (day === 0 ? -6 : 1));
-  ranges.week_start = mon.toISOString().split('T')[0];
-  const sun = new Date(mon); sun.setDate(sun.getDate() + 6);
-  ranges.week_end = sun.toISOString().split('T')[0];
+  // This week (Mon-Sun), ET-anchored
+  const mon = etWeekStart(now);
+  ranges.week_start = mon;
+  ranges.week_end = etDateString(addETDays(parseETDateTime(mon + 'T12:00'), 6));
 
   // Last week
-  const lwMon = new Date(mon); lwMon.setDate(lwMon.getDate() - 7);
-  ranges.last_week_start = lwMon.toISOString().split('T')[0];
-  const lwSun = new Date(lwMon); lwSun.setDate(lwSun.getDate() + 6);
-  ranges.last_week_end = lwSun.toISOString().split('T')[0];
+  ranges.last_week_start = etDateString(addETDays(parseETDateTime(mon + 'T12:00'), -7));
+  ranges.last_week_end = etDateString(addETDays(parseETDateTime(mon + 'T12:00'), -1));
 
-  // This quarter
-  const qMonth = Math.floor(now.getMonth() / 3) * 3;
-  ranges.quarter_start = new Date(now.getFullYear(), qMonth, 1).toISOString().split('T')[0];
+  ranges.quarter_start = etQuarterStart(now);
   ranges.quarter_end = today;
 
-  // YTD
-  ranges.year_start = new Date(now.getFullYear(), 0, 1).toISOString().split('T')[0];
+  ranges.year_start = etYearStart(now);
   ranges.year_end = today;
-
-  ranges.today = today;
 
   return ranges;
 }
@@ -265,9 +254,10 @@ async function comparePeriods(input) {
       default:
         if (p && p.match(/^\d{4}-\d{2}$/)) {
           const [y, m] = p.split('-').map(Number);
-          const start = new Date(y, m - 1, 1).toISOString().split('T')[0];
-          const end = new Date(y, m, 0).toISOString().split('T')[0];
-          return { from: start, to: end, label: new Date(y, m - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) };
+          const start = `${y}-${String(m).padStart(2, '0')}-01`;
+          const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+          const end = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+          return { from: start, to: end, label: parseETDateTime(`${y}-${String(m).padStart(2, '0')}-15T12:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' }) };
         }
         return { from: p, to: p, label: p };
     }
@@ -337,12 +327,16 @@ async function getMrrTrend(months) {
   const now = new Date();
   const windows = [];
   for (let i = months - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+    // Walk back i ET calendar months from now; anchor each window at ET midnight.
+    const startDay = etMonthStart(now, -i);
+    const endDay = etMonthEnd(now, -i);
+    const d = parseETDateTime(`${startDay}T00:00`);
+    const monthEnd = parseETDateTime(`${endDay}T23:59:59`);
     windows.push({
       start: d,
       end: monthEnd,
-      label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+      startDay,
+      label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'America/New_York' }),
     });
   }
 
@@ -366,7 +360,7 @@ async function getMrrTrend(months) {
     ]);
     return {
       month: w.label,
-      date: w.start.toISOString().split('T')[0],
+      date: w.startDay,
       mrr: parseFloat(mrrRow?.mrr || 0),
       customer_count: parseInt(mrrRow?.customer_count || 0),
       by_tier: byTier.map(t => ({ tier: t.waveguard_tier || 'None', mrr: parseFloat(t.mrr || 0), count: parseInt(t.count) })),
@@ -639,7 +633,7 @@ async function getOutstandingBalances(input) {
 
 
 async function getTodayBriefing() {
-  const today = new Date().toISOString().split('T')[0];
+  const today = etDateString();
   const r = dateRange();
 
   const [schedule, unread, pendingEst, overdueCustomers, atRisk, recentActivity] = await Promise.all([

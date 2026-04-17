@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 
 function classifyServiceLine(type) {
   const t = (type || '').toLowerCase();
@@ -22,24 +23,22 @@ function classifyServiceLine(type) {
 
 function getPeriodDates(period) {
   const now = new Date();
-  const today = now.toISOString().split('T')[0];
+  const today = etDateString(now);
   switch (period) {
-    case 'month': return { start: new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0], end: today, label: 'This Month' };
-    case 'last_month': {
-      const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      return { start: lm.toISOString().split('T')[0], end: new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0], label: 'Last Month' };
-    }
-    case 'quarter': {
-      const qm = Math.floor(now.getMonth() / 3) * 3;
-      return { start: new Date(now.getFullYear(), qm, 1).toISOString().split('T')[0], end: today, label: 'This Quarter' };
-    }
-    case 'ytd': return { start: new Date(now.getFullYear(), 0, 1).toISOString().split('T')[0], end: today, label: 'YTD' };
+    case 'month': return { start: etMonthStart(now), end: today, label: 'This Month' };
+    case 'last_month': return { start: etMonthStart(now, -1), end: etMonthEnd(now, -1), label: 'Last Month' };
+    case 'quarter': return { start: etQuarterStart(now), end: today, label: 'This Quarter' };
+    case 'ytd': return { start: etYearStart(now), end: today, label: 'YTD' };
     default:
       if (period && period.match(/^\d{4}-\d{2}$/)) {
         const [y, m] = period.split('-').map(Number);
-        return { start: new Date(y, m - 1, 1).toISOString().split('T')[0], end: new Date(y, m, 0).toISOString().split('T')[0], label: new Date(y, m - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) };
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const start = `${y}-${String(m).padStart(2, '0')}-01`;
+        const end = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+        const label = parseETDateTime(`${y}-${String(m).padStart(2, '0')}-15T12:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' });
+        return { start, end, label };
       }
-      return { start: new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0], end: today, label: 'This Month' };
+      return { start: etMonthStart(now), end: today, label: 'This Month' };
   }
 }
 
@@ -171,10 +170,12 @@ async function getRevenueOverview(period = 'month') {
   const services = await fetchServiceRecords(p.start, p.end);
   const topline = computeTopline(services);
 
-  // Previous period for comparison
-  const pDur = Math.round((new Date(p.end) - new Date(p.start)) / 86400000);
-  const prevEnd = new Date(new Date(p.start).getTime() - 86400000).toISOString().split('T')[0];
-  const prevStart = new Date(new Date(prevEnd).getTime() - pDur * 86400000).toISOString().split('T')[0];
+  // Previous period for comparison (ET calendar days).
+  const startAnchor = parseETDateTime(p.start + 'T12:00');
+  const endAnchor = parseETDateTime(p.end + 'T12:00');
+  const pDur = Math.round((endAnchor - startAnchor) / 86400000);
+  const prevEnd = etDateString(addETDays(startAnchor, -1));
+  const prevStart = etDateString(addETDays(startAnchor, -1 - pDur));
   const prevServices = await fetchServiceRecords(prevStart, prevEnd);
   const prevTopline = computeTopline(prevServices);
 

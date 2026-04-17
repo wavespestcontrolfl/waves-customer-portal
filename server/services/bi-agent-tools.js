@@ -5,11 +5,12 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, etMonthStart, etMonthEnd, etWeekStart, addETDays } = require('../utils/datetime-et');
 
-function som() { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0]; }
-function today() { return new Date().toISOString().split('T')[0]; }
-function daysAgo(n) { return new Date(Date.now() - n * 86400000).toISOString().split('T')[0]; }
-function mondayThisWeek() { const d = new Date(); const day = d.getDay(); const diff = d.getDate() - day + (day === 0 ? -6 : 1); return new Date(d.getFullYear(), d.getMonth(), diff).toISOString().split('T')[0]; }
+function som() { return etMonthStart(); }
+function today() { return etDateString(); }
+function daysAgo(n) { return etDateString(addETDays(new Date(), -n)); }
+function mondayThisWeek() { return etWeekStart(); }
 
 async function executeBITool(toolName, input) {
   switch (toolName) {
@@ -17,8 +18,8 @@ async function executeBITool(toolName, input) {
     case 'get_revenue_snapshot': {
       const somDate = som();
       const todayDate = today();
-      const lastMonthStart = (() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0]; })();
-      const lastMonthEnd = new Date(new Date().getFullYear(), new Date().getMonth(), 0).toISOString().split('T')[0];
+      const lastMonthStart = etMonthStart(new Date(), -1);
+      const lastMonthEnd = etMonthEnd(new Date(), -1);
 
       const [revMTD, revLastMonth, mrr, oneTime, overdue, tierRevenue] = await Promise.all([
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', somDate).sum('amount as total').first(),
@@ -98,7 +99,7 @@ async function executeBITool(toolName, input) {
     case 'get_operations_snapshot': {
       const monday = mondayThisWeek();
       const todayDate = today();
-      const tomorrowDate = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+      const tomorrowDate = etDateString(addETDays(new Date(), 1));
 
       const [weekServices, todayServices, unassigned] = await Promise.all([
         db('scheduled_services').where('scheduled_date', '>=', monday).where('scheduled_date', '<=', todayDate)

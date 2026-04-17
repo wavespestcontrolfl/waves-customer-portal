@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -131,7 +132,7 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`
     const [callScore] = await db('csr_call_scores').insert({
       customer_id: customerId || null,
       csr_name: csrName,
-      call_date: new Date().toISOString().split('T')[0],
+      call_date: etDateString(),
       call_direction: callDirection || 'inbound',
       call_source: callSource,
       total_score: score.total_score,
@@ -249,7 +250,7 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`
    * Get team overview stats for the CSR Coach dashboard.
    */
   async getTeamOverview(days = 30) {
-    const since = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+    const since = etDateString(addETDays(new Date(), -days));
 
     const scores = await db('csr_call_scores').where('call_date', '>=', since);
 
@@ -328,7 +329,7 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`
    */
   async generateWeeklyTeamRecommendation() {
     const allScores = await db('csr_call_scores')
-      .where('call_date', '>', new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0]);
+      .where('call_date', '>', etDateString(addETDays(new Date(), -7)));
 
     if (allScores.length < 5) {
       return { recommendation: 'Not enough data yet — need at least 5 scored calls.', dataPoint: '', estimatedImpact: '' };
@@ -396,12 +397,11 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`
    */
   async getLeaderboard() {
     const now = new Date();
-    const periodStart = now.getDate() <= 15
-      ? new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0]
-      : new Date(now.getFullYear(), now.getMonth(), 16).toISOString().split('T')[0];
-    const periodEnd = now.getDate() <= 15
-      ? new Date(now.getFullYear(), now.getMonth(), 15).toISOString().split('T')[0]
-      : new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
+    const { year, month, day } = etParts(now);
+    const ym = `${year}-${String(month).padStart(2, '0')}`;
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const periodStart = day <= 15 ? `${ym}-01` : `${ym}-16`;
+    const periodEnd = day <= 15 ? `${ym}-15` : `${ym}-${String(lastDay).padStart(2, '0')}`;
 
     const overview = await this.getTeamOverview(15);
 
@@ -414,7 +414,7 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`
     return {
       periodStart,
       periodEnd,
-      periodLabel: `${new Date(periodStart + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${new Date(periodEnd + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`,
+      periodLabel: `${parseETDateTime(periodStart + 'T12:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })} – ${parseETDateTime(periodEnd + 'T12:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`,
       categories: [
         { category: 'Best Booking Rate', winner: bestBooking?.name, value: `${bestBooking?.firstCallBookingRate || 0}%`, bonus: 50 },
         { category: 'Best Script Score', winner: bestScore?.name, value: `${bestScore?.avgScore || 0}/15`, bonus: 50 },

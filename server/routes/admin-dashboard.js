@@ -2,33 +2,21 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { etDateString, etMonthStart, etMonthEnd, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-function startOfMonth(d = new Date()) {
-  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0];
-}
-function startOfLastMonth() {
-  const d = new Date(); d.setMonth(d.getMonth() - 1);
-  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0];
-}
-function endOfLastMonth() {
-  const d = new Date();
-  return new Date(d.getFullYear(), d.getMonth(), 0).toISOString().split('T')[0];
-}
-function mondayThisWeek() {
-  const d = new Date(); const day = d.getDay(); const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  return new Date(d.getFullYear(), d.getMonth(), diff).toISOString().split('T')[0];
-}
-function sundayThisWeek() {
-  const d = new Date(mondayThisWeek()); d.setDate(d.getDate() + 6);
-  return d.toISOString().split('T')[0];
-}
+// ET-calendar period helpers — these back every dashboard KPI window.
+function startOfMonth(d = new Date()) { return etMonthStart(d); }
+function startOfLastMonth() { return etMonthStart(new Date(), -1); }
+function endOfLastMonth() { return etMonthEnd(new Date(), -1); }
+function mondayThisWeek() { return etWeekStart(); }
+function sundayThisWeek() { return etDateString(addETDays(parseETDateTime(etWeekStart() + 'T12:00'), 6)); }
 
 // GET /api/admin/dashboard — all KPIs in one call
 router.get('/', async (req, res, next) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = etDateString();
     const som = startOfMonth();
     const solm = startOfLastMonth();
     const eolm = endOfLastMonth();
@@ -146,7 +134,7 @@ router.get('/', async (req, res, next) => {
 router.get('/forecast', async (req, res, next) => {
   try {
     const today = new Date();
-    const todayStr = today.toISOString().split('T')[0];
+    const todayStr = etDateString(today);
 
     // MRR — sum of monthly_rate for all active, non-deleted customers
     const mrrResult = await db('customers')
@@ -160,10 +148,9 @@ router.get('/forecast', async (req, res, next) => {
     const arr = mrr * 12;
     const activeRecurringCount = parseInt(mrrResult?.count || 0);
 
-    // Helper: get date N days from now
+    // Helper: get ET calendar date N days from now
     function futureDate(days) {
-      const d = new Date(today.getTime() + days * 86400000);
-      return d.toISOString().split('T')[0];
+      return etDateString(addETDays(today, days));
     }
 
     const date30 = futureDate(30);
@@ -278,12 +265,12 @@ router.get('/core-kpis', async (req, res, next) => {
   try {
     const period = String(req.query.period || 'mtd').toLowerCase();
     const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
+    const todayStr = etDateString(now);
 
     let start;
     if (period === 'today') start = todayStr;
     else if (period === 'wtd') start = mondayThisWeek();
-    else if (period === 'ytd') start = new Date(now.getFullYear(), 0, 1).toISOString().split('T')[0];
+    else if (period === 'ytd') start = etYearStart(now);
     else start = startOfMonth();
 
     // Service completion rate — scheduled_services in window

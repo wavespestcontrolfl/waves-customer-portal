@@ -9,6 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const StripeBanking = require('../stripe-banking');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const BANKING_TOOLS = [
   {
@@ -224,7 +225,7 @@ async function getCashFlowHandler(input) {
 
   let startDate, endDate;
   const now = new Date();
-  const today = now.toISOString().split('T')[0];
+  const today = etDateString(now);
 
   // Custom dates override period
   if (start_date && end_date) {
@@ -233,28 +234,15 @@ async function getCashFlowHandler(input) {
   } else {
     switch (period) {
       case 'mtd':
-        startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-        endDate = today;
-        break;
-      case 'last_month': {
-        const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        startDate = lm.toISOString().split('T')[0];
-        endDate = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0];
-        break;
-      }
-      case 'quarterly': {
-        const qm = Math.floor(now.getMonth() / 3) * 3;
-        startDate = new Date(now.getFullYear(), qm, 1).toISOString().split('T')[0];
-        endDate = today;
-        break;
-      }
+        startDate = etMonthStart(now); endDate = today; break;
+      case 'last_month':
+        startDate = etMonthStart(now, -1); endDate = etMonthEnd(now, -1); break;
+      case 'quarterly':
+        startDate = etQuarterStart(now); endDate = today; break;
       case 'ytd':
-        startDate = `${now.getFullYear()}-01-01`;
-        endDate = today;
-        break;
+        startDate = etYearStart(now); endDate = today; break;
       default:
-        startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-        endDate = today;
+        startDate = etMonthStart(now); endDate = today;
     }
   }
 
@@ -379,7 +367,11 @@ async function getUnreconciledPayouts(input) {
         fee_total: parseFloat(p.fee_total || 0),
         bank_name: p.bank_name,
         days_since_arrival: p.arrival_date
-          ? Math.floor((Date.now() - new Date(p.arrival_date).getTime()) / 86400000)
+          ? Math.floor(
+              (parseETDateTime(etDateString() + 'T12:00') -
+                parseETDateTime((p.arrival_date instanceof Date ? etDateString(p.arrival_date) : String(p.arrival_date).slice(0, 10)) + 'T12:00'))
+              / 86400000,
+            )
           : null,
       })),
       total: payouts.length,
@@ -396,8 +388,8 @@ async function exportPayouts(input) {
   const { format = 'csv', start_date, end_date } = input;
 
   const now = new Date();
-  const endDate = end_date || now.toISOString().split('T')[0];
-  const startDate = start_date || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const endDate = end_date || etDateString(now);
+  const startDate = start_date || etDateString(addETDays(now, -30));
 
   try {
     const result = await StripeBanking.generateExport(format, startDate, endDate);

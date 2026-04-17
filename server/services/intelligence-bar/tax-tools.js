@@ -9,17 +9,18 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, etParts, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 // ET date (Waves operates in FL; Railway server runs UTC).
 function todayET() {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  return etDateString();
 }
 
-// Calendar-day diff (dueDate - today) anchored at UTC midnight; same-day = 0.
+// Calendar-day diff (dueDate - today) using ET calendar dates; same-day = 0.
 function daysUntil(due) {
   if (!due) return 0;
-  const dueStr = (due instanceof Date ? due.toISOString() : String(due)).slice(0, 10);
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const dueStr = (due instanceof Date ? etDateString(due) : String(due)).slice(0, 10);
+  const todayStr = etDateString();
   return Math.floor((new Date(dueStr + 'T00:00:00Z') - new Date(todayStr + 'T00:00:00Z')) / 86400000);
 }
 
@@ -189,7 +190,7 @@ async function getTaxDashboard(yearInput) {
       db.raw("COUNT(*) FILTER (WHERE current_book_value <= 0) as fully_depreciated"),
     ).first().catch(() => ({ count: 0, total_cost: 0, book_value: 0, depreciation: 0, fully_depreciated: 0 })),
 
-    db('tax_filing_calendar').where('due_date', '>=', db.fn.now()).whereNot('status', 'filed')
+    db('tax_filing_calendar').where('due_date', '>=', today).whereNot('status', 'filed')
       .orderBy('due_date').limit(5).catch(() => []),
 
     db('tax_advisor_alerts').where('status', 'new')
@@ -236,7 +237,7 @@ async function getTaxDashboard(yearInput) {
 async function getExpenses(input) {
   const { category, date_from, date_to, deductible_only, vendor, sort = 'date', limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 30, 200);
-  const year = String(new Date().getFullYear());
+  const year = String(etParts().year);
 
   let query = db('expenses').leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
     .select('expenses.*', 'expense_categories.name as category_name', 'expense_categories.tax_category')
@@ -301,14 +302,16 @@ async function getEquipmentDepreciation(input) {
 
 async function getFilingDeadlines(input) {
   const { include_filed = false, days_ahead = 90 } = input;
-  const cutoff = new Date(Date.now() + days_ahead * 86400000).toISOString().split('T')[0];
+  const today = etDateString();
+  const cutoff = etDateString(addETDays(new Date(), days_ahead));
 
   let query = db('tax_filing_calendar').where('due_date', '<=', cutoff).orderBy('due_date');
   if (!include_filed) query = query.whereNot('status', 'filed');
 
   const filings = await query;
 
-  const overdue = filings.filter(f => new Date(f.due_date) < new Date() && f.status !== 'filed');
+  const toDateStr = (v) => (v instanceof Date ? etDateString(v) : String(v).slice(0, 10));
+  const overdue = filings.filter(f => toDateStr(f.due_date) < today && f.status !== 'filed');
 
   return {
     filings: filings.map(f => ({
@@ -316,7 +319,7 @@ async function getFilingDeadlines(input) {
       due_date: f.due_date, status: f.status,
       amount_due: f.amount_due ? parseFloat(f.amount_due) : null,
       days_until: daysUntil(f.due_date),
-      overdue: new Date(f.due_date) < new Date() && f.status !== 'filed',
+      overdue: toDateStr(f.due_date) < today && f.status !== 'filed',
     })),
     overdue_count: overdue.length,
     next_due: filings[0] ? { title: filings[0].title, date: filings[0].due_date, days: daysUntil(filings[0].due_date) } : null,
@@ -326,12 +329,13 @@ async function getFilingDeadlines(input) {
 
 async function getQuarterlyEstimate(quarter) {
   const now = new Date();
-  const q = quarter || `Q${Math.floor(now.getMonth() / 3) + 1}`;
-  const year = now.getFullYear();
+  const { year, month } = etParts(now);
+  const q = quarter || `Q${Math.floor((month - 1) / 3) + 1}`;
   const qNum = parseInt(q.replace('Q', ''));
-  const startMonth = (qNum - 1) * 3;
-  const startDate = new Date(year, startMonth, 1).toISOString().split('T')[0];
-  const endDate = new Date(year, startMonth + 3, 0).toISOString().split('T')[0];
+  const startMonthIdx = (qNum - 1) * 3; // 0, 3, 6, 9 (zero-based)
+  const startDate = `${year}-${String(startMonthIdx + 1).padStart(2, '0')}-01`;
+  const lastDay = new Date(Date.UTC(year, startMonthIdx + 3, 0)).getUTCDate();
+  const endDate = `${year}-${String(startMonthIdx + 3).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
   const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
   const expenses = await db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
@@ -367,24 +371,22 @@ async function getPnl(period) {
   try {
     // Call the existing PnL endpoint logic
     const now = new Date();
+    const today = etDateString(now);
+    const { year } = etParts(now);
     let startDate, endDate;
     switch (period) {
       case 'mtd':
-        startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-        endDate = now.toISOString().split('T')[0]; break;
-      case 'last_month': {
-        const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        startDate = lm.toISOString().split('T')[0];
-        endDate = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0]; break;
-      }
-      case 'quarterly': {
-        const qm = Math.floor(now.getMonth() / 3) * 3;
-        startDate = new Date(now.getFullYear(), qm, 1).toISOString().split('T')[0];
-        endDate = now.toISOString().split('T')[0]; break;
-      }
-      case 'ytd': startDate = `${now.getFullYear()}-01-01`; endDate = now.toISOString().split('T')[0]; break;
-      case 'last_year': startDate = `${now.getFullYear() - 1}-01-01`; endDate = `${now.getFullYear() - 1}-12-31`; break;
-      default: startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`; endDate = now.toISOString().split('T')[0];
+        startDate = etMonthStart(now); endDate = today; break;
+      case 'last_month':
+        startDate = etMonthStart(now, -1); endDate = etMonthEnd(now, -1); break;
+      case 'quarterly':
+        startDate = etQuarterStart(now); endDate = today; break;
+      case 'ytd':
+        startDate = etYearStart(now); endDate = today; break;
+      case 'last_year':
+        startDate = `${year - 1}-01-01`; endDate = `${year - 1}-12-31`; break;
+      default:
+        startDate = etMonthStart(now); endDate = today;
     }
 
     // Revenue
@@ -477,7 +479,7 @@ async function getAdvisorAlerts(status) {
 
 
 async function getMileageSummary(yearInput) {
-  const year = yearInput || String(new Date().getFullYear());
+  const year = yearInput || String(etParts().year);
   const IRS_RATE = parseFloat(process.env.IRS_MILEAGE_RATE) || 0.70;
   const yearStart = `${year}-01-01`;
   const yearEnd = `${year}-12-31`;
@@ -523,14 +525,19 @@ async function getArAging(input) {
     .select('invoices.*', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customers.phone')
     .orderBy('invoices.total', 'desc');
 
-  const now = new Date();
+  const todayAnchor = parseETDateTime(etDateString() + 'T12:00');
   const aging = { current: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0, days_90_plus: 0 };
   let total = 0;
 
   invoices.forEach(i => {
     const amt = parseFloat(i.total || 0);
     total += amt;
-    const age = i.due_date ? Math.floor((now - new Date(i.due_date)) / 86400000) : 0;
+    let age = 0;
+    if (i.due_date) {
+      const dueStr = i.due_date instanceof Date ? etDateString(i.due_date) : String(i.due_date).slice(0, 10);
+      const dueAnchor = parseETDateTime(dueStr + 'T12:00');
+      age = Math.floor((todayAnchor - dueAnchor) / 86400000);
+    }
     if (age <= 0) aging.current += amt;
     else if (age < 30) aging.days_1_30 += amt;
     else if (age < 60) aging.days_31_60 += amt;
