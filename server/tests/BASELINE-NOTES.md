@@ -161,6 +161,29 @@ Both breaks produced file + line + symbol in the error. Both were reverted befor
 
 ---
 
+## Session 6 — Termidor SC bottleCost correction baseline update (2026-04-17)
+
+Pre-slab Termidor bottle cost corrected from $174.72 to $152.10 per current SiteOne invoice (commit `9a69c74`). Updated in three in-sync copies: `server/services/pricing-engine/constants.js`, `server/services/pricing-engine-v2.js` (inline `PS_BTL`), and `client/src/lib/estimateEngine.js`.
+
+### Regression impact
+
+**v1 suite:** 13/13 byte-identical. No pre-slab fixture in the v1 suite at current scope.
+
+**v2 suite:** one case drifted — `v2_preslab_2000sf_basic_warranty`. Baseline updated from $952 → $852.
+
+### Math reconciliation
+
+Pre-fix: `round((2 × 174.72 + 1.833 × 35 + 15) / 0.45) = round(952.47) = 952`
+Post-fix: `round((2 × 152.10 + 1.833 × 35 + 15) / 0.45) = round(852.00) = 852`
+
+Delta: $100 exactly. Math traces through `bottles × (174.72 − 152.10) / 0.45 = 2 × 22.62 / 0.45 = $100.53`, rounded to $100 at the final `Math.round(cost / 0.45)` step. Clean reconciliation — no compounding or discount-layer interaction (case uses volume `'NONE'`, warranty `'BASIC'`).
+
+### Scope
+
+Termidor correction is a **material cost** change, not a rule/policy change. Customer-facing impact: ~8–10% reduction on new-construction pre-slab quotes. See `pricing_changelog` id=6 for full Session 6 rationale (discount engine rewrite is the primary change; Termidor fix shipped alongside).
+
+---
+
 ## Governance note
 
 Discovering prod Platinum at 20% instead of the expected 18% is a governance signal: either docs drifted from code, or live admin-UI edits bypassed the changelog. Going forward (post v4.3 ship), every pricing change — including manual admin-UI edits — must land a `pricing_changelog` row with rationale. Session 9's approval-queue-to-pricing-config wiring automates this for cost changes; rule and discount changes made manually still need manual changelog entries.

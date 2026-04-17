@@ -214,18 +214,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 952,
+      "total": 852,
       "tmInstall": 0,
       "items": [
         {
           "name": "Pre-Slab Termite (Termidor SC)",
-          "price": 952
+          "price": 852
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 952,
+      "year1": 852,
       "year2": 0
     }
   },
