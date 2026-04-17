@@ -10,6 +10,10 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 // ---- helpers -------------------------------------------------------------
 
+// pg returns numeric(12,4) columns as JS strings. Coerce to Number before
+// JSON.stringify so jsonb_set stores a jsonb number, not a jsonb string.
+const numVal = (v) => (v == null ? null : Number(v));
+
 function determineCategory(configKey) {
   if (!configKey || typeof configKey !== 'string') return 'rule';
   const rowKey = configKey.split('.')[0];
@@ -25,7 +29,7 @@ function buildRationaleText(proposal, reviewNotes, technicianId) {
   const lines = [];
   lines.push(`Approved by technician_id=${technicianId} at ${new Date().toISOString()}.`);
   lines.push(`Config key: ${proposal.config_key}`);
-  lines.push(`Change: ${JSON.stringify(proposal.current_value)} -> ${JSON.stringify(proposal.proposed_value)}`);
+  lines.push(`Change: ${JSON.stringify(numVal(proposal.current_value))} -> ${JSON.stringify(numVal(proposal.proposed_value))}`);
   if (proposal.pct_change != null) lines.push(`Pct change: ${proposal.pct_change}%`);
   if (proposal.trigger_source) lines.push(`Trigger source: ${proposal.trigger_source}`);
   if (proposal.evidence) {
@@ -72,7 +76,7 @@ async function applyConfigUpdate(trx, proposal) {
   if (!row) throw new Error(`pricing_config row '${rowKey}' not found`);
 
   const pathLiteral = `{${jsonPath.join(',')}}`;
-  const proposedJson = JSON.stringify(proposal.proposed_value);
+  const proposedJson = JSON.stringify(numVal(proposal.proposed_value));
 
   const updated = await trx('pricing_config')
     .where('config_key', rowKey)
@@ -168,10 +172,10 @@ router.post('/:id/approve', async (req, res) => {
         version_to: 'v4.2',
         changed_by: `admin-${technicianId}`,
         category,
-        summary: `Approved proposal ${proposalId}: ${proposal.config_key} ${JSON.stringify(proposal.current_value)} -> ${JSON.stringify(proposal.proposed_value)}`,
+        summary: `Approved proposal ${proposalId}: ${proposal.config_key} ${JSON.stringify(numVal(proposal.current_value))} -> ${JSON.stringify(numVal(proposal.proposed_value))}`,
         affected_services: JSON.stringify([proposal.config_key]),
-        before_value: JSON.stringify({ value: proposal.current_value }),
-        after_value: JSON.stringify({ value: proposal.proposed_value }),
+        before_value: JSON.stringify({ value: numVal(proposal.current_value) }),
+        after_value: JSON.stringify({ value: numVal(proposal.proposed_value) }),
         rationale: buildRationaleText(proposal, review_notes, technicianId),
       }).returning('id');
 
