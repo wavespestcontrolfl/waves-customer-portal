@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { COLORS as B, FONTS } from '../../theme';
+import { COLORS as B, FONTS } from '../../theme-brand';
 import api from '../../utils/api';
 
 /**

@@ -3,14 +3,14 @@ import { useParams } from 'react-router-dom';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// Waves brand palette
+// Waves brand palette — mirrored from wavespestcontrol.com (Astro @theme tokens)
 const W = {
-  blue: '#1565C0', blueBright: '#2196F3', bluePale: '#E3F2FD',
-  red: '#A83B34', yellow: '#FDD835',
-  teal: '#0ea5e9', green: '#4CAF50', greenLight: '#E8F5E9',
-  navy: '#1E1E2B', textBody: '#455A64', textCaption: '#90A4AE',
-  white: '#FFFFFF', offWhite: '#F8FAFB', sand: '#FDF6EC',
-  border: '#E0E0E0', borderLight: '#F0F0F0',
+  blue: '#065A8C', blueBright: '#097ABD', bluePale: '#E3F5FD',
+  red: '#C0392B', yellow: '#FFD700',
+  teal: '#4DC9F6', green: '#16A34A', greenLight: '#DCFCE7',
+  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
+  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0',
+  border: '#CBD5E1', borderLight: '#F1F5F9',
 };
 
 const SOCIAL_LINKS = [

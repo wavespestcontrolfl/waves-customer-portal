@@ -5,23 +5,24 @@ import AddressAutocomplete from '../components/AddressAutocomplete';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // Brand tokens (match existing BookingPage for visual consistency)
+// Mirrored from wavespestcontrol.com — semantic keys preserved, values swapped to brand
 const BRAND = {
-  navy: '#0B2545',
-  teal: '#0FA3B1',
-  tealDark: '#0C8A96',
-  tealLight: '#E8F8F9',
-  sand: '#F5F1EB',
-  warmWhite: '#FDFCFA',
-  coral: '#E8593C',
-  gold: '#F0A500',
-  green: '#2D9F5C',
-  greenLight: '#EAFAF0',
-  gray100: '#F7F6F3',
-  gray200: '#EDECE8',
-  gray300: '#D4D2CC',
-  gray400: '#9C9A92',
-  gray600: '#5C5B56',
-  gray800: '#2C2B28',
+  navy: '#04395E',       // brand-blueDeeper
+  teal: '#097ABD',       // brand-blue (primary accent)
+  tealDark: '#065A8C',   // brand-blueDark
+  tealLight: '#E3F5FD',  // brand-blueLight
+  sand: '#FEF7E0',       // brand-gold light
+  warmWhite: '#FFFFFF',
+  coral: '#C0392B',      // brand-red
+  gold: '#FFD700',       // brand-gold
+  green: '#16A34A',
+  greenLight: '#DCFCE7',
+  gray100: '#F1F5F9',    // slate-100
+  gray200: '#E2E8F0',    // slate-200
+  gray300: '#CBD5E1',    // slate-300
+  gray400: '#94A3B8',    // slate-400
+  gray600: '#475569',    // slate-600
+  gray800: '#1E293B',    // slate-800
 };
 
 const SERVICES = [

@@ -4,22 +4,23 @@ import { useParams, useSearchParams } from "react-router-dom";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 // ── Brand tokens ──
+// Mirrored from wavespestcontrol.com — semantic keys preserved, values swapped to brand
 const BRAND = {
-  navy: "#0B2545",
-  teal: "#0FA3B1",
-  tealDark: "#0C8A96",
-  tealLight: "#E8F8F9",
-  sand: "#F5F1EB",
-  warmWhite: "#FDFCFA",
-  coral: "#E8593C",
-  green: "#2D9F5C",
-  greenLight: "#EAFAF0",
-  gray100: "#F7F6F3",
-  gray200: "#EDECE8",
-  gray300: "#D4D2CC",
-  gray400: "#9C9A92",
-  gray600: "#5C5B56",
-  gray800: "#2C2B28",
+  navy: "#04395E",
+  teal: "#097ABD",
+  tealDark: "#065A8C",
+  tealLight: "#E3F5FD",
+  sand: "#FEF7E0",
+  warmWhite: "#FFFFFF",
+  coral: "#C0392B",
+  green: "#16A34A",
+  greenLight: "#DCFCE7",
+  gray100: "#F1F5F9",
+  gray200: "#E2E8F0",
+  gray300: "#CBD5E1",
+  gray400: "#94A3B8",
+  gray600: "#475569",
+  gray800: "#1E293B",
 };
 
 // Real API calls
