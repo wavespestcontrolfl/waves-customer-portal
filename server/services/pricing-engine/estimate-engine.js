@@ -413,7 +413,11 @@ function generateEstimate(input) {
   return {
     // Property
     property,
-    zone: { key: input.zone || 'UNKNOWN', ...zone },
+    zone: (() => {
+      const zoneKey = (input.serviceZone || input.zone || 'UNKNOWN').toUpperCase();
+      const info = ZONES[zoneKey] || ZONES.UNKNOWN;
+      return { key: zoneKey, name: info.name, multiplier: zoneMult };
+    })(),
 
     // WaveGuard
     waveGuard: {
