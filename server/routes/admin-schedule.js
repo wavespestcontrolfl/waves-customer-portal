@@ -1187,72 +1187,60 @@ router.post('/sync-calendar', async (req, res, next) => {
 });
 
 /**
- * Schedule a review request SMS 2 hours after service completion.
+ * Queue a review request to send 2 hours after service completion.
+ *
+ * Persists to review_requests with scheduled_for = now + 120min. A cron in
+ * scheduler.js (every 15 min) picks it up and sends via ReviewService.sendSMS,
+ * so the request survives Railway restarts/deploys.
+ *
  * Checks: customer has sms_enabled, hasn't been asked in 30 days.
  */
-function scheduleReviewRequest(svc) {
-  const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
+async function scheduleReviewRequest(svc) {
+  try {
+    const customer = await db('customers').where({ id: svc.customer_id }).first();
+    if (!customer || !customer.phone) return;
 
-  setTimeout(async () => {
-    try {
-      const customer = await db('customers').where({ id: svc.customer_id }).first();
-      if (!customer || !customer.phone) return;
-
-      // Check SMS opt-in
-      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-      if (prefs && prefs.sms_enabled === false) {
-        logger.info(`[review-auto] Skipping review request for ${customer.first_name} — SMS disabled`);
-        return;
-      }
-
-      // Check if review already requested in last 30 days
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
-      let recentRequest = null;
-      try {
-        recentRequest = await db('review_requests')
-          .where({ customer_id: customer.id })
-          .where('created_at', '>', thirtyDaysAgo)
-          .first();
-      } catch { /* table may not exist yet */ }
-
-      if (recentRequest) {
-        logger.info(`[review-auto] Skipping review request for ${customer.first_name} — already asked recently`);
-        return;
-      }
-
-      // Create review request and send SMS
-      const { WAVES_LOCATIONS } = require('../config/locations');
-      const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
-      const adminReviewRouter = require('./admin-reviews');
-
-      const reviewReq = await adminReviewRouter.createReviewRequest({
-        customerId: customer.id,
-        locationId: loc.id,
-        techName: svc.tech_name || null,
-        serviceType: svc.service_type || 'pest control',
-        serviceDate: svc.scheduled_date || null,
-      });
-
-      const PORTAL_DOMAIN = process.env.PORTAL_DOMAIN || 'portal.wavespestcontrol.com';
-      const rateUrl = `https://${PORTAL_DOMAIN}/rate/${reviewReq.token}`;
-      const firstName = customer.first_name || 'there';
-      const svcLabel = reviewReq.service_type || 'pest control service';
-
-      await TwilioService.sendSMS(customer.phone,
-        `Hey ${firstName}! Thanks for choosing Waves 🌊 We'd love to hear how your ${svcLabel} went — it only takes 10 seconds:\n\n${rateUrl}\n\nThank you! — Waves Pest Control`,
-        { customerId: customer.id, messageType: 'review_request', customerLocationId: customer.nearest_location_id }
-      );
-
-      await db('activity_log').insert({
-        customer_id: customer.id, action: 'review_requested',
-        description: `Auto review request sent 2h after ${svc.service_type} completion`,
-      });
-
-      logger.info(`[review-auto] Review request sent to ${customer.first_name} ${customer.last_name}`);
-    } catch (err) {
-      logger.error(`[review-auto] Failed to send review request: ${err.message}`);
+    const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+    if (prefs && prefs.sms_enabled === false) {
+      logger.info(`[review-auto] Skipping review request for ${customer.first_name} — SMS disabled`);
+      return;
     }
-  }, TWO_HOURS_MS);
+
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+    let recentRequest = null;
+    try {
+      recentRequest = await db('review_requests')
+        .where({ customer_id: customer.id })
+        .where('created_at', '>', thirtyDaysAgo)
+        .first();
+    } catch { /* table may not exist yet */ }
+    if (recentRequest) {
+      logger.info(`[review-auto] Skipping review request for ${customer.first_name} — already asked recently`);
+      return;
+    }
+
+    // Look up the matching service_record so ReviewService can dedup + attach tech/service metadata.
+    let serviceRecordId = null;
+    try {
+      const sr = await db('service_records')
+        .where({ customer_id: customer.id })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (sr) serviceRecordId = sr.id;
+    } catch { /* service_records lookup is best-effort */ }
+
+    const ReviewService = require('../services/review-request');
+    await ReviewService.create({
+      customerId: customer.id,
+      serviceRecordId,
+      triggeredBy: 'auto',
+      delayMinutes: 120,
+    });
+
+    logger.info(`[review-auto] Review request queued for ${customer.first_name} ${customer.last_name} (sends in 2h)`);
+  } catch (err) {
+    logger.error(`[review-auto] Failed to queue review request: ${err.message}`);
+  }
 }
 
 // GET /api/admin/schedule/vehicle-location — live GPS from Bouncie

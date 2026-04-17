@@ -259,17 +259,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
 
     if (requestReview && svc.cust_phone) {
-      const loc = resolveLocation(svc.city);
-      setTimeout(async () => {
-        try {
-          const fallback = `Hello ${svc.first_name}! How was your service? We'd love your feedback: ${loc.googleReviewUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('review_request', {
-            first_name: svc.first_name || '',
-            review_url: loc.googleReviewUrl,
-          }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body);
-        } catch (e) { logger.error(`Review request SMS failed: ${e.message}`); }
-      }, 2 * 60 * 60 * 1000);
+      try {
+        const ReviewService = require('../services/review-request');
+        await ReviewService.create({
+          customerId: svc.customer_id,
+          serviceRecordId: record.id,
+          triggeredBy: 'auto',
+          delayMinutes: 120,
+        });
+      } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
 
     await db('activity_log').insert({
