@@ -13,10 +13,12 @@
  *   - Workflow triggers (cancellation save, upsell, balance reminder, etc.)
  */
 
+const MODELS = require('../config/models');
+
 const RETENTION_AGENT_CONFIG = {
   name: 'waves-retention-strategist',
   description: 'Weekly autonomous customer retention agent — churn prevention, upsell identification, outreach orchestration',
-  model: 'claude-sonnet-4-6',
+  model: MODELS.FLAGSHIP,
   system: `You are the Waves Pest Control retention strategist. Identify at-risk customers and decide the right intervention for each. Every saved customer is $600-2,000/year.
 
 INTERVENTION TIERS:

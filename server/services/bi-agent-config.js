@@ -6,10 +6,12 @@
  * Also saves a detailed report to the admin dashboard.
  */
 
+const MODELS = require('../config/models');
+
 const BI_AGENT_CONFIG = {
   name: 'waves-weekly-briefing',
   description: 'Monday morning business intelligence briefing — revenue, customers, ads, content, SEO, reviews in one SMS',
-  model: 'claude-sonnet-4-6',
+  model: MODELS.FLAGSHIP,
   system: `You are the Waves Pest Control business intelligence analyst. Pull every metric, identify what changed, and send Adam one SMS briefing.
 
 SMS FORMAT (under 480 chars — 3 SMS segments max):

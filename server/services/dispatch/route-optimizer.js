@@ -2,6 +2,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { scoreJob, driveMins } = require('./job-scorer');
 const WikiQA = require('../knowledge/wiki-qa');
+const MODELS = require('../../config/models');
 
 let db;
 function getDb() {
@@ -68,7 +69,7 @@ async function optimizeTechRoute(tech, date, mode, zone) {
   let notes = '';
   try {
     const res = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 120,
       messages: [{
         role: 'user',

@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const MODELS = require('../../config/models');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -39,7 +40,7 @@ class WikiQA {
     let paths = [];
     try {
       const routingResponse = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 500,
         messages: [{
           role: 'user',
@@ -82,7 +83,7 @@ ${liveIndex}`
 
     // Step 3: Answer with full context
     const answerResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 2000,
       system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.`,
       messages: [{

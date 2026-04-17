@@ -1,6 +1,7 @@
 // server/services/dispatch/csr-booker.js
 const Anthropic = require('@anthropic-ai/sdk');
 const WikiQA = require('../knowledge/wiki-qa');
+const MODELS = require('../../config/models');
 
 let db;
 function getDb() {
@@ -59,7 +60,7 @@ async function getRecommendedSlots(scenario, serviceType, zip) {
 
   try {
     const res = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 700,
       messages: [{
         role: 'user',

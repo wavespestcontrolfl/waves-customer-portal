@@ -4,6 +4,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const MODELS = require('../config/models');
 const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
   cleanSquareNotes, isNewCustomer, safeDate,
@@ -1465,7 +1466,7 @@ WHAT WE FOUND
 Do not include the client name as a header. Do not add greetings, sign-offs, or any text outside these two sections.`;
 
     const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      model: MODELS.FLAGSHIP,
       max_tokens: 800,
       messages: [{ role: 'user', content: prompt }],
     });

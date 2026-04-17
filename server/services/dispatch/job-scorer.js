@@ -1,6 +1,7 @@
 // server/services/dispatch/job-scorer.js
 const Anthropic = require('@anthropic-ai/sdk');
 const WikiQA = require('../knowledge/wiki-qa');
+const MODELS = require('../../config/models');
 
 let db;
 function getDb() {
@@ -65,7 +66,7 @@ async function scoreJob(job, prevLat = null, prevLng = null) {
   try {
     const rules = await WikiQA.lookup('job scoring formula') || '';
     const res = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 350,
       messages: [{
         role: 'user',

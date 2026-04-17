@@ -2,6 +2,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
+const MODELS = require('../../config/models');
 
 const anthropic = new Anthropic();
 
@@ -49,7 +50,7 @@ async function processVendorInvoice(email, classification) {
       });
 
       const parseResponse = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 1024,
         messages: [{
           role: 'user',

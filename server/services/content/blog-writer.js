@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const MODELS = require('../../config/models');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -82,7 +83,7 @@ FORMAT:
 - End with a practical takeaway + soft Waves mention`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 3000,
       system: systemPrompt,
       messages: [{
@@ -127,7 +128,7 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 3000,
       system: 'You optimize existing blog posts for Waves Pest Control. Improve SEO without changing core content. Match the Waves voice: snarky, casual, Florida-specific, technically knowledgeable.',
       messages: [{
@@ -219,7 +220,7 @@ Return JSON: {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 4000,
       system: `Generate ${count} new blog post ideas for Waves Pest Control. Match the tone of these existing titles:
 

@@ -12,6 +12,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const MODELS = require('../config/models');
 
 function capitalizeName(name) {
   if (!name) return '';
@@ -93,7 +94,7 @@ async function extractCallData(transcription, callerPhone) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.FLAGSHIP,
     max_tokens: 1500,
     messages: [{
       role: 'user',
@@ -154,7 +155,7 @@ async function generateLeadSynopsis(transcription) {
 
   try {
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 1200,
       messages: [{
         role: 'user',

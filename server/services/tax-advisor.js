@@ -15,6 +15,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const MODELS = require('../config/models');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -56,7 +57,7 @@ class TaxAdvisor {
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 6000,
         tools: [
           {
@@ -347,7 +348,7 @@ Please search for current FL and federal tax changes, then provide your analysis
         compliance_alerts: JSON.stringify(report.compliance_alerts || []),
         action_items: JSON.stringify(report.action_items || []),
         raw_ai_response: rawResponse || JSON.stringify(report),
-        model_used: 'claude-sonnet-4-20250514',
+        model_used: MODELS.FLAGSHIP,
       }).returning('*');
 
       // Create alert records for action items

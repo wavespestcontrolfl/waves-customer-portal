@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const MODELS = require('../config/models');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -183,7 +184,7 @@ const KnowledgeBaseService = {
     for (const entry of entries) {
       try {
         const response = await client.messages.create({
-          model: 'claude-sonnet-4-20250514',
+          model: MODELS.FLAGSHIP,
           max_tokens: 600,
           messages: [{
             role: 'user',

@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const fs = require('fs');
 const path = require('path');
+const MODELS = require('../../config/models');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -29,7 +30,7 @@ class WikiCompiler {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 8000,
       system: `You are the knowledge base compiler for Waves Pest Control. Read raw source documents and compile them into structured, interlinked wiki articles in markdown.
 
@@ -227,7 +228,7 @@ ${content.substring(0, 50000)}`
       : '';
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 8000,
       system: `You are the knowledge base compiler for Waves Pest Control. Read raw source documents and compile them into structured, interlinked wiki articles in markdown.
 

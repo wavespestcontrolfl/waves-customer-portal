@@ -6,6 +6,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
+const MODELS = require('../config/models');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -234,7 +235,7 @@ router.post('/ai-draft', async (req, res, next) => {
     const client = new Anthropic();
 
     const msg = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 200,
       messages: [{
         role: 'user',

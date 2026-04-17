@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const MODELS = require('../config/models');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -683,7 +684,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
 }`;
 
     const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 2000,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }],
@@ -708,7 +709,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       }));
 
       currentMsg = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 2000,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [

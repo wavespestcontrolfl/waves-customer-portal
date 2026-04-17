@@ -7,6 +7,7 @@ function getGoogle() {
 const logger = require('./logger');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
+const MODELS = require('../config/models');
 
 /**
  * Google Business Profile service — fully separate credentials per account.
@@ -293,7 +294,7 @@ class GoogleBusinessService {
                 const Anthropic = require('@anthropic-ai/sdk');
                 const aiClient = new Anthropic();
                 const aiMsg = await aiClient.messages.create({
-                  model: 'claude-sonnet-4-20250514',
+                  model: MODELS.FLAGSHIP,
                   max_tokens: 400,
                   messages: [{ role: 'user', content: `Write a professional, empathetic reply to a ${rating}-star review for Waves Pest Control ${loc.name}. The reviewer "${reviewerName}" said: "${reviewText || '(no comment)'}". Keep it under 2 paragraphs. Acknowledge the concern, apologize, and invite them to contact us directly. End with: The 🌊 Waves Pest Control ${loc.name} Team` }],
                 });

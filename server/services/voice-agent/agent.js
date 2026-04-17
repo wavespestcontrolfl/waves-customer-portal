@@ -18,6 +18,7 @@
 const Anthropic = require("@anthropic-ai/sdk");
 const config = require("../../config");
 const { isEnabled: checkGate } = require("../../config/feature-gates");
+const MODELS = require("../../config/models");
 const db = require("../../models/db");
 
 const { SYSTEM_PROMPT, buildDynamicPrompt } = require("./system-prompt");
@@ -61,7 +62,7 @@ let agentConfig = {
   afterHoursOnly: true,        // default: only active outside business hours
   businessHours: { start: 8, end: 20 },
   maxRingSeconds: 25,
-  model: "claude-sonnet-4-20250514",
+  model: MODELS.FLAGSHIP,
   ttsProvider: "ElevenLabs",
   ttsVoice: "Rachel",
   sttProvider: "Deepgram",

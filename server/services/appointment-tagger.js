@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const TwilioService = require('./twilio');
 const logger = require('./logger');
+const MODELS = require('../config/models');
 
 class AppointmentTagger {
 
@@ -153,7 +154,7 @@ class AppointmentTagger {
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
       const resp = await client.messages.create({
-        model: 'claude-sonnet-4-20250514', max_tokens: 4000,
+        model: MODELS.FLAGSHIP, max_tokens: 4000,
         system: 'You are a pre-inspection research assistant for a Florida pest control company. Analyze RentCast data and return a JSON WDO pre-inspection brief with: risk_score (Low/Moderate/High), risk_reason, top_3_priorities, top_3_unknowns, vulnerabilities, homeowner_questions. Return VALID JSON ONLY.',
         messages: [{ role: 'user', content: `WDO brief for ${service.address_line1}, ${service.city}, FL ${service.zip}. Client: ${service.first_name} ${service.last_name}. Date: ${service.scheduled_date}.\n\nRentCast: ${JSON.stringify(rc)}` }],
       });

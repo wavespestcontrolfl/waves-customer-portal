@@ -42,9 +42,11 @@ function isToolFailure(result) {
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
+const MODELS = require('../config/models');
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-const MODEL = process.env.INTELLIGENCE_BAR_MODEL || 'claude-opus-4-6';
+const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
 const MAX_TOOL_ROUNDS = 8;
 
 // Schedule tool names for routing execution
@@ -591,7 +593,7 @@ router.post('/query', async (req, res, next) => {
     const tools = getToolsForContext(context);
 
     // For tech context, use a simpler model to reduce latency in the field
-    const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || 'claude-sonnet-4-20250514') : MODEL;
+    const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || MODELS.FLAGSHIP) : MODEL;
 
     // Build messages array (support multi-turn conversation)
     const messages = [

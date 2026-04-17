@@ -18,7 +18,8 @@
     "db:seed": "cd server && npx knex seed:run",
     "test": "cd server && npm test",
     "test:contracts": "node server/contract-tests/index.js",
-    "test:contracts:list": "node server/contract-tests/index.js --list"
+    "test:contracts:list": "node server/contract-tests/index.js --list",
+    "models:check": "node scripts/check-models.js"
   },
   "engines": {
     "node": ">=20"

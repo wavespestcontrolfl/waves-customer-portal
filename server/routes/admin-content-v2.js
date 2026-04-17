@@ -6,6 +6,7 @@ const BlogWriter = require('../services/content/blog-writer');
 const BlogAuditor = require('../services/content/blog-auditor');
 // WordPressSync removed — content now publishes to wavespestcontrol.com Astro site
 const logger = require('../services/logger');
+const MODELS = require('../config/models');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -369,7 +370,7 @@ router.post('/generate', async (req, res, next) => {
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 4000,
         system: `You write hyper-local pest control and lawn care content for Waves Pest Control in Southwest Florida.
 

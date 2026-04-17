@@ -15,10 +15,12 @@
  *   - Content calendar scheduling
  */
 
+const MODELS = require('../../config/models');
+
 const CONTENT_AGENT_CONFIG = {
   name: 'waves-content-engine',
   description: 'Autonomous blog content production agent — research, write, QA, publish, distribute',
-  model: 'claude-sonnet-4-6',
+  model: MODELS.FLAGSHIP,
   system: `You are the Waves Pest Control content engine. Produce hyper-local blog posts for Southwest Florida pest control and lawn care, then publish and distribute them.
 
 VOICE — this is what makes Waves content distinct:

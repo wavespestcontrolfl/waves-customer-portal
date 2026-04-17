@@ -6,6 +6,7 @@ const gbp = require('../services/google-business');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
+const MODELS = require('../config/models');
 
 const PORTAL_DOMAIN = process.env.PORTAL_DOMAIN || 'portal.wavespestcontrol.com';
 
@@ -262,7 +263,7 @@ The 🌊 Waves Pest Control ${locationName} Team
 Generate the reply now.`;
 
     const msg = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 500,
       messages: [{ role: 'user', content: prompt }],
     });

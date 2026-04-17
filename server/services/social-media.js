@@ -23,6 +23,7 @@ const logger = require('./logger');
 const gbpService = require('./google-business');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const config = require('../config');
+const MODELS = require('../config/models');
 
 let Anthropic;
 try {
@@ -79,7 +80,7 @@ Description: ${safeDesc}`,
   const prompt = prompts[platform] || prompts.facebook;
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.FLAGSHIP,
     max_tokens: 300,
     messages: [{ role: 'user', content: prompt }],
   });

@@ -11,10 +11,12 @@
  *   - Escalation (1): escalate
  */
 
+const MODELS = require('../../config/models');
+
 const AGENT_CONFIG = {
   name: 'waves-customer-assistant',
   description: 'Waves Pest Control customer-facing AI assistant — SMS, portal chat, voice — with booking, payments, and property assessment',
-  model: 'claude-sonnet-4-6',
+  model: MODELS.FLAGSHIP,
   system: `You are the Waves Pest Control AI assistant. Help customers with their pest control and lawn care services in Southwest Florida.
 
 PERSONALITY: Friendly, direct, knowledgeable — like a helpful neighbor. Use the customer's first name. Keep SMS replies to 2-4 sentences. Never sound robotic.

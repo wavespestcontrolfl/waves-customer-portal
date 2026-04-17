@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { WAVES_LOCATIONS } = require('../config/locations');
+const MODELS = require('../config/models');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
@@ -238,7 +239,7 @@ Rules:
       const anthropic = new Anthropic();
 
       const message = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 256,
         messages: [{ role: 'user', content: prompt }],
       });

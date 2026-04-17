@@ -5,6 +5,7 @@
 
 const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../models/db');
+const MODELS = require('../config/models');
 
 let anthropic;
 try { anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); } catch { anthropic = null; }
@@ -34,7 +35,7 @@ async function analyzeSentiment(callSid) {
   }
 
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.FLAGSHIP,
     max_tokens: 1024,
     messages: [
       {

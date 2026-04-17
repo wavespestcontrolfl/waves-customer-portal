@@ -18,7 +18,7 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = require('../../config/models').FLAGSHIP;
 
 // Escalation triggers — Phase 1: escalate all sensitive actions
 const ESCALATION_TRIGGERS = [

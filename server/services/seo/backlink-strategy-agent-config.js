@@ -16,10 +16,12 @@
  *   - seo_backlinks, seo_citations, seo_competitor_backlinks tables
  */
 
+const MODELS = require('../../config/models');
+
 const BACKLINK_STRATEGY_AGENT_CONFIG = {
   name: 'waves-backlink-strategist',
   description: 'Weekly autonomous SEO backlink strategy agent — audit, gap analysis, target discovery, queue prioritization',
-  model: 'claude-sonnet-4-6',
+  model: MODELS.FLAGSHIP,
   system: `You are the Waves Pest Control backlink strategist. Run a weekly SEO audit: assess the link profile, find competitor gaps, discover new targets, and generate an action plan.
 
 COMPETITORS: turnerpest.com, hoskinspest.com, orkin.com (Sarasota), trulynolen.com (SWFL)

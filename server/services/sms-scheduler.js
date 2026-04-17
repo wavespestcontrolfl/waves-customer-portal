@@ -22,6 +22,7 @@ const db = require('../models/db');
 const AvailabilityEngine = require('./availability');
 const TwilioService = require('./twilio');
 const logger = require('./logger');
+const MODELS = require('../config/models');
 
 const anthropic = new Anthropic();
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -162,7 +163,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
 
     try {
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 400,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userMessage }],

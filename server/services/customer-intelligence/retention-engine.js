@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const MODELS = require('../../config/models');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -58,7 +59,7 @@ class RetentionEngine {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 500,
       system: `You generate personalized retention outreach for Waves Pest Control customers showing churn risk. Write as Adam — direct, empathetic, specific. Reference their actual situation. NEVER be generic or corporate.
 

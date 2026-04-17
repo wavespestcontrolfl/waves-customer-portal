@@ -16,6 +16,7 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const MODELS = require('../config/models');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -508,7 +509,7 @@ Return a JSON object with exactly these fields:
       'anthropic-version': '2023-06-01'
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 4096,
       messages: [{
         role: 'user',

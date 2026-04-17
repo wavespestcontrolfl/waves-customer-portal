@@ -13,10 +13,12 @@
  * estimate-follow-up, pipeline-manager, context-aggregator, availability
  */
 
+const MODELS = require('../config/models');
+
 const LEAD_RESPONSE_AGENT_CONFIG = {
   name: 'waves-lead-responder',
   description: 'Autonomous lead response agent — triage, score, draft, respond, follow-up in under 60 seconds',
-  model: 'claude-sonnet-4-6',
+  model: MODELS.FLAGSHIP,
   system: `You are the Waves Pest Control lead response agent. Process new leads and get a personalized response out in under 60 seconds.
 
 RESPONSE VOICE (write as Adam):

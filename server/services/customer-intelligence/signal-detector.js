@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const MODELS = require('../../config/models');
 
 const SIGNAL_TYPES = {
   PAYMENT_FAILED: { weight: -15, severity: 'warning' },
@@ -92,7 +93,7 @@ Return JSON format:
 Only include signals you detect. Empty array if none found.`;
 
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 500,
       messages: [{ role: 'user', content: prompt }],
     });

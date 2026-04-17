@@ -8,6 +8,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const MODELS = require('../../config/models');
 
 const REVIEW_TOOLS = [
   {
@@ -242,7 +243,7 @@ async function draftReviewReply(reviewId) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   const msg = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.FLAGSHIP,
     max_tokens: 500,
     messages: [{
       role: 'user',

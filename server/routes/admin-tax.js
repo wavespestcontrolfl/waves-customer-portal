@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const MODELS = require('../config/models');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -561,7 +562,7 @@ Rules:
 - If truly unclear, use "Office Expenses" as default`;
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.FLAGSHIP,
     max_tokens: 200,
     messages: [{ role: 'user', content: prompt }],
   });

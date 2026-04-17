@@ -1,4 +1,5 @@
 const logger = require('./logger');
+const MODELS = require('../config/models');
 
 /**
  * AI-powered lead triage using Claude.
@@ -36,7 +37,7 @@ Return a JSON object with:
 Return ONLY valid JSON, no markdown.`;
 
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });

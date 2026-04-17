@@ -6,6 +6,7 @@ const path = require('path');
 const os = require('os');
 const db = require('../../models/db');
 const logger = require('../logger');
+const MODELS = require('../../config/models');
 
 const anthropic = new Anthropic();
 
@@ -122,7 +123,7 @@ async function processSignup(queueItem) {
     const screenshot1 = (await page.screenshot({ fullPage: false, type: 'png' })).toString('base64');
 
     const findResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 1024,
       messages: [{
         role: 'user',
@@ -171,7 +172,7 @@ Respond in JSON only, no markdown:
     const password = PROFILE.generatePassword();
 
     const fillResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 2048,
       messages: [{
         role: 'user',
@@ -271,7 +272,7 @@ Important:
     const resultScreenshot = (await page.screenshot({ fullPage: false, type: 'png' })).toString('base64');
 
     const verifyResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 512,
       messages: [{
         role: 'user',

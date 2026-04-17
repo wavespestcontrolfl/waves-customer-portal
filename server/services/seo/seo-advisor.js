@@ -16,6 +16,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const SearchConsole = require('./search-console');
+const MODELS = require('../../config/models');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -114,7 +115,7 @@ class SEOAdvisor {
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 4000,
         system: `You are an SEO analyst specializing in local service businesses (pest control, lawn care) in Southwest Florida. You review Google Search Console, Google Business Profile, and web performance data weekly and provide specific, actionable SEO recommendations.
 

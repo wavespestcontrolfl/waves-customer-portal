@@ -8,6 +8,7 @@
  */
 
 const logger = require('./logger');
+const MODELS = require('../config/models');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -104,7 +105,7 @@ class SatelliteAnalyzer {
     try {
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: MODELS.FLAGSHIP,
         max_tokens: 1000,
         messages: [{
           role: 'user',

@@ -12,7 +12,7 @@ const logger = require('./logger');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = require('../config/models').FLAGSHIP;
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS

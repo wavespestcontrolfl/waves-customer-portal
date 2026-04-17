@@ -1,6 +1,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../../models/db');
 const logger = require('../logger');
+const MODELS = require('../../config/models');
 
 const anthropic = new Anthropic();
 
@@ -24,7 +25,7 @@ async function classifyEmail(email) {
     const bodyPreview = (email.body_text || email.snippet || '').substring(0, 2000);
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.FLAGSHIP,
       max_tokens: 512,
       messages: [{
         role: 'user',
