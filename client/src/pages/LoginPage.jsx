@@ -64,14 +64,14 @@ export default function LoginPage() {
         loop
         playsInline
         preload="none"
-        poster="/brand/waves-ford-2.webp"
+        poster="/brand/waves-hero-service.webp"
         style={{
           position: 'absolute', inset: 0, width: '100%', height: '100%',
           objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none',
         }}
         aria-hidden="true"
       >
-        <source src="/brand/waves-van-hero-section.mp4" type="video/mp4" />
+        <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
       </video>
       {/* Gradient overlay: brand-sky/90 → brand-blue/60 → brand-blueLight/40 */}
       <div style={{
