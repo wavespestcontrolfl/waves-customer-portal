@@ -246,14 +246,14 @@ const MOSQUITO = {
     HALF:    [r(110), r(125), r(145), r(155)],
     ACRE:    [r(140), r(155), r(180), r(200)],
   },
-  tierVisits: { bronze: 12, silver: 12, gold: 15, platinum: 18 },  // Was 17. 18 = cleaner ~20-day intervals.
+  tierVisits: { bronze: 12, silver: 12, gold: 15, platinum: 17 },  // Aligned to v2. Was 18 per prior comment, but v2 (Virginia's primary flow) has always used 17.
   pressureFactors: {
     trees_heavy: 0.15, trees_moderate: 0.05,
     complexity_complex: 0.10, complexity_moderate: 0.05,
     pool: 0.05, nearWater: 0.10, irrigation: 0.08,
     lot_acre: 0.15, lot_half: 0.05,
   },
-  pressureCap: 1.80,  // Was 2.00. 2× doubles base price, too high for quoting.
+  pressureCap: 2.0,  // Aligned to v2. Was 1.80 per prior comment, but v2 (Virginia's primary flow) caps at 2.0 for extreme water proximity.
 };
 
 // ============================================================
