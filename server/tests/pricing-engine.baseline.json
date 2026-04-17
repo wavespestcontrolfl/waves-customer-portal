@@ -141,9 +141,9 @@
   },
   "mosquito_acre_waterfront_max_pressure": {
     "summary": {
-      "recurringAnnualAfterDiscount": 6480,
-      "recurringMonthlyAfterDiscount": 540,
-      "year1Total": 6480
+      "recurringAnnualAfterDiscount": 6426,
+      "recurringMonthlyAfterDiscount": 535.5,
+      "year1Total": 6426
     },
     "waveGuard": {
       "tier": "bronze",
@@ -152,8 +152,8 @@
     },
     "lineItems": {
       "mosquito": {
-        "annual": 6480,
-        "monthly": 540
+        "annual": 6426,
+        "monthly": 535.5
       }
     }
   },

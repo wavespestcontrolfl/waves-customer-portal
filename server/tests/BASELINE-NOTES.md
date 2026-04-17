@@ -184,6 +184,56 @@ Termidor correction is a **material cost** change, not a rule/policy change. Cus
 
 ---
 
+## Session 7 — v1 mosquito constants aligned to v2 (2026-04-17)
+
+Two single-number changes in `server/services/pricing-engine/constants.js` (commit `5e537a8`):
+- `MOSQUITO.pressureCap`: `1.80` → `2.0`
+- `MOSQUITO.tierVisits.platinum`: `18` → `17`
+
+Both changes close v1/v2 drift discovered during Session 6's scope audit. v2 (Virginia's primary quoting flow) has produced customer-facing prices with `pressureCap=2.0` + `platinum visits=17` all along; v1's "theoretical" values never reached real customers. This aligns v1 to match v2's practical behavior ahead of Session 11's v2 retirement.
+
+### Regression impact
+
+**v1 suite:** 12/13 byte-identical. One case drifted — `mosquito_acre_waterfront_max_pressure`. Baseline updated from `{annual: 6480, monthly: 540}` → `{annual: 6426, monthly: 535.5}`.
+
+**v2 suite:** 14/14 byte-identical. v2 wasn't touched.
+
+### Math reconciliation — `mosquito_acre_waterfront_max_pressure`
+
+Fixture: `{lotSqFt: 50000 → ACRE, trees: 'heavy', complexity: 'complex', nearWater: 'ADJACENT', mosquito: {tier: 'platinum'}}`
+
+| Dimension | Old (v4.2 v1) | New (Session 7 v1) |
+|---|---|---|
+| Uncapped pressure | 1.89 | 1.89 |
+| `pressureCap` | 1.80 | 2.0 |
+| Applied pressure | **1.80** (clamped) | **1.89** (uncapped) |
+| basePrice (Platinum ACRE) | 200 | 200 |
+| perVisit = `round(basePrice × pressure)` | 360 | 378 |
+| Platinum visits | **18** | **17** |
+| annual = `perVisit × visits` | **6480** | **6426** |
+| monthly = `round(annual/12, 2)` | 540.00 | 535.50 |
+
+Both counterfactuals falsified (proves both drifts engaged together):
+- visits-only (18→17, cap=1.80): `360 × 17 = 6120` ≠ 6426
+- cap-only (1.80→2.0, visits=18): `378 × 18 = 6804` ≠ 6426
+- both together: `378 × 17 = 6426` ✓
+
+Net delta: $6480 → $6426 = **−$54 (−0.83%)**.
+
+### Why only Case 7 drifted
+
+The other two v1 mosquito cases neither hit the old cap nor used Platinum visits:
+- `edge_large_footprint_5500sf_platinum_bundle` — mosquito at **gold** (visits=15 unchanged). Uncapped pressure ≈ 1.45 (below 1.80). Neither change engaged.
+- `platinum_bundle_4_qualifying_services_zone_a` — mosquito at **silver** (visits=12 unchanged). Uncapped pressure = 1.05 (below 1.80). Neither change engaged.
+
+Drift lands exactly where it should: Platinum tier + waterfront + max-pressure fixture. No scope leakage into unrelated cases.
+
+### Scope
+
+v1-only alignment to v2. Customer-facing change: zero (0 Platinum mosquito customers, 2 total mosquito customers; tool-visible 0-3 pattern per Session 6). See `pricing_changelog` id=7 for full Session 7 rationale.
+
+---
+
 ## Governance note
 
 Discovering prod Platinum at 20% instead of the expected 18% is a governance signal: either docs drifted from code, or live admin-UI edits bypassed the changelog. Going forward (post v4.3 ship), every pricing change — including manual admin-UI edits — must land a `pricing_changelog` row with rationale. Session 9's approval-queue-to-pricing-config wiring automates this for cost changes; rule and discount changes made manually still need manual changelog entries.
