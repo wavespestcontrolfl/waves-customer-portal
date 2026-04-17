@@ -2,6 +2,8 @@
 
 Captured 2026-04-17 from prod (`https://portal.wavespestcontrol.com`) during v4.3 Session 2.
 
+Extended 2026-04-17 during Session 3 with two v2 zone-coverage cases (see "Session 3 additions" below).
+
 These baselines are the yardstick for Sessions 3-10. A failing regression test means a real pricing change, NOT a baseline bug — investigate before updating the baseline. Intentional baseline updates require a `pricing_changelog` entry.
 
 ---
@@ -30,6 +32,17 @@ Current state is the truth; captured as-is.
 At the time of capture there was an uncommitted local diff on `server/routes/property-lookup-v2.js` line 1159 adding `hi: tb.hexpro?.install || 0` to the emission. That diff was **reverted** so the baseline matches prod behavior.
 
 **Open question for Session 11 (v2 retirement):** is HexPro omission a bug (the engine computes it at `pricing-engine-v2.js:929-938` but the route drops it during response shaping) or an intentional hide from the lookup flow? Business decision needed before surfacing HexPro install pricing in customer-facing estimates.
+
+---
+
+## Session 3 additions
+
+Added two v2 regression cases to cover zones C and D, which Session 3's drift-prevention work in `pricing-engine-v2.js` (`zoneMultipliers: C=1.12, D=1.20`) would otherwise be untested against. The pre-existing 12 v2 cases all run zone A.
+
+- `v2_zone_c_bimonthly_pest_lawn_treeshrub` — 2000 sqft Charlotte outskirts, PEST+LAWN+TREE_SHRUB. Exercises C=1.12x multiplier on v2's hot path.
+- `v2_zone_d_quarterly_pest_bahia` — 2000 sqft far reach, PEST+LAWN. Exercises D=1.20x multiplier.
+
+Baselines captured 2026-04-17 post-Session-3 deploy (`70a3109` hotfix). The pre-existing 12 cases were confirmed byte-identical via `git diff` on the baseline JSON — only the 2 new entries appended.
 
 ---
 

@@ -504,5 +504,152 @@
       "year1": 840,
       "year2": 840
     }
+  },
+  "v2_zone_c_bimonthly_pest_lawn_treeshrub": {
+    "recurring": {
+      "tier": "Gold",
+      "discount": 0.15,
+      "annualBeforeDiscount": 1905.48,
+      "annualAfterDiscount": 1619.66,
+      "monthlyTotal": 134.97,
+      "savings": 285.82,
+      "serviceCount": 3
+    },
+    "results": {
+      "lawn": [
+        {
+          "mo": 40,
+          "recommended": false,
+          "name": "4x"
+        },
+        {
+          "mo": 50,
+          "recommended": false,
+          "name": "6x"
+        },
+        {
+          "mo": 60,
+          "recommended": true,
+          "name": "9x"
+        },
+        {
+          "mo": 75,
+          "recommended": false,
+          "name": "12x"
+        }
+      ],
+      "pestTiers": [
+        {
+          "mo": 42.19,
+          "apps": 4,
+          "recommended": false,
+          "label": "Quarterly"
+        },
+        {
+          "mo": 53.79,
+          "apps": 6,
+          "recommended": true,
+          "label": "Bi-Monthly"
+        },
+        {
+          "mo": 88.59,
+          "apps": 12,
+          "recommended": false,
+          "label": "Monthly"
+        }
+      ],
+      "ts": [
+        {
+          "mo": 36,
+          "recommended": false,
+          "name": "4x"
+        },
+        {
+          "mo": 45,
+          "recommended": true,
+          "name": "6x"
+        }
+      ],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 99,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 1718.66,
+      "year2": 1619.66
+    }
+  },
+  "v2_zone_d_quarterly_pest_bahia": {
+    "recurring": {
+      "tier": "Silver",
+      "discount": 0.1,
+      "annualBeforeDiscount": 1142.4,
+      "annualAfterDiscount": 1028.16,
+      "monthlyTotal": 85.68,
+      "savings": 114.24,
+      "serviceCount": 2
+    },
+    "results": {
+      "lawn": [
+        {
+          "mo": 30,
+          "recommended": false,
+          "name": "4x"
+        },
+        {
+          "mo": 40,
+          "recommended": false,
+          "name": "6x"
+        },
+        {
+          "mo": 50,
+          "recommended": true,
+          "name": "9x"
+        },
+        {
+          "mo": 68,
+          "recommended": false,
+          "name": "12x"
+        }
+      ],
+      "pestTiers": [
+        {
+          "mo": 45.2,
+          "apps": 4,
+          "recommended": true,
+          "label": "Quarterly"
+        },
+        {
+          "mo": 57.63,
+          "apps": 6,
+          "recommended": false,
+          "label": "Bi-Monthly"
+        },
+        {
+          "mo": 94.92,
+          "apps": 12,
+          "recommended": false,
+          "label": "Monthly"
+        }
+      ],
+      "ts": [],
+      "mq": [],
+      "tmBait": null
+    },
+    "oneTime": {
+      "total": 99,
+      "tmInstall": 0,
+      "items": [],
+      "specItems": []
+    },
+    "totals": {
+      "year1": 1127.16,
+      "year2": 1028.16
+    }
   }
 }
