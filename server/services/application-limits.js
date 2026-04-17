@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { etParts, etDateString } = require('../utils/datetime-et');
 
 class ApplicationLimitChecker {
   async checkLimits(customerId, productId, proposedDate = new Date()) {
@@ -80,12 +81,27 @@ class ApplicationLimitChecker {
 
       case 'seasonal_blackout': {
         if (!limit.season_start || !limit.season_end) return { violated: false };
-        const start = new Date(limit.season_start);
-        const end = new Date(limit.season_end);
-        start.setFullYear(proposedDate.getFullYear());
-        end.setFullYear(proposedDate.getFullYear());
-        if (proposedDate >= start && proposedDate <= end) return { violated: true, message: `BLACKOUT: ${(limit.jurisdiction || '').replace(/_/g, ' ')} restricts nitrogen ${start.toLocaleDateString()} — ${end.toLocaleDateString()}. Use iron/potassium only.`, current: 'in_blackout', max: 'none' };
-        const daysUntil = Math.floor((start - proposedDate) / 86400000);
+        // Compare ET calendar days (YYYY-MM-DD), not Date objects — blackout
+        // windows are legal calendar dates, not absolute timestamps.
+        const proposedYMD = etDateString(proposedDate);
+        const startMMDD = String(limit.season_start).slice(5, 10);
+        const endMMDD = String(limit.season_end).slice(5, 10);
+        const proposedMMDD = proposedYMD.slice(5, 10);
+        const wraps = startMMDD > endMMDD;
+        const inRange = wraps
+          ? (proposedMMDD >= startMMDD || proposedMMDD <= endMMDD)
+          : (proposedMMDD >= startMMDD && proposedMMDD <= endMMDD);
+        if (inRange) {
+          const startLabel = `${startMMDD.slice(0, 2)}/${startMMDD.slice(3)}`;
+          const endLabel = `${endMMDD.slice(0, 2)}/${endMMDD.slice(3)}`;
+          return { violated: true, message: `BLACKOUT: ${(limit.jurisdiction || '').replace(/_/g, ' ')} restricts nitrogen ${startLabel} — ${endLabel}. Use iron/potassium only.`, current: 'in_blackout', max: 'none' };
+        }
+        // Approaching-window check: compute days-until using ET calendar math.
+        const proposedYear = etParts(proposedDate).year;
+        const startYear = proposedMMDD <= startMMDD ? proposedYear : proposedYear + 1;
+        const startDate = new Date(`${startYear}-${startMMDD}T12:00:00Z`);
+        const proposedAnchor = new Date(`${proposedYMD}T12:00:00Z`);
+        const daysUntil = Math.floor((startDate - proposedAnchor) / 86400000);
         if (daysUntil > 0 && daysUntil <= 14) return { approaching: true, message: `Nitrogen blackout starts in ${daysUntil} days. May be last nitrogen window.`, current: daysUntil, max: 0 };
         return { violated: false };
       }
@@ -176,11 +192,11 @@ class ApplicationLimitChecker {
 
   isInBlackout(date, county) {
     if (county !== 'sarasota_county' && county !== 'manatee_county') return false;
-    const month = date.getMonth();
-    return month >= 5 && month <= 8;
+    const month = etParts(date).month; // 1-12 (ET calendar month)
+    return month >= 6 && month <= 9;   // June-Sept inclusive — was UTC month 5-8
   }
 
-  getYearStart(date) { return new Date(date.getFullYear(), 0, 1).toISOString().split('T')[0]; }
+  getYearStart(date) { return `${etParts(date).year}-01-01`; }
 }
 
 module.exports = new ApplicationLimitChecker();

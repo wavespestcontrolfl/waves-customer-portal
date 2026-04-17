@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, etParts } = require('../utils/datetime-et');
 
 const ComplianceService = {
 
@@ -38,7 +39,7 @@ const ComplianceService = {
         service_record_id: serviceRecordId,
         product_id: catalog?.id || sp.product_id || null,
         technician_id: sr.technician_id,
-        application_date: sr.service_date || new Date().toISOString().split('T')[0],
+        application_date: sr.service_date || etDateString(),
         quantity_applied: sp.quantity_applied || sp.application_rate || null,
         quantity_unit: sp.rate_unit || null,
         application_rate: sp.application_rate || null,
@@ -124,8 +125,8 @@ const ComplianceService = {
    * FL DACS structured compliance report.
    */
   async getDacsReport(startDate, endDate) {
-    const start = startDate || new Date(new Date().getFullYear(), 0, 1).toISOString().split('T')[0];
-    const end = endDate || new Date().toISOString().split('T')[0];
+    const start = startDate || `${etParts().year}-01-01`;
+    const end = endDate || etDateString();
 
     const rows = await db('property_application_history as pah')
       .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
@@ -209,8 +210,8 @@ const ComplianceService = {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
-    const yearStart = `${new Date().getFullYear()}-01-01`;
-    const today = new Date().toISOString().split('T')[0];
+    const yearStart = `${etParts().year}-01-01`;
+    const today = etDateString();
 
     // Get all applications this year for the customer
     const apps = await db('property_application_history')
@@ -242,13 +243,16 @@ const ComplianceService = {
         if (current >= limit.limit_value) status = 'exceeded';
         else if (current >= limit.limit_value - 1) status = 'warning';
       } else if (limit.limit_type === 'seasonal_blackout') {
-        const now = new Date(today);
-        const seasonStart = new Date(limit.season_start);
-        const seasonEnd = new Date(limit.season_end);
-        // Normalize year for comparison
-        seasonStart.setFullYear(now.getFullYear());
-        seasonEnd.setFullYear(now.getFullYear());
-        if (now >= seasonStart && now <= seasonEnd) status = 'blackout_active';
+        // Compare ET calendar MM-DD, not UTC Date objects — blackout windows
+        // are legal dates, not absolute timestamps.
+        const mmdd = (s) => String(s).slice(5, 10);
+        const startMMDD = mmdd(limit.season_start);
+        const endMMDD = mmdd(limit.season_end);
+        const todayMMDD = today.slice(5, 10);
+        const inRange = startMMDD <= endMMDD
+          ? todayMMDD >= startMMDD && todayMMDD <= endMMDD
+          : todayMMDD >= startMMDD || todayMMDD <= endMMDD; // window wraps year boundary
+        if (inRange) status = 'blackout_active';
       }
 
       results.push({
@@ -276,19 +280,21 @@ const ComplianceService = {
    * Nitrogen blackout status for all active lawn customers.
    */
   async getNitrogenStatus() {
-    const today = new Date().toISOString().split('T')[0];
-    const now = new Date();
+    const today = etDateString();
+    const { year } = etParts();
 
     // Get nitrogen blackout limits
     const blackouts = await db('product_limits')
       .where({ match_type: 'nitrogen', limit_type: 'seasonal_blackout' });
 
+    const mmdd = (s) => String(s).slice(5, 10);
+    const todayMMDD = today.slice(5, 10);
     const activeBlackouts = blackouts.filter(b => {
-      const start = new Date(b.season_start);
-      const end = new Date(b.season_end);
-      start.setFullYear(now.getFullYear());
-      end.setFullYear(now.getFullYear());
-      return now >= start && now <= end;
+      const startMMDD = mmdd(b.season_start);
+      const endMMDD = mmdd(b.season_end);
+      return startMMDD <= endMMDD
+        ? todayMMDD >= startMMDD && todayMMDD <= endMMDD
+        : todayMMDD >= startMMDD || todayMMDD <= endMMDD;
     });
 
     const lawnCustomers = await db('customers')
@@ -296,7 +302,7 @@ const ComplianceService = {
       .whereNotNull('lawn_type')
       .select('id', 'first_name', 'last_name', 'city', 'zip', 'lawn_type');
 
-    const yearStart = `${now.getFullYear()}-01-01`;
+    const yearStart = `${year}-01-01`;
     const statuses = [];
 
     for (const c of lawnCustomers) {
@@ -342,8 +348,8 @@ const ComplianceService = {
    * Dashboard overview stats.
    */
   async getDashboard() {
-    const yearStart = `${new Date().getFullYear()}-01-01`;
-    const today = new Date().toISOString().split('T')[0];
+    const yearStart = `${etParts().year}-01-01`;
+    const today = etDateString();
 
     const [appCount] = await db('property_application_history')
       .where('application_date', '>=', yearStart)

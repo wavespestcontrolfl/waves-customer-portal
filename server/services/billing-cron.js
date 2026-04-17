@@ -3,6 +3,7 @@ const logger = require('./logger');
 const PaymentRouter = require('./payment-router');
 const TwilioService = require('./twilio');
 const { logAutopay } = require('./autopay-log');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
 /**
  * Billing Cron Service
@@ -29,10 +30,12 @@ const BillingCron = {
    */
   async processMonthlyBilling() {
     const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-      .toISOString().split('T')[0];
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0)
-      .toISOString().split('T')[0];
+    const { year, month } = etParts(now);
+    const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+    // Last day of ET month — new Date(y, m, 0) uses UTC constructor which is
+    // fine for day-count math, but we format via UTC getters below so it's ET-safe.
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const monthEnd = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
     logger.info(`[billing-cron] Starting monthly billing for ${monthStart}`);
 
@@ -46,7 +49,7 @@ const BillingCron = {
         'billing_day',
       );
 
-    const todayDay = now.getDate();
+    const todayDay = etParts(now).day;
     let charged = 0;
     let skipped = 0;
     let failed = 0;
@@ -107,11 +110,16 @@ const BillingCron = {
           details: { source: 'autopay', tier: customer.waveguard_tier },
         });
 
-        const nextDate = new Date(now);
-        nextDate.setMonth(nextDate.getMonth() + 1);
-        nextDate.setDate(customer.billing_day || 1);
+        // Next charge = same billing_day in the next ET calendar month.
+        const et = etParts(now);
+        const nextMonth = et.month === 12 ? 1 : et.month + 1;
+        const nextYear = et.month === 12 ? et.year + 1 : et.year;
+        const billingDay = customer.billing_day || 1;
+        const daysInNextMonth = new Date(Date.UTC(nextYear, nextMonth, 0)).getUTCDate();
+        const day = Math.min(billingDay, daysInNextMonth);
+        const nextChargeDate = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
         await db('customers').where({ id: customer.id })
-          .update({ next_charge_date: nextDate.toISOString().split('T')[0] });
+          .update({ next_charge_date: nextChargeDate });
 
         // Extract receipt URL and include in confirmation SMS
         let receiptUrl = null;

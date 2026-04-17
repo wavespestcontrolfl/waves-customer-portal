@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
 const { logAutopay, eventExistsRecently } = require('./autopay-log');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
 /**
  * Autopay Notifications
@@ -15,10 +16,12 @@ const { logAutopay, eventExistsRecently } = require('./autopay-log');
  */
 
 async function sendPreChargeReminders() {
+  // Target = ET calendar date, 3 days from now. billing_day is a calendar
+  // day-of-month (1-31), so this match must be done in ET.
   const today = new Date();
-  const target = new Date(today);
-  target.setDate(target.getDate() + 3);
-  const targetDay = target.getDate();
+  const target = addETDays(today, 3);
+  const targetParts = etParts(target);
+  const targetDay = targetParts.day;
 
   logger.info(`[autopay-notifications] Pre-charge reminders for billing_day=${targetDay}`);
 
@@ -45,7 +48,7 @@ async function sendPreChargeReminders() {
       const already = await eventExistsRecently(c.id, 'pre_charge_reminder_sent', 25);
       if (already) { skipped++; continue; }
 
-      const dateStr = target.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+      const dateStr = target.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
       const amt = parseFloat(c.monthly_rate || 0).toFixed(2);
 
       await TwilioService.sendSMS(
@@ -55,7 +58,7 @@ async function sendPreChargeReminders() {
 
       await logAutopay(c.id, 'pre_charge_reminder_sent', {
         amountCents: Math.round(parseFloat(c.monthly_rate) * 100),
-        details: { charge_date: target.toISOString().split('T')[0] },
+        details: { charge_date: etDateString(target) },
       });
       sent++;
     } catch (err) {
@@ -69,7 +72,7 @@ async function sendPreChargeReminders() {
 
 async function sendCardExpiryWarnings() {
   const now = new Date();
-  const sixty = new Date(); sixty.setDate(sixty.getDate() + 60);
+  const sixty = addETDays(now, 60);
 
   logger.info(`[autopay-notifications] Card expiry warnings — scanning next 60 days`);
 
@@ -81,7 +84,7 @@ async function sendCardExpiryWarnings() {
     .where('payment_methods.autopay_enabled', true)
     .whereRaw(
       "make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) <= ?",
-      [sixty.toISOString().split('T')[0]]
+      [etDateString(sixty)]
     )
     .select(
       'customers.id as customer_id', 'customers.first_name', 'customers.phone',

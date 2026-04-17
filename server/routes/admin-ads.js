@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 // Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
 let _BudgetManager, _CampaignAdvisor, _googleAds;
@@ -334,7 +335,7 @@ router.post('/advisor/apply', async (req, res, next) => {
 
     // Increment applied count for today's report
     await db('ad_advisor_reports')
-      .where({ date: new Date().toISOString().split('T')[0] })
+      .where({ date: etDateString() })
       .increment('applied_count', 1);
 
     res.json({ success: true, result });

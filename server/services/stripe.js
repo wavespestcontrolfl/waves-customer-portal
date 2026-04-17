@@ -4,6 +4,7 @@ const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
 const { v4: uuidv4 } = require('uuid');
+const { etDateString } = require('../utils/datetime-et');
 
 // ═══════════════════════════════════════════════════════════════
 // Lazy-init Stripe client — don't crash if key is missing
@@ -346,7 +347,7 @@ const StripeService = {
         customer_id: customerId,
         payment_method_id: card.id,
         processor: 'stripe',
-        payment_date: new Date().toISOString().split('T')[0],
+        payment_date: etDateString(),
         amount: totalAmount,
         status: 'failed',
         description: `${description} — FAILED`,
@@ -370,7 +371,7 @@ const StripeService = {
         processor: 'stripe',
         stripe_payment_intent_id: paymentIntent.id,
         stripe_charge_id: paymentIntent.latest_charge || null,
-        payment_date: new Date().toISOString().split('T')[0],
+        payment_date: etDateString(),
         amount: totalAmount,
         status,
         description: surchargeAmount > 0
@@ -687,7 +688,7 @@ const StripeService = {
           processor: 'stripe',
           stripe_payment_intent_id: paymentIntentId,
           stripe_charge_id: typeof charge === 'string' ? charge : null,
-          payment_date: new Date().toISOString().split('T')[0],
+          payment_date: etDateString(),
           amount: parseFloat(invoice.total),
           status: 'paid',
           description: `Invoice ${invoice.invoice_number}`,

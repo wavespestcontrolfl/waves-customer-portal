@@ -3,6 +3,7 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = stripeKey ? require('stripe')(stripeKey) : null;
@@ -128,7 +129,7 @@ router.post('/reconcile', async (req, res, next) => {
         amount: parseFloat(invoice.total),
         status: 'paid',
         description: `Invoice ${invoice.invoice_number} — ${collectedVia}`,
-        payment_date: new Date().toISOString().split('T')[0],
+        payment_date: etDateString(),
         stripe_charge_id: stripeChargeId || null,
         processor: stripeChargeId ? 'stripe' : null,
       });
