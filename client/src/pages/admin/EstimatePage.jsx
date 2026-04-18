@@ -342,12 +342,18 @@ function EstimateToolView() {
   }, [customerSearch]);
 
   function selectCustomer(c) {
+    const fullName = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
+    const phoneDigits = String(c.phone || '').replace(/\D/g, '');
+    const normalizedPhone = phoneDigits.length === 11 && phoneDigits.startsWith('1') ? phoneDigits.slice(1) : phoneDigits.slice(0, 10);
     setForm(f => ({
       ...f,
       address: c.address || '',
       homeSqFt: c.homeSqFt ? String(c.homeSqFt) : f.homeSqFt,
       lotSqFt: c.lotSqFt ? String(c.lotSqFt) : f.lotSqFt,
       stories: c.stories ? String(c.stories) : f.stories,
+      customerName: fullName || f.customerName,
+      customerPhone: normalizedPhone || f.customerPhone,
+      customerEmail: c.email || f.customerEmail,
     }));
     setCustomerSearch('');
     setCustomers([]);
