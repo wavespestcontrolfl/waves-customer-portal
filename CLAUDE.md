@@ -9,6 +9,26 @@ This file provides context for Claude Code sessions working on the waves-custome
 - If errors appear, diagnose and fix immediately before continuing other work
 - After every commit, create a fresh tar.gz in ~/Downloads (exclude node_modules, .git, dist)
 
+## Active initiative: Admin UI redesign (Tier 1)
+
+Authoritative specs live in `docs/design/`:
+- `waves-portal-ui-redesign-spec.md` — full monochrome admin spec
+- `waves-customer-facing-design-brief.md` — separate warmer language for customer surfaces (do not apply admin spec there)
+- `DECISIONS.md` — architectural decisions log; append new entries at bottom, never edit old ones
+
+Tier 1 scope (full redesign): Dashboard, Dispatch (absorbs Schedule), Customers + Detail, Estimates + `/new`, Communications. Everything else = tier 2 token pass only. `/tech` Home, Intelligence Bar, and customer-facing surfaces are **out of scope**.
+
+Foundation landed (PR #1):
+- `client/src/components/ui/` — 13 hand-rolled primitives (Button, Input, Select, Checkbox, Radio, Switch, Textarea, Badge, Card, Table, Dialog, Sheet, Tabs) + `cn` helper. Import via `import { Button } from 'components/ui'`.
+- `client/tailwind.config.js` — authoritative source for redesign tokens (zinc ramp, alert red, type scale 11–28, letterSpacing `label`/`tight`/`display`, radii xs/sm/md/lg, hairline border width). `darkMode: false` and `fontWeight` restricted to `normal`/`medium` by design — do not add weight 600/700.
+- `client/src/styles/tokens.css` — utility classes only (`u-focus-ring`, `u-hairline`, `u-dot*`, `u-nums`, `u-label`). No color duplication — Tailwind config is the single source.
+- `@fontsource/inter` weights 400 + 500 loaded in `client/src/index.css`.
+- `/admin/_design-system` — canonical primitive reference, gated to dev or `VITE_DESIGN_SYSTEM_ALLOWLIST` user IDs. Not in sidebar nav. Excluded in `client/public/robots.txt`.
+
+**When building Tier 1 pages:** use the new `components/ui` primitives + Tailwind classes + tokens. Do not mix with the legacy `D` palette in Tier 1 components.
+
+**When building anything else (Tier 2 pages, Intelligence Bar tools, tech portal, customer surfaces):** keep using the existing inline-styles + `D` palette pattern documented below. Do not preemptively migrate non-Tier-1 code to the new primitives.
+
 ## Rules
 
 1. **Only touch what you're asked to touch.** If the task is "add a tool to the Intelligence Bar," don't refactor the route file, don't update the UI theme, don't reorganize imports in unrelated files.

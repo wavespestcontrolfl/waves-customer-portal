@@ -1,0 +1,4 @@
+User-agent: *
+Disallow: /admin/
+Disallow: /admin/_design-system
+Disallow: /tech/
