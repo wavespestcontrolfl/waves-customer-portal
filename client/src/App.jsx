@@ -112,6 +112,7 @@ const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage')
 import BookingPage from './pages/BookingPage';
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
+const ButtonExamples = lazyWithRetry(() => import('./pages/ButtonExamples'));
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
@@ -162,6 +163,7 @@ export default function App() {
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/quote" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
+          <Route path="/button-examples" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><ButtonExamples /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookingPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />
           <Route path="/tech" element={<TechLayout />}>

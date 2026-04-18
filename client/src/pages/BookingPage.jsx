@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import BrandFooter from "../components/BrandFooter";
+import { Button } from "../components/Button";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -271,23 +272,13 @@ export default function BookingPage() {
               </div>
             </div>
 
-            <button
+            <Button
+              variant="primary"
               onClick={() => setStep(1)}
-              style={{
-                width: "100%", padding: "14px 0",
-                background: "#FFD700", color: BRAND.navy,
-                border: "none", borderRadius: 9999,
-                fontSize: 15, fontWeight: 800,
-                letterSpacing: "0.02em",
-                cursor: "pointer",
-                transition: "background 0.15s cubic-bezier(0.4,0,0.2,1)",
-                fontFamily: "'Inter', system-ui, sans-serif",
-              }}
-              onMouseEnter={(e) => (e.target.style.background = "#FFF176")}
-              onMouseLeave={(e) => (e.target.style.background = "#FFD700")}
+              style={{ width: "100%" }}
             >
               Show available times
-            </button>
+            </Button>
           </div>
         )}
 
@@ -505,24 +496,13 @@ export default function BookingPage() {
             </div>
 
             {selectedSlot && (
-              <button
+              <Button
+                variant="primary"
                 onClick={() => setStep(3)}
-                style={{
-                  width: "100%", marginTop: 24, padding: "14px 0",
-                  background: "#FFD700", color: BRAND.navy,
-                  border: "none", borderRadius: 9999,
-                  fontSize: 15, fontWeight: 800,
-                  letterSpacing: "0.02em",
-                  cursor: "pointer",
-                  animation: "slideUp 0.3s ease-out",
-                  transition: "background 0.15s cubic-bezier(0.4,0,0.2,1)",
-                  fontFamily: "'Inter', system-ui, sans-serif",
-                }}
-                onMouseEnter={(e) => (e.target.style.background = "#FFF176")}
-                onMouseLeave={(e) => (e.target.style.background = "#FFD700")}
+                style={{ width: "100%", marginTop: 24, animation: "slideUp 0.3s ease-out" }}
               >
                 Continue
-              </button>
+              </Button>
             )}
           </div>
         )}
@@ -638,28 +618,18 @@ export default function BookingPage() {
               </span>
             </div>
 
-            <button
+            <Button
+              variant="primary"
               onClick={handleConfirm}
               disabled={loading}
-              style={{
-                width: "100%", padding: "15px 0",
-                background: loading ? BRAND.gray300 : "#FFD700",
-                color: loading ? "#fff" : BRAND.navy,
-                border: "none", borderRadius: 9999,
-                fontSize: 16, fontWeight: 800,
-                letterSpacing: "0.02em",
-                cursor: loading ? "wait" : "pointer",
-                transition: "all 0.15s cubic-bezier(0.4,0,0.2,1)",
-                position: "relative",
-                fontFamily: "'Inter', system-ui, sans-serif",
-              }}
+              style={{ width: "100%", fontSize: 16, cursor: loading ? "wait" : "pointer" }}
             >
               {loading ? (
                 <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
                   <span style={{
                     width: 18, height: 18, borderRadius: "50%",
-                    border: "2.5px solid rgba(255,255,255,0.3)",
-                    borderTopColor: "#fff",
+                    border: "2.5px solid rgba(27,44,91,0.3)",
+                    borderTopColor: BRAND.navy,
                     animation: "spin 0.7s linear infinite",
                     display: "inline-block",
                   }} />
@@ -668,7 +638,7 @@ export default function BookingPage() {
               ) : (
                 "Confirm appointment"
               )}
-            </button>
+            </Button>
           </div>
         )}
 
