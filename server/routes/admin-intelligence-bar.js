@@ -29,6 +29,7 @@ const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
+const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const logger = require('../services/logger');
@@ -63,6 +64,7 @@ const TAX_TOOL_NAMES = new Set(TAX_TOOLS.map(t => t.name));
 const LEADS_TOOL_NAMES = new Set(LEADS_TOOLS.map(t => t.name));
 const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
 const BANKING_TOOL_NAMES = new Set(BANKING_TOOLS.map(t => t.name));
+const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
@@ -405,6 +407,48 @@ RESPONSE STYLE:
 - If a customer emailed about scheduling, suggest replying via SMS since it's faster
 - Keep email drafts concise — 2-3 paragraphs max, professional but warm`,
 
+  estimates: `
+ESTIMATES & QUOTING AGENT CONTEXT:
+You are the Waves Quoting Agent. The operator opened the Estimates page or invoked you via ⌘K to delegate a quote — usually an edge case the rule-based EstimatePage workflow handles awkwardly (commercial scenarios, unusual property mixes, conversational quoting from a phone call note).
+
+YOUR ROLE:
+You populate DRAFT estimates with engine-derived numbers and structured reasoning. You DO NOT price things yourself. You DO NOT send. The admin reviews every draft you create through the normal EstimatePage flow before anything reaches a customer.
+
+HARD CONSTRAINTS:
+1. NEVER quote a price without first calling compute_estimate. The v1 pricing engine is the source of truth for residential pricing.
+2. NEVER call create_pending_estimate without first confirming with the operator ("Draft this estimate? y/n"). Show the engine output, your reasoning, your assumptions, and your uncertainty flags BEFORE the confirm prompt.
+3. NEVER adjust the engine's price upward or downward based on your own judgment. If the engine output looks wrong, flag it as uncertainty — let the admin decide.
+4. NEVER send. You have no access to send tools. Drafts are created with status='draft', source='ai_agent' — admin sends through EstimatePage manually.
+
+ENGINE FAILURE RULES:
+- If compute_estimate returns an error or zero price: still create the draft, but in the reasoning field write "Engine output uncertain — manual review required." and list the inputs you used. The admin needs the draft to exist as an anchor even when the engine couldn't price it.
+- If the scenario is clearly outside engine scope (commercial property over 10,000 sqft, non-standard property type, services the engine doesn't support): DO NOT create a draft. Report back: "This scenario requires manual quoting. Info gathered: [list everything you collected]. Recommended next step: [suggestion]." Let the admin handle it in EstimatePage directly.
+
+QUOTING WORKFLOW:
+1. Address → call lookup_property to enrich (sqft, lot size, year built)
+2. Customer check → call match_existing_customer (phone OR address OR name) — if they're already a customer, FLAG this and ask the operator whether to proceed (might be a renewal/upsell, not a new quote)
+3. Calibration (optional) → call find_similar_estimates and/or recent_pricing_changes if you want comp data or want to understand if pricing recently shifted
+4. Compute → call compute_estimate with normalized inputs
+5. Show the operator: engine output, your assumptions (sqft source, service inferences), uncertainty flags
+6. Confirm → "Draft this estimate? y/n"
+7. On yes → call create_pending_estimate (notes are auto-built from the inputs you pass; do NOT pre-format the notes string)
+
+ENGINE BASICS (so you can explain numbers):
+- Loaded labor rate: $35/hr
+- Pest frequencies: quarterly (~90d), bimonthly (~60d), monthly (~30d)
+- Lawn tracks: st_augustine, bermuda, zoysia, bahia. Tiers: basic, enhanced, premium
+- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+) — discount applies automatically based on service count
+- Default sqft if unknown: 2000. Default lot: 4× home sqft.
+
+OUT-OF-SCOPE EXAMPLES (do not draft):
+- Commercial school with 50k sqft of athletic field
+- Mixed-use property
+- Real-estate WDO inspection (separate workflow)
+- Scenarios where the operator says "just guess" or "ballpark it" without enough info
+
+OUTPUT STYLE:
+Lead with the engine result and your bottom-line recommendation in 1-2 sentences. Then show the structured breakdown (inputs, assumptions, uncertainty). Then ask the confirm question. No throat-clearing.`,
+
   banking: `
 BANKING & CASH FLOW CONTEXT:
 You are on the Banking page. The operator manages the Stripe → Capital One cash pipeline.
@@ -467,6 +511,9 @@ function getToolsForContext(context) {
   if (context === 'banking') {
     return [...TOOLS, ...BANKING_TOOLS];
   }
+  if (context === 'estimates') {
+    return [...TOOLS, ...ESTIMATE_TOOLS];
+  }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
@@ -495,6 +542,9 @@ function executeToolByName(toolName, input, techContext) {
   }
   if (BANKING_TOOL_NAMES.has(toolName)) {
     return executeBankingTool(toolName, input);
+  }
+  if (ESTIMATE_TOOL_NAMES.has(toolName)) {
+    return executeEstimateTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -888,6 +938,14 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'leads', label: 'Email Leads', prompt: 'How many leads came in via email this month? Show me the recent ones.', icon: '📈' },
       { id: 'blocked', label: 'Blocked Senders', prompt: 'How many spam senders are blocked? Show the top domains.', icon: '🚫' },
       { id: 'stats', label: 'Email Stats', prompt: 'Email volume and classification breakdown this month', icon: '📊' },
+    ] });
+  } else if (context === 'estimates') {
+    res.json({ actions: [
+      { id: 'quote_address', label: 'Quote an Address', prompt: 'I want to draft a quote. The address is __ , customer is __ , phone __ , services they want: __ . Walk me through it.', icon: '🤖' },
+      { id: 'commercial', label: 'Commercial Scenario', prompt: 'Help me think through a commercial quote — gather the info you need first, then tell me whether the engine can handle it or if we need to do this manually.', icon: '🏢' },
+      { id: 'comp_check', label: 'Find Comps', prompt: 'Find recent estimates around $__/mo so I can sanity-check what we usually charge for that range', icon: '📊' },
+      { id: 'recent_changes', label: 'Recent Pricing Changes', prompt: 'What pricing changes happened recently? Anything that would affect a quote I am about to draft?', icon: '📜' },
+      { id: 'review_drafts', label: 'My Agent Drafts', prompt: 'Show me agent-created draft estimates that need review', icon: '📋' },
     ] });
   } else if (context === 'banking') {
     res.json({ actions: [
