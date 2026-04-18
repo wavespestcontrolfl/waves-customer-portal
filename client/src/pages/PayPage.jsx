@@ -4,11 +4,17 @@ import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// Waves brand palette — mirrored from wavespestcontrol.com (Astro @theme tokens)
+// Waves brand palette — mirrored from wavespestcontrol.com Astro @theme tokens (van-vinyl spec)
 const W = {
-  blue: '#065A8C', blueBright: '#097ABD', bluePale: '#E3F5FD',
-  red: '#C0392B', yellow: '#FFD700',
-  teal: '#4DC9F6', green: '#16A34A', greenLight: '#DCFCE7',
+  blue: '#065A8C',                 // --color-brand-blueDark — depth accent
+  blueBright: '#009CDE',           // --color-brand-blue (PMS 2925) — primary brand
+  blueDeeper: '#1B2C5B',           // --color-brand-blueDeeper (PMS 2766) — heading text
+  bluePale: '#E3F5FD',             // --color-brand-blueLight — soft wash
+  sky: '#4DC9F6',                  // --color-brand-sky — hero bg
+  red: '#C8102E',                  // --color-brand-red (PMS 186)
+  yellow: '#FFD700',               // --color-brand-gold — primary CTA
+  yellowHover: '#FFF176',          // --color-brand-yellow — CTA hover
+  green: '#16A34A', greenLight: '#DCFCE7',
   navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
   white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0',
   border: '#CBD5E1', borderLight: '#F1F5F9',
@@ -74,23 +80,23 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
           appearance: {
             theme: 'stripe',
             variables: {
-              colorPrimary: W.blue,
+              colorPrimary: W.blueBright,
               colorBackground: W.white,
-              colorText: W.navy,
+              colorText: W.blueDeeper,
               colorDanger: W.red,
-              fontFamily: "'Nunito', sans-serif",
-              borderRadius: '10px',
+              fontFamily: "Inter, system-ui, sans-serif",
+              borderRadius: '12px',
               spacingUnit: '4px',
             },
             rules: {
               '.Input': {
-                border: `1px solid ${W.border}`,
+                border: `1.5px solid #E2E8F0`,
                 boxShadow: 'none',
                 padding: '12px 14px',
               },
               '.Input:focus': {
-                border: `1px solid ${W.blue}`,
-                boxShadow: `0 0 0 1px ${W.blue}`,
+                border: `1.5px solid ${W.blueBright}`,
+                boxShadow: `0 0 0 3px rgba(0,156,222,0.15)`,
               },
               '.Label': {
                 fontSize: '13px',
@@ -98,11 +104,11 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
                 color: W.textBody,
               },
               '.Tab': {
-                border: `1px solid ${W.border}`,
-                borderRadius: '10px',
+                border: `1.5px solid #E2E8F0`,
+                borderRadius: '12px',
               },
               '.Tab--selected': {
-                borderColor: W.blue,
+                borderColor: W.blueBright,
                 backgroundColor: W.bluePale,
               },
             },
@@ -264,13 +270,17 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
         disabled={isDisabled || syncingAmount}
         style={{
           width: '100%', padding: 16,
-          background: processing ? W.textCaption : W.blue,
-          color: W.white, border: 'none', borderRadius: 12,
-          fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 16,
+          background: processing ? W.textCaption : W.yellow,
+          color: W.blueDeeper, border: 'none', borderRadius: 9999,
+          fontFamily: "'Inter', system-ui, sans-serif", fontWeight: 800, fontSize: 16,
+          letterSpacing: '0.02em',
           cursor: (isDisabled || syncingAmount) ? 'default' : 'pointer',
           opacity: (isDisabled || syncingAmount) ? 0.6 : 1,
-          transition: 'all 0.2s',
+          boxShadow: '0 4px 14px rgba(0,0,0,0.15)',
+          transition: 'background-color 150ms cubic-bezier(0.4,0,0.2,1)',
         }}
+        onMouseEnter={(e) => { if (!isDisabled && !syncingAmount && !processing) e.currentTarget.style.background = W.yellowHover; }}
+        onMouseLeave={(e) => { if (!processing) e.currentTarget.style.background = W.yellow; }}
       >
         {processing
           ? 'Processing...'
@@ -402,7 +412,7 @@ export default function PayPage() {
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{ width: 40, height: 40, border: `3px solid ${W.border}`, borderTopColor: W.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 16px' }} />
-        <div style={{ color: W.textCaption, fontFamily: "'Nunito', sans-serif", fontSize: 14 }}>Loading your service details...</div>
+        <div style={{ color: W.textCaption, fontFamily: "'Inter', system-ui, sans-serif", fontSize: 14 }}>Loading your service details...</div>
         <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
       </div>
     </div>
@@ -412,8 +422,8 @@ export default function PayPage() {
   if (error) return (
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center', maxWidth: 400 }}>
-        <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontSize: 20, fontWeight: 700, color: W.navy, marginBottom: 8 }}>Invoice Not Found</div>
-        <div style={{ fontFamily: "'Nunito', sans-serif", fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a> if you need help.</div>
+        <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 20, fontWeight: 700, color: W.blueDeeper, marginBottom: 8, letterSpacing: '-0.01em' }}>Invoice Not Found</div>
+        <div style={{ fontFamily: "'Inter', system-ui, sans-serif", fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a> if you need help.</div>
       </div>
     </div>
   );
@@ -424,11 +434,11 @@ export default function PayPage() {
   const tierColors = TIER_COLORS[tier] || TIER_COLORS.Bronze;
 
   return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Nunito', sans-serif" }}>
+    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Inter', system-ui, sans-serif" }}>
       {/* Brand fonts loaded globally via client/index.html */}
 
       {/* ── Header ── */}
-      <div style={{ position: 'relative', overflow: 'hidden', background: `linear-gradient(135deg, ${W.blue} 0%, ${W.navy} 100%)`, padding: isMobile ? '24px 16px' : '32px 24px', textAlign: 'center' }}>
+      <div style={{ position: 'relative', overflow: 'hidden', background: `linear-gradient(135deg, ${W.blueBright} 0%, ${W.blueDeeper} 100%)`, padding: isMobile ? '24px 16px' : '32px 24px', textAlign: 'center' }}>
         {/* Hero video — waves-hero-service.mp4 */}
         <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
@@ -443,7 +453,7 @@ export default function PayPage() {
         {/* ── Paid Banner ── */}
         {isPaid && (
           <div style={{ background: W.greenLight, border: `1px solid ${W.green}`, borderRadius: 12, padding: '16px 20px', marginTop: -16, marginBottom: 20, textAlign: 'center' }}>
-            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
+            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
             <div style={{ fontSize: 13, color: W.textBody, marginTop: 4 }}>
               Paid {invoice.paidAt ? new Date(invoice.paidAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
               {invoice.cardBrand && invoice.cardLastFour ? ` — ${invoice.cardBrand} ****${invoice.cardLastFour}` : ''}
@@ -454,8 +464,8 @@ export default function PayPage() {
         {/* ── Customer Greeting (hero H1) ── */}
         <div style={{ marginTop: isPaid ? 16 : 24, marginBottom: 24 }}>
           <h1 style={{
-            fontFamily: "'Luckiest Guy', 'Baloo 2', cursive", fontWeight: 400,
-            fontSize: isMobile ? 32 : 40, color: W.blue,
+            fontFamily: "'Anton', 'Luckiest Guy', cursive", fontWeight: 400,
+            fontSize: isMobile ? 32 : 40, color: W.blueBright,
             letterSpacing: '0.02em', lineHeight: 1.05, margin: 0,
           }}>
             {isPaid ? `Thank you, ${customer.firstName}!` : `Hi ${customer.firstName}!`}
@@ -486,7 +496,7 @@ export default function PayPage() {
         {(service.type || service.techName) && (
           <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
             <div style={{ background: W.bluePale, padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
-              <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Service Completed</div>
+              <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Service Completed</div>
               <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 13, color: W.textBody, flexWrap: 'wrap' }}>
                 {service.date && <span>{new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</span>}
                 {service.techName && <span>Tech: {service.techName}</span>}
@@ -547,7 +557,7 @@ export default function PayPage() {
         <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
           <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
-              <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Invoice</div>
+              <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Invoice</div>
               <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>{invoice.invoiceNumber}</div>
             </div>
             {!isPaid && (() => {
@@ -590,7 +600,7 @@ export default function PayPage() {
                 </div>
               )}
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: isMobile ? 18 : 20, fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 800, color: W.navy, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${W.navy}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: isMobile ? 18 : 20, fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 800, color: W.blueDeeper, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${W.blueDeeper}` }}>
                 <span>Total</span><span>${invoice.total.toFixed(2)}</span>
               </div>
             </div>
@@ -601,7 +611,7 @@ export default function PayPage() {
         {!isPaid && paymentState !== 'success' && (
           <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
             <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
-              <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 15, color: W.navy }}>Pay Now</div>
+              <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Pay Now</div>
               <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>Card, Apple Pay, Google Pay, or bank transfer</div>
             </div>
 
@@ -642,7 +652,7 @@ export default function PayPage() {
         {/* ── Payment Success ── */}
         {paymentState === 'success' && (
           <div style={{ background: W.greenLight, borderRadius: 16, border: `1px solid ${W.green}`, padding: 28, textAlign: 'center', marginBottom: 20 }}>
-            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 20, color: '#2E7D32', marginBottom: 8 }}>Payment Successful!</div>
+            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 20, color: '#2E7D32', marginBottom: 8 }}>Payment Successful!</div>
             <div style={{ fontSize: 15, color: W.textBody, marginBottom: 4 }}>
               {paymentResult?.amount
                 ? `$${paymentResult.amount.toFixed(2)} paid for ${paymentResult.invoiceNumber || invoice.invoiceNumber}`
@@ -658,7 +668,7 @@ export default function PayPage() {
         {/* ── WaveGuard Upgrade Nudge (Bronze only, not paid) ── */}
         {tier === 'Bronze' && !isPaid && paymentState !== 'success' && (
           <div style={{ background: `linear-gradient(135deg, ${W.sand} 0%, #FFF8E1 100%)`, borderRadius: 14, border: '1px solid #E8D5B7', padding: '18px 20px', marginBottom: 20 }}>
-            <div style={{ fontFamily: "'Baloo 2', 'Nunito', sans-serif", fontWeight: 700, fontSize: 14, color: '#8D6E63', marginBottom: 4 }}>
+            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 14, color: '#8D6E63', marginBottom: 4 }}>
               Save on every visit
             </div>
             <div style={{ fontSize: 13, color: W.textBody, lineHeight: 1.5 }}>
