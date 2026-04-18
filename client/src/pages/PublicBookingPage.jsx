@@ -8,14 +8,15 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Brand tokens (match existing BookingPage for visual consistency)
 // Mirrored from wavespestcontrol.com — semantic keys preserved, values swapped to brand
 const BRAND = {
-  navy: '#04395E',       // brand-blueDeeper
-  teal: '#097ABD',       // brand-blue (primary accent)
+  navy: '#1B2C5B',       // brand-blueDeeper (PMS 2766) — headings, dark surfaces
+  teal: '#009CDE',       // brand-blue (PMS 2925) — primary accent
   tealDark: '#065A8C',   // brand-blueDark
   tealLight: '#E3F5FD',  // brand-blueLight
   sand: '#FEF7E0',       // brand-gold light
   warmWhite: '#FFFFFF',
-  coral: '#C0392B',      // brand-red
+  coral: '#C8102E',      // brand-red (PMS 186)
   gold: '#FFD700',       // brand-gold
+  goldHover: '#FFF176',  // gold CTA hover
   green: '#16A34A',
   greenLight: '#DCFCE7',
   gray100: '#F1F5F9',    // slate-100
@@ -174,7 +175,7 @@ export default function PublicBookingPage() {
     letterSpacing: '0.02em',
     cursor: disabled ? 'not-allowed' : 'pointer',
     transition: 'background 0.15s cubic-bezier(0.4,0,0.2,1)',
-    fontFamily: "'Baloo 2', 'Nunito', sans-serif",
+    fontFamily: "'Inter', system-ui, sans-serif",
   });
   const btnSecondary = {
     padding: '10px 16px', borderRadius: 8, background: 'transparent',
@@ -193,9 +194,9 @@ export default function PublicBookingPage() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', background: BRAND.sand, fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ minHeight: '100vh', background: BRAND.sand, fontFamily: "'Inter', system-ui, sans-serif" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+        /* Inter / Anton / Montserrat load globally via client/index.html */
         @keyframes slideUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
         @keyframes checkPop { 0% { transform:scale(0) } 60% { transform:scale(1.2) } 100% { transform:scale(1) } }
         @keyframes pulse { 0%,100% { transform:scale(1) } 50% { transform:scale(1.03) } }
@@ -221,7 +222,7 @@ export default function PublicBookingPage() {
         <div style={{ position: 'relative', zIndex: 1 }}>
           <h1 style={{
             color: '#fff',
-            fontFamily: "'Luckiest Guy', 'Baloo 2', cursive",
+            fontFamily: "'Anton', 'Luckiest Guy', cursive",
             fontWeight: 400, fontSize: 22,
             letterSpacing: '0.02em', lineHeight: 1,
             margin: 0,
@@ -489,7 +490,7 @@ export default function PublicBookingPage() {
                   placeholder="Gate code, pets, access instructions…"
                   value={notes}
                   onChange={e => setNotes(e.target.value)}
-                  style={{ ...inputStyle, resize: 'vertical', fontFamily: "'DM Sans', sans-serif" }}
+                  style={{ ...inputStyle, resize: 'vertical', fontFamily: "'Inter', system-ui, sans-serif" }}
                 />
               </div>
             </div>

@@ -26,14 +26,16 @@ function captureAttribution() {
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Mirrored from wavespestcontrol.com Astro @theme tokens (van-vinyl spec)
 const BRAND = {
-  navy: '#04395E',
-  teal: '#097ABD',
-  tealDark: '#065A8C',
-  tealLight: '#E3F5FD',
+  navy: '#1B2C5B',       // --color-brand-blueDeeper (PMS 2766) — heading + dark surface
+  teal: '#009CDE',       // --color-brand-blue (PMS 2925) — primary blue
+  tealDark: '#065A8C',   // --color-brand-blueDark
+  tealLight: '#E3F5FD',  // --color-brand-blueLight
   warmWhite: '#FFFFFF',
-  coral: '#C0392B',
+  coral: '#C8102E',      // --color-brand-red (PMS 186)
   gold: '#FFD700',
+  goldHover: '#FFF176',
   green: '#16A34A',
   greenLight: '#DCFCE7',
   gray100: '#F1F5F9',
@@ -127,13 +129,13 @@ export default function QuotePage() {
     }
   }
 
-  const sPage = { minHeight: '100vh', background: BRAND.gray100, fontFamily: "'DM Sans', sans-serif", color: BRAND.gray800, display: 'flex', flexDirection: 'column' };
+  const sPage = { minHeight: '100vh', background: BRAND.gray100, fontFamily: "'Inter', system-ui, sans-serif", color: BRAND.gray800, display: 'flex', flexDirection: 'column' };
   const sWrap = { maxWidth: 640, margin: '0 auto', padding: '32px 20px', width: '100%', flex: 1 };
-  const sCard = { background: BRAND.warmWhite, borderRadius: 16, padding: 28, boxShadow: '0 4px 20px rgba(4,57,94,0.08)', border: `1px solid ${BRAND.gray200}` };
+  const sCard = { background: BRAND.warmWhite, borderRadius: 16, padding: 28, boxShadow: '0 4px 20px rgba(27,44,91,0.08)', border: `1px solid ${BRAND.gray200}` };
   const sLabel = { display: 'block', fontSize: 14, fontWeight: 600, color: BRAND.gray800, marginBottom: 6 };
-  const sInput = { width: '100%', padding: '12px 14px', border: `1px solid ${BRAND.gray300}`, borderRadius: 8, fontSize: 16, fontFamily: 'inherit', boxSizing: 'border-box', background: BRAND.warmWhite };
-  const sBtn = { padding: '14px 24px', background: BRAND.teal, color: BRAND.warmWhite, border: 'none', borderRadius: 8, fontSize: 16, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' };
-  const sBtnGhost = { ...sBtn, background: 'transparent', color: BRAND.teal, border: `1px solid ${BRAND.teal}` };
+  const sInput = { width: '100%', padding: '12px 14px', border: `1.5px solid ${BRAND.gray300}`, borderRadius: 10, fontSize: 16, fontFamily: 'inherit', boxSizing: 'border-box', background: BRAND.warmWhite };
+  const sBtn = { padding: '14px 24px', background: BRAND.gold, color: BRAND.navy, border: 'none', borderRadius: 9999, fontSize: 16, fontWeight: 800, letterSpacing: '0.02em', cursor: 'pointer', fontFamily: 'inherit', boxShadow: '0 4px 14px rgba(0,0,0,0.15)', transition: 'background-color 150ms cubic-bezier(0.4,0,0.2,1)' };
+  const sBtnGhost = { ...sBtn, background: 'transparent', color: BRAND.teal, border: `1.5px solid ${BRAND.teal}`, fontWeight: 600, boxShadow: 'none' };
   const sChip = (on) => ({ padding: '14px 18px', borderRadius: 10, border: `2px solid ${on ? BRAND.teal : BRAND.gray300}`, background: on ? BRAND.tealLight : BRAND.warmWhite, cursor: 'pointer', fontSize: 15, fontWeight: on ? 700 : 500, color: on ? BRAND.navy : BRAND.gray800, textAlign: 'left', display: 'block', width: '100%' });
 
   const totalSteps = 4;

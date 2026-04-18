@@ -154,7 +154,7 @@ export default function RatePage() {
   if (loading) return (
     <Page>
       <div style={{ textAlign: 'center', padding: 48 }}>
-        <div style={{ width: 32, height: 32, border: '3px solid #CBD5E1', borderTopColor: '#097ABD', borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
+        <div style={{ width: 32, height: 32, border: '3px solid #CBD5E1', borderTopColor: '#009CDE', borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
         <span style={{ fontSize: 14, color: '#64748B' }}>Loading...</span>
       </div>
     </Page>
@@ -164,7 +164,7 @@ export default function RatePage() {
     <Page>
       <div style={{ textAlign: 'center', padding: 36, color: '#334155', fontSize: 15, lineHeight: 1.5 }}>
         <p>This link may have expired or already been used.</p>
-        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: '#C0392B', fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
+        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: '#C8102E', fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
       </div>
     </Page>
   );
@@ -175,13 +175,13 @@ export default function RatePage() {
       {screen === 'rating' && (
         <div>
           <div style={{ textAlign: 'center', marginBottom: 22 }}>
-            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'linear-gradient(135deg, #4DC9F6, #097ABD)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: '#fff', fontFamily: "'Baloo 2', cursive", boxShadow: '0 4px 20px rgba(30,127,217,.35)' }}>
+            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'linear-gradient(135deg, #4DC9F6, #009CDE)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: '#fff', fontFamily: "'Anton', 'Luckiest Guy', cursive", boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}>
               {(techName || 'W')[0].toUpperCase()}
             </div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#04395E' }}>{techName}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#1B2C5B' }}>{techName}</div>
           </div>
 
-          <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 22, fontWeight: 700, textAlign: 'center', color: '#04395E', marginBottom: 22, lineHeight: 1.3 }}>
+          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 22, fontWeight: 700, textAlign: 'center', color: '#1B2C5B', marginBottom: 22, lineHeight: 1.3 }}>
             Hey {firstName}, how'd we do?
           </div>
 
@@ -192,11 +192,11 @@ export default function RatePage() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
             {[1,2,3,4,5,6,7,8,9,10].map(n => {
               const selected = score === n;
-              const bg = selected ? (n <= 3 ? '#C0392B' : n <= 7 ? '#F59E0B' : '#16A34A') : '#fff';
+              const bg = selected ? (n <= 3 ? '#C8102E' : n <= 7 ? '#F59E0B' : '#16A34A') : '#fff';
               return (
                 <button key={n} onClick={() => handleScore(n)} style={{
                   minHeight: 44, minWidth: 44, border: `2px solid ${selected ? bg : '#CBD5E1'}`, borderRadius: 12,
-                  background: bg, fontFamily: "'Baloo 2', cursive", fontSize: 18, fontWeight: 700,
+                  background: bg, fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 18, fontWeight: 700,
                   color: selected ? '#fff' : '#334155', cursor: 'pointer', display: 'flex',
                   alignItems: 'center', justifyContent: 'center', padding: 0,
                 }}>{n}</button>
@@ -213,24 +213,24 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
             <span role="img" aria-label="party">&#127881;</span>
           </div>
-          <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 24, fontWeight: 800, color: '#04395E', marginBottom: 8 }}>Awesome, thank you!</div>
+          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Awesome, thank you!</div>
           <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55, marginBottom: 16 }}>What stood out about your experience?</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
             {HIGHLIGHTS.map(h => (
               <button key={h} onClick={() => toggleHighlight(h)} style={{
-                padding: '10px 16px', minHeight: 44, border: `2px solid ${highlights.includes(h) ? '#097ABD' : '#CBD5E1'}`,
-                borderRadius: 24, background: highlights.includes(h) ? '#097ABD' : '#fff',
+                padding: '10px 16px', minHeight: 44, border: `2px solid ${highlights.includes(h) ? '#009CDE' : '#CBD5E1'}`,
+                borderRadius: 24, background: highlights.includes(h) ? '#009CDE' : '#fff',
                 color: highlights.includes(h) ? '#fff' : '#334155', fontSize: 14, fontWeight: 700, cursor: 'pointer',
               }}>{h}</button>
             ))}
           </div>
           <button onClick={handleHighlightsNext} disabled={submitting} style={{
             display: 'inline-flex', alignItems: 'center', gap: 10, padding: '14px 28px',
-            background: '#FFD700', color: '#04395E', border: 'none', borderRadius: 9999,
+            background: '#FFD700', color: '#1B2C5B', border: 'none', borderRadius: 9999,
             fontSize: 16, fontWeight: 800, cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
-            fontFamily: "'Baloo 2', 'Nunito', sans-serif",
+            fontFamily: "'Inter', system-ui, sans-serif",
           }}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#04395E"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#1B2C5B"/></svg>
             {submitting ? 'Sending...' : 'Leave a Google Review'}
           </button>
           <button onClick={() => { setScreen('success'); handleSubmit(); }} style={{ display: 'block', margin: '14px auto 0', fontSize: 13, color: '#64748B', background: 'none', border: 'none', cursor: 'pointer' }}>Skip for now</button>
@@ -241,7 +241,7 @@ export default function RatePage() {
       {screen === 'ai-review' && (
         <div>
           <div style={{ textAlign: 'center', marginBottom: 20 }}>
-            <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 22, fontWeight: 800, color: '#04395E', marginBottom: 6 }}>
+            <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 22, fontWeight: 800, color: '#1B2C5B', marginBottom: 6 }}>
               We'll write it for you!
             </div>
             <div style={{ fontSize: 14, color: '#334155', lineHeight: 1.5 }}>
@@ -251,12 +251,12 @@ export default function RatePage() {
 
           {/* Service selection */}
           <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#04395E', marginBottom: 8 }}>What service did you receive?</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#1B2C5B', marginBottom: 8 }}>What service did you receive?</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {SERVICE_OPTIONS.map(s => (
                 <button key={s} onClick={() => toggleService(s)} style={{
-                  padding: '9px 16px', border: `2px solid ${selectedServices.includes(s) ? '#097ABD' : '#CBD5E1'}`,
-                  borderRadius: 20, background: selectedServices.includes(s) ? '#097ABD' : '#fff',
+                  padding: '9px 16px', border: `2px solid ${selectedServices.includes(s) ? '#009CDE' : '#CBD5E1'}`,
+                  borderRadius: 20, background: selectedServices.includes(s) ? '#009CDE' : '#fff',
                   color: selectedServices.includes(s) ? '#fff' : '#334155', fontSize: 13, fontWeight: 700, cursor: 'pointer',
                 }}>{s}</button>
               ))}
@@ -265,7 +265,7 @@ export default function RatePage() {
 
           {/* Standout selection */}
           <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#04395E', marginBottom: 4 }}>What stood out?</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#1B2C5B', marginBottom: 4 }}>What stood out?</div>
             <div style={{ fontSize: 11, color: '#64748B', marginBottom: 8 }}>Pick up to 3</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {STANDOUT_OPTIONS.map(s => (
@@ -281,7 +281,7 @@ export default function RatePage() {
 
           {/* Personal note */}
           <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#04395E', marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: '#64748B' }}>(optional)</span></div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#1B2C5B', marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: '#64748B' }}>(optional)</span></div>
             <input
               value={personalNote}
               onChange={e => setPersonalNote(e.target.value)}
@@ -289,7 +289,7 @@ export default function RatePage() {
               maxLength={150}
               style={{
                 width: '100%', padding: '12px 14px', border: '2px solid #CBD5E1', borderRadius: 12,
-                fontSize: 14, color: '#04395E', outline: 'none', boxSizing: 'border-box',
+                fontSize: 14, color: '#1B2C5B', outline: 'none', boxSizing: 'border-box',
               }}
             />
           </div>
@@ -299,7 +299,7 @@ export default function RatePage() {
             <button onClick={handleGenerateReview} disabled={generating || selectedServices.length === 0} style={{
               width: '100%', padding: 14, border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 800,
               color: '#fff', cursor: (generating || selectedServices.length === 0) ? 'default' : 'pointer',
-              background: (generating || selectedServices.length === 0) ? '#94A3B8' : '#097ABD',
+              background: (generating || selectedServices.length === 0) ? '#94A3B8' : '#009CDE',
               opacity: selectedServices.length === 0 ? 0.5 : 1,
               transition: 'all 0.2s',
             }}>
@@ -310,10 +310,10 @@ export default function RatePage() {
           {/* Generated review display */}
           {generatedReview && (
             <div style={{ marginTop: 4 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#04395E', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Your Review</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#1B2C5B', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Your Review</div>
               <div style={{
                 background: '#E3F5FD', border: '2px solid #E3F5FD', borderRadius: 14, padding: 16,
-                fontSize: 15, color: '#04395E', lineHeight: 1.65, marginBottom: 14,
+                fontSize: 15, color: '#1B2C5B', lineHeight: 1.65, marginBottom: 14,
                 position: 'relative',
               }}>
                 <div style={{ position: 'absolute', top: -6, left: 16, background: '#E3F5FD', padding: '0 6px', fontSize: 10, color: '#065A8C', fontWeight: 700, letterSpacing: 0.5 }}>READY TO PASTE</div>
@@ -324,7 +324,7 @@ export default function RatePage() {
                 <button onClick={handleCopyReview} style={{
                   flex: 1, padding: 14, border: 'none', borderRadius: 12, fontSize: 15, fontWeight: 800,
                   color: '#fff', cursor: 'pointer',
-                  background: copied ? '#16A34A' : '#097ABD',
+                  background: copied ? '#16A34A' : '#009CDE',
                   transition: 'background 0.2s',
                 }}>
                   {copied ? 'Copied!' : 'Copy to Clipboard'}
@@ -333,15 +333,15 @@ export default function RatePage() {
 
               <button onClick={handleGoToGoogle} style={{
                 width: '100%', padding: 14, border: 'none', borderRadius: 9999, fontSize: 16, fontWeight: 800,
-                color: '#04395E', cursor: 'pointer', background: '#FFD700',
+                color: '#1B2C5B', cursor: 'pointer', background: '#FFD700',
                 boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
-                fontFamily: "'Baloo 2', 'Nunito', sans-serif",
+                fontFamily: "'Inter', system-ui, sans-serif",
               }}>
                 Go to Google Reviews
               </button>
 
               <button onClick={handleGenerateReview} disabled={generating} style={{
-                display: 'block', margin: '12px auto 0', fontSize: 13, color: '#097ABD', background: 'none',
+                display: 'block', margin: '12px auto 0', fontSize: 13, color: '#009CDE', background: 'none',
                 border: 'none', cursor: 'pointer', fontWeight: 600,
               }}>
                 {generating ? 'Rewriting...' : 'Regenerate review'}
@@ -365,8 +365,8 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: score <= 3 ? '#FEE2E2' : '#FEF7E0', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
             {score <= 3 ? '\uD83D\uDE14' : '\uD83E\uDD14'}
           </div>
-          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: '#C0392B', fontSize: 13, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>We want to make this right</div>}
-          <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 24, fontWeight: 800, color: '#04395E', marginBottom: 8 }}>
+          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: '#C8102E', fontSize: 13, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>We want to make this right</div>}
+          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>
             {score <= 3 ? "We're sorry to hear that." : "Thanks for the feedback."}
           </div>
           <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55, marginBottom: 16 }}>
@@ -374,13 +374,13 @@ export default function RatePage() {
           </div>
           <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} style={{
             width: '100%', minHeight: 100, padding: 14, border: '2px solid #CBD5E1', borderRadius: 12,
-            fontSize: 15, color: '#04395E', resize: 'vertical', outline: 'none', boxSizing: 'border-box',
+            fontSize: 15, color: '#1B2C5B', resize: 'vertical', outline: 'none', boxSizing: 'border-box',
           }} />
           <button onClick={handleSubmit} disabled={submitting} style={{
             width: '100%', padding: 14, border: 'none', borderRadius: 9999, fontSize: 16, fontWeight: 800,
-            color: '#04395E', cursor: 'pointer', marginTop: 12,
+            color: '#1B2C5B', cursor: 'pointer', marginTop: 12,
             background: '#FFD700',
-            fontFamily: "'Baloo 2', 'Nunito', sans-serif",
+            fontFamily: "'Inter', system-ui, sans-serif",
           }}>{submitting ? 'Sending...' : 'Send Feedback'}</button>
         </div>
       )}
@@ -391,7 +391,7 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
             <span role="img" aria-label="party">&#127881;</span>
           </div>
-          <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 24, fontWeight: 800, color: '#04395E', marginBottom: 8 }}>Taking you to Google...</div>
+          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Taking you to Google...</div>
           <div style={{ fontSize: 15, color: '#334155' }}>Your review means the world to our small team!</div>
         </div>
       )}
@@ -402,7 +402,7 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
             <span role="img" aria-label="check">&#9989;</span>
           </div>
-          <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 24, fontWeight: 800, color: '#04395E', marginBottom: 8 }}>Thank you!</div>
+          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Thank you!</div>
           <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55 }}>Your feedback helps us serve you better.</div>
         </div>
       )}
@@ -412,7 +412,7 @@ export default function RatePage() {
 
 function Page({ children }) {
   return (
-    <div style={{ minHeight: '100dvh', background: '#097ABD', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: "'Nunito', -apple-system, sans-serif", position: 'relative', overflow: 'hidden' }}>
+    <div style={{ minHeight: '100dvh', background: '#009CDE', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: "'Inter', system-ui, -apple-system, sans-serif", position: 'relative', overflow: 'hidden' }}>
       {/* Hero video — waves-hero-service.mp4 */}
       <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.25, zIndex: 0, pointerEvents: 'none' }}
@@ -421,22 +421,22 @@ function Page({ children }) {
       </video>
       <div style={{ position: 'relative', zIndex: 1, width: '100%', padding: '22px 20px 12px', textAlign: 'center' }}>
         <h1 style={{
-          fontFamily: "'Luckiest Guy', 'Baloo 2', cursive", fontWeight: 400,
+          fontFamily: "'Anton', 'Luckiest Guy', cursive", fontWeight: 400,
           fontSize: 36, color: '#F1F5F9', letterSpacing: '0.03em', lineHeight: 1,
-          margin: 0, textShadow: '2px 2px 0 #04395E',
+          margin: 0, textShadow: '2px 2px 0 #1B2C5B',
         }}>
           Waves <span style={{ color: '#FFD700' }}>Lawn & Pest</span>
         </h1>
         <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,.85)', letterSpacing: 1, fontStyle: 'italic', marginTop: 6 }}>Wave Goodbye to Pests!</div>
       </div>
       <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: '#fff', borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
-        <div style={{ height: 5, background: 'linear-gradient(90deg, #C0392B, #C0392B, #F59E0B, #FFD700)' }} />
+        <div style={{ height: 5, background: 'linear-gradient(90deg, #C8102E, #C8102E, #F59E0B, #FFD700)' }} />
         <div style={{ padding: '28px 22px 24px' }}>{children}</div>
       </div>
       <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, padding: '0 0 32px' }}>
         <BrandFooter variant="dark" />
       </div>
-      <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
+      {/* Anton / Montserrat / Inter load globally via client/index.html */}
     </div>
   );
 }
