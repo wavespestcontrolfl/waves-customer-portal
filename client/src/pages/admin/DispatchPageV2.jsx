@@ -7,7 +7,7 @@ import {
   ProtocolReferenceTab,
   RecurringAlertsBanner,
 } from './SchedulePage';
-import { ViewModeSelector, WeekView, MonthView } from '../../components/schedule/CalendarViews';
+import { ViewModeSelectorV2, WeekViewV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import ScheduleIntelligenceBar from '../../components/admin/ScheduleIntelligenceBar';
 import HorizontalScroll from '../../components/HorizontalScroll';
@@ -739,7 +739,7 @@ export default function DispatchPageV2() {
                 <Button size="sm" variant="secondary" onClick={() => setDate(formatDateISO(new Date()))}>Today</Button>
               )}
             </div>
-            <ViewModeSelector viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
+            <ViewModeSelectorV2 viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
           </div>
         </div>
 
@@ -778,9 +778,9 @@ export default function DispatchPageV2() {
         />
       )}
 
-      {/* Week / Month calendar — V1 components, unchanged */}
-      {viewMode === 'week' && <WeekView startDate={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
-      {viewMode === 'month' && <MonthView date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
+      {/* Week / Month calendar — V2 monochrome, same endpoints and data shape as V1 */}
+      {viewMode === 'week' && <WeekViewV2 startDate={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
+      {viewMode === 'month' && <MonthViewV2 date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
 
       {/* Tabs bar — day view only */}
       {viewMode === 'day' && (
