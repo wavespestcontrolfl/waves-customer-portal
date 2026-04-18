@@ -105,7 +105,52 @@ function statusBorderColor(status) {
   }
 }
 
-function AppointmentBlock({ service, top, height, onEdit }) {
+// Greedy interval-scheduling lane layout: overlapping services share a
+// cluster; within a cluster each is placed in the first lane whose last
+// assigned service ends at or before this one starts. Returns a Map
+// keyed by service.id → { laneIdx, laneCount }.
+function computeLanes(services) {
+  const result = new Map();
+  const items = services
+    .map((s) => {
+      const start = parseHHMM(s.windowStart);
+      const endRaw = parseHHMM(s.windowEnd);
+      const dur = effectiveDuration(s);
+      const end = endRaw != null ? endRaw : (start != null ? start + dur : null);
+      return { svc: s, start: start ?? 0, end: end ?? 30 };
+    })
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+
+  const clusters = [];
+  items.forEach((item) => {
+    let cluster = clusters.find((c) =>
+      c.items.some((x) => x.start < item.end && x.end > item.start)
+    );
+    if (!cluster) {
+      cluster = { items: [] };
+      clusters.push(cluster);
+    }
+    cluster.items.push(item);
+  });
+
+  clusters.forEach((cluster) => {
+    const lanes = [];
+    cluster.items.forEach((item) => {
+      let laneIdx = lanes.findIndex((e) => e <= item.start);
+      if (laneIdx === -1) { laneIdx = lanes.length; lanes.push(item.end); }
+      else { lanes[laneIdx] = item.end; }
+      result.set(item.svc.id, { laneIdx, laneCount: 0 });
+    });
+    const laneCount = lanes.length;
+    cluster.items.forEach((item) => {
+      result.get(item.svc.id).laneCount = laneCount;
+    });
+  });
+
+  return result;
+}
+
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -126,13 +171,15 @@ function AppointmentBlock({ service, top, height, onEdit }) {
         onEdit?.(service);
       }}
       className={cn(
-        'absolute left-1 right-1 px-2 py-1 rounded-sm cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
+        'absolute px-2 py-1 rounded-sm cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-60 z-50 shadow-lg',
       )}
       style={{
         top,
         height: Math.max(height, SLOT_HEIGHT - 2),
+        left: `calc(${laneIdx * (100 / laneCount)}% + 2px)`,
+        width: `calc(${100 / laneCount}% - 4px)`,
         border: `1px solid ${statusBorderColor(service.status)}`,
         ...dragStyle,
       }}
@@ -187,22 +234,28 @@ function TechColumn({ tech, services, onEdit }) {
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => (
           <SlotDroppable key={idx} techId={tech.id} slotIdx={idx} />
         ))}
-        {services.map((svc) => {
-          const startMin = parseHHMM(svc.windowStart);
-          if (startMin == null || startMin < DAY_START_HOUR * 60 || startMin >= DAY_END_HOUR * 60) return null;
-          const top = minutesToTopPx(startMin);
-          const dur = effectiveDuration(svc);
-          const height = (dur / SLOT_MIN) * SLOT_HEIGHT;
-          return (
-            <AppointmentBlock
-              key={svc.id}
-              service={svc}
-              top={top}
-              height={height}
-              onEdit={onEdit}
-            />
-          );
-        })}
+        {(() => {
+          const lanes = computeLanes(services);
+          return services.map((svc) => {
+            const startMin = parseHHMM(svc.windowStart);
+            if (startMin == null || startMin < DAY_START_HOUR * 60 || startMin >= DAY_END_HOUR * 60) return null;
+            const top = minutesToTopPx(startMin);
+            const dur = effectiveDuration(svc);
+            const height = (dur / SLOT_MIN) * SLOT_HEIGHT;
+            const lane = lanes.get(svc.id) || { laneIdx: 0, laneCount: 1 };
+            return (
+              <AppointmentBlock
+                key={svc.id}
+                service={svc}
+                top={top}
+                height={height}
+                laneIdx={lane.laneIdx}
+                laneCount={lane.laneCount}
+                onEdit={onEdit}
+              />
+            );
+          });
+        })()}
       </div>
     </div>
   );
