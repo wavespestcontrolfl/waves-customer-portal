@@ -39,7 +39,7 @@ import AdminReviewsPage from './pages/admin/ReviewsPage';
 import AdminDispatchGate from './pages/admin/DispatchGate';
 import AdminInventoryPage from './pages/admin/InventoryPage';
 import AdminRevenuePage from './pages/admin/RevenuePage';
-import AdminCommunicationsPage from './pages/admin/CommunicationsPage';
+import AdminCommunicationsPage from './pages/admin/CommunicationsGate';
 import AdminCustomersPage from './pages/admin/CustomersGate';
 import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';

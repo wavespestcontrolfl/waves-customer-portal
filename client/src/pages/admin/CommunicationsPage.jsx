@@ -1269,6 +1269,9 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
 // MAIN COMMUNICATIONS PAGE
 // =========================================================================
 
+// Named exports for V2 reuse
+export { ALL_NUMBERS, TEMPLATES, CallLogTab, CSRCoachTab, SmsTemplatesTab };
+
 export default function CommunicationsPage() {
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
