@@ -3,7 +3,6 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const pricingEngineV2 = require('../services/pricing-engine-v2');
 const dbBridge = require('../services/pricing-engine/db-bridge');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -197,7 +196,7 @@ router.post('/:id/approve', async (req, res) => {
 
     // Bust caches (outside transaction, single-instance in-process)
     try {
-      pricingEngineV2.invalidatePricingConfigCache();
+      dbBridge.invalidatePricingConfigCache();
       await dbBridge.syncConstantsFromDB(db);
     } catch (cacheErr) {
       logger.warn(`[pricing-proposals] Cache bust failed post-approval: ${cacheErr.message}`);

@@ -119,13 +119,11 @@ router.put('/lawn-brackets/:track', async (req, res, next) => {
       const modular = require('../services/pricing-engine');
       if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
     } catch { /* non-fatal */ }
-    // Invalidate v2 cache so admin edits flow to the lookup path immediately.
-    // Session 2 removed this as DEAD_CODE on the premise that v2 was dying;
-    // Session 11 now owns v2 retirement. Restored here to prevent up-to-60s
-    // stale-quote windows on Virginia's hot path.
+    // Invalidate v1 db-bridge cache so admin edits flow to the lookup path
+    // immediately. Prevents up-to-60s stale-quote windows on Virginia's hot path.
     try {
-      const v2 = require('../services/pricing-engine-v2');
-      if (v2.invalidatePricingConfigCache) v2.invalidatePricingConfigCache();
+      const bridge = require('../services/pricing-engine/db-bridge');
+      if (bridge.invalidatePricingConfigCache) bridge.invalidatePricingConfigCache();
     } catch { /* non-fatal */ }
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -282,13 +280,11 @@ router.put('/:key', async (req, res, next) => {
       const modular = require('../services/pricing-engine');
       if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
     } catch { /* non-fatal */ }
-    // Invalidate v2 cache so admin edits flow to the lookup path immediately.
-    // Session 2 removed this as DEAD_CODE on the premise that v2 was dying;
-    // Session 11 now owns v2 retirement. Restored here to prevent up-to-60s
-    // stale-quote windows on Virginia's hot path.
+    // Invalidate v1 db-bridge cache so admin edits flow to the lookup path
+    // immediately. Prevents up-to-60s stale-quote windows on Virginia's hot path.
     try {
-      const v2 = require('../services/pricing-engine-v2');
-      if (v2.invalidatePricingConfigCache) v2.invalidatePricingConfigCache();
+      const bridge = require('../services/pricing-engine/db-bridge');
+      if (bridge.invalidatePricingConfigCache) bridge.invalidatePricingConfigCache();
     } catch { /* non-fatal */ }
 
     // Audit log

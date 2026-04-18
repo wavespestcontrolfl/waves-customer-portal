@@ -220,4 +220,8 @@ function needsSync() {
   return Date.now() - _lastSync > SYNC_INTERVAL;
 }
 
-module.exports = { syncConstantsFromDB, needsSync };
+function invalidatePricingConfigCache() {
+  _lastSync = 0;
+}
+
+module.exports = { syncConstantsFromDB, needsSync, invalidatePricingConfigCache };
