@@ -104,7 +104,7 @@ function TabBar({ tabs, active, onSelect }) {
 // SECTION HEADING HELPER
 // =========================================================================
 function SectionHeading({ children }) {
-  return <div style={{ fontSize: 22, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, letterSpacing: -0.3 }}>{children}</div>;
+  return <div style={{ fontSize: 22, fontWeight: 400, color: B.navy, fontFamily: FONTS.display, letterSpacing: '0.02em' }}>{children}</div>;
 }
 
 // Wave divider SVG — used between sections
@@ -554,7 +554,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
               cursor: 'pointer', padding: '8px 0',
             }}
           >
-            <div style={{ fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0.8 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.8 }}>
               Progress Over Time ({trend.length} visits)
             </div>
             <span style={{ fontSize: 12, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
@@ -820,7 +820,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
         borderRadius: 16, padding: 20, color: '#fff', textAlign: 'center',
       }}>
         <div style={{ fontSize: 32 }}>🏅</div>
-        <div style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 4 }}>{earnedCount} Badges Earned</div>
+        <div style={{ fontSize: 22, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em', marginTop: 4 }}>{earnedCount} Badges Earned</div>
         <div style={{ fontSize: 13, color: B.blueLight, marginTop: 4 }}>out of {badges.length} total</div>
         <div style={{
           marginTop: 12, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.15)',
@@ -1828,7 +1828,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <span style={{ fontSize: 26 }}>{isToday ? '🔧' : isTomorrow ? '⏰' : '📅'}</span>
                 <div>
-                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, opacity: 0.85, fontFamily: FONTS.heading }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, opacity: 0.85, fontFamily: FONTS.ui }}>
                     {isToday ? "Today's Service" : isTomorrow ? 'Tomorrow' : 'Your Next Visit'}
                   </div>
                   <div style={{ fontSize: 18, fontWeight: 800, fontFamily: FONTS.heading }}>
@@ -5626,7 +5626,7 @@ function MyPlanTab({ customer }) {
       }}>
         <div style={{ position: 'absolute', top: -30, right: -30, fontSize: 120, opacity: 0.1 }}>🛡️</div>
         <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.5, opacity: 0.8 }}>Your Plan</div>
-        <div style={{ fontSize: 32, fontWeight: 900, fontFamily: FONTS.heading, marginTop: 4 }}>
+        <div style={{ fontSize: 32, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em', marginTop: 4 }}>
           {tierName} WaveGuard
         </div>
 
@@ -6780,7 +6780,7 @@ function ReferTab({ customer, onSwitchTab }) {
         position: 'relative', overflow: 'hidden',
       }}>
         <div style={{ fontSize: 40, marginBottom: 8 }}>🎁</div>
-        <div style={{ fontSize: 28, fontWeight: 800, fontFamily: FONTS.heading }}>Give $25, Get $25</div>
+        <div style={{ fontSize: 28, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em' }}>Give $25, Get $25</div>
         <div style={{ fontSize: 14, opacity: 0.85, marginTop: 8, lineHeight: 1.6 }}>
           Refer anyone in Southwest Florida to Waves Pest Control. When they sign up for any WaveGuard plan, you both get a <strong>$25 credit</strong> on your next bill.
         </div>
