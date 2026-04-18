@@ -135,9 +135,6 @@ export default function QuotePage() {
   const sCard = { background: BRAND.warmWhite, borderRadius: 16, padding: 28, boxShadow: '0 4px 20px rgba(27,44,91,0.08)', border: `1px solid ${BRAND.gray200}` };
   const sLabel = { display: 'block', fontSize: 14, fontWeight: 600, color: BRAND.gray800, marginBottom: 6 };
   const sInput = { width: '100%', padding: '12px 14px', border: `1.5px solid ${BRAND.gray300}`, borderRadius: 10, fontSize: 16, fontFamily: 'inherit', boxSizing: 'border-box', background: BRAND.warmWhite };
-  // Primary CTAs use <Button variant="primary"> (gold pill). sBtnGhost remains
-  // for subdued back/secondary actions (teal outline — no matching Button variant).
-  const sBtnGhost = { padding: '14px 24px', background: 'transparent', color: BRAND.teal, border: `1.5px solid ${BRAND.teal}`, borderRadius: 9999, fontSize: 16, fontWeight: 600, letterSpacing: '0.02em', cursor: 'pointer', fontFamily: 'inherit', transition: 'background-color 150ms cubic-bezier(0.4,0,0.2,1)' };
   const sChip = (on) => ({ padding: '14px 18px', borderRadius: 10, border: `2px solid ${on ? BRAND.teal : BRAND.gray300}`, background: on ? BRAND.tealLight : BRAND.warmWhite, cursor: 'pointer', fontSize: 15, fontWeight: on ? 700 : 500, color: on ? BRAND.navy : BRAND.gray800, textAlign: 'left', display: 'block', width: '100%' });
 
   const totalSteps = 4;
@@ -216,7 +213,7 @@ export default function QuotePage() {
               )}
 
               <div style={{ marginTop: 24, display: 'flex', justifyContent: 'space-between' }}>
-                <button style={sBtnGhost} onClick={() => setStep(1)}>Back</button>
+                <Button variant="secondary" onClick={() => setStep(1)} style={{ fontSize: 16, padding: '14px 24px' }}>Back</Button>
                 <Button variant="primary" disabled={!svcPest && !svcLawn} onClick={() => setStep(3)} style={{ fontSize: 16 }}>Continue</Button>
               </div>
             </div>
@@ -238,7 +235,7 @@ export default function QuotePage() {
               )}
 
               <div style={{ marginTop: 24, display: 'flex', justifyContent: 'space-between' }}>
-                <button style={sBtnGhost} onClick={() => setStep(2)}>Back</button>
+                <Button variant="secondary" onClick={() => setStep(2)} style={{ fontSize: 16, padding: '14px 24px' }}>Back</Button>
                 <Button variant="primary" disabled={!homeSqFt || Number(homeSqFt) < 500} onClick={() => setStep(4)} style={{ fontSize: 16 }}>Continue</Button>
               </div>
             </div>
@@ -271,7 +268,7 @@ export default function QuotePage() {
               {error && <div style={{ marginTop: 16, padding: 12, background: '#FEE2E2', color: BRAND.coral, borderRadius: 8, fontSize: 14 }}>{error}</div>}
 
               <div style={{ marginTop: 24, display: 'flex', justifyContent: 'space-between' }}>
-                <button style={sBtnGhost} onClick={() => setStep(3)} disabled={loading}>Back</button>
+                <Button variant="secondary" onClick={() => setStep(3)} disabled={loading} style={{ fontSize: 16, padding: '14px 24px' }}>Back</Button>
                 <Button variant="primary" onClick={submit} disabled={loading} style={{ fontSize: 16 }}>{loading ? 'Calculating…' : 'Get my quote'}</Button>
               </div>
             </div>
@@ -292,7 +289,7 @@ export default function QuotePage() {
 
               <div style={{ marginTop: 24, display: 'grid', gap: 12 }}>
                 <Button variant="primary" as="a" href="tel:+19413187612" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', display: 'flex' }}>Call (941) 318-7612</Button>
-                <button style={sBtnGhost} onClick={() => { setStep(1); setResult(null); setError(''); }}>Start a new quote</button>
+                <Button variant="secondary" onClick={() => { setStep(1); setResult(null); setError(''); }} style={{ fontSize: 16, padding: '14px 24px' }}>Start a new quote</Button>
               </div>
             </div>
           )}

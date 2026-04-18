@@ -65,20 +65,21 @@
   background: #FFF176;
 }
 
-/* SECONDARY — navy fill, white text (pairs with gold primary) */
+/* SECONDARY — teal 1.5px outline, teal text (ghost pill; pairs with gold primary) */
 .btn-secondary[data-surface="customer"],
 .btn-secondary:not([data-surface]) {
-  background: #1B2C5B;
-  color: #FFFFFF;
+  background: transparent;
+  color: #009CDE;
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
   padding: 12px 20px;
   min-height: 44px;
+  border: 1.5px solid #009CDE;
 }
 .btn-secondary[data-surface="customer"]:hover:not(:disabled),
 .btn-secondary:not([data-surface]):hover:not(:disabled) {
-  background: #04395E;
+  background: #E3F5FD;
 }
 
 /* TERTIARY — text link on brand blue */
