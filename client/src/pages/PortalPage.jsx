@@ -3316,7 +3316,7 @@ function BillingTab({ customer }) {
   const bannerConfig = {
     failed: {
       bg: '#FFEBEE', border: '#FFCDD2', iconBg: B.red,
-      icon: '!', titleColor: '#C62828', subtitleColor: '#D32F2F',
+      icon: '!', titleColor: B.red, subtitleColor: '#D32F2F',
     },
     expiring: {
       bg: '#FFF8E1', border: '#FFE082', iconBg: B.orange,
@@ -3596,7 +3596,7 @@ function BillingTab({ customer }) {
         )}
 
         {stripeError && !showAddCard && (
-          <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: '#C62828', marginTop: 8 }}>
+          <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: B.red, marginTop: 8 }}>
             {stripeError}
           </div>
         )}
@@ -3621,7 +3621,7 @@ function BillingTab({ customer }) {
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
             {stripeError && (
-              <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: '#C62828', marginBottom: 12 }}>
+              <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: B.red, marginBottom: 12 }}>
                 {stripeError}
               </div>
             )}
@@ -3631,7 +3631,7 @@ function BillingTab({ customer }) {
               color: stripeReady ? '#fff' : B.grayMid,
               opacity: stripeLoading ? 0.6 : 1,
             }}>{stripeLoading ? 'Saving...' : 'Save Card'}</button>
-            <div style={{ fontSize: 11, color: '#90A4AE', marginTop: 10, textAlign: 'center' }}>
+            <div style={{ fontSize: 11, color: B.textCaption, marginTop: 10, textAlign: 'center' }}>
               Secured by Stripe. We never store your card details directly.
             </div>
           </div>
@@ -5123,7 +5123,7 @@ function ContentCard({ post, large }) {
               background: `${srcColor}18`, color: srcColor,
             }}>{post.sourceName}</span>
             {pubDate && !isNaN(pubDate) && (
-              <span style={{ fontSize: 10, color: '#90A4AE' }}>
+              <span style={{ fontSize: 10, color: B.textCaption }}>
                 {pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               </span>
             )}
@@ -6436,7 +6436,7 @@ function ServiceTracker() {
       </div>
 
       {/* Chevron tracker bar */}
-      <div style={{ background: `linear-gradient(180deg, ${B.blueDark}, #1976D2)`, padding: '12px 8px 18px' }}>
+      <div style={{ background: `linear-gradient(180deg, ${B.blueDark}, ${B.wavesBlue})`, padding: '12px 8px 18px' }}>
         <div style={{ display: 'flex', position: 'relative' }}>
           {STEPS.map((s, i) => {
             const isComplete = i + 1 < step;
@@ -6540,7 +6540,7 @@ function ServiceTracker() {
               )}
             </div>
             {stepTs && (
-              <div style={{ fontSize: 11, color: '#90A4AE', marginTop: 2 }}>
+              <div style={{ fontSize: 11, color: B.textCaption, marginTop: 2 }}>
                 {techName} · {new Date(stepTs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
               </div>
             )}
@@ -6569,7 +6569,7 @@ function ServiceTracker() {
             }}>{techInitials}</div>
             <div>
               <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{techName}</div>
-              <span style={{ display: 'inline-block', fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: B.yellow, color: '#1E1E2B', fontFamily: FONTS.ui, marginTop: 1 }}>{svcType}</span>
+              <span style={{ display: 'inline-block', fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: B.yellow, color: B.blueDeeper, fontFamily: FONTS.ui, marginTop: 1 }}>{svcType}</span>
             </div>
           </div>
 
@@ -6577,7 +6577,7 @@ function ServiceTracker() {
           <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{office.name}</div>
-              <div style={{ fontSize: 9, color: '#90A4AE' }}>Open 24 hrs</div>
+              <div style={{ fontSize: 9, color: B.textCaption }}>Open 24 hrs</div>
             </div>
             <div style={{ display: 'flex', gap: 6 }}>
               <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.yellow, color: B.blueDeeper, textDecoration: 'none' }}>📞 Call</a>
@@ -6651,7 +6651,7 @@ function ServiceTracker() {
                     <div style={{ width: 6, height: 6, borderRadius: '50%', background: B.wavesBlue }} />
                     {i < notes.length - 1 && <div style={{ width: 1.5, flex: 1, background: B.bluePale, marginTop: 1 }} />}
                   </div>
-                  <div><div style={{ fontSize: 11, color: B.navy, fontWeight: 500, lineHeight: 1.3 }}>{n.note}</div><div style={{ fontSize: 9, color: '#90A4AE' }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
+                  <div><div style={{ fontSize: 11, color: B.navy, fontWeight: 500, lineHeight: 1.3 }}>{n.note}</div><div style={{ fontSize: 9, color: B.textCaption }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
                 </div>
               ))}
             </div>
