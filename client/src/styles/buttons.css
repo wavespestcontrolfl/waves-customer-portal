@@ -1,0 +1,256 @@
+/* =========================================================================
+   WAVES BUTTON SYSTEM
+   Paired with <Button /> in ../components/Button.jsx.
+
+   Two surfaces (selected via data-surface attr):
+     - "customer"  → theme-brand PMS tokens, gold-pill primary, Inter 800
+                     Default when data-surface is omitted.
+     - "admin"     → D palette + DM Sans + 6px radius (admin-exclusion rule)
+   ========================================================================= */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform        150ms cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow       150ms cubic-bezier(0.4, 0, 0.2, 1);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* =========================================================================
+   CUSTOMER SURFACE (default)
+   PMS 2925 blue · PMS 2766 navy · PMS 186 red · Gold #FFD700
+   ========================================================================= */
+
+.btn[data-surface="customer"],
+.btn:not([data-surface]) {
+  border-radius: 9999px;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  letter-spacing: 0.02em;
+}
+.btn[data-surface="customer"]:focus-visible,
+.btn:not([data-surface]):focus-visible {
+  outline: 2px solid #009CDE;
+  outline-offset: 2px;
+}
+
+/* PRIMARY — gold pill, navy text (hero CTAs, the loudest button) */
+.btn-primary[data-surface="customer"],
+.btn-primary:not([data-surface]) {
+  background: #FFD700;
+  color: #1B2C5B;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 14px 24px;
+  min-height: 48px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+}
+.btn-primary[data-surface="customer"]:hover:not(:disabled),
+.btn-primary:not([data-surface]):hover:not(:disabled) {
+  background: #FFF176;
+}
+
+/* SECONDARY — navy fill, white text (pairs with gold primary) */
+.btn-secondary[data-surface="customer"],
+.btn-secondary:not([data-surface]) {
+  background: #1B2C5B;
+  color: #FFFFFF;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 12px 20px;
+  min-height: 44px;
+}
+.btn-secondary[data-surface="customer"]:hover:not(:disabled),
+.btn-secondary:not([data-surface]):hover:not(:disabled) {
+  background: #04395E;
+}
+
+/* TERTIARY — text link on brand blue */
+.btn-tertiary[data-surface="customer"],
+.btn-tertiary:not([data-surface]) {
+  background: transparent;
+  color: #009CDE;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 8px 0;
+  min-height: 44px;
+}
+.btn-tertiary[data-surface="customer"]:hover:not(:disabled),
+.btn-tertiary:not([data-surface]):hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+/* NAV — compact gold pill for headers/toolbars */
+.btn-nav[data-surface="customer"],
+.btn-nav:not([data-surface]) {
+  background: #FFD700;
+  color: #1B2C5B;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 10px 16px;
+  min-height: 40px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.btn-nav[data-surface="customer"]:hover:not(:disabled),
+.btn-nav:not([data-surface]):hover:not(:disabled) {
+  background: #FFF176;
+}
+
+/* UTILITY — navy outline chip */
+.btn-utility[data-surface="customer"],
+.btn-utility:not([data-surface]) {
+  background: transparent;
+  color: #1B2C5B;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 8px 12px;
+  min-height: 36px;
+  border: 1.5px solid #1B2C5B;
+}
+.btn-utility[data-surface="customer"]:hover:not(:disabled),
+.btn-utility:not([data-surface]):hover:not(:disabled) {
+  background: #E3F5FD;
+}
+
+/* Customer surface — tablet (640px+) */
+@media (min-width: 640px) {
+  .btn-primary[data-surface="customer"],
+  .btn-primary:not([data-surface]) { padding: 14px 28px; }
+
+  .btn-secondary[data-surface="customer"],
+  .btn-secondary:not([data-surface]) { padding: 12px 24px; }
+
+  .btn-nav[data-surface="customer"],
+  .btn-nav:not([data-surface]) {
+    font-size: 14px;
+    padding: 10px 18px;
+  }
+}
+
+/* Customer surface — desktop (1024px+) */
+@media (min-width: 1024px) {
+  .btn-primary[data-surface="customer"],
+  .btn-primary:not([data-surface]) { padding: 14px 32px; }
+
+  .btn-secondary[data-surface="customer"],
+  .btn-secondary:not([data-surface]) { padding: 12px 26px; }
+}
+
+/* =========================================================================
+   ADMIN SURFACE
+   D palette + DM Sans + 6px radius (per admin-exclusion rule).
+   No gold pills here — admin is utilitarian, not marketing.
+   ========================================================================= */
+
+.btn[data-surface="admin"] {
+  border-radius: 6px;
+  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+  letter-spacing: 0;
+}
+.btn[data-surface="admin"]:focus-visible {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 2px;
+}
+
+/* PRIMARY — D.teal fill */
+.btn-primary[data-surface="admin"] {
+  background: #0ea5e9;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 10px 16px;
+  min-height: 40px;
+}
+.btn-primary[data-surface="admin"]:hover:not(:disabled) {
+  background: #0284c7;
+}
+
+/* SECONDARY — teal outline */
+.btn-secondary[data-surface="admin"] {
+  background: transparent;
+  color: #0ea5e9;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 10px 16px;
+  min-height: 40px;
+  border: 1px solid #0ea5e9;
+}
+.btn-secondary[data-surface="admin"]:hover:not(:disabled) {
+  background: rgba(14, 165, 233, 0.1);
+}
+
+/* TERTIARY — text link */
+.btn-tertiary[data-surface="admin"] {
+  background: transparent;
+  color: #0ea5e9;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
+  padding: 8px 0;
+  min-height: 36px;
+}
+.btn-tertiary[data-surface="admin"]:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+/* NAV — compact primary */
+.btn-nav[data-surface="admin"] {
+  background: #0ea5e9;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 8px 12px;
+  min-height: 36px;
+}
+.btn-nav[data-surface="admin"]:hover:not(:disabled) {
+  background: #0284c7;
+}
+
+/* UTILITY — muted outline chip for dark-card bg */
+.btn-utility[data-surface="admin"] {
+  background: transparent;
+  color: #e2e8f0;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 6px 10px;
+  min-height: 32px;
+  border: 1px solid #334155;
+}
+.btn-utility[data-surface="admin"]:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: #0ea5e9;
+}
+
+/* =========================================================================
+   SHARED MODIFIERS
+   ========================================================================= */
+
+@media (max-width: 639px) {
+  .btn-block-mobile {
+    width: 100%;
+    display: flex;
+  }
+}
