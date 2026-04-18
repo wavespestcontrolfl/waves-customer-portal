@@ -56,7 +56,7 @@ async function transcribeWithGemini(mp3Url) {
     logger.info(`[call-proc] Downloaded ${Math.round(audioBase64.length / 1024)}KB audio`);
 
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -64,9 +64,16 @@ async function transcribeWithGemini(mp3Url) {
           contents: [{
             parts: [
               { inlineData: { mimeType: 'audio/mpeg', data: audioBase64 } },
-              { text: 'Transcribe this phone call recording for Waves Pest Control. Output the full transcription with speaker labels (Caller/Agent) where possible. No commentary, just the transcript.' },
+              { text: `Transcribe this phone call recording for Waves Pest Control (pest control + lawn care, SW Florida).
+
+Rules:
+- Label every turn "Agent:" or "Caller:" on its own line.
+- Transcribe verbatim — preserve fillers ("um", "uh"), numbers, addresses, phone numbers, and proper nouns exactly as spoken.
+- If audio is silent, unintelligible, or only voicemail tones, output exactly: [VOICEMAIL] or [NO SPEECH].
+- Do NOT summarize, translate, or add commentary. Output the transcript only, nothing before or after.` },
             ],
           }],
+          generationConfig: { temperature: 0 },
         }),
       }
     );
@@ -226,11 +233,10 @@ const CallRecordingProcessor = {
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
 
-    // Step 1: Get or create transcription
-    let transcription = call.transcription;
+    // Step 1: Transcribe — Gemini is the source of truth. Twilio's built-in is fallback only.
+    let transcription = null;
 
-    if (!transcription && call.recording_url) {
-      // Try Gemini transcription
+    if (call.recording_url) {
       transcription = await transcribeWithGemini(call.recording_url);
       if (transcription) {
         await db('call_log').where({ id: call.id }).update({
@@ -242,12 +248,15 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Fallback: re-check DB in case Twilio built-in transcription arrived after initial load
+    // Fallback: use Twilio's built-in transcription if Gemini failed or no recording URL
     if (!transcription) {
       const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
       if (freshCall?.transcription) {
         transcription = freshCall.transcription;
-        logger.info(`[call-proc] Using Twilio transcription (arrived after initial load): ${transcription.length} chars`);
+        logger.info(`[call-proc] Gemini unavailable — falling back to Twilio transcription: ${transcription.length} chars`);
+      } else if (call.transcription) {
+        transcription = call.transcription;
+        logger.info(`[call-proc] Gemini unavailable — using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
 
