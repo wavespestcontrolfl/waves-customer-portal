@@ -478,8 +478,8 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
           {overallDelta !== 0 && (
             <div style={{
               display: 'inline-block', marginTop: 6, fontSize: 11, fontWeight: 700,
-              color: overallDelta > 0 ? B.green : '#ef4444',
-              background: overallDelta > 0 ? `${B.green}12` : '#ef444412',
+              color: overallDelta > 0 ? B.green : B.red,
+              background: overallDelta > 0 ? `${B.green}12` : `${B.red}12`,
               padding: '3px 8px', borderRadius: 6,
             }}>
               {overallDelta > 0 ? '↑' : '↓'} {Math.abs(overallDelta)} pts since first visit
@@ -512,11 +512,11 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
                 <span style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.body }}>{m.label}</span>
                 <span style={{ fontSize: 12, fontFamily: FONTS.ui }}>
-                  <span style={{ fontWeight: 700, color: current >= 75 ? B.green : current >= 50 ? '#f59e0b' : '#ef4444' }}>{current}%</span>
+                  <span style={{ fontWeight: 700, color: current >= 75 ? B.green : current >= 50 ? B.orange : B.red }}>{current}%</span>
                   {delta !== 0 && (
                     <span style={{
                       fontSize: 10, marginLeft: 6, fontWeight: 700,
-                      color: delta > 0 ? B.green : '#ef4444',
+                      color: delta > 0 ? B.green : B.red,
                     }}>
                       {delta > 0 ? '+' : ''}{delta}
                     </span>
@@ -718,8 +718,8 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
           {seasonalContext.pressureSignals.filter(s => s.level === 'high' || s.level === 'regulatory').slice(0, 3).map((s, i) => (
             <span key={i} style={{
               fontSize: 10, padding: '3px 8px', borderRadius: 6,
-              background: s.level === 'regulatory' ? '#ef444415' : `${B.amber || '#f59e0b'}15`,
-              color: s.level === 'regulatory' ? '#ef4444' : '#f59e0b',
+              background: s.level === 'regulatory' ? `${B.red}15` : `${B.orange}15`,
+              color: s.level === 'regulatory' ? B.red : B.orange,
               fontWeight: 600,
             }}>
               {s.type.replace(/_/g, ' ')}
@@ -1127,9 +1127,9 @@ function PromotionCards() {
   if (!promoData.promotions?.length) return null;
 
   const urgencyConfig = {
-    peak: { badge: '🔥 Peak Season', color: B.orange, bg: '#FFF3E0', borderColor: B.orange },
-    high: { badge: '📈 Rising', color: B.orange, bg: '#FFF3E0', borderColor: B.orange },
-    moderate: { badge: '📋 Recommended', color: B.teal, bg: '#E0F7FA', borderColor: B.teal },
+    peak: { badge: '🔥 Peak Season', color: B.orange, bg: `${B.orange}20`, borderColor: B.orange },
+    high: { badge: '📈 Rising', color: B.orange, bg: `${B.orange}20`, borderColor: B.orange },
+    moderate: { badge: '📋 Recommended', color: B.teal, bg: `${B.bluePale}20`, borderColor: B.teal },
   };
 
   return (
@@ -1225,7 +1225,7 @@ function PromotionCards() {
               ) : (
                 <div style={{
                   marginTop: 12, padding: 13, borderRadius: 50, textAlign: 'center',
-                  background: '#E8F5E9', color: B.green, fontSize: 14, fontWeight: 700,
+                  background: `${B.green}20`, color: B.green, fontSize: 14, fontWeight: 700,
                 }}>
                   ✓ We'll follow up within 24 hours!
                 </div>
@@ -1913,7 +1913,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   }}>✓ Confirm Appointment</button>
                 ) : (
                   <span style={{
-                    padding: '10px 20px', borderRadius: 50, background: '#E8F5E9', flex: 1,
+                    padding: '10px 20px', borderRadius: 50, background: `${B.green}20`, flex: 1,
                     color: B.green, fontSize: 13, fontWeight: 700, textAlign: 'center',
                   }}>✓ Confirmed</span>
                 )}
@@ -1947,7 +1947,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             </div>
             <span style={{
               fontSize: 11, padding: '3px 10px', borderRadius: 6,
-              background: '#E8F5E9', color: B.green, fontWeight: 700,
+              background: `${B.green}20`, color: B.green, fontWeight: 700,
             }}>Completed</span>
           </div>
           {lastService.notes || lastService.technician_notes ? (
@@ -2154,7 +2154,7 @@ function ServicesTab() {
 
   const statusBadge = (status) => {
     const styles = {
-      Completed: { bg: '#E8F5E9', color: B.green },
+      Completed: { bg: `${B.green}20`, color: B.green },
       Callback: { bg: B.blueSurface, color: B.wavesBlue },
       Rescheduled: { bg: B.offWhite, color: B.grayMid },
     };
@@ -2499,7 +2499,7 @@ function ServicesTab() {
                         )}
 
                         {/* Precautions */}
-                        <div style={{ padding: '12px 18px', background: '#FFF8E1', borderBottom: `1px solid ${B.grayLight}` }}>
+                        <div style={{ padding: '12px 18px', background: `${B.yellow}20`, borderBottom: `1px solid ${B.grayLight}` }}>
                           <div style={{ fontSize: 11, color: '#F57F17', lineHeight: 1.5 }}>
                             {'⚠️'} Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 318-7612.
                           </div>
@@ -2770,7 +2770,7 @@ function ScheduleTab({ customer }) {
         <span style={{
           flex: compact ? undefined : 1,
           padding: compact ? '6px 14px' : '9px 18px',
-          borderRadius: 50, background: '#E8F5E9',
+          borderRadius: 50, background: `${B.green}20`,
           color: B.green, fontSize: 12, fontWeight: 700, textAlign: 'center',
           display: 'inline-flex', alignItems: 'center', gap: 4,
         }}>
@@ -3315,15 +3315,15 @@ function BillingTab({ customer }) {
   const bannerState = lastPaymentFailed ? 'failed' : cardExpiringSoon ? 'expiring' : 'active';
   const bannerConfig = {
     failed: {
-      bg: '#FFEBEE', border: '#FFCDD2', iconBg: B.red,
+      bg: `${B.red}20`, border: `${B.red}33`, iconBg: B.red,
       icon: '!', titleColor: B.red, subtitleColor: '#D32F2F',
     },
     expiring: {
-      bg: '#FFF8E1', border: '#FFE082', iconBg: B.orange,
+      bg: `${B.orange}20`, border: `${B.orange}33`, iconBg: B.orange,
       icon: '!', titleColor: '#E65100', subtitleColor: '#F57C00',
     },
     active: {
-      bg: '#E8F5E9', border: '#C8E6C9', iconBg: B.green,
+      bg: `${B.green}20`, border: `${B.green}33`, iconBg: B.green,
       icon: '\u2713', titleColor: '#2E7D32', subtitleColor: '#558B2F',
     },
   }[bannerState];
@@ -3331,10 +3331,10 @@ function BillingTab({ customer }) {
   // Payment status badge helper
   const statusBadge = (status) => {
     const map = {
-      paid: { bg: '#E8F5E9', color: B.green },
-      upcoming: { bg: '#FFF8E1', color: B.orange },
+      paid: { bg: `${B.green}20`, color: B.green },
+      upcoming: { bg: `${B.orange}20`, color: B.orange },
       processing: { bg: B.blueSurface, color: B.wavesBlue },
-      failed: { bg: '#FFEBEE', color: B.red },
+      failed: { bg: `${B.red}20`, color: B.red },
       refunded: { bg: B.offWhite, color: B.grayMid },
     };
     const s = map[status] || map.paid;
@@ -3539,7 +3539,7 @@ function BillingTab({ customer }) {
           <span style={{
             fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
             padding: '4px 12px', borderRadius: 20,
-            background: hasAutoPay ? '#E8F5E9' : '#FFF3E0',
+            background: hasAutoPay ? `${B.green}20` : `${B.orange}20`,
             color: hasAutoPay ? B.green : B.orange,
           }}>{hasAutoPay ? 'Enrolled' : 'Not Enrolled'}</span>
         </div>
@@ -3596,7 +3596,7 @@ function BillingTab({ customer }) {
         )}
 
         {stripeError && !showAddCard && (
-          <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: B.red, marginTop: 8 }}>
+          <div style={{ padding: 10, background: `${B.red}20`, borderRadius: 8, fontSize: 13, color: B.red, marginTop: 8 }}>
             {stripeError}
           </div>
         )}
@@ -3621,7 +3621,7 @@ function BillingTab({ customer }) {
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
             {stripeError && (
-              <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: B.red, marginBottom: 12 }}>
+              <div style={{ padding: 10, background: `${B.red}20`, borderRadius: 8, fontSize: 13, color: B.red, marginBottom: 12 }}>
                 {stripeError}
               </div>
             )}
@@ -3959,7 +3959,7 @@ function RequestTab({ customer, onSwitchTab }) {
 
       {submitted && (
         <div style={{
-          padding: 18, borderRadius: 14, background: '#E8F5E9',
+          padding: 18, borderRadius: 14, background: `${B.green}20`,
           border: `1.5px solid ${B.green}33`,
         }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: B.green }}>Request submitted!</div>
@@ -4222,7 +4222,7 @@ function RequestTab({ customer, onSwitchTab }) {
                   <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{r.subject}</div>
                   <span style={{
                     fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '3px 8px', borderRadius: 20,
-                    background: pipeIdx >= 3 ? '#E8F5E9' : pipeIdx >= 2 ? '#E0F7FA' : pipeIdx >= 1 ? '#FFF3E0' : B.bluePale,
+                    background: pipeIdx >= 3 ? `${B.green}20` : pipeIdx >= 2 ? `${B.bluePale}20` : pipeIdx >= 1 ? `${B.orange}20` : B.bluePale,
                     color: pipeIdx >= 3 ? B.green : pipeIdx >= 2 ? B.teal : pipeIdx >= 1 ? B.orange : B.wavesBlue,
                   }}>{PIPELINE_STEPS[pipeIdx]?.label}</span>
                 </div>
@@ -5757,7 +5757,7 @@ function MyPlanTab({ customer }) {
                     }}>{p}</span>
                   ))}
                 </div>
-                <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: '#E8F5E9', fontSize: 12, color: B.green, fontWeight: 600 }}>
+                <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: `${B.green}20`, fontSize: 12, color: B.green, fontWeight: 600 }}>
                   💰 You save ${annualSavingsForService.toFixed(2)}/year on {svc.name} with your {tierName} discount
                 </div>
 
@@ -5908,7 +5908,7 @@ function MyPlanTab({ customer }) {
               {addonRequested[addon.id] ? (
                 <div style={{
                   marginTop: 12, padding: '10px 18px', borderRadius: 12, fontSize: 13,
-                  background: '#E8F5E9', color: B.green, fontWeight: 600,
+                  background: `${B.green}20`, color: B.green, fontWeight: 600,
                   display: 'flex', alignItems: 'center', gap: 8,
                 }}>
                   <span style={{ fontSize: 16 }}>✓</span>
@@ -5983,7 +5983,7 @@ function MyPlanTab({ customer }) {
                 </div>
 
                 {isCurrent ? (
-                  <div style={{ marginTop: 10, fontSize: 11, fontWeight: 700, color: B.green, background: '#E8F5E9', padding: '4px 10px', borderRadius: 20 }}>Current Plan</div>
+                  <div style={{ marginTop: 10, fontSize: 11, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '4px 10px', borderRadius: 20 }}>Current Plan</div>
                 ) : i > tierIdx ? (
                   upgradeRequested[tn] ? (
                     <div style={{ marginTop: 10, fontSize: 11, fontWeight: 600, color: B.green, padding: '4px 10px' }}>
@@ -6232,7 +6232,7 @@ function MyPlanTab({ customer }) {
         )}
 
         {pauseSubmitted && (
-          <div style={{ padding: '12px 18px', borderRadius: 12, background: '#E8F5E9', fontSize: 13, color: B.green, fontWeight: 600 }}>
+          <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.green}20`, fontSize: 13, color: B.green, fontWeight: 600 }}>
             ✓ Pause request submitted — we'll confirm within 1 business day.
           </div>
         )}
@@ -6510,7 +6510,7 @@ function ServiceTracker() {
         {/* Status */}
         <div style={{
           padding: '10px 12px', borderRadius: 10,
-          background: step === 7 ? '#E8F5E9' : B.white,
+          background: step === 7 ? `${B.green}20` : B.white,
           border: `1px solid ${step === 7 ? B.green + '33' : B.bluePale}`,
           boxShadow: '0 1px 4px rgba(0,0,0,0.03)',
           display: 'flex', alignItems: 'flex-start', gap: 10,
@@ -6659,7 +6659,7 @@ function ServiceTracker() {
 
           {/* Completion summary */}
           {step === 7 && summary && (
-            <div style={{ padding: '8px 12px', borderRadius: 10, background: '#E8F5E9', border: `1px solid ${B.green}33` }}>
+            <div style={{ padding: '8px 12px', borderRadius: 10, background: `${B.green}20`, border: `1px solid ${B.green}33` }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: B.green, marginBottom: 4 }}>Service Summary</div>
               {summary.productsApplied?.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
@@ -6763,8 +6763,8 @@ function ReferTab({ customer, onSwitchTab }) {
   const statusConfig = {
     pending: { label: 'Invited', color: B.grayMid, bg: B.grayLight },
     contacted: { label: 'Contacted', color: B.wavesBlue, bg: B.bluePale },
-    signed_up: { label: 'Signed Up', color: B.orange, bg: '#FFF3E0' },
-    credited: { label: 'Credit Applied', color: B.green, bg: '#E8F5E9' },
+    signed_up: { label: 'Signed Up', color: B.orange, bg: `${B.orange}20` },
+    credited: { label: 'Credit Applied', color: B.green, bg: `${B.green}20` },
   };
 
   const STATUS_ORDER = ['pending', 'contacted', 'signed_up', 'credited'];
@@ -6897,7 +6897,7 @@ function ReferTab({ customer, onSwitchTab }) {
 
         {submitted && (
           <div style={{
-            padding: 14, borderRadius: 12, background: '#E8F5E9', marginBottom: 14,
+            padding: 14, borderRadius: 12, background: `${B.green}20`, marginBottom: 14,
             fontSize: 13, fontWeight: 600, color: B.green,
           }}>Invite sent! We texted them your referral.</div>
         )}
@@ -7144,10 +7144,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
     const now = new Date();
     const daysUntil = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
 
-    if (daysUntil < 0) return { label: 'Expired', color: B.red, bg: '#FFEBEE' };
-    if (daysUntil <= 30) return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.red, bg: '#FFEBEE' };
-    if (daysUntil <= 60) return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.orange, bg: '#FFF3E0' };
-    return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.green, bg: '#E8F5E9' };
+    if (daysUntil < 0) return { label: 'Expired', color: B.red, bg: `${B.red}20` };
+    if (daysUntil <= 30) return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.red, bg: `${B.red}20` };
+    if (daysUntil <= 60) return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.orange, bg: `${B.orange}20` };
+    return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.green, bg: `${B.green}20` };
   };
 
   const formatDate = (date) => {
@@ -7786,9 +7786,9 @@ function MyRequestsCard() {
 
   const statusConfig = {
     new: { label: 'New', color: B.wavesBlue, bg: B.bluePale },
-    acknowledged: { label: 'Reviewed', color: B.orange, bg: '#FFF3E0' },
-    scheduled: { label: 'Scheduled', color: B.teal, bg: '#E0F7FA' },
-    resolved: { label: 'Resolved', color: B.green, bg: '#E8F5E9' },
+    acknowledged: { label: 'Reviewed', color: B.orange, bg: `${B.orange}20` },
+    scheduled: { label: 'Scheduled', color: B.teal, bg: `${B.bluePale}20` },
+    resolved: { label: 'Resolved', color: B.green, bg: `${B.green}20` },
   };
 
   const STATUS_ORDER = ['new', 'acknowledged', 'scheduled', 'resolved'];
