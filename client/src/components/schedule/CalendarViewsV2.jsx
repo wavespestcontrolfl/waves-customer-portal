@@ -28,6 +28,21 @@ import {
   useDroppable,
   pointerWithin,
 } from '@dnd-kit/core';
+import RescheduleConfirmModal from './RescheduleConfirmModal';
+
+function formatDayLabel(isoDate) {
+  if (!isoDate) return '';
+  const d = new Date(isoDate + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function minutesToLabelMonth(min) {
+  const h24 = Math.floor(min / 60);
+  const m = min % 60;
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  const ap = h24 < 12 ? 'AM' : 'PM';
+  return m === 0 ? `${h12} ${ap}` : `${h12}:${String(m).padStart(2, '0')} ${ap}`;
+}
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -325,6 +340,7 @@ export function MonthViewV2({ date, onDateClick }) {
   const [loading, setLoading] = useState(true);
   const [optimistic, setOptimistic] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(null);
 
   const yearMonth = date.slice(0, 7); // "2026-04"
 
@@ -342,14 +358,13 @@ export function MonthViewV2({ date, onDateClick }) {
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
-  const onDragEnd = useCallback(async (event) => {
+  const onDragEnd = useCallback((event) => {
     const { active, over } = event;
     if (!over) return;
     const svc = active.data.current?.service;
     const drop = over.data.current;
     if (!svc || !drop?.date) return;
 
-    // Find the day currently containing this svc
     const weeks = (optimistic?.weeks || data?.weeks || []);
     let fromDate = null;
     for (const w of weeks) {
@@ -361,14 +376,12 @@ export function MonthViewV2({ date, onDateClick }) {
     const toDate = drop.date;
     if (!fromDate || fromDate === toDate) return;
 
-    // Build newWindow from current svc.windowStart + duration
     const startMin = parseHHMM(svc.windowStart);
     const dur = svc.duration || 30;
     const newWindow = startMin != null
       ? `${minutesToHHMM(startMin)}-${minutesToHHMM(startMin + dur)}`
       : '08:00-09:00';
 
-    // Optimistic: remove from fromDate, add to toDate
     const source = optimistic || data;
     const nextWeeks = source.weeks.map((w) => w.map((d) => {
       if (d.date === fromDate) {
@@ -382,6 +395,20 @@ export function MonthViewV2({ date, onDateClick }) {
       return d;
     }));
     setOptimistic({ ...source, weeks: nextWeeks });
+
+    const timeLabel = startMin != null ? minutesToLabelMonth(startMin) : '';
+    setPending({
+      svc,
+      toDate,
+      newWindow,
+      fromLabel: `${formatDayLabel(fromDate)}${timeLabel ? ' · ' + timeLabel : ''}`,
+      toLabel: `${formatDayLabel(toDate)}${timeLabel ? ' · ' + timeLabel : ''}`,
+    });
+  }, [data, optimistic]);
+
+  const commitReschedule = useCallback(async ({ notificationType }) => {
+    if (!pending) return;
+    const { svc, toDate, newWindow } = pending;
     setBusy(true);
     try {
       await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
@@ -391,17 +418,24 @@ export function MonthViewV2({ date, onDateClick }) {
           newWindow,
           reasonCode: 'dispatch_drag',
           reasonText: 'Rescheduled via drag-and-drop on month grid',
-          notifyCustomer: false,
+          notifyCustomer: notificationType === 'sms',
         }),
       });
       await reload();
+      setPending(null);
     } catch (err) {
       alert('Reschedule failed: ' + err.message);
       setOptimistic(null);
+      setPending(null);
     } finally {
       setBusy(false);
     }
-  }, [data, optimistic, reload]);
+  }, [pending, reload]);
+
+  const cancelReschedule = useCallback(() => {
+    setOptimistic(null);
+    setPending(null);
+  }, []);
 
   const viewData = optimistic || data;
 
@@ -487,6 +521,15 @@ export function MonthViewV2({ date, onDateClick }) {
           <div className="mt-2 text-11 text-ink-secondary text-center">Saving…</div>
         )}
       </DndContext>
+
+      <RescheduleConfirmModal
+        open={!!pending}
+        customerName={pending?.svc?.customerName}
+        fromLabel={pending?.fromLabel || ''}
+        toLabel={pending?.toLabel || ''}
+        onConfirm={commitReschedule}
+        onCancel={cancelReschedule}
+      />
 
       {/* Tech workload for the month */}
       {Object.keys(summary.byTech || {}).length > 0 && (

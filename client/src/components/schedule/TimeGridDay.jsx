@@ -16,6 +16,7 @@ import {
   pointerWithin,
 } from '@dnd-kit/core';
 import { Badge, cn } from '../ui';
+import RescheduleConfirmModal from './RescheduleConfirmModal';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -325,6 +326,7 @@ export default function TimeGridDay({
 }) {
   const [optimistic, setOptimistic] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(null);
 
   const allServices = optimistic || services;
 
@@ -364,7 +366,7 @@ export default function TimeGridDay({
     [allServices],
   );
 
-  const onDragEnd = useCallback(async (event) => {
+  const onDragEnd = useCallback((event) => {
     const { active, over } = event;
     if (!over) return;
     const svc = active.data.current?.service;
@@ -396,6 +398,31 @@ export default function TimeGridDay({
         : s,
     );
     setOptimistic(next);
+
+    const fromTechName = fromTech === '__unassigned__'
+      ? null
+      : (technicians.find((t) => t.id === fromTech)?.name || svc.technicianName || null);
+    const toTechName = toTech === '__unassigned__'
+      ? null
+      : (technicians.find((t) => t.id === toTech)?.name || null);
+    setPending({
+      svc,
+      toTech,
+      fromMin,
+      toMin,
+      newWindow,
+      fromLabel: minutesToLabel(fromMin),
+      toLabel: minutesToLabel(toMin),
+      technicianChange: fromTech !== toTech
+        ? { fromName: fromTechName, toName: toTechName }
+        : null,
+    });
+  }, [allServices, technicians]);
+
+  const commitReschedule = useCallback(async ({ notificationType }) => {
+    if (!pending) return;
+    const { svc, toTech, fromMin, toMin, newWindow } = pending;
+    const fromTech = svc.technicianId || '__unassigned__';
     setBusy(true);
     try {
       const calls = [];
@@ -414,20 +441,27 @@ export default function TimeGridDay({
             newWindow,
             reasonCode: 'dispatch_drag',
             reasonText: 'Rescheduled via drag-and-drop on Day grid',
-            notifyCustomer: false,
+            notifyCustomer: notificationType === 'sms',
           }),
         }));
       }
       await Promise.all(calls);
       setOptimistic(null);
+      setPending(null);
       onChange?.();
     } catch (err) {
       alert('Reschedule failed: ' + err.message);
       setOptimistic(null);
+      setPending(null);
     } finally {
       setBusy(false);
     }
-  }, [allServices, date, onChange, technicians]);
+  }, [pending, date, onChange]);
+
+  const cancelReschedule = useCallback(() => {
+    setOptimistic(null);
+    setPending(null);
+  }, []);
 
   if (techList.length === 0) {
     return (
@@ -464,6 +498,15 @@ export default function TimeGridDay({
           style={{ borderTop: '1px solid #E4E4E7' }}
         >Saving…</div>
       )}
+      <RescheduleConfirmModal
+        open={!!pending}
+        customerName={pending?.svc?.customerName}
+        fromLabel={pending ? `${date} · ${pending.fromLabel}` : ''}
+        toLabel={pending ? `${date} · ${pending.toLabel}` : ''}
+        technicianChange={pending?.technicianChange}
+        onConfirm={commitReschedule}
+        onCancel={cancelReschedule}
+      />
     </div>
   );
 }

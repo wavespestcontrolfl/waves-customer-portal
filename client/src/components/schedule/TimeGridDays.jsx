@@ -16,6 +16,7 @@ import {
   pointerWithin,
 } from '@dnd-kit/core';
 import { cn } from '../ui';
+import RescheduleConfirmModal from './RescheduleConfirmModal';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -318,6 +319,7 @@ export default function TimeGridDays({
   const [loading, setLoading] = useState(true);
   const [optimistic, setOptimistic] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(null);
 
   const monday = useMemo(() => startOfWeek(date), [date]);
 
@@ -338,7 +340,7 @@ export default function TimeGridDays({
 
   const today = new Date().toISOString().split('T')[0];
 
-  const onDragEnd = useCallback(async (event) => {
+  const onDragEnd = useCallback((event) => {
     const { active, over } = event;
     if (!over) return;
     const svc = active.data.current?.service;
@@ -356,7 +358,6 @@ export default function TimeGridDays({
     const dur = effectiveDuration(svc);
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
 
-    // Optimistic update: move svc out of fromDate, into toDate at new time
     const updatedSvc = {
       ...svc,
       windowStart: minutesToHHMM(toMin),
@@ -380,6 +381,18 @@ export default function TimeGridDays({
       return d;
     });
     setOptimistic({ ...data, days: nextDays });
+    setPending({
+      svc,
+      toDate,
+      newWindow,
+      fromLabel: `${fromDate} · ${minutesToLabel(fromMin)}`,
+      toLabel: `${toDate} · ${minutesToLabel(toMin)}`,
+    });
+  }, [data]);
+
+  const commitReschedule = useCallback(async ({ notificationType }) => {
+    if (!pending) return;
+    const { svc, toDate, newWindow } = pending;
     setBusy(true);
     try {
       await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
@@ -389,21 +402,27 @@ export default function TimeGridDays({
           newWindow,
           reasonCode: 'dispatch_drag',
           reasonText: 'Rescheduled via drag-and-drop on multi-day grid',
-          notifyCustomer: false,
+          notifyCustomer: notificationType === 'sms',
         }),
       });
-      // Refetch to pick up route_day-snapped date if the API adjusts it
       const j = await adminFetch(`/admin/schedule/week?start=${monday}`);
       setData(j);
       setOptimistic(null);
+      setPending(null);
       onChange?.();
     } catch (err) {
       alert('Reschedule failed: ' + err.message);
       setOptimistic(null);
+      setPending(null);
     } finally {
       setBusy(false);
     }
-  }, [data, monday, onChange]);
+  }, [pending, monday, onChange]);
+
+  const cancelReschedule = useCallback(() => {
+    setOptimistic(null);
+    setPending(null);
+  }, []);
 
   if (loading) {
     return <div className="py-10 text-center text-13 text-ink-secondary">Loading…</div>;
@@ -439,6 +458,14 @@ export default function TimeGridDays({
           style={{ borderTop: '1px solid #E4E4E7' }}
         >Saving…</div>
       )}
+      <RescheduleConfirmModal
+        open={!!pending}
+        customerName={pending?.svc?.customerName}
+        fromLabel={pending?.fromLabel || ''}
+        toLabel={pending?.toLabel || ''}
+        onConfirm={commitReschedule}
+        onCancel={cancelReschedule}
+      />
     </div>
   );
 }
