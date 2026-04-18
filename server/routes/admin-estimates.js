@@ -89,19 +89,27 @@ async function sendEstimateNow(estimate, sendMethod) {
     if (!estimate.customer_phone) {
       channels.sms = { ok: false, error: 'No phone on file' };
     } else {
-      try {
-        const fallback = `Hello ${firstName}! Your Waves estimate is ready: ${viewUrl}\n\nQuestions or requests? Reply to this message. Thank you for considering Waves!`;
-        const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl }, fallback);
-        const result = await TwilioService.sendSMS(estimate.customer_phone, smsBody);
-        if (result && result.success === false) {
-          channels.sms = { ok: false, error: result.error || 'Twilio send failed' };
-          logger.error(`Estimate SMS failed: ${result.error || 'unknown'}`);
-        } else {
-          channels.sms = { ok: true };
+      const digits = String(estimate.customer_phone).replace(/\D/g, '');
+      const normalized = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
+        : digits.length === 10 ? `+1${digits}`
+        : null;
+      if (!normalized) {
+        channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
+      } else {
+        try {
+          const fallback = `Hello ${firstName}! Your Waves estimate is ready: ${viewUrl}\n\nQuestions or requests? Reply to this message. Thank you for considering Waves!`;
+          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl }, fallback);
+          const result = await TwilioService.sendSMS(normalized, smsBody);
+          if (result && result.success === false) {
+            channels.sms = { ok: false, error: result.error || 'Twilio send failed' };
+            logger.error(`Estimate SMS failed: ${result.error || 'unknown'}`);
+          } else {
+            channels.sms = { ok: true };
+          }
+        } catch (e) {
+          logger.error(`Estimate SMS failed: ${e.message}`);
+          channels.sms = { ok: false, error: e.message };
         }
-      } catch (e) {
-        logger.error(`Estimate SMS failed: ${e.message}`);
-        channels.sms = { ok: false, error: e.message };
       }
     }
   }

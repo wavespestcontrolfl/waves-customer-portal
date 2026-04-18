@@ -1148,7 +1148,9 @@ function EstimateToolView() {
               <div style={sPanelTitle}>Send Estimate</div>
               <Field label="Customer Phone Number">
                 <input type="tel" value={form.customerPhone || ''} onChange={async (e) => {
-                  const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+                  let raw = e.target.value.replace(/\D/g, '');
+                  if (raw.length === 11 && raw.startsWith('1')) raw = raw.slice(1);
+                  const digits = raw.slice(0, 10);
                   set('customerPhone', digits);
                   if (digits.length >= 7) {
                     try {
