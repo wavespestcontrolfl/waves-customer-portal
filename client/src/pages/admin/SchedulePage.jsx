@@ -2188,6 +2188,9 @@ const TRACK_SAFETY_RULES = {
   ],
 };
 
+/* Named exports for V2 reuse (ProtocolReferenceTabV2) */
+export { MONTH_NAMES, PRODUCT_DESCRIPTIONS, TRACK_SAFETY_RULES, stripLegacyBoilerplate };
+
 /* Parse product lines and attach descriptions */
 function parseProductLines(text) {
   if (!text) return [];

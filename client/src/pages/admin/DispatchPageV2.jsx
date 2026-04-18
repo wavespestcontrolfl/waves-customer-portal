@@ -4,8 +4,8 @@ import {
   RescheduleModal,
   EditServiceModal,
   ProtocolPanel,
-  ProtocolReferenceTab,
 } from './SchedulePage';
+import ProtocolReferenceTabV2 from './ProtocolReferenceTabV2';
 import { ViewModeSelectorV2, WeekViewV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
@@ -808,8 +808,8 @@ export default function DispatchPageV2() {
         <ScheduleIntelligenceBarV2 date={date} scheduleData={data} onRefresh={() => fetchSchedule(date)} />
       )}
 
-      {/* Non-board tabs — V2 monochrome panels (Match/CSR/Revenue/Insights). ProtocolReferenceTab stays V1 until PR #3d. */}
-      {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTab />}
+      {/* Non-board tabs — V2 monochrome panels (Match/CSR/Revenue/Insights/Protocols). */}
+      {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTabV2 />}
       {viewMode === 'day' && activeTab === 'match' && (
         <Suspense fallback={<div className="py-10 text-center text-13 text-ink-secondary">Loading…</div>}><TechMatchPanel /></Suspense>
       )}
