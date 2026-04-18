@@ -776,7 +776,7 @@ function BadgeRow({ badges, earnedCount, totalCount, onViewAll }) {
             {b.reward && (
               <span style={{
                 position: 'absolute', top: -3, right: -3,
-                fontSize: 10, color: '#DAA520', lineHeight: 1,
+                fontSize: 10, color: B.yellow, lineHeight: 1,
               }}>★</span>
             )}
           </div>
@@ -870,7 +870,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                     {b.reward && (
                       <span style={{
                         position: 'absolute', top: -3, right: -3,
-                        fontSize: 11, color: '#DAA520', lineHeight: 1,
+                        fontSize: 11, color: B.yellow, lineHeight: 1,
                       }}>★</span>
                     )}
                   </div>
@@ -880,7 +880,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}>{b.title}</div>
                   {b.reward && (
-                    <div style={{ fontSize: 8, color: '#DAA520', fontWeight: 700, marginTop: 1 }}>★ Reward</div>
+                    <div style={{ fontSize: 8, color: B.yellow, fontWeight: 700, marginTop: 1 }}>★ Reward</div>
                   )}
                   {b.earned && b.earnedAt && (
                     <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2 }}>
@@ -932,9 +932,9 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                 {selected.reward && (
                   <div style={{
                     marginTop: 10, padding: '8px 12px', borderRadius: 8,
-                    background: '#FFF8E1', border: '1px solid #DAA520',
+                    background: `${B.yellow}20`, border: '1px solid #DAA520',
                   }}>
-                    <div style={{ fontSize: 11, color: '#DAA520', fontWeight: 700 }}>★ Reward unlocked: {selected.reward.description}</div>
+                    <div style={{ fontSize: 11, color: B.yellow, fontWeight: 700 }}>★ Reward unlocked: {selected.reward.description}</div>
                   </div>
                 )}
               </>
@@ -960,9 +960,9 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                 {selected.reward && (
                   <div style={{
                     marginTop: 10, padding: '8px 12px', borderRadius: 8,
-                    background: '#FFF8E1', border: '1px solid #e0d5b0',
+                    background: `${B.yellow}20`, border: `1px solid ${B.yellow}33`,
                   }}>
-                    <div style={{ fontSize: 11, color: '#9e8a4f', fontWeight: 600 }}>★ Unlock reward: {selected.reward.description}</div>
+                    <div style={{ fontSize: 11, color: B.blueDeeper, fontWeight: 600 }}>★ Unlock reward: {selected.reward.description}</div>
                   </div>
                 )}
               </>
@@ -1031,8 +1031,8 @@ function BadgeCelebrationToast({ badges }) {
             position: 'fixed', top: 60 + i * 80, left: '50%', transform: 'translateX(-50%)',
             zIndex: 2000, animation: 'toast-slide-in 0.5s ease-out',
             background: B.white, borderRadius: 16, padding: '12px 20px',
-            boxShadow: isReward ? '0 8px 30px rgba(218,165,32,0.3)' : '0 8px 30px rgba(0,0,0,0.15)',
-            border: `2px solid ${isReward ? '#DAA520' : B.yellow}`,
+            boxShadow: isReward ? '0 8px 30px rgba(255,215,0,0.3)' : '0 8px 30px rgba(0,0,0,0.15)',
+            border: `2px solid ${isReward ? B.yellow : B.yellow}`,
             display: 'flex', alignItems: 'center', gap: 12, minWidth: 280,
             overflow: 'visible',
           }}>
@@ -1046,16 +1046,16 @@ function BadgeCelebrationToast({ badges }) {
             ))}
             <div style={{
               width: 36, height: 36, borderRadius: '50%',
-              background: isReward ? '#FFF8E1' : `${B.yellow}20`, display: 'flex', alignItems: 'center',
+              background: isReward ? `${B.yellow}20` : `${B.yellow}20`, display: 'flex', alignItems: 'center',
               justifyContent: 'center', fontSize: 20, flexShrink: 0,
             }}>{b.icon}</div>
             <div>
-              <div style={{ fontSize: 11, color: isReward ? '#DAA520' : B.yellow, fontWeight: 700 }}>
+              <div style={{ fontSize: 11, color: isReward ? B.yellow : B.yellow, fontWeight: 700 }}>
                 {isReward ? '★ Reward Badge Earned!' : '🎉 New Badge Earned!'}
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{b.title}</div>
               {isReward && b.reward && (
-                <div style={{ fontSize: 11, color: '#9e8a4f', marginTop: 1 }}>{b.reward.description}</div>
+                <div style={{ fontSize: 11, color: B.blueDeeper, marginTop: 1 }}>{b.reward.description}</div>
               )}
             </div>
           </div>
