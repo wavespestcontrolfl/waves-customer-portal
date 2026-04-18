@@ -3,7 +3,7 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, ZONES, URGENCY } = require('./constants');
+const { GLOBAL, WAVEGUARD, ZONES, URGENCY, SPECIALTY } = require('./constants');
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes, zoneMultiplier } = require('./modifiers');
 const {
@@ -222,6 +222,17 @@ function generateEstimate(input) {
   }
   if (services.boraCare) {
     const result = priceBoraCare(services.boraCare.atticSqFt || property.footprint);
+    lineItems.push(result);
+  }
+  if (services.preSlab) {
+    const result = pricePreSlabTermidor(
+      services.preSlab.slabSqFt || property.footprint,
+      services.preSlab.volumeDiscount || 'none'
+    );
+    if (services.preSlab.warranty === 'EXTENDED') {
+      result.price += SPECIALTY.preSlabTermidor.warrantyExtended;
+      result.warrantyAdd = SPECIALTY.preSlabTermidor.warrantyExtended;
+    }
     lineItems.push(result);
   }
   if (services.bedBug) {
