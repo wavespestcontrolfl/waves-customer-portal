@@ -36,7 +36,7 @@ import InstallPrompt from './components/InstallPrompt';
 import AdminDashboardGate from './pages/admin/DashboardGate';
 import EstimateViewPage from './pages/EstimateViewPage';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
-import AdminSchedulePage from './pages/admin/SchedulePage';
+import AdminDispatchGate from './pages/admin/DispatchGate';
 import AdminInventoryPage from './pages/admin/InventoryPage';
 import AdminRevenuePage from './pages/admin/RevenuePage';
 import AdminCommunicationsPage from './pages/admin/CommunicationsPage';
@@ -178,7 +178,7 @@ export default function App() {
             <Route path="dashboard" element={<AdminDashboardGate />} />
             <Route path="customers" element={<AdminCustomersPage />} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
-            <Route path="schedule" element={<AdminSchedulePage />} />
+            <Route path="schedule" element={<AdminDispatchGate />} />
             <Route path="dispatch" element={<Navigate to="/admin/schedule" replace />} />
             <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
             <Route path="communications" element={<AdminCommunicationsPage />} />

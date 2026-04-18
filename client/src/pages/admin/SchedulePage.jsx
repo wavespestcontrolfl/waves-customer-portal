@@ -868,7 +868,7 @@ const EDIT_FALLBACK_SERVICES = [
   ]},
 ];
 
-function EditServiceModal({ service, technicians, onClose, onSaved }) {
+export function EditServiceModal({ service, technicians, onClose, onSaved }) {
   const [form, setForm] = useState({
     scheduledDate: service.scheduledDate ? String(service.scheduledDate).split('T')[0] : '',
     windowStart: service.windowStart || '',
@@ -1216,7 +1216,7 @@ function EditServiceModal({ service, technicians, onClose, onSaved }) {
 // =========================================================================
 // PROTOCOL PANEL — shows all 5 protocol layers for a service
 // =========================================================================
-function ProtocolPanel({ service, onClose }) {
+export function ProtocolPanel({ service, onClose }) {
   const [photos, setPhotos] = useState([]);
   const [seasonal, setSeasonal] = useState([]);
   const [scripts, setScripts] = useState([]);
@@ -1432,7 +1432,7 @@ function ProtocolPanel({ service, onClose }) {
   );
 }
 
-function RescheduleModal({ service, onClose, onRescheduled }) {
+export function RescheduleModal({ service, onClose, onRescheduled }) {
   const [options, setOptions] = useState([]);
   const [reason, setReason] = useState('customer_request');
   const [notes, setNotes] = useState('');
@@ -1582,7 +1582,7 @@ function RescheduleModal({ service, onClose, onRescheduled }) {
 
 /* ── Completion Panel (slide-over) ────────────────────── */
 
-function CompletionPanel({ service, products, onClose, onSubmit }) {
+export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [notes, setNotes] = useState('');
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState('');
@@ -2355,7 +2355,7 @@ function CurrentVisitCard({ visit, trackName }) {
   );
 }
 
-function ProtocolReferenceTab() {
+export function ProtocolReferenceTab() {
   const [programs, setPrograms] = useState(null);
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [trackData, setTrackData] = useState(null);
@@ -2579,7 +2579,7 @@ function ProtocolReferenceTab() {
 
 /* ── Recurring Plan Alerts Banner ──────────────────────── */
 
-function RecurringAlertsBanner() {
+export function RecurringAlertsBanner() {
   const [alerts, setAlerts] = useState([]);
   const [expanded, setExpanded] = useState(false);
   const [busyId, setBusyId] = useState(null);
