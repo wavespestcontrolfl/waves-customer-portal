@@ -20,7 +20,6 @@ import {
   KANBAN_STAGES,
   LEAD_SOURCES,
   CustomerMap,
-  PipelineColumn,
   CustomerIntelligenceTab,
 } from './CustomersPage';
 import {
@@ -84,6 +83,127 @@ function HealthDot({ score }) {
       )}
       title={`Health: ${score}`}
     />
+  );
+}
+
+// --- Pipeline card (V2) ---
+// Monochrome card. alert-fg reserved for the delete-confirm state only —
+// the stage's own "urgency" color is collapsed to neutral chrome; the column
+// header handles the at-risk signal via StageBadgeV2.
+function PipelineCardV2({ customer, onDelete }) {
+  const [confirming, setConfirming] = useState(false);
+  const daysInStage = customer.stageEnteredAt
+    ? Math.floor((Date.now() - new Date(customer.stageEnteredAt)) / 86400000)
+    : null;
+  const addressLine = customer.address ? customer.address.split(',')[0] : '';
+  const tier = customer.tier && customer.tier !== 'Bronze' ? customer.tier : null;
+
+  return (
+    <div className="bg-white border border-hairline border-zinc-200 rounded-md p-3 mb-2 last:mb-0">
+      <div className="flex justify-between items-start mb-1">
+        <div className="text-13 font-medium text-ink-primary tracking-tight">
+          {customer.firstName} {customer.lastName}
+        </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setConfirming(!confirming);
+          }}
+          className="text-ink-tertiary hover:text-ink-primary text-14 leading-none u-focus-ring px-1"
+          aria-label="Remove"
+        >
+          ×
+        </button>
+      </div>
+
+      {confirming && (
+        <div className="bg-alert-bg border border-hairline border-alert-fg/30 rounded p-2 mb-2">
+          <div className="text-12 text-alert-fg mb-2">
+            Delete {customer.firstName} {customer.lastName}?
+          </div>
+          <div className="flex gap-1.5">
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={async () => {
+                try {
+                  await fetch(`${API_BASE}/admin/customers/${customer.id}`, {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+                  });
+                  onDelete?.(customer.id);
+                } catch (e) {
+                  alert('Delete failed: ' + e.message);
+                }
+              }}
+            >
+              Delete
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {addressLine && (
+        <div className="text-12 text-ink-tertiary mb-2 truncate">{addressLine}</div>
+      )}
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <HealthDot score={customer.leadScore} />
+        {tier && <TierBadgeV2 tier={tier} />}
+        {customer.monthlyRate > 0 && (
+          <span className="font-mono u-nums text-12 text-ink-primary">
+            ${customer.monthlyRate}/mo
+          </span>
+        )}
+      </div>
+
+      {daysInStage != null && (
+        <div className="text-11 text-ink-tertiary u-label mt-1.5">
+          {daysInStage === 0 ? 'Today' : `${daysInStage}d in stage`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Pipeline column (V2) ---
+function PipelineColumnV2({ stage, customers, onDeleteCustomer }) {
+  const monthlyTotal = customers.reduce((sum, c) => sum + (c.monthlyRate || 0), 0);
+  const isAlertStage = stage.key === 'at_risk' || stage.key === 'churned';
+  return (
+    <div
+      className="flex-shrink-0 w-[260px] bg-white border border-hairline border-zinc-200 rounded-md flex flex-col"
+      style={{ maxHeight: 'calc(100vh - 220px)' }}
+    >
+      <div className="px-3.5 py-3 border-b border-hairline border-zinc-200 flex justify-between items-center">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-13 font-medium text-ink-primary">{stage.label}</span>
+            {isAlertStage && <span className="inline-block w-1.5 h-1.5 rounded-full bg-alert-fg" />}
+          </div>
+          <div className="text-11 font-mono u-nums text-ink-tertiary mt-0.5">
+            {customers.length} {customers.length === 1 ? 'customer' : 'customers'}
+          </div>
+        </div>
+        {monthlyTotal > 0 && (
+          <span className="font-mono u-nums text-12 text-ink-primary font-medium">
+            ${monthlyTotal.toLocaleString()}/mo
+          </span>
+        )}
+      </div>
+      <div className="p-2 overflow-y-auto flex-1">
+        {customers.length === 0 ? (
+          <div className="text-ink-tertiary text-12 text-center py-5">No customers</div>
+        ) : (
+          customers.map((c) => (
+            <PipelineCardV2 key={c.id} customer={c} onDelete={onDeleteCustomer} />
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -814,13 +934,13 @@ export default function CustomersPageV2() {
         </div>
       )}
 
-      {/* ======================= PIPELINE (V1 panels inside V2 gate) ======================= */}
+      {/* ======================= PIPELINE (V2 monochrome) ======================= */}
       {view === 'pipeline' && (
         <div className="flex gap-3 overflow-x-auto pb-3 mt-4" style={{ WebkitOverflowScrolling: 'touch' }}>
           {KANBAN_STAGES.map((key) => {
             const stage = STAGE_MAP[key];
             return (
-              <PipelineColumn
+              <PipelineColumnV2
                 key={key}
                 stage={stage}
                 customers={pipelineGroups[key] || []}
