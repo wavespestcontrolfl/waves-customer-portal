@@ -30,7 +30,7 @@ import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
 import OnboardingPage from './pages/OnboardingPage';
 import AdminLoginPage from './pages/AdminLoginPage';
-import AdminLayout from './components/AdminLayout';
+import AdminLayout from './components/AdminLayoutGate';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import AdminDashboardGate from './pages/admin/DashboardGate';

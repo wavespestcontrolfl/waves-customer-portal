@@ -153,3 +153,15 @@ Raw traces archived at `/tmp/waves-baseline-traces/0{1..6}-*.json`.
 **Revisit if:** Primitive count grows past ~20 (CVA starts paying off at higher variant counts); or a second engineer joins who's more productive with the shadcn mental model.
 
 ---
+
+## 2026-04-18 — Admin shell pivots to Square-inspired warm-stone + blue CTA
+
+**Decision:** The admin shell (sidebar, app frame, future top-level chrome) adopts a Square Dashboard-inspired light theme: white `--surface-primary`, warm-stone `--surface-page`/`--surface-hover`, near-black warm-neutral text, and a single `#006AFF` blue reserved for the one primary CTA per screen. Tokens live in `client/src/styles/theme-square.css` scoped to `.admin-shell-v2`. Ships as `AdminLayoutV2` behind the `admin-shell-v2` per-user feature flag. Location switcher from the original pitch removed — work scopes by customer address, not GBP location.
+
+**Context:** The earlier Tier 1 spec (zinc ramp, monochrome) was correct in spirit but clinical in execution; Virginia and the operator both have years of Square muscle memory from Square Appointments / POS. Building in the visual language they already know collapses training cost on redesigned pages to roughly zero. Stone beats zinc because zinc reads cold against the warm tonality Square has settled on; the difference is small in isolation but compounds across a dashboard.
+
+**Reasoning:** Combining the token file and the first shell consumer in one PR instead of splitting them — inline hex in `AdminLayoutV2` followed by a tokens-retrofit PR would bake silent drift into the file that matters most, and leave a multi-day window where both shells coexist with different levels of tokenization. Tokens aren't the expensive part (≈40 lines of CSS vars); the expensive part was picking the palette, which is already decided. Scoping tokens to `.admin-shell-v2` (rather than `:root`) prevents leakage into flag-off V1 pages while both shells coexist, and leaves room for a `[data-theme="tech-dark"]` override for the tech portal later without rewriting consumers. Location switcher dropped because Waves doesn't actually scope work by GBP location — jobs scope by customer address, so the pattern was imported from Square without a real workflow match.
+
+**Revisit if:** Florida-sun glare on tablets forces the office team off light mode (unlikely — Virginia works indoors). Also revisit if the next Tier 1 page migration onto these tokens reveals missing semantic slots (e.g. chart colors, success/warning — intentionally omitted until a real consumer needs them).
+
+---
