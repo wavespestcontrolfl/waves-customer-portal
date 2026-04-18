@@ -78,7 +78,7 @@ function lazyWithRetry(factory) {
     }
   });
 }
-const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatePage'));
+const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesGate'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
