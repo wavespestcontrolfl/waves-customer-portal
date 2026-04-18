@@ -1383,3 +1383,4 @@ function mergeAiAnalyses(claude, gemini) {
 
 module.exports = router;
 module.exports.performPropertyLookup = performPropertyLookup;
+module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
