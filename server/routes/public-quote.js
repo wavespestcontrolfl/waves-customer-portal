@@ -22,7 +22,7 @@ function normalizePhone(raw) {
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
-    const { firstName, lastName, email, phone, address, city, zip, homeSqFt, lotSqFt, propertyType, services, attribution } = req.body || {};
+    const { leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt, lotSqFt, stories, propertyType, enriched, services, attribution } = req.body || {};
 
     if (!firstName || !lastName || !email || !phone || !address) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
@@ -33,12 +33,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     const sqft = Math.max(500, Math.min(20000, Number(homeSqFt) || 2000));
     const lot = Math.max(500, Math.min(200000, Number(lotSqFt) || sqft * 4));
+    const ep = (enriched && typeof enriched === 'object') ? enriched : {};
 
+    // NOTE: enriched density/pool/complexity fields are captured on the lead
+    // row for follow-up but NOT passed into the pricing engine here. Flipping
+    // those inputs on would quietly raise public quotes by ~$10/visit vs the
+    // pre-lookup flow (LIGHT defaults → MODERATE defaults). Keep public quote
+    // pricing stable until explicitly greenlit.
     const engineInput = {
       homeSqFt: sqft,
       stories: 1,
       lotSqFt: lot,
-      propertyType: propertyType || 'Single Family',
+      propertyType: propertyType || ep.propertyType || 'Single Family',
       services: {},
     };
     if (services.pest) {
@@ -66,31 +72,60 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
 
-    const [lead] = await db('leads').insert({
-      first_name: firstName,
-      last_name: lastName,
-      email: email.toLowerCase().trim(),
-      phone: normalizedPhone || phone,
-      address: [address, city, zip].filter(Boolean).join(', '),
-      city: city || null,
-      zip: zip || null,
-      service_interest: serviceInterest,
-      lead_type: 'quote_wizard',
-      first_contact_channel: 'website_quote',
-      monthly_value: monthly,
-      status: 'new',
-      gclid,
-      extracted_data: JSON.stringify({
-        homeSqFt: sqft,
-        lotSqFt: lot,
-        services,
-        annual,
-        monthly,
-        utm: attr?.utm || null,
-        referrer: attr?.referrer || null,
-        landing_url: attr?.landing_url || null,
-      }),
-    }).returning(['id']);
+    const extractedData = JSON.stringify({
+      stage: 'quote_calculated',
+      homeSqFt: sqft,
+      lotSqFt: lot,
+      services,
+      enriched: ep,
+      annual,
+      monthly,
+      utm: attr?.utm || null,
+      referrer: attr?.referrer || null,
+      landing_url: attr?.landing_url || null,
+    });
+
+    // If the property-lookup step already captured a lead row, update it
+    // in place so we don't double-count leads for a single conversion.
+    let lead;
+    if (leadId) {
+      const rows = await db('leads')
+        .where({ id: leadId })
+        .update({
+          first_name: firstName,
+          last_name: lastName,
+          email: email.toLowerCase().trim(),
+          phone: normalizedPhone || phone,
+          address: [address, city, zip].filter(Boolean).join(', '),
+          city: city || null,
+          zip: zip || null,
+          service_interest: serviceInterest,
+          monthly_value: monthly,
+          extracted_data: extractedData,
+          updated_at: new Date(),
+        })
+        .returning(['id']);
+      lead = rows[0];
+    }
+    if (!lead) {
+      const rows = await db('leads').insert({
+        first_name: firstName,
+        last_name: lastName,
+        email: email.toLowerCase().trim(),
+        phone: normalizedPhone || phone,
+        address: [address, city, zip].filter(Boolean).join(', '),
+        city: city || null,
+        zip: zip || null,
+        service_interest: serviceInterest,
+        lead_type: 'quote_wizard',
+        first_contact_channel: 'website_quote',
+        monthly_value: monthly,
+        status: 'new',
+        gclid,
+        extracted_data: extractedData,
+      }).returning(['id']);
+      lead = rows[0];
+    }
 
     try {
       const NotificationService = require('../services/notification-service');

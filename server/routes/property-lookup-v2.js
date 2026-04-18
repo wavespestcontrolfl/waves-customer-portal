@@ -32,16 +32,14 @@ const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
 const SWFL_BOUNDS = { latMin: 26.3, latMax: 27.8, lngMin: -82.9, lngMax: -81.5 };
 
 // ─────────────────────────────────────────────
-// MAIN ROUTE
+// CORE LOOKUP — reusable by admin + public routes
+// Extracted from the POST /property-lookup handler so server/routes/
+// public-property-lookup.js can run the same RentCast + satellite + dual
+// AI vision pipeline without duplicating the logic.
 // ─────────────────────────────────────────────
-router.post('/property-lookup', async (req, res) => {
-  const { address } = req.body;
-  if (!address || address.trim().length < 5) {
-    return res.status(400).json({ error: 'Address required' });
-  }
-
+async function performPropertyLookup(address) {
   const result = {
-    address: address.trim(),
+    address: String(address).trim(),
     rentcast: null,
     avm: null,
     satellite: null,
@@ -215,7 +213,24 @@ router.post('/property-lookup', async (req, res) => {
   }
 
   result.meta.lookupMs = Date.now() - t0;
-  res.json(result);
+  return result;
+}
+
+// ─────────────────────────────────────────────
+// MAIN ROUTE — admin/tech-gated thin wrapper over performPropertyLookup
+// ─────────────────────────────────────────────
+router.post('/property-lookup', async (req, res) => {
+  const { address } = req.body;
+  if (!address || address.trim().length < 5) {
+    return res.status(400).json({ error: 'Address required' });
+  }
+  try {
+    const result = await performPropertyLookup(address);
+    res.json(result);
+  } catch (err) {
+    logger.error(`[property-lookup] ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
@@ -1351,3 +1366,4 @@ function mergeAiAnalyses(claude, gemini) {
 }
 
 module.exports = router;
+module.exports.performPropertyLookup = performPropertyLookup;
