@@ -767,6 +767,12 @@ function EstimateToolView() {
       if (d.scheduled) {
         const when = new Date(d.scheduledAt).toLocaleString();
         alert(`Estimate scheduled via ${label} for ${when}`);
+      } else if (d.channels) {
+        const parts = [];
+        if (d.channels.sms) parts.push(d.channels.sms.ok ? 'SMS sent' : `SMS failed: ${d.channels.sms.error}`);
+        if (d.channels.email) parts.push(d.channels.email.ok ? 'Email sent' : `Email failed: ${d.channels.email.error}`);
+        const anyFail = (d.channels.sms && !d.channels.sms.ok) || (d.channels.email && !d.channels.email.ok);
+        alert((anyFail ? 'Send had issues: ' : 'Sent: ') + parts.join(' / '));
       } else {
         alert(`Estimate sent via ${label}!`);
       }
