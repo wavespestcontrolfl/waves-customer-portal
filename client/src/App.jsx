@@ -40,7 +40,7 @@ import AdminDispatchGate from './pages/admin/DispatchGate';
 import AdminInventoryPage from './pages/admin/InventoryPage';
 import AdminRevenuePage from './pages/admin/RevenuePage';
 import AdminCommunicationsPage from './pages/admin/CommunicationsPage';
-import AdminCustomersPage from './pages/admin/CustomersPage';
+import AdminCustomersPage from './pages/admin/CustomersGate';
 import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';
 import { lazy, Suspense } from 'react';

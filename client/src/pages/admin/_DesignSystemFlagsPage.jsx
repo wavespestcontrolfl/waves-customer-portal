@@ -35,7 +35,7 @@ function adminFetch(path, init) {
   });
 }
 
-const KNOWN_FLAGS = ['dashboard-v2'];
+const KNOWN_FLAGS = ['dashboard-v2', 'dispatch-v2', 'customers-v2'];
 
 export default function DesignSystemFlagsPage() {
   const [loading, setLoading] = useState(true);

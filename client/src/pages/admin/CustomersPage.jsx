@@ -55,6 +55,8 @@ const TIER_COLORS = { Platinum: '#7C3AED', Gold: D.amber, Silver: '#64748B', Bro
 
 const LEAD_SOURCES = ['referral', 'google', 'facebook', 'nextdoor', 'website', 'door_knock', 'yelp', 'other'];
 
+// V2 re-uses these constants + sub-panels via named exports (see end of file).
+
 // --- Reusable components ---
 function StageBadge({ stage }) {
   const s = STAGE_MAP[stage] || { label: stage, color: D.muted, bg: `${D.muted}22` };
@@ -1496,3 +1498,18 @@ export default function CustomersPage() {
     </div>
   );
 }
+
+// Named exports so CustomersPageV2 can reuse V1 sub-panels (Pipeline / Map /
+// AI Advisor) without duplicating code. The V2 page restyles only the
+// Directory view + header chrome + QuickAddModal; Pipeline/Health/Intelligence
+// stay V1 until PR #4b/#4d.
+export {
+  STAGES,
+  STAGE_MAP,
+  KANBAN_STAGES,
+  TIER_COLORS,
+  LEAD_SOURCES,
+  CustomerMap,
+  PipelineColumn,
+  CustomerIntelligenceTab,
+};
