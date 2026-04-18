@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
-import { COLORS, FONTS } from '../theme-brand';
+import { COLORS, FONTS, SHADOWS } from '../theme-brand';
 
 function captureAttribution() {
   if (typeof window === 'undefined') return null;
@@ -297,7 +297,7 @@ export default function QuotePage() {
     background: COLORS.white,
     borderRadius: 16,
     padding: 'clamp(24px, 3vw, 40px)',
-    boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)',
+    boxShadow: SHADOWS.goldRing,
     minHeight: 420,
   };
 
@@ -345,6 +345,8 @@ export default function QuotePage() {
     fontWeight: 700,
     color: COLORS.blueDeeper,
     margin: '0 0 6px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.02em',
   };
 
   const sCardSub = {
@@ -582,7 +584,7 @@ function LookupLoading({ status, sub, satellite, aiSources, address }) {
   return (
     <div style={{ textAlign: 'center', padding: '16px 0' }}>
       <div style={{ fontSize: 12, color: COLORS.textCaption, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.2, marginBottom: 6, fontFamily: FONTS.ui }}>Property Lookup</div>
-      <h2 style={{ margin: '0 0 8px', fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700, color: COLORS.blueDeeper }}>
+      <h2 style={{ margin: '0 0 8px', fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700, color: COLORS.blueDeeper, textTransform: 'uppercase', letterSpacing: '0.02em' }}>
         {status || 'Looking up property...'}{dots}
       </h2>
       {sub && <div style={{ fontSize: 14, color: COLORS.textBody, marginBottom: 20 }}>{sub}</div>}
