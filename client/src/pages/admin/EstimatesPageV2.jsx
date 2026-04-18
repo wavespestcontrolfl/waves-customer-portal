@@ -4,12 +4,13 @@
 //   - PATCH /admin/estimates/:id            (isPriority, status, declineReason)
 //   - POST  /admin/estimates/:id/send
 //   - POST  /admin/estimates/:id/follow-up
-// Scope (post PR #5b):
+// Scope (post PR #5c):
 //   PR #5a → tab chrome + Pipeline tab (stats bar + filter pills + list rows)
 //   PR #5b → Create Estimate tab now renders EstimateToolViewV2 (monochrome
 //            estimator — same endpoints/state/pricing as V1)
-// Leads / Pricing Logic tabs still render V1 panels. FollowUp/Decline modals
-// stay V1 — restyled in PR #5c.
+//   PR #5c → FollowUpModalV2 + DeclineModalV2 replace V1 modals (Dialog
+//            primitive, danger variant on Mark-as-Lost)
+// Leads / Pricing Logic tabs still render V1 panels.
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   STATUS_CONFIG,
@@ -17,13 +18,15 @@ import {
   classifyEstimate,
   getUrgencyIndicator,
   detectCompetitor,
-  FollowUpModal,
-  DeclineModal,
 } from './EstimatePage';
 import { LeadsSection } from './LeadsTabs';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
 import { MarginCalculator } from './PricingLogicPage';
 import EstimateToolViewV2 from './EstimateToolViewV2';
+import {
+  FollowUpModalV2,
+  DeclineModalV2,
+} from '../../components/admin/EstimateModalsV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -243,7 +246,7 @@ function EstimatePipelineViewV2() {
   return (
     <div>
       {followUpTarget && (
-        <FollowUpModal
+        <FollowUpModalV2
           estimate={followUpTarget}
           onClose={() => setFollowUpTarget(null)}
           onSent={() => {
@@ -253,7 +256,7 @@ function EstimatePipelineViewV2() {
         />
       )}
       {declineTarget && (
-        <DeclineModal
+        <DeclineModalV2
           estimate={declineTarget}
           onClose={() => setDeclineTarget(null)}
           onSaved={() => {
