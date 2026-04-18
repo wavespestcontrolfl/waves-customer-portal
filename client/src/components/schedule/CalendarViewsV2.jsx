@@ -39,6 +39,7 @@ function formatDateISO(d) { return d.toISOString().split('T')[0]; }
 export function ViewModeSelectorV2({ viewMode, onViewModeChange }) {
   const modes = [
     { id: 'day', label: 'Day' },
+    { id: '5day', label: '5-Day' },
     { id: 'week', label: 'Week' },
     { id: 'month', label: 'Month' },
   ];

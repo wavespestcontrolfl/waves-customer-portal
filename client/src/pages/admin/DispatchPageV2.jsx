@@ -6,8 +6,9 @@ import {
   ProtocolPanel,
 } from './SchedulePage';
 import ProtocolReferenceTabV2 from './ProtocolReferenceTabV2';
-import { ViewModeSelectorV2, WeekViewV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
+import { ViewModeSelectorV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
 import TimeGridDay from '../../components/schedule/TimeGridDay';
+import TimeGridDays from '../../components/schedule/TimeGridDays';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import ScheduleIntelligenceBarV2 from '../../components/admin/ScheduleIntelligenceBarV2';
@@ -779,8 +780,25 @@ export default function DispatchPageV2() {
         />
       )}
 
-      {/* Week / Month calendar — V2 monochrome, same endpoints and data shape as V1 */}
-      {viewMode === 'week' && <WeekViewV2 startDate={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
+      {/* Week / 5-Day = Square-style time grid (drag to reschedule). Month = summary grid. */}
+      {viewMode === 'week' && (
+        <TimeGridDays
+          date={date}
+          dayCount={7}
+          selectedDate={date}
+          onEdit={(svc) => setEditingService(svc)}
+          onChange={() => fetchSchedule(date)}
+        />
+      )}
+      {viewMode === '5day' && (
+        <TimeGridDays
+          date={date}
+          dayCount={5}
+          selectedDate={date}
+          onEdit={(svc) => setEditingService(svc)}
+          onChange={() => fetchSchedule(date)}
+        />
+      )}
       {viewMode === 'month' && <MonthViewV2 date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
 
       {/* Tabs bar — day view only */}

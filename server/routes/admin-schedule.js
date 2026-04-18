@@ -246,7 +246,10 @@ router.get('/week', async (req, res, next) => {
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
         .select('scheduled_services.id', 'scheduled_services.service_type', 'scheduled_services.status',
-          'scheduled_services.window_start', 'scheduled_services.zone', 'scheduled_services.route_order',
+          'scheduled_services.window_start', 'scheduled_services.window_end',
+          'scheduled_services.estimated_duration_minutes',
+          'scheduled_services.technician_id',
+          'scheduled_services.zone', 'scheduled_services.route_order',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'technicians.name as tech_name')
         .orderByRaw('COALESCE(route_order, 999)');
@@ -267,6 +270,11 @@ router.get('/week', async (req, res, next) => {
             status: s.status,
             techName: s.tech_name, zone: s.zone,
             tier: s.waveguard_tier,
+            windowStart: s.window_start,
+            windowEnd: s.window_end,
+            estimatedDuration: s.estimated_duration_minutes,
+            technicianId: s.technician_id,
+            technicianName: s.tech_name,
           };
         }),
         count: services.length,
