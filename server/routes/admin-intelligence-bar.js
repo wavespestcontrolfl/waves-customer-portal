@@ -512,7 +512,7 @@ function getToolsForContext(context) {
     return [...TOOLS, ...BANKING_TOOLS];
   }
   if (context === 'estimates') {
-    return [...TOOLS, ...ESTIMATE_TOOLS];
+    return [...TOOLS, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
   }
   if (context === 'tech') {
     return TECH_TOOLS;

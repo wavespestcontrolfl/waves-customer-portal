@@ -27,7 +27,7 @@ const ROUTE_CONTEXT_MAP = {
   '/admin/dashboard': 'dashboard',
   '/admin': 'dashboard',
   '/admin/customers': 'customers',
-  '/admin/estimates': 'leads',
+  '/admin/estimates': 'estimates',
   '/admin/seo': 'seo',
   '/admin/ppc': 'seo',
   '/admin/social-media': 'seo',
@@ -58,6 +58,7 @@ const CONTEXT_LABELS = {
   leads: 'Pipeline',
   email: 'Email',
   banking: 'Banking & Cash Flow',
+  estimates: 'Estimates & Quoting Agent',
 };
 
 const CONTEXT_COLORS = {
@@ -75,6 +76,7 @@ const CONTEXT_COLORS = {
   leads: D.amber,
   email: D.green,
   banking: D.green,
+  estimates: D.teal,
 };
 
 function detectContext(pathname) {

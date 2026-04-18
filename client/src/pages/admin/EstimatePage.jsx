@@ -2060,6 +2060,7 @@ function EstimatePipelineView() {
                     {e.source === 'lead_webhook' && <span title="Website lead" style={{ fontSize: 14 }}>{'🌐'}</span>}
                     {e.source === 'voice_agent' && <span title="Voice agent lead" style={{ fontSize: 14 }}>{'🎙️'}</span>}
                     {e.source === 'referral' && <span title="Referral" style={{ fontSize: 14 }}>{'🤝'}</span>}
+                    {e.source === 'ai_agent' && <span title="AI agent draft — review before sending" style={{ fontSize: 14 }}>{'🤖'}</span>}
                     {/* Urgency indicator */}
                     {urgency && (
                       <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 4, background: urgency.bg, color: urgency.color, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3 }}>{urgency.label}</span>
@@ -2194,7 +2195,7 @@ function WebsiteQuotesView() {
   const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
 
   const sourceIcon = (src) => {
-    const icons = { voice_agent: '🎙️', lead_webhook: '🌐', website: '🌐', referral: '🤝', manual: '✏️' };
+    const icons = { voice_agent: '🎙️', lead_webhook: '🌐', website: '🌐', referral: '🤝', manual: '✏️', ai_agent: '🤖' };
     return icons[src] || '📋';
   };
 
