@@ -182,103 +182,143 @@ export const blogPostFrontmatter = z.object({
 export type BlogPostFrontmatter = z.infer<typeof blogPostFrontmatter>;
 
 // ─────────────────────────────────────────────────────────────
-// §10 — Post-type component requirements
+// §10 — Component catalog + post-type requirements
 //
-// Each component renders an HTML root with data-wv-component="<id>".
-// validateRenderedComponents(html, frontmatter) parses the HTML and
-// returns which required IDs are missing.
+// COMPONENT_NAMES is the contract between:
+//   - the validator (what we look for in authored MDX)
+//   - the renderer (what Astro registers and compiles)
+//   - the template (what authors may invoke in MDX bodies)
+//
+// Names are PascalCase JSX identifiers — they appear verbatim in MDX
+// bodies as <BottomLineBox ... />. Adding a component means adding its
+// name here AND registering it Astro-side; both paths must stay in sync
+// or the validator will miss invocations or flag false positives.
 // ─────────────────────────────────────────────────────────────
 
-export type ComponentId = string;
+export const COMPONENT_NAMES = [
+  'BottomLineBox',
+  'WhyTrustUs',
+  'TLDR',
+  'DataCallout',
+  'ProTip',
+  'HonestRejection',
+  'ComparisonTable',
+  'AnnotatedDiagnosticPhoto',
+  'CaseStudy',
+  'SeasonalCalendar',
+  'PestDiagnosticTree',
+  'WaveGuardLadder',
+  'RecommendationQuiz',
+  'ContentUpgrade',
+  'DisclosureBlock',
+  'GrassTypeSection',
+  'FAQBlock',
+] as const;
+
+export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
 export interface PostTypeRequirement {
-  required: ComponentId[];
-  recommended?: ComponentId[];
+  required: ComponentName[];
+  recommended?: ComponentName[];
 }
 
+// Post-type → required/recommended body components.
+//
+// Location posts have no body requirements — city-level assets (map
+// ribbon, hero image, tracking number) render from frontmatter at the
+// template level, not from MDX body invocations. Protocol posts require
+// DataCallout for methodology; howto-step structure comes from regular
+// markdown headings. Case-study posts require the single CaseStudy
+// component — before/after pairs, named neighborhoods, and measurable
+// outcomes are its props, not separate components.
 export const postTypeRequirements: Record<string, PostTypeRequirement> = {
   decision: {
-    required: ['bottom-line-box', 'comparison-table', 'honest-rejection-callout'],
+    required: ['BottomLineBox', 'ComparisonTable', 'HonestRejection'],
   },
   diagnostic: {
-    required: ['annotated-diagnostic-photo', 'pest-symptom-decision-tree'],
-    recommended: ['case-study-block'],
+    required: ['AnnotatedDiagnosticPhoto', 'PestDiagnosticTree'],
+    recommended: ['CaseStudy'],
   },
   seasonal: {
-    required: ['seasonal-calendar', 'content-upgrade-pdf'],
+    required: ['SeasonalCalendar', 'ContentUpgrade'],
   },
   protocol: {
-    required: ['howto-steps', 'methodology-callout', 'protocol-field-photos'],
-    recommended: ['alternatives-considered-callout'],
+    required: ['DataCallout'],
+    recommended: ['HonestRejection'],
   },
   cost: {
-    required: ['waveguard-ladder', 'disclosure-block', 'comparison-table'],
+    required: ['WaveGuardLadder', 'DisclosureBlock', 'ComparisonTable'],
   },
   comparison: {
-    required: [
-      'comparison-table',
-      'honest-rejection-callout',
-      'who-shouldnt-pick-this',
-    ],
+    required: ['ComparisonTable', 'HonestRejection'],
   },
   'case-study': {
-    required: [
-      'case-study-block',
-      'before-after-photo-pair',
-      'named-neighborhood',
-      'measurable-outcome',
-    ],
+    required: ['CaseStudy'],
   },
   location: {
-    required: ['city-map-ribbon', 'city-hero-image', 'city-tracking-number'],
+    required: [],
   },
-  // `by-grass-type` is a structural pattern (St. Augustine / Bermuda /
-  // Zoysia / Bahia subsections). Require at least one grass-type-section
-  // marker — either the 4-column comparison table or the 4 labeled
-  // subsections form; both render with data-wv-component="grass-type-section".
   'by-grass-type': {
-    required: ['grass-type-section'],
-    recommended: ['grass-type-field-photos'],
+    required: ['GrassTypeSection'],
   },
 };
 
 export interface ComponentValidationResult {
   ok: boolean;
   post_type: string;
-  missing_required: ComponentId[];
-  missing_recommended: ComponentId[];
+  missing_required: ComponentName[];
+  missing_recommended: ComponentName[];
+  unknown_components: string[]; // JSX elements found in body that aren't in COMPONENT_NAMES
 }
 
-export function validateRenderedComponents(
-  html: string,
+// Validates authored MDX body against the §10 post-type contract.
+//
+// Extracts JSX element invocations from the MDX source, intersects with
+// the known component catalog, and reports which required/recommended
+// components are missing plus any unknown component names used.
+//
+// Presence check only — does not validate props. Prop validation is a
+// future pass once the prop-interface catalog lives alongside this file.
+//
+// Implementation: strips fenced + inline code so JSX in code samples
+// doesn't produce false hits, then regex-matches <PascalCaseName as
+// JSX element openings. Upgrade to a full MDX AST walk (remark-mdx) if
+// false positives become real.
+export function validateMarkdownComponents(
+  body_mdx: string,
   frontmatter: { post_type: string },
 ): ComponentValidationResult {
   const pt = frontmatter.post_type;
   const req = postTypeRequirements[pt] ?? { required: [], recommended: [] };
+  const found = extractMdxComponentNames(body_mdx);
+  const known = new Set<string>(COMPONENT_NAMES);
 
-  const missingRequired: ComponentId[] = [];
-  for (const id of req.required) {
-    if (!hasComponent(html, id)) missingRequired.push(id);
-  }
-
-  const missingRecommended: ComponentId[] = [];
-  for (const id of req.recommended ?? []) {
-    if (!hasComponent(html, id)) missingRecommended.push(id);
-  }
+  const missingRequired = req.required.filter((name) => !found.has(name));
+  const missingRecommended = (req.recommended ?? []).filter(
+    (name) => !found.has(name),
+  );
+  const unknownComponents = [...found].filter((name) => !known.has(name));
 
   return {
     ok: missingRequired.length === 0,
     post_type: pt,
     missing_required: missingRequired,
     missing_recommended: missingRecommended,
+    unknown_components: unknownComponents,
   };
 }
 
-function hasComponent(html: string, id: ComponentId): boolean {
-  // Escape regex metachars in the id (ids are kebab-case but belt+suspenders).
-  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`data-wv-component=["']${escaped}["']`, 'i');
-  return pattern.test(html);
+function extractMdxComponentNames(mdx: string): Set<string> {
+  let cleaned = mdx.replace(/```[\s\S]*?```/g, '');
+  cleaned = cleaned.replace(/`[^`\n]*`/g, '');
+
+  const names = new Set<string>();
+  const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(cleaned)) !== null) {
+    names.add(match[1]);
+  }
+  return names;
 }
 
 // ─────────────────────────────────────────────────────────────

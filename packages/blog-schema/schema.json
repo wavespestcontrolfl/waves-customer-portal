@@ -308,71 +308,58 @@
   "postTypeRequirements": {
     "decision": {
       "required": [
-        "bottom-line-box",
-        "comparison-table",
-        "honest-rejection-callout"
+        "BottomLineBox",
+        "ComparisonTable",
+        "HonestRejection"
       ]
     },
     "diagnostic": {
       "required": [
-        "annotated-diagnostic-photo",
-        "pest-symptom-decision-tree"
+        "AnnotatedDiagnosticPhoto",
+        "PestDiagnosticTree"
       ],
       "recommended": [
-        "case-study-block"
+        "CaseStudy"
       ]
     },
     "seasonal": {
       "required": [
-        "seasonal-calendar",
-        "content-upgrade-pdf"
+        "SeasonalCalendar",
+        "ContentUpgrade"
       ]
     },
     "protocol": {
       "required": [
-        "howto-steps",
-        "methodology-callout",
-        "protocol-field-photos"
+        "DataCallout"
       ],
       "recommended": [
-        "alternatives-considered-callout"
+        "HonestRejection"
       ]
     },
     "cost": {
       "required": [
-        "waveguard-ladder",
-        "disclosure-block",
-        "comparison-table"
+        "WaveGuardLadder",
+        "DisclosureBlock",
+        "ComparisonTable"
       ]
     },
     "comparison": {
       "required": [
-        "comparison-table",
-        "honest-rejection-callout",
-        "who-shouldnt-pick-this"
+        "ComparisonTable",
+        "HonestRejection"
       ]
     },
     "case-study": {
       "required": [
-        "case-study-block",
-        "before-after-photo-pair",
-        "named-neighborhood",
-        "measurable-outcome"
+        "CaseStudy"
       ]
     },
     "location": {
-      "required": [
-        "city-map-ribbon",
-        "city-hero-image",
-        "city-tracking-number"
-      ]
+      "required": []
     },
     "by-grass-type": {
       "required": [
-        "grass-type-section"
-      ],
-      "recommended": [
-        "grass-type-field-photos"
+        "GrassTypeSection"
       ]
     }
   }
