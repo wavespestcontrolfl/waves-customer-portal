@@ -22,7 +22,7 @@ function normalizePhone(raw) {
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
-    const { firstName, lastName, email, phone, address, city, zip, homeSqFt, lotSqFt, propertyType, services } = req.body || {};
+    const { firstName, lastName, email, phone, address, city, zip, homeSqFt, lotSqFt, propertyType, services, attribution } = req.body || {};
 
     if (!firstName || !lastName || !email || !phone || !address) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
@@ -63,6 +63,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const serviceInterest = [services.pest ? 'Pest Control' : null, services.lawn ? 'Lawn Care' : null].filter(Boolean).join(' + ');
     const normalizedPhone = normalizePhone(phone);
 
+    const attr = (attribution && typeof attribution === 'object') ? attribution : null;
+    const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
+
     const [lead] = await db('leads').insert({
       first_name: firstName,
       last_name: lastName,
@@ -76,7 +79,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       first_contact_channel: 'website_quote',
       monthly_value: monthly,
       status: 'new',
-      extracted_data: JSON.stringify({ homeSqFt: sqft, lotSqFt: lot, services, annual, monthly }),
+      gclid,
+      extracted_data: JSON.stringify({
+        homeSqFt: sqft,
+        lotSqFt: lot,
+        services,
+        annual,
+        monthly,
+        utm: attr?.utm || null,
+        referrer: attr?.referrer || null,
+        landing_url: attr?.landing_url || null,
+      }),
     }).returning(['id']);
 
     try {

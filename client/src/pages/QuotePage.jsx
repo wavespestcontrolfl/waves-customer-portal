@@ -2,6 +2,28 @@ import { useState } from 'react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import BrandFooter from '../components/BrandFooter';
 
+function captureAttribution() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const p = new URLSearchParams(window.location.search);
+    const utm = {
+      source: p.get('utm_source') || null,
+      medium: p.get('utm_medium') || null,
+      campaign: p.get('utm_campaign') || null,
+      term: p.get('utm_term') || null,
+      content: p.get('utm_content') || null,
+    };
+    const hasUtm = Object.values(utm).some(Boolean);
+    const gclid = p.get('gclid') || null;
+    const referrer = document.referrer || null;
+    const landing_url = window.location.href || null;
+    if (!hasUtm && !gclid && !referrer) return null;
+    return { utm: hasUtm ? utm : null, gclid, referrer, landing_url };
+  } catch {
+    return null;
+  }
+}
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const BRAND = {
@@ -48,6 +70,7 @@ export default function QuotePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
+  const [attribution] = useState(() => captureAttribution());
 
   function setPhone(raw) {
     let digits = raw.replace(/\D/g, '');
@@ -90,6 +113,7 @@ export default function QuotePage() {
             ...(svcPest ? { pest: { frequency: pestFreq } } : {}),
             ...(svcLawn ? { lawn: { track: grassType, tier: 'enhanced' } } : {}),
           },
+          attribution: attribution || undefined,
         }),
       });
       const d = await r.json();
