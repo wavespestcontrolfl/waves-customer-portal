@@ -116,11 +116,16 @@ function AppointmentBlock({ service, top, height, onEdit }) {
         onEdit?.(service);
       }}
       className={cn(
-        'absolute left-1 right-1 px-2 py-1 rounded-sm border-hairline cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
+        'absolute left-1 right-1 px-2 py-1 rounded-sm cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-60 z-50 shadow-lg',
       )}
-      style={{ top, height: Math.max(height, SLOT_HEIGHT - 2), ...dragStyle }}
+      style={{
+        top,
+        height: Math.max(height, SLOT_HEIGHT - 2),
+        border: `1px solid ${statusBorderColor(service.status)}`,
+        ...dragStyle,
+      }}
       title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || ''}`}
     >
       <div className="font-medium truncate">{service.customerName}</div>
@@ -140,15 +145,15 @@ function SlotDroppable({ techId, slotIdx }) {
     id: `slot-${techId}-${slotIdx}`,
     data: { techId, slotMin },
   });
+  const isHour = slotIdx % 2 === 0;
   return (
     <div
       ref={setNodeRef}
-      className={cn(
-        'border-t border-zinc-100 transition-colors',
-        slotIdx % 2 === 0 && 'border-zinc-200',
-        isOver && 'bg-zinc-100',
-      )}
-      style={{ height: SLOT_HEIGHT }}
+      className={cn('transition-colors', isOver && 'bg-zinc-100')}
+      style={{
+        height: SLOT_HEIGHT,
+        borderTop: `1px solid ${isHour ? '#E4E4E7' : '#F4F4F5'}`,
+      }}
     />
   );
 }
@@ -156,10 +161,13 @@ function SlotDroppable({ techId, slotIdx }) {
 function TechColumn({ tech, services, onEdit }) {
   return (
     <div
-      className="flex-1 border-r border-zinc-200 relative"
-      style={{ minWidth: COL_MIN_WIDTH }}
+      className="flex-1 relative"
+      style={{ minWidth: COL_MIN_WIDTH, borderRight: '1px solid #E4E4E7' }}
     >
-      <div className="sticky top-0 z-10 bg-zinc-50 border-b border-zinc-200 px-3 py-2 text-12 font-medium text-zinc-900 flex items-center justify-between">
+      <div
+        className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 text-12 font-medium text-zinc-900 flex items-center justify-between"
+        style={{ borderBottom: '1px solid #E4E4E7' }}
+      >
         <span className="truncate">{tech.name}</span>
         <span className="u-nums text-11 text-ink-secondary">
           {services.length}
@@ -193,10 +201,13 @@ function TechColumn({ tech, services, onEdit }) {
 function TimeAxis() {
   return (
     <div
-      className="bg-white border-r border-zinc-200 sticky left-0 z-20"
-      style={{ width: TIME_AXIS_WIDTH }}
+      className="bg-white sticky left-0 z-20"
+      style={{ width: TIME_AXIS_WIDTH, borderRight: '1px solid #E4E4E7' }}
     >
-      <div className="bg-zinc-50 border-b border-zinc-200" style={{ height: 36 }} />
+      <div
+        className="bg-zinc-50"
+        style={{ height: 36, borderBottom: '1px solid #E4E4E7' }}
+      />
       <div className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => {
           const min = DAY_START_HOUR * 60 + idx * SLOT_MIN;
@@ -222,14 +233,18 @@ function TimeAxis() {
 function AllDayStrip({ services, onEdit }) {
   if (services.length === 0) return null;
   return (
-    <div className="border-b border-zinc-200 bg-zinc-50/50 px-2 py-2 flex flex-wrap gap-1">
+    <div
+      className="bg-zinc-50/50 px-2 py-2 flex flex-wrap gap-1"
+      style={{ borderBottom: '1px solid #E4E4E7' }}
+    >
       <span className="text-10 uppercase tracking-label text-ink-tertiary self-center mr-2">All-day</span>
       {services.map((svc) => (
         <button
           key={svc.id}
           type="button"
           onClick={() => onEdit?.(svc)}
-          className="px-2 py-1 rounded-sm border-hairline border-zinc-300 bg-white text-11 text-zinc-900 hover:border-zinc-900 truncate max-w-[200px]"
+          className="px-2 py-1 rounded-sm bg-white text-11 text-zinc-900 truncate max-w-[200px]"
+          style={{ border: '1px solid #D4D4D8' }}
         >
           {svc.customerName} · {svc.serviceType || ''}
         </button>
@@ -360,7 +375,10 @@ export default function TimeGridDay({
   }
 
   return (
-    <div className="bg-white border-hairline border-zinc-200 rounded-md overflow-hidden">
+    <div
+      className="bg-white rounded-md overflow-hidden"
+      style={{ border: '1px solid #E4E4E7' }}
+    >
       <AllDayStrip services={allDay} onEdit={onEdit} />
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
         <div className="overflow-auto" style={{ maxHeight: '70vh' }}>
@@ -378,7 +396,10 @@ export default function TimeGridDay({
         </div>
       </DndContext>
       {busy && (
-        <div className="px-3 py-1 text-11 text-ink-secondary border-t border-zinc-200">Saving…</div>
+        <div
+          className="px-3 py-1 text-11 text-ink-secondary"
+          style={{ borderTop: '1px solid #E4E4E7' }}
+        >Saving…</div>
       )}
     </div>
   );
