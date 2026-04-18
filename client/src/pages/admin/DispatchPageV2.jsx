@@ -5,19 +5,19 @@ import {
   EditServiceModal,
   ProtocolPanel,
   ProtocolReferenceTab,
-  RecurringAlertsBanner,
 } from './SchedulePage';
 import { ViewModeSelectorV2, WeekViewV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
+import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
-import ScheduleIntelligenceBar from '../../components/admin/ScheduleIntelligenceBar';
+import ScheduleIntelligenceBarV2 from '../../components/admin/ScheduleIntelligenceBarV2';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { Button, Badge, Card, CardBody, cn } from '../../components/ui';
 
-const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPanel'));
-const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanel'));
-const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanel'));
-const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanel'));
+const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPanelV2'));
+const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanelV2'));
+const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanelV2'));
+const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanelV2'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -802,13 +802,13 @@ export default function DispatchPageV2() {
         </div>
       )}
 
-      {viewMode === 'day' && <RecurringAlertsBanner />}
+      {viewMode === 'day' && <RecurringAlertsBannerV2 />}
 
       {viewMode === 'day' && (
-        <ScheduleIntelligenceBar date={date} scheduleData={data} onRefresh={() => fetchSchedule(date)} />
+        <ScheduleIntelligenceBarV2 date={date} scheduleData={data} onRefresh={() => fetchSchedule(date)} />
       )}
 
-      {/* Non-board tabs — V1 panels unchanged */}
+      {/* Non-board tabs — V2 monochrome panels (Match/CSR/Revenue/Insights). ProtocolReferenceTab stays V1 until PR #3d. */}
       {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTab />}
       {viewMode === 'day' && activeTab === 'match' && (
         <Suspense fallback={<div className="py-10 text-center text-13 text-ink-secondary">Loading…</div>}><TechMatchPanel /></Suspense>
