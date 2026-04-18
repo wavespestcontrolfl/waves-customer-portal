@@ -19,6 +19,9 @@ const RECURRING_SERVICES = new Set([
 const ONE_TIME_SERVICES = new Set([
   'one_time_pest', 'one_time_lawn', 'one_time_mosquito',
   'top_dressing', 'dethatching', 'plugging', 'trenching',
+  // Session 11a Step 2b-3: auto-fire from recurring pest roachModifier='GERMAN'.
+  // Mirrors v2-legacy-mapper treating oneTime.germanRoachInitial as a one-time item.
+  'german_roach_initial',
 ]);
 
 const CAP = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -39,6 +42,7 @@ const SERVICE_LABEL = {
   wdo: 'WDO Inspection',
   flea: 'Flea Treatment',
   german_roach: 'German Roach',
+  german_roach_initial: 'German Roach Initial (3-Visit)',
   stinging: 'Stinging Insect',
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
@@ -84,7 +88,9 @@ function mapV1ToLegacyShape(v1Result) {
       rOG: pestLI.roachAddOn || 0,
       label: sel.label || 'Quarterly',
     };
-    R.pestRoachMod = 'NONE';
+    // Session 11a Step 2b-3: uppercase to match v2-legacy-mapper output.
+    // pestLI.roachType is lowercase (german/regular/none) per service-pricing.
+    R.pestRoachMod = (pestLI.roachType || 'none').toUpperCase();
   }
 
   // Lawn → R.lawn, R.lawnMeta

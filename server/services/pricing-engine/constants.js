@@ -107,7 +107,11 @@ const PEST = {
     nearWater: r(5),            // Was 2.5.
     largeDriveway: r(5),        // Was 2.5.
   },
-  roachModifier: { german: 0.25, regular: 0.10, none: 0 },
+  // Session 11a Step 2b-3 byte-parity: v1 flattened from 0.25/0.10 to 0.15/0.15
+  // to match v2's currently-live rate (pricing-engine-v2.js:742-744). Customer-
+  // impact scan showed zero live estimates priced with roach modifier when this
+  // landed, so no existing customer pricing shifted.
+  roachModifier: { german: 0.15, regular: 0.15, none: 0 },
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
     // Session 11a byte-parity: v1 lowered from 0.92/0.85 to 0.85/0.70 to match
@@ -510,6 +514,11 @@ const WAVEGUARD = {
     bed_bug_heat: true,         // $50 flat member credit
     bora_care: true,            // Excluded — no discount
     pre_slab_termidor: true,    // Excluded — no discount
+    // priceGermanRoachInitial bakes urgency × rc in a single Math.round to
+    // match v2's applyOT exactly (pricing-engine-v2.js:183, 482). Excluding
+    // it here stops the orchestrator discount loop from applying the 15% rc
+    // perk a second time on the already-discounted $85.
+    german_roach_initial: true,
   },
   // One-time service perk for recurring customers. Flat 15% off one-time
   // services only. Does NOT stack with WaveGuard tier discount (recurring

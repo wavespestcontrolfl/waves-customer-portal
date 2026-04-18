@@ -73,7 +73,8 @@ function pricePestControl(property, options = {}) {
   let basePrice = Math.max(PEST.floor, PEST.base + Math.round(footprintAdj) + additionalAdj + propAdj + ageAdj);
 
   const roachMod = PEST.roachModifier[roachType] || 0;
-  const roachAddOn = Math.round(basePrice * roachMod);
+  // Session 11a Step 2b-3: 2-decimal rounding matches v2 (pricing-engine-v2.js:743).
+  const roachAddOn = Math.round(basePrice * roachMod * 100) / 100;
 
   const freqDiscounts = pricingVersion === 'v2' ? PEST.frequencyDiscounts.v2 : PEST.frequencyDiscounts.v1;
   const freqMult = freqDiscounts[frequency] || 1.0;
@@ -118,7 +119,7 @@ function pricePestControl(property, options = {}) {
   return {
     service: 'pest_control',
     basePrice, footprintAdj: Math.round(footprintAdj), additionalAdj, propAdj,
-    roachAddOn, freqMult, frequency, visitsPerYear, pricingVersion,
+    roachType, roachAddOn, freqMult, frequency, visitsPerYear, pricingVersion,
     perApp, annual, monthly,
     tiers,
     costs: {
@@ -681,6 +682,30 @@ function priceGermanRoach(property) {
   };
 }
 
+// Session 11a Step 2b-3 — v2 parity for the auto-fire when recurring pest
+// carries roachModifier='GERMAN'. v2 emits a flat $100 one-time line item
+// (pricing-engine-v2.js:481-483), urgency/afterHours via applyOT. Separate
+// from priceGermanRoach (the specialty ROACH service, $450+).
+function priceGermanRoachInitial(options = {}) {
+  const {
+    urgency = 'NONE',
+    afterHours = false,
+    isRecurringCustomer = false,
+  } = options;
+  const BASE = 100;
+  const urgencyMult = afterHours
+    ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
+    : (URGENCY[urgency] || URGENCY.NONE).standard;
+  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
+  const price = Math.round(BASE * urgencyMult * rcDisc);
+  return {
+    service: 'german_roach_initial',
+    name: 'German Roach Initial (3-Visit)',
+    price,
+    visits: 3,
+  };
+}
+
 function priceBedBug(rooms, method = 'chemical', footprint = 2000) {
   // 'both' returns v2 composite shape; dispatch in estimate-engine decomposes
   // into two flat line items for downstream pipeline compatibility.
@@ -1133,7 +1158,7 @@ module.exports = {
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
-  priceGermanRoach, priceBedBug, priceWDO, priceFlea,
+  priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   // Spec functions (Apr 2026)

@@ -11,7 +11,7 @@ const {
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
-  priceGermanRoach, priceBedBug, priceWDO, priceFlea,
+  priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
@@ -238,6 +238,23 @@ function generateEstimate(input) {
   }
   if (services.germanRoach) {
     const result = priceGermanRoach(property);
+    lineItems.push(result);
+  }
+  // Session 11a Step 2b-3: v2-parity auto-fire for recurring pest with
+  // roachModifier='GERMAN'. Flat $100 one-time (urgency/afterHours/rc baked
+  // inside priceGermanRoachInitial via a single Math.round, matching v2's
+  // applyOT). german_roach_initial is in WAVEGUARD.excludedFromPercentDiscount
+  // so the orchestrator discount loop doesn't re-apply the rc perk on top.
+  // Separate from the full specialty germanRoach service above.
+  if (services.germanRoachInitial) {
+    const opts = typeof services.germanRoachInitial === 'object'
+      ? services.germanRoachInitial
+      : {};
+    const result = priceGermanRoachInitial({
+      urgency: opts.urgency || 'NONE',
+      afterHours: !!opts.afterHours,
+      isRecurringCustomer: !!opts.isRecurringCustomer,
+    });
     lineItems.push(result);
   }
   if (services.boraCare) {

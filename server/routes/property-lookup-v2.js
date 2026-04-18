@@ -1136,8 +1136,15 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
 
   const services = {};
 
+  // Roach modifier (Step 2b-3). v2 options.roachModifier is uppercase
+  // (GERMAN/REGULAR/NONE); v1 service-pricing expects lowercase roachType.
+  const rawRoach = String(o.roachModifier || 'NONE').toUpperCase();
+  const roachType = rawRoach === 'GERMAN' ? 'german'
+                  : rawRoach === 'REGULAR' ? 'regular'
+                  : 'none';
+
   // Recurring
-  if (sel.has('PEST')) services.pest = { frequency: pestFreq };
+  if (sel.has('PEST')) services.pest = { frequency: pestFreq, roachType };
   if (sel.has('LAWN')) services.lawn = { track, tier: lawnTier };
   if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
   if (sel.has('MOSQUITO')) services.mosquito = { tier: 'silver' };
@@ -1169,8 +1176,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('RODENT_TRAP')) services.rodentTrapping = {};
   if (sel.has('WDO')) services.wdo = {};
   if (sel.has('FLEA')) services.flea = {};
-  // ROACH auto-fire via options.roachModifier='GERMAN' — deferred to Step 2b-3
+  // ROACH: manual specialty (full $450+ program) vs auto-fire (flat $100 initial).
+  // Step 2b-3: when recurring pest carries roachModifier='GERMAN', auto-add
+  // the $100 germanRoachInitial one-time (mirrors pricing-engine-v2.js:481-483).
+  // Urgency/afterHours/recurringCustomer multipliers applied inside priceGermanRoachInitial.
   if (sel.has('ROACH')) services.germanRoach = {};
+  if (sel.has('PEST') && rawRoach === 'GERMAN') {
+    services.germanRoachInitial = { urgency, afterHours, isRecurringCustomer: recurringCustomer };
+  }
   if (sel.has('BEDBUG')) {
     services.bedBug = {
       rooms: o.bedbugRooms || 1,

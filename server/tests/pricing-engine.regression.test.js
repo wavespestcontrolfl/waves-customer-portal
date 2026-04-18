@@ -223,6 +223,26 @@ const REGRESSION_CASES = [
       paymentMethod: 'card',
     },
   },
+  {
+    // Session 11a Step 2b-3 — pins roachType='german' behavior.
+    // Exercises: (a) 15% roachAddOn on recurring pest base (2-decimal round),
+    // (b) $100 germanRoachInitial auto-fire with recurringCustomer=true,
+    // mirroring the adapter's real prod call shape. Locks byte-parity with
+    // v2 applyOT(100) = $85 by excluding german_roach_initial from the
+    // orchestrator's rc perk (the function already bakes rc discount in).
+    name: 'german_roach_modifier_pest_quarterly',
+    input: {
+      homeSqFt: 2000, stories: 1, lotSqFt: 10000,
+      propertyType: 'single_family', zone: 'A',
+      features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+      services: {
+        pest: { frequency: 'quarterly', roachType: 'german' },
+        germanRoachInitial: { urgency: 'NONE', afterHours: false, isRecurringCustomer: true },
+      },
+      recurringCustomer: true,
+      paymentMethod: 'card',
+    },
+  },
 ];
 
 async function getEstimate(input) {
