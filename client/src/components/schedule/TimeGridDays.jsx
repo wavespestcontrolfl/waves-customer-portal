@@ -73,6 +73,16 @@ function minutesToTopPx(min) {
   return ((min - DAY_START_HOUR * 60) / SLOT_MIN) * SLOT_HEIGHT;
 }
 
+// Prefer the actual window (windowEnd - windowStart) since the DB's
+// estimated_duration_minutes column is often null. Falls back to 30.
+function effectiveDuration(svc) {
+  if (svc?.estimatedDuration && svc.estimatedDuration > 0) return svc.estimatedDuration;
+  const start = parseHHMM(svc?.windowStart);
+  const end = parseHHMM(svc?.windowEnd);
+  if (start != null && end != null && end > start) return end - start;
+  return 30;
+}
+
 function statusBlockClasses(status) {
   switch (status) {
     case 'completed': return 'bg-zinc-200 text-zinc-500';
@@ -187,7 +197,7 @@ function DayColumn({ day, onEdit, isToday, isSelected }) {
           const startMin = parseHHMM(svc.windowStart);
           if (startMin == null || startMin < DAY_START_HOUR * 60 || startMin >= DAY_END_HOUR * 60) return null;
           const top = minutesToTopPx(startMin);
-          const dur = svc.estimatedDuration || 30;
+          const dur = effectiveDuration(svc);
           const height = (dur / SLOT_MIN) * SLOT_HEIGHT;
           return (
             <AppointmentBlock
@@ -291,7 +301,7 @@ export default function TimeGridDays({
     const toMin = drop.slotMin;
     if (fromDate === toDate && fromMin === toMin) return;
 
-    const dur = svc.estimatedDuration || 30;
+    const dur = effectiveDuration(svc);
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
 
     // Optimistic update: move svc out of fromDate, into toDate at new time
