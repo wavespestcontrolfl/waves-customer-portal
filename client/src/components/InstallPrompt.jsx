@@ -1,12 +1,5 @@
 import { useEffect, useState } from 'react';
-
-const DARK = {
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-};
+import { COLORS as B, FONTS } from '../theme-brand';
 
 export default function InstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] = useState(null);
@@ -57,8 +50,8 @@ export default function InstallPrompt() {
       <div style={{
         maxWidth: 480,
         margin: '0 auto',
-        background: DARK.card,
-        border: `1px solid ${DARK.border}`,
+        background: B.blueDeeper,
+        border: `1px solid ${B.blueDark}`,
         borderRadius: 14,
         padding: '14px 16px',
         display: 'flex',
@@ -67,37 +60,44 @@ export default function InstallPrompt() {
         boxShadow: '0 -4px 24px rgba(0,0,0,0.4)',
         pointerEvents: 'auto',
       }}>
-        {/* Logo */}
+        {/* W logo tile — brand gold square, Anton W in navy */}
         <div style={{
           width: 36, height: 36, borderRadius: 10, flexShrink: 0,
-          background: `linear-gradient(135deg, ${DARK.teal}, #2563eb)`,
+          background: B.yellow,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 18, fontWeight: 800, color: '#fff',
-          fontFamily: "'Montserrat', sans-serif",
+          fontSize: 22, fontWeight: 400, color: B.blueDeeper,
+          fontFamily: FONTS.display,
+          letterSpacing: '0.02em',
+          lineHeight: 1,
         }}>W</div>
 
         {/* Text */}
         <div style={{ flex: 1 }}>
           <p style={{
-            margin: 0, fontSize: 14, fontWeight: 700, color: DARK.text,
-            fontFamily: "'Montserrat', sans-serif",
+            margin: 0, fontSize: 14, fontWeight: 700, color: B.white,
+            fontFamily: FONTS.heading,
           }}>Add Waves to Home Screen</p>
-          <p style={{ margin: '2px 0 0', fontSize: 12, color: DARK.muted }}>
+          <p style={{
+            margin: '2px 0 0', fontSize: 12,
+            color: 'rgba(255,255,255,0.7)',
+            fontFamily: FONTS.body,
+          }}>
             Quick access to your portal
           </p>
         </div>
 
-        {/* Install button */}
+        {/* Install button — gold pill, navy text (matches LoginPage primary CTA) */}
         <button onClick={handleInstall} style={{
-          background: DARK.teal,
-          color: '#fff',
+          background: B.yellow,
+          color: B.blueDeeper,
           border: 'none',
           borderRadius: 8,
           padding: '8px 14px',
           fontSize: 13,
-          fontWeight: 700,
+          fontWeight: 800,
           cursor: 'pointer',
-          fontFamily: "'Montserrat', sans-serif",
+          fontFamily: FONTS.ui,
+          letterSpacing: '0.02em',
           whiteSpace: 'nowrap',
         }}>Install</button>
 
@@ -105,7 +105,7 @@ export default function InstallPrompt() {
         <button onClick={dismiss} style={{
           background: 'none',
           border: 'none',
-          color: DARK.muted,
+          color: 'rgba(255,255,255,0.6)',
           fontSize: 18,
           cursor: 'pointer',
           padding: '0 4px',
