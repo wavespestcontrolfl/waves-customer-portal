@@ -1,0 +1,11 @@
+{
+  "name": "@waves/blog-schema",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vendored blog post frontmatter schema. Source of truth lives in wavespestcontrol-astro. Do not edit files here directly — run `npm run sync:blog-schema` from the admin repo root after updating upstream.",
+  "main": "schema.json",
+  "scripts": {
+    "verify": "node scripts/verify-vendor.js",
+    "sync": "node scripts/sync-from-astro.js"
+  }
+}

@@ -5,13 +5,16 @@
   "private": true,
   "workspaces": [
     "server",
-    "client"
+    "client",
+    "packages/*"
   ],
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
+    "prebuild": "npm run verify:blog-schema",
     "build": "cd client && npm run build",
+    "prestart": "npm run verify:blog-schema",
     "start": "cd server && npx knex migrate:latest && cd .. && node server/index.js",
     "db:migrate": "cd server && npx knex migrate:latest",
     "db:rollback": "cd server && npx knex migrate:rollback",
@@ -20,7 +23,9 @@
     "test:contracts": "node server/contract-tests/index.js",
     "test:contracts:list": "node server/contract-tests/index.js --list",
     "models:check": "node scripts/check-models.js",
-    "seed:pricing": "node scripts/seed-local-pricing.js"
+    "seed:pricing": "node scripts/seed-local-pricing.js",
+    "verify:blog-schema": "node packages/blog-schema/scripts/verify-vendor.js",
+    "sync:blog-schema": "node packages/blog-schema/scripts/sync-from-astro.js"
   },
   "engines": {
     "node": ">=20"
