@@ -240,8 +240,25 @@ function mapV1ToLegacyShape(v1Result) {
   const year1 = Math.round((recurringAnnual + oneTimeTotal) * 100) / 100;
   const year2 = Math.round(recurringAnnual * 100) / 100;
 
+  // Project v1 features back onto flat v2-shape keys so EstimatePage's
+  // client-side modifiers fallback (which predates Session 11a and reads
+  // `p.poolCage === 'YES'`, `p.shrubDensity`, `p.hasLargeDriveway`, etc.)
+  // renders correctly without touching the engine output shape.
+  const vp = v1Result.property || {};
+  const vf = vp.features || {};
+  const upper = v => (v ? String(v).toUpperCase() : '');
+  const legacyProperty = {
+    ...vp,
+    pool: vf.pool ? 'YES' : 'NO',
+    poolCage: vf.poolCage ? 'YES' : 'NO',
+    hasLargeDriveway: !!vf.largeDriveway,
+    shrubDensity: upper(vf.shrubs),
+    treeDensity: upper(vf.trees),
+    landscapeComplexity: upper(vf.complexity),
+  };
+
   return {
-    property: v1Result.property,
+    property: legacyProperty,
     fieldVerify: [],
     notes: v1Result.notes || [],
     urgency: { mult: 1, label: '' },
