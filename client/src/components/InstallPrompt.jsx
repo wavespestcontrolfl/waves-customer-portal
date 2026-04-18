@@ -60,16 +60,14 @@ export default function InstallPrompt() {
         boxShadow: '0 -4px 24px rgba(0,0,0,0.4)',
         pointerEvents: 'auto',
       }}>
-        {/* W logo tile — brand gold square, Anton W in navy */}
+        {/* Waves logo tile */}
         <div style={{
           width: 36, height: 36, borderRadius: 10, flexShrink: 0,
           background: B.yellow,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 22, fontWeight: 400, color: B.blueDeeper,
-          fontFamily: FONTS.display,
-          letterSpacing: '0.02em',
-          lineHeight: 1,
-        }}>W</div>
+        }}>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 24, maxWidth: 28, objectFit: 'contain' }} />
+        </div>
 
         {/* Text */}
         <div style={{ flex: 1 }}>
@@ -78,9 +76,9 @@ export default function InstallPrompt() {
             fontFamily: FONTS.heading,
           }}>Add Waves to Home Screen</p>
           <p style={{
-            margin: '2px 0 0', fontSize: 12,
+            margin: '2px 0 0', fontSize: 12, fontWeight: 500,
             color: 'rgba(255,255,255,0.7)',
-            fontFamily: FONTS.body,
+            fontFamily: FONTS.heading,
           }}>
             Quick access to your portal
           </p>
@@ -96,7 +94,7 @@ export default function InstallPrompt() {
           fontSize: 13,
           fontWeight: 800,
           cursor: 'pointer',
-          fontFamily: FONTS.ui,
+          fontFamily: FONTS.heading,
           letterSpacing: '0.02em',
           whiteSpace: 'nowrap',
         }}>Install</button>

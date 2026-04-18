@@ -441,6 +441,7 @@ export default function PayPage() {
           aria-hidden="true">
           <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
         </video>
+        <img src="/waves-logo.png" alt="Waves Pest Control" style={{ position: 'relative', zIndex: 1, height: 28, objectFit: 'contain' }} />
       </div>
 
       <div style={{ maxWidth: 560, margin: '0 auto', padding: isMobile ? '0 12px 40px' : '0 16px 60px' }}>
