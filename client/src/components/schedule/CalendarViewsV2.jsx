@@ -267,11 +267,11 @@ function MonthDayCell({ day, di, onDateClick }) {
       }}
       className={cn(
         'text-left min-h-[90px] p-2 transition-colors u-focus-ring cursor-pointer',
-        di < 6 && 'border-r border-hairline border-zinc-200',
         day.isToday ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
         !day.isCurrentMonth && 'opacity-40',
         isOver && 'bg-zinc-100 ring-1 ring-zinc-400 ring-inset'
       )}
+      style={di < 6 ? { borderRight: '1px solid #E4E4E7' } : undefined}
     >
       {/* Day number + count */}
       <div className="flex items-center justify-between mb-1">
@@ -442,7 +442,8 @@ export function MonthViewV2({ date, onDateClick }) {
             .map(([cat, count]) => (
               <span
                 key={cat}
-                className="inline-flex items-center gap-2 text-11 px-2.5 h-6 rounded-sm border-hairline border-zinc-200 bg-white text-ink-secondary"
+                className="inline-flex items-center gap-2 text-11 px-2.5 h-6 rounded-sm bg-white text-ink-secondary"
+                style={{ border: '1px solid #E4E4E7' }}
               >
                 <span className="u-dot u-dot--filled" />
                 <span className="lowercase">{cat}</span>
@@ -457,7 +458,10 @@ export function MonthViewV2({ date, onDateClick }) {
         <div className="-mx-4 md:mx-0 overflow-x-auto">
         <Card className="overflow-hidden min-w-[700px] md:min-w-0 md:mx-0 mx-4">
           {/* Day of week headers */}
-          <div className="grid grid-cols-7 border-b border-hairline border-zinc-200 bg-zinc-50">
+          <div
+            className="grid grid-cols-7 bg-zinc-50"
+            style={{ borderBottom: '1px solid #E4E4E7' }}
+          >
             {DOW.map((d) => (
               <div key={d} className="u-label text-ink-secondary py-2 text-center">
                 {d}
@@ -469,10 +473,8 @@ export function MonthViewV2({ date, onDateClick }) {
           {viewData.weeks.map((week, wi) => (
             <div
               key={wi}
-              className={cn(
-                'grid grid-cols-7',
-                wi < viewData.weeks.length - 1 && 'border-b border-hairline border-zinc-200'
-              )}
+              className="grid grid-cols-7"
+              style={wi < viewData.weeks.length - 1 ? { borderBottom: '1px solid #E4E4E7' } : undefined}
             >
               {week.map((day, di) => (
                 <MonthDayCell key={day.date} day={day} di={di} onDateClick={onDateClick} />
@@ -503,7 +505,8 @@ export function MonthViewV2({ date, onDateClick }) {
                   return (
                     <div
                       key={tech}
-                      className="border-hairline border-zinc-200 rounded-sm bg-white p-3"
+                      className="rounded-sm bg-white p-3"
+                      style={{ border: '1px solid #E4E4E7' }}
                     >
                       <div className="flex items-baseline justify-between">
                         <div className="text-13 font-medium text-ink-primary">{tech}</div>
