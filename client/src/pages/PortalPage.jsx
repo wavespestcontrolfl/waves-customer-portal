@@ -1533,7 +1533,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         const svcDate = parseDate(pendingSatisfaction.service_date || pendingSatisfaction.serviceDate);
 
         // Confetti particles
-        const confettiColors = [B.yellow, B.green, B.wavesBlue, B.orange, B.red, '#9C27B0'];
+        const confettiColors = [B.yellow, B.green, B.wavesBlue, B.orange, B.red, B.blueDeeper];
         const confettiParticles = showConfetti ? Array.from({ length: 40 }, (_, i) => ({
           id: i,
           color: confettiColors[i % confettiColors.length],
@@ -1818,9 +1818,9 @@ function DashboardTab({ customer, onSwitchTab }) {
             {/* Header */}
             <div style={{
               background: isToday
-                ? `linear-gradient(135deg, ${B.green}, #2E7D32)`
+                ? `linear-gradient(135deg, ${B.green}, ${B.blueDark})`
                 : isTomorrow
-                  ? `linear-gradient(135deg, ${B.orange}, #E65100)`
+                  ? `linear-gradient(135deg, ${B.orange}, ${B.blueDark})`
                   : `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
               padding: '16px 20px', color: '#fff',
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -2793,9 +2793,9 @@ function ScheduleTab({ customer }) {
     const isGreen = s.isToday;
     const isOrange = s.isSoon;
     const headerBg = isGreen
-      ? `linear-gradient(135deg, ${B.green}, #2E7D32)`
+      ? `linear-gradient(135deg, ${B.green}, ${B.blueDark})`
       : isOrange
-        ? `linear-gradient(135deg, ${B.orange}, #E65100)`
+        ? `linear-gradient(135deg, ${B.orange}, ${B.blueDark})`
         : `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`;
     const borderColor = isGreen ? B.green : isOrange ? B.orange : B.wavesBlue;
 
@@ -3316,15 +3316,15 @@ function BillingTab({ customer }) {
   const bannerConfig = {
     failed: {
       bg: `${B.red}20`, border: `${B.red}33`, iconBg: B.red,
-      icon: '!', titleColor: B.red, subtitleColor: '#D32F2F',
+      icon: '!', titleColor: B.red, subtitleColor: B.grayDark,
     },
     expiring: {
       bg: `${B.orange}20`, border: `${B.orange}33`, iconBg: B.orange,
-      icon: '!', titleColor: '#E65100', subtitleColor: '#F57C00',
+      icon: '!', titleColor: B.orange, subtitleColor: B.grayDark,
     },
     active: {
       bg: `${B.green}20`, border: `${B.green}33`, iconBg: B.green,
-      icon: '\u2713', titleColor: '#2E7D32', subtitleColor: '#558B2F',
+      icon: '\u2713', titleColor: B.green, subtitleColor: B.grayDark,
     },
   }[bannerState];
 
