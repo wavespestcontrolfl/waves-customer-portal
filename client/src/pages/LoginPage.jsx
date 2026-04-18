@@ -218,7 +218,7 @@ export default function LoginPage() {
       <div style={{ position: 'relative', zIndex: 2, marginTop: 28, textAlign: 'center' }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', fontFamily: FONTS.heading }}>
           Looking for new service?{' '}
-          <a href="https://wavespestcontrol.com" target="_blank" rel="noopener noreferrer"
+          <a href="/quote"
             style={{ color: B.yellow, fontWeight: 800, textDecoration: 'none' }}>
             Get a Quote
           </a>
