@@ -1270,7 +1270,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
 // =========================================================================
 
 // Named exports for V2 reuse
-export { ALL_NUMBERS, TEMPLATES, CallLogTab, CSRCoachTab, SmsTemplatesTab };
+export { ALL_NUMBERS, TEMPLATES, CALL_DISPOSITIONS, NUMBER_LABEL_MAP, CallLogTab, CSRCoachTab, SmsTemplatesTab };
 
 export default function CommunicationsPage() {
   const [messages, setMessages] = useState([]);

@@ -11,21 +11,21 @@
 //   POST /admin/communications/ai-draft
 //   GET  /admin/customers?search=...
 //
-// Scope: Full V2 redesign of page chrome + SMS tab. Calls / Templates / CSR
-// tabs render V1 named-exported panels unchanged. Email + Notifications
-// pass through their existing separate files.
+// Scope: Full V2 redesign of all tabs. CallLogTabV2, SmsTemplatesTabV2,
+// CSRCoachTabV2, EmailAutomationsPanelV2, and PushSettingsV2 each render
+// behind the comms-v2 flag. V1 CommunicationsPage still uses the V1 inline
+// tabs and V1 separate panels.
 import React, {
   useState, useEffect, useCallback, useMemo,
 } from 'react';
 import {
-  CallLogTab,
-  CSRCoachTab,
-  SmsTemplatesTab,
   ALL_NUMBERS,
   TEMPLATES,
 } from './CommunicationsPage';
-import EmailAutomationsPanel from './EmailAutomationsPanel';
-import PushSettings from '../../components/admin/PushSettings';
+import CallLogTabV2 from './CallLogTabV2';
+import { SmsTemplatesTabV2, CSRCoachTabV2 } from './CommunicationsTabsV2';
+import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
+import PushSettingsV2 from '../../components/admin/PushSettingsV2';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 import { Badge, Button, Card, cn } from '../../components/ui';
 
@@ -957,11 +957,11 @@ export default function CommunicationsPageV2() {
       </div>
 
       {tab === 'sms' && <SmsTab />}
-      {tab === 'calls' && <CallLogTab />}
-      {tab === 'templates' && <SmsTemplatesTab />}
-      {tab === 'email' && <EmailAutomationsPanel />}
-      {tab === 'csr' && <CSRCoachTab />}
-      {tab === 'notifications' && <PushSettings />}
+      {tab === 'calls' && <CallLogTabV2 />}
+      {tab === 'templates' && <SmsTemplatesTabV2 />}
+      {tab === 'email' && <EmailAutomationsPanelV2 />}
+      {tab === 'csr' && <CSRCoachTabV2 />}
+      {tab === 'notifications' && <PushSettingsV2 />}
     </div>
   );
 }
