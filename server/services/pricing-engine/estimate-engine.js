@@ -236,12 +236,20 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.bedBug) {
-    const result = priceBedBug(
-      services.bedBug.rooms || 1,
-      services.bedBug.method || 'chemical',
-      property.footprint
-    );
-    lineItems.push(result);
+    const rooms = services.bedBug.rooms || 1;
+    const method = services.bedBug.method || 'chemical';
+    const result = priceBedBug(rooms, method, property.footprint);
+    if (result.methods) {
+      // 'both' composite → split into two flat line items for pipeline
+      result.methods.forEach(m => lineItems.push({
+        service: m.method === 'Heat' ? 'bed_bug_heat' : 'bed_bug_chemical',
+        rooms,
+        price: m.price,
+        detail: m.detail,
+      }));
+    } else {
+      lineItems.push(result);
+    }
   }
   if (services.wdo) {
     const result = priceWDO(property.footprint);

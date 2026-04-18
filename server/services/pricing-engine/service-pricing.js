@@ -682,15 +682,28 @@ function priceGermanRoach(property) {
 }
 
 function priceBedBug(rooms, method = 'chemical', footprint = 2000) {
+  // 'both' returns v2 composite shape; dispatch in estimate-engine decomposes
+  // into two flat line items for downstream pipeline compatibility.
+  if (method === 'both' || method === 'BOTH') {
+    const chem = priceBedBug(rooms, 'chemical', footprint);
+    const heat = priceBedBug(rooms, 'heat', footprint);
+    return {
+      name: 'Bed Bug Treatment',
+      methods: [
+        { method: 'Chemical', price: chem.price, detail: `${rooms} room${rooms > 1 ? 's' : ''}, 2 visits` },
+        { method: 'Heat',     price: heat.price, detail: `${rooms} room${rooms > 1 ? 's' : ''} — $${Math.round(heat.price / rooms)}/room` },
+      ],
+    };
+  }
+
   if (method === 'heat') {
     const perRoom = rooms <= 1 ? SPECIALTY.bedBug.heat.perRoom[1]
       : rooms <= 2 ? SPECIALTY.bedBug.heat.perRoom[2]
       : SPECIALTY.bedBug.heat.perRoom[3];
     let price = perRoom * rooms;
-    price += SPECIALTY.bedBug.heat.inHouseBase + Math.max(0, rooms - 1) * SPECIALTY.bedBug.heat.inHousePerExtra;
-    if (footprint > 2500) price *= SPECIALTY.bedBug.heat.footprintMult.over2500;
-    else if (footprint < 1200) price *= SPECIALTY.bedBug.heat.footprintMult.under1200;
-    return { service: 'bed_bug_heat', rooms, price: Math.round(price) };
+    if (footprint > 2500) price = Math.round(price * SPECIALTY.bedBug.heat.footprintMult.over2500);
+    else if (footprint < 1200) price = Math.round(price * SPECIALTY.bedBug.heat.footprintMult.under1200);
+    return { service: 'bed_bug_heat', rooms, price };
   }
 
   // Chemical method
@@ -699,7 +712,7 @@ function priceBedBug(rooms, method = 'chemical', footprint = 2000) {
   const v1min = 45 + (rooms - 1) * 30 + 30 + driveMin;
   const v2min = 25 + (rooms - 1) * 20 + driveMin;
   const cost = (mpr * rooms + GLOBAL.LABOR_RATE * v1min / 60 + mpr * rooms * 0.5 + GLOBAL.LABOR_RATE * v2min / 60);
-  let price = Math.round(cost / SPECIALTY.bedBug.chemical.marginDivisor);
+  let price = Math.round(cost / SPECIALTY.bedBug.chemical.marginDivisor * 100) / 100;
   const floor = SPECIALTY.bedBug.chemical.floorBase + Math.max(0, rooms - 1) * SPECIALTY.bedBug.chemical.floorPerExtraRoom;
   price = Math.max(floor, price);
   if (footprint > 2500) price = Math.round(price * SPECIALTY.bedBug.chemical.footprintMult.over2500);
