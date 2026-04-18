@@ -341,12 +341,11 @@ export default function QuotePage() {
 
   const sCardH2 = {
     fontFamily: FONTS.heading,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: 700,
     color: COLORS.blueDeeper,
     margin: '0 0 6px',
-    textTransform: 'uppercase',
-    letterSpacing: '0.02em',
+    lineHeight: 1.2,
   };
 
   const sCardSub = {
@@ -484,7 +483,7 @@ export default function QuotePage() {
 
                 {satellite?.closeUrl && (
                   <div style={{ marginBottom: 16, borderRadius: 12, overflow: 'hidden', border: `1px solid ${COLORS.slate200}` }}>
-                    <img src={satellite.closeUrl} alt="Property satellite view" style={{ width: '100%', height: 'auto', display: 'block' }} />
+                    <img src={satellite.closeUrl} alt="Property satellite view" style={{ width: '100%', maxHeight: 220, objectFit: 'cover', objectPosition: 'center', display: 'block' }} />
                   </div>
                 )}
 
@@ -584,7 +583,7 @@ function LookupLoading({ status, sub, satellite, aiSources, address }) {
   return (
     <div style={{ textAlign: 'center', padding: '16px 0' }}>
       <div style={{ fontSize: 12, color: COLORS.textCaption, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.2, marginBottom: 6, fontFamily: FONTS.ui }}>Property Lookup</div>
-      <h2 style={{ margin: '0 0 8px', fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700, color: COLORS.blueDeeper, textTransform: 'uppercase', letterSpacing: '0.02em' }}>
+      <h2 style={{ margin: '0 0 8px', fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700, color: COLORS.blueDeeper, lineHeight: 1.2 }}>
         {status || 'Looking up property...'}{dots}
       </h2>
       {sub && <div style={{ fontSize: 14, color: COLORS.textBody, marginBottom: 20 }}>{sub}</div>}
@@ -594,7 +593,7 @@ function LookupLoading({ status, sub, satellite, aiSources, address }) {
 
       {satellite?.closeUrl && (
         <div style={{ marginTop: 16, borderRadius: 12, overflow: 'hidden', border: `1px solid ${COLORS.slate200}` }}>
-          <img src={satellite.closeUrl} alt="Property satellite view" style={{ width: '100%', height: 'auto', display: 'block' }} />
+          <img src={satellite.closeUrl} alt="Property satellite view" style={{ width: '100%', maxHeight: 220, objectFit: 'cover', objectPosition: 'center', display: 'block' }} />
         </div>
       )}
       {aiSources && (
