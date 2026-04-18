@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
+import { Button } from '../components/Button';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Mirrored from wavespestcontrol.com Astro @theme tokens (van-vinyl spec)
@@ -246,21 +247,14 @@ export default function ReviewPage() {
               }}
             />
             <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <button onClick={handleFeedback} disabled={submittingFeedback}
-                onMouseEnter={(e) => { if (!submittingFeedback) e.currentTarget.style.background = W.yellowHover; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = W.yellow; }}
-                style={{
-                  flex: 1, padding: 14, borderRadius: 9999, border: 'none',
-                  background: W.yellow, color: W.blueDeeper,
-                  fontFamily: "'Inter', system-ui, sans-serif",
-                  fontWeight: 800, fontSize: 15, letterSpacing: '0.02em',
-                  cursor: submittingFeedback ? 'wait' : 'pointer',
-                  opacity: submittingFeedback ? 0.6 : 1,
-                  boxShadow: '0 4px 14px rgba(0,0,0,0.15)',
-                  transition: 'background-color 150ms cubic-bezier(0.4,0,0.2,1)',
-                }}>
+              <Button
+                variant="primary"
+                onClick={handleFeedback}
+                disabled={submittingFeedback}
+                style={{ flex: 1, cursor: submittingFeedback ? 'wait' : 'pointer' }}
+              >
                 {submittingFeedback ? 'Sending...' : 'Send Feedback'}
-              </button>
+              </Button>
               <button onClick={() => setPhase('thankyou')}
                 style={{
                   padding: '14px 20px', borderRadius: 12, border: `1px solid ${W.border}`,

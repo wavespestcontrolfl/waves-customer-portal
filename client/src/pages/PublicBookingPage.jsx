@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import BrandFooter from '../components/BrandFooter';
+import { Button } from '../components/Button';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -167,16 +168,7 @@ export default function PublicBookingPage() {
   };
 
   // ── shared styles ──
-  const btnPrimary = (disabled) => ({
-    width: '100%', padding: '14px 20px', borderRadius: 9999,
-    background: disabled ? BRAND.gray300 : '#FFD700',
-    color: disabled ? '#fff' : BRAND.navy,
-    border: 'none', fontSize: 15, fontWeight: 800,
-    letterSpacing: '0.02em',
-    cursor: disabled ? 'not-allowed' : 'pointer',
-    transition: 'background 0.15s cubic-bezier(0.4,0,0.2,1)',
-    fontFamily: "'Inter', system-ui, sans-serif",
-  });
+  // Primary CTAs now use <Button variant="primary"> (see usages below).
   const btnSecondary = {
     padding: '10px 16px', borderRadius: 8, background: 'transparent',
     border: `1px solid ${BRAND.gray300}`, color: BRAND.gray600,
@@ -310,13 +302,14 @@ export default function PublicBookingPage() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
-              <button
+              <Button
+                variant="primary"
                 onClick={() => setStep(2)}
                 disabled={!address.line1 || !address.city || !address.zip}
-                style={btnPrimary(!address.line1 || !address.city || !address.zip)}
+                style={{ width: '100%' }}
               >
                 Find my best times →
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -400,13 +393,14 @@ export default function PublicBookingPage() {
 
             <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
               <button onClick={() => setStep(1)} style={btnSecondary}>← Back</button>
-              <button
+              <Button
+                variant="primary"
                 onClick={() => setStep(3)}
                 disabled={!selectedSlot}
-                style={btnPrimary(!selectedSlot)}
+                style={{ flex: 1 }}
               >
                 Continue →
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -504,13 +498,14 @@ export default function PublicBookingPage() {
 
             <div style={{ display: 'flex', gap: 10 }}>
               <button onClick={() => setStep(2)} style={btnSecondary}>← Back</button>
-              <button
+              <Button
+                variant="primary"
                 onClick={handleConfirm}
                 disabled={loading || !contact.firstName || !contact.lastName || !contact.phone}
-                style={btnPrimary(loading || !contact.firstName || !contact.lastName || !contact.phone)}
+                style={{ flex: 1 }}
               >
                 {loading ? 'Booking…' : 'Confirm booking'}
-              </button>
+              </Button>
             </div>
           </div>
         )}

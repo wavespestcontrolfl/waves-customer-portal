@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
+import { Button } from '../components/Button';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -265,22 +266,17 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
         </div>
       )}
 
-      <button
+      <Button
+        variant="primary"
         onClick={handleSubmit}
         disabled={isDisabled || syncingAmount}
         style={{
-          width: '100%', padding: 16,
-          background: processing ? W.textCaption : W.yellow,
-          color: W.blueDeeper, border: 'none', borderRadius: 9999,
-          fontFamily: "'Inter', system-ui, sans-serif", fontWeight: 800, fontSize: 16,
-          letterSpacing: '0.02em',
+          width: '100%',
+          padding: 16,
+          fontSize: 16,
+          background: processing ? W.textCaption : undefined,
           cursor: (isDisabled || syncingAmount) ? 'default' : 'pointer',
-          opacity: (isDisabled || syncingAmount) ? 0.6 : 1,
-          boxShadow: '0 4px 14px rgba(0,0,0,0.15)',
-          transition: 'background-color 150ms cubic-bezier(0.4,0,0.2,1)',
         }}
-        onMouseEnter={(e) => { if (!isDisabled && !syncingAmount && !processing) e.currentTarget.style.background = W.yellowHover; }}
-        onMouseLeave={(e) => { if (!processing) e.currentTarget.style.background = W.yellow; }}
       >
         {processing
           ? 'Processing...'
@@ -289,7 +285,7 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
             : syncingAmount
               ? 'Updating total…'
               : `Pay $${buttonAmount.toFixed(2)}`}
-      </button>
+      </Button>
 
       <div style={{ textAlign: 'center', marginTop: 12, fontSize: 11, color: W.textCaption }}>
         256-bit encrypted — Processed by Stripe

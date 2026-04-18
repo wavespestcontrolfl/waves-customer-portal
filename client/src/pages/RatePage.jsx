@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
+import { Button } from '../components/Button';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -224,15 +225,16 @@ export default function RatePage() {
               }}>{h}</button>
             ))}
           </div>
-          <button onClick={handleHighlightsNext} disabled={submitting} style={{
-            display: 'inline-flex', alignItems: 'center', gap: 10, padding: '14px 28px',
-            background: '#FFD700', color: '#1B2C5B', border: 'none', borderRadius: 9999,
-            fontSize: 16, fontWeight: 800, cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
-            fontFamily: "'Inter', system-ui, sans-serif",
-          }}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#1B2C5B"/></svg>
+          <Button
+            variant="primary"
+            onClick={handleHighlightsNext}
+            disabled={submitting}
+            style={{ fontSize: 16 }}
+            icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#1B2C5B"/></svg>}
+            iconPosition="left"
+          >
             {submitting ? 'Sending...' : 'Leave a Google Review'}
-          </button>
+          </Button>
           <button onClick={() => { setScreen('success'); handleSubmit(); }} style={{ display: 'block', margin: '14px auto 0', fontSize: 13, color: '#64748B', background: 'none', border: 'none', cursor: 'pointer' }}>Skip for now</button>
         </div>
       )}
@@ -331,14 +333,13 @@ export default function RatePage() {
                 </button>
               </div>
 
-              <button onClick={handleGoToGoogle} style={{
-                width: '100%', padding: 14, border: 'none', borderRadius: 9999, fontSize: 16, fontWeight: 800,
-                color: '#1B2C5B', cursor: 'pointer', background: '#FFD700',
-                boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
-                fontFamily: "'Inter', system-ui, sans-serif",
-              }}>
+              <Button
+                variant="primary"
+                onClick={handleGoToGoogle}
+                style={{ width: '100%', fontSize: 16 }}
+              >
                 Go to Google Reviews
-              </button>
+              </Button>
 
               <button onClick={handleGenerateReview} disabled={generating} style={{
                 display: 'block', margin: '12px auto 0', fontSize: 13, color: '#009CDE', background: 'none',
@@ -376,12 +377,14 @@ export default function RatePage() {
             width: '100%', minHeight: 100, padding: 14, border: '2px solid #CBD5E1', borderRadius: 12,
             fontSize: 15, color: '#1B2C5B', resize: 'vertical', outline: 'none', boxSizing: 'border-box',
           }} />
-          <button onClick={handleSubmit} disabled={submitting} style={{
-            width: '100%', padding: 14, border: 'none', borderRadius: 9999, fontSize: 16, fontWeight: 800,
-            color: '#1B2C5B', cursor: 'pointer', marginTop: 12,
-            background: '#FFD700',
-            fontFamily: "'Inter', system-ui, sans-serif",
-          }}>{submitting ? 'Sending...' : 'Send Feedback'}</button>
+          <Button
+            variant="primary"
+            onClick={handleSubmit}
+            disabled={submitting}
+            style={{ width: '100%', fontSize: 16, marginTop: 12 }}
+          >
+            {submitting ? 'Sending...' : 'Send Feedback'}
+          </Button>
         </div>
       )}
 
