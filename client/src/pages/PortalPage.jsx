@@ -188,11 +188,11 @@ function BeforeAfterSlider({ beforeAfter }) {
 
   const beforeStyle = hasBeforePhoto
     ? { backgroundImage: `url(${beforeAfter.before.photoUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
-    : { background: 'linear-gradient(135deg, #8B6914 0%, #A0522D 40%, #CD853F 70%, #D2B48C 100%)' };
+    : { background: `linear-gradient(135deg, ${B.grayDark} 0%, ${B.grayMid} 60%, ${B.grayLight} 100%)` };
 
   const afterStyle = hasAfterPhoto
     ? { backgroundImage: `url(${beforeAfter.after.photoUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
-    : { background: 'linear-gradient(135deg, #2E7D32 0%, #43A047 30%, #66BB6A 60%, #81C784 100%)' };
+    : { background: `linear-gradient(135deg, ${B.wavesBlue} 0%, ${B.sky} 100%)` };
 
   return (
     <div
@@ -219,7 +219,7 @@ function BeforeAfterSlider({ beforeAfter }) {
             BEFORE {beforeDate ? `— ${fmtDate(beforeDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.before?.overallScore != null && (
-            <div style={{ color: '#fbbf24', fontSize: 12, fontWeight: 700, marginTop: 2 }}>
+            <div style={{ color: B.yellow, fontSize: 12, fontWeight: 700, marginTop: 2 }}>
               Score: {beforeAfter.before.overallScore}%
             </div>
           )}
@@ -243,7 +243,7 @@ function BeforeAfterSlider({ beforeAfter }) {
             AFTER {afterDate ? `— ${fmtDate(afterDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.after?.overallScore != null && (
-            <div style={{ color: '#34d399', fontSize: 12, fontWeight: 700, marginTop: 2 }}>
+            <div style={{ color: B.green, fontSize: 12, fontWeight: 700, marginTop: 2 }}>
               Score: {beforeAfter.after.overallScore}%
             </div>
           )}
@@ -283,7 +283,7 @@ function ScoreRing({ score, size = 90, stroke = 7, label }) {
   }, [score]);
 
   const offset = circumference - (anim / 100) * circumference;
-  const color = score >= 75 ? B.green : score >= 50 ? '#f59e0b' : '#ef4444';
+  const color = score >= 75 ? B.green : score >= 50 ? B.orange : B.red;
 
   return (
     <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
@@ -1738,7 +1738,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         {/* Wave motif at bottom */}
         <div style={{
           position: 'absolute', bottom: 0, left: 0, right: 0, height: 30, zIndex: 1,
-          background: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120'%3E%3Cpath d='M0,60 C200,120 400,0 600,60 C800,120 1000,0 1200,60 L1200,120 L0,120Z' fill='%232196F3' fill-opacity='0.15'/%3E%3C/svg%3E") no-repeat bottom`,
+          background: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120'%3E%3Cpath d='M0,60 C200,120 400,0 600,60 C800,120 1000,0 1200,60 L1200,120 L0,120Z' fill='%234DC9F6' fill-opacity='0.25'/%3E%3C/svg%3E") no-repeat bottom`,
           backgroundSize: '100% 100%',
         }} />
         <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: B.blueLight, fontFamily: FONTS.body }}>Hey there,</div>
