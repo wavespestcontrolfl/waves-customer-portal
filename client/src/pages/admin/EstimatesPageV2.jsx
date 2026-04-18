@@ -447,6 +447,23 @@ function EstimatePipelineViewV2() {
                     <Button
                       size="sm"
                       variant="secondary"
+                      onClick={async () => {
+                        if (!confirm(`Resend estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
+                        await adminFetch(`/admin/estimates/${e.id}/send`, {
+                          method: 'POST',
+                          body: JSON.stringify({ sendMethod: 'both' }),
+                        }).catch(() => {});
+                        refreshEstimates();
+                      }}
+                    >
+                      Resend
+                    </Button>
+                  )}
+
+                  {(e.status === 'sent' || e.status === 'viewed') && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
                       onClick={() => setDeclineTarget(e)}
                     >
                       Mark Lost

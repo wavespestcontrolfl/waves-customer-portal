@@ -2135,6 +2135,21 @@ function EstimatePipelineView() {
                     }}>Follow Up</button>
                   )}
 
+                  {/* Resend — re-fires SMS + email via the original send endpoint */}
+                  {(e.status === 'sent' || e.status === 'viewed') && (
+                    <button onClick={async () => {
+                      if (!confirm(`Resend estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
+                      await adminFetch(`/admin/estimates/${e.id}/send`, {
+                        method: 'POST',
+                        body: JSON.stringify({ sendMethod: 'both' }),
+                      }).catch(() => {});
+                      refreshEstimates();
+                    }} style={{
+                      padding: '6px 12px', borderRadius: 6, border: `1px solid ${C.teal}`, cursor: 'pointer',
+                      background: 'transparent', color: C.teal, fontSize: 11, fontWeight: 600,
+                    }}>Resend</button>
+                  )}
+
                   {/* Mark as Lost button for sent/viewed */}
                   {(e.status === 'sent' || e.status === 'viewed') && (
                     <button onClick={() => setDeclineTarget(e)} style={{

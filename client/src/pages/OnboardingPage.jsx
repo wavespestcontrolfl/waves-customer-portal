@@ -126,6 +126,14 @@ export default function OnboardingPage() {
   // Stripe payment state
   const [stripeReady, setStripeReady] = useState(false);
   const [stripeError, setStripeError] = useState('');
+
+  // Reschedule flow state — we fetch zone-aware slots on demand so the
+  // customer only sees days a tech is actually nearby.
+  const [showReschedule, setShowReschedule] = useState(false);
+  const [slotDays, setSlotDays] = useState([]);
+  const [slotsLoading, setSlotsLoading] = useState(false);
+  const [slotsError, setSlotsError] = useState('');
+  const [pickedDate, setPickedDate] = useState(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
@@ -236,6 +244,36 @@ export default function OnboardingPage() {
       await apiFetch(`/onboarding/${token}/confirm-service`, { method: 'PUT', body: JSON.stringify({ confirmed: true }) });
       setData(prev => ({ ...prev, status: { ...prev.status, serviceConfirmed: true }, scheduledService: prev.scheduledService ? { ...prev.scheduledService, confirmed: true } : null }));
     } catch (e) { setError(e.message); }
+    setSubmitting(false);
+  };
+
+  const openReschedule = async () => {
+    setShowReschedule(true);
+    setSlotsLoading(true);
+    setSlotsError('');
+    try {
+      const result = await apiFetch(`/onboarding/${token}/available-slots`);
+      setSlotDays(result.days || []);
+      if (!result.days || result.days.length === 0) {
+        setSlotsError('No open slots in your area right now — call (941) 318-7612 and we\'ll sort it out.');
+      }
+    } catch (e) { setSlotsError(e.message || 'Could not load available days'); }
+    setSlotsLoading(false);
+  };
+
+  const submitReschedule = async (date, startTime24) => {
+    setSubmitting(true);
+    try {
+      await apiFetch(`/onboarding/${token}/reschedule-service`, {
+        method: 'PUT',
+        body: JSON.stringify({ date, startTime: startTime24 }),
+      });
+      // Refresh the onboarding state so the service card shows the new date.
+      const fresh = await apiFetch(`/onboarding/${token}`);
+      setData(fresh);
+      setShowReschedule(false);
+      setPickedDate(null);
+    } catch (e) { setError(e.message || 'Reschedule failed'); }
     setSubmitting(false);
   };
 
@@ -452,7 +490,7 @@ export default function OnboardingPage() {
                     {!svc.confirmed && !data.status.serviceConfirmed ? (
                       <>
                         <button onClick={handleConfirm} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: B.yellow, color: B.blueDeeper }}>✅ Confirm</button>
-                        <button style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: 'transparent', color: B.wavesBlue, border: `1.5px solid ${B.wavesBlue}` }}>📅 Reschedule</button>
+                        <button onClick={openReschedule} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: 'transparent', color: B.wavesBlue, border: `1.5px solid ${B.wavesBlue}` }}>📅 Reschedule</button>
                       </>
                     ) : (
                       <span style={{ fontSize: 13, fontWeight: 700, color: B.green }}>✅ Confirmed</span>
@@ -461,6 +499,55 @@ export default function OnboardingPage() {
                   <button onClick={generateICS} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginTop: 8, padding: 0 }}>
                     Add to Calendar 📅
                   </button>
+                </div>
+              )}
+
+              {/* Reschedule picker — shows real zone-aware availability */}
+              {showReschedule && (
+                <div style={{ marginTop: 12, padding: '14px 16px', borderRadius: 12, border: `1.5px solid ${B.wavesBlue}`, background: '#fff' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Pick a new day</div>
+                    <button onClick={() => { setShowReschedule(false); setPickedDate(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, color: B.grayMid }}>✕</button>
+                  </div>
+                  <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2 }}>
+                    Only showing days a Waves tech is already in your neighborhood.
+                  </div>
+
+                  {slotsLoading && <div style={{ marginTop: 12, fontSize: 13, color: B.grayMid }}>Loading…</div>}
+                  {slotsError && <div style={{ marginTop: 12, fontSize: 13, color: B.red }}>{slotsError}</div>}
+
+                  {!slotsLoading && !slotsError && slotDays.length > 0 && !pickedDate && (
+                    <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))', gap: 6 }}>
+                      {slotDays.map(d => (
+                        <button key={d.date} onClick={() => setPickedDate(d)} style={{
+                          padding: '10px 8px', borderRadius: 10, border: `1.5px solid ${B.bluePale}`, background: '#fff',
+                          cursor: 'pointer', textAlign: 'center',
+                        }}>
+                          <div style={{ fontSize: 11, color: B.grayMid, textTransform: 'uppercase', fontWeight: 600 }}>{d.dayOfWeek}</div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: B.navy }}>{d.dayNum}</div>
+                          <div style={{ fontSize: 11, color: B.grayMid }}>{d.month}</div>
+                          <div style={{ fontSize: 10, color: B.wavesBlue, marginTop: 2 }}>{d.slots.length} open</div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {pickedDate && (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 13, color: B.navy, fontWeight: 600, marginBottom: 8 }}>{pickedDate.fullDate}</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 6 }}>
+                        {pickedDate.slots.map(s => (
+                          <button key={s.startTime24} disabled={submitting} onClick={() => submitReschedule(pickedDate.date, s.startTime24)} style={{
+                            padding: '10px 12px', borderRadius: 10, border: `1.5px solid ${B.wavesBlue}`, background: B.blueSurface,
+                            cursor: submitting ? 'default' : 'pointer', fontSize: 13, fontWeight: 600, color: B.navy,
+                          }}>
+                            {s.start} – {s.end}
+                          </button>
+                        ))}
+                      </div>
+                      <button onClick={() => setPickedDate(null)} style={{ marginTop: 10, background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: B.wavesBlue, fontWeight: 600, padding: 0 }}>← Different day</button>
+                    </div>
+                  )}
                 </div>
               )}
 

@@ -266,6 +266,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 9AM — Auto-renew expired estimates once (+7 days)
+  // =========================================================================
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      const EstimateAutoRenew = require('./estimate-auto-renew');
+      const result = await EstimateAutoRenew.checkAll();
+      if (result.renewed > 0) logger.info(`Estimate auto-renew: ${result.renewed} renewed`);
+    } catch (err) {
+      logger.error(`Estimate auto-renew job failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 8AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {

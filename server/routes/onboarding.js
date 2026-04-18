@@ -312,6 +312,58 @@ router.put('/:token/details', loadSession, async (req, res, next) => {
 });
 
 // =========================================================================
+// GET /api/onboarding/:token/available-slots — show customer real route-day
+// slots they can pick from (zone-aware — only days a tech is nearby)
+// =========================================================================
+router.get('/:token/available-slots', loadSession, async (req, res, next) => {
+  try {
+    const availability = require('../services/availability');
+    const result = await availability.getAvailableSlots(req.customer.city, null);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// PUT /api/onboarding/:token/reschedule-service — actually move the first
+// service to a customer-picked slot (not just a note-to-office).
+// =========================================================================
+router.put('/:token/reschedule-service', loadSession, async (req, res, next) => {
+  try {
+    const { date, startTime } = req.body;
+    if (!date || !startTime) return res.status(400).json({ error: 'date and startTime required' });
+
+    const current = await db('scheduled_services')
+      .where({ customer_id: req.customer.id })
+      .whereNotIn('status', ['cancelled', 'completed'])
+      .orderBy('scheduled_date', 'asc')
+      .first();
+
+    // Cancel the auto-picked service so we don't end up with two scheduled
+    // entries on the dispatch board.
+    if (current) {
+      await db('scheduled_services').where({ id: current.id }).update({
+        status: 'cancelled',
+        notes: `Rescheduled by customer during onboarding to ${date} ${startTime}`,
+      });
+      if (current.self_booking_id) {
+        await db('self_booked_appointments').where({ id: current.self_booking_id }).update({ status: 'cancelled' });
+      }
+    }
+
+    // Book the customer-picked slot through the same engine the portal uses,
+    // so we inherit confirmation codes, dispatch sync, and SMS notifications.
+    const availability = require('../services/availability');
+    const booking = await availability.confirmBooking(null, req.customer.id, date, startTime, 'Picked during onboarding');
+
+    await db('onboarding_sessions')
+      .where({ id: req.session.id })
+      .update({ service_confirmed: true, status: 'service_confirmed' });
+
+    res.json({ success: true, booking });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
 // POST /api/onboarding/:token/complete — finalize onboarding
 // =========================================================================
 router.post('/:token/complete', loadSession, async (req, res, next) => {
