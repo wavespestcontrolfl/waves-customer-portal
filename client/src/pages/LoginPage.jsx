@@ -240,7 +240,7 @@ export default function LoginPage() {
         ].map(s => (
           <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} style={{
             width: 36, height: 36, borderRadius: '50%',
-            background: 'rgba(255,255,255,0.15)', color: '#fff',
+            background: 'rgba(255,255,255,0.15)', color: B.yellow,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             textDecoration: 'none', transition: 'all 0.2s ease',
           }}>
