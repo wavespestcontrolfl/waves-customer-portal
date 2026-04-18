@@ -258,6 +258,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [sendAfterCreate, setSendAfterCreate] = useState(true);
+  const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
+  const [serviceResults, setServiceResults] = useState([]);
 
   // Customer search
   useEffect(() => {
@@ -277,6 +279,31 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       .then(d => setServiceRecords(d.records || []))
       .catch(() => {});
   }, [selectedCustomer]);
+
+  // Service library search for active line item
+  useEffect(() => {
+    if (serviceSearchIdx === null) { setServiceResults([]); return; }
+    const q = lineItems[serviceSearchIdx]?.description || '';
+    if (q.length < 2) { setServiceResults([]); return; }
+    const t = setTimeout(() => {
+      adminFetch(`/admin/services?search=${encodeURIComponent(q)}&is_active=true&limit=10`)
+        .then(d => setServiceResults(d.services || []))
+        .catch(() => setServiceResults([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [serviceSearchIdx, lineItems]);
+
+  const pickService = (i, svc) => {
+    const updated = [...lineItems];
+    updated[i] = {
+      ...updated[i],
+      description: svc.name,
+      unit_price: Number(svc.base_price) || updated[i].unit_price || 0,
+    };
+    setLineItems(updated);
+    setServiceSearchIdx(null);
+    setServiceResults([]);
+  };
 
   const addLineItem = () => setLineItems([...lineItems, { description: '', quantity: 1, unit_price: 0 }]);
   const removeLineItem = (i) => setLineItems(lineItems.filter((_, idx) => idx !== i));
@@ -386,9 +413,40 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           <div style={{ marginBottom: 16 }}>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 8 }}>Line Items</label>
             {lineItems.map((item, i) => (
-              <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center', flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
-                <input value={item.description} onChange={e => updateLineItem(i, 'description', e.target.value)}
-                  placeholder="Service description" style={{ ...sInput, flex: isMobile ? '1 1 100%' : 3 }} />
+              <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
+                <div style={{ position: 'relative', flex: isMobile ? '1 1 100%' : 3 }}>
+                  <input
+                    value={item.description}
+                    onChange={e => updateLineItem(i, 'description', e.target.value)}
+                    onFocus={() => setServiceSearchIdx(i)}
+                    onBlur={() => setTimeout(() => { setServiceSearchIdx(prev => (prev === i ? null : prev)); }, 150)}
+                    placeholder="Search service library or type custom..."
+                    style={sInput}
+                  />
+                  {serviceSearchIdx === i && serviceResults.length > 0 && (
+                    <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 20, maxHeight: 240, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
+                      {serviceResults.map(svc => (
+                        <div
+                          key={svc.id}
+                          onMouseDown={e => { e.preventDefault(); pickService(i, svc); }}
+                          style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
+                        >
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ color: D.heading, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{svc.name}</div>
+                            {svc.short_name && svc.short_name !== svc.name && (
+                              <div style={{ color: D.muted, fontSize: 11, marginTop: 2 }}>{svc.short_name}</div>
+                            )}
+                          </div>
+                          {svc.base_price != null && Number(svc.base_price) > 0 && (
+                            <span style={{ color: D.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, whiteSpace: 'nowrap' }}>
+                              ${Number(svc.base_price).toFixed(2)}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <input type="number" value={item.quantity} onChange={e => updateLineItem(i, 'quantity', e.target.value)}
                   min="1" style={{ ...sInput, flex: isMobile ? '0 0 60px' : 0.5, textAlign: 'center' }} />
                 <div style={{ position: 'relative', flex: 1 }}>
@@ -397,7 +455,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     placeholder="0.00" step="0.01" style={{ ...sInput, paddingLeft: 22 }} />
                 </div>
                 {lineItems.length > 1 && (
-                  <button onClick={() => removeLineItem(i)} style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 16 }}>x</button>
+                  <button onClick={() => removeLineItem(i)} style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 16, padding: '10px 4px' }}>x</button>
                 )}
               </div>
             ))}

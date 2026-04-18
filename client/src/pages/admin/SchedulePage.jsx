@@ -241,7 +241,30 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
   const [lawnUploading, setLawnUploading] = useState(false);
   const [lawnDone, setLawnDone] = useState(false);
   const [showSkipReasons, setShowSkipReasons] = useState(false);
+  const [editQuery, setEditQuery] = useState('');
+  const [serviceResults, setServiceResults] = useState([]);
+  const [showServiceResults, setShowServiceResults] = useState(false);
   const lawnFileRef = useRef(null);
+
+  useEffect(() => {
+    if (!service._editing) { setShowServiceResults(false); setServiceResults([]); return; }
+    if (editQuery.length < 2) { setServiceResults([]); return; }
+    const t = setTimeout(() => {
+      adminFetch(`/admin/services?search=${encodeURIComponent(editQuery)}&is_active=true&limit=10`)
+        .then(d => setServiceResults(d.services || []))
+        .catch(() => setServiceResults([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [editQuery, service._editing]);
+
+  const pickServiceFromLibrary = (svc) => {
+    service._editType = svc.name;
+    if (svc.default_duration_minutes) service._editDuration = String(svc.default_duration_minutes);
+    setEditQuery(svc.name);
+    setShowServiceResults(false);
+    setServiceResults([]);
+    setUpdating(u => !u);
+  };
   const zoneColor = zoneColors?.[service.zone] || service.zoneColor || D.blue;
   const status = service.status;
   const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
@@ -358,10 +381,47 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
         {service._editing ? (
           <>
-            <input value={service._editType || service.serviceType} onChange={e => {
-              service._editType = e.target.value;
-              setUpdating(u => !u); // force re-render
-            }} style={{ fontSize: 13, fontWeight: 600, color: D.text, padding: '4px 10px', borderRadius: 8, background: D.input, border: `1px solid ${D.border}`, width: 160, outline: 'none' }} />
+            <div style={{ position: 'relative' }}>
+              <input
+                value={service._editType !== undefined ? service._editType : (service.serviceType || '')}
+                onChange={e => {
+                  service._editType = e.target.value;
+                  setEditQuery(e.target.value);
+                  setShowServiceResults(true);
+                  setUpdating(u => !u);
+                }}
+                onFocus={() => {
+                  if (!editQuery) setEditQuery(service._editType ?? service.serviceType ?? '');
+                  setShowServiceResults(true);
+                }}
+                onBlur={() => setTimeout(() => setShowServiceResults(false), 150)}
+                placeholder="Search service library..."
+                style={{ fontSize: 13, fontWeight: 600, color: D.text, padding: '4px 10px', borderRadius: 8, background: D.input, border: `1px solid ${D.border}`, width: 200, outline: 'none' }}
+              />
+              {showServiceResults && serviceResults.length > 0 && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, minWidth: 280, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 30, maxHeight: 240, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.12)' }}>
+                  {serviceResults.map(svc => (
+                    <div
+                      key={svc.id}
+                      onMouseDown={e => { e.preventDefault(); pickServiceFromLibrary(svc); }}
+                      style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ color: D.text, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{svc.name}</div>
+                        {svc.short_name && svc.short_name !== svc.name && (
+                          <div style={{ color: D.muted, fontSize: 10, marginTop: 2 }}>{svc.short_name}</div>
+                        )}
+                      </div>
+                      {svc.default_duration_minutes && (
+                        <span style={{ color: D.muted, fontSize: 10, whiteSpace: 'nowrap' }}>
+                          {svc.default_duration_minutes}m
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
             <input type="number" value={service._editDuration || service.estimatedDuration || 30} onChange={e => {
               service._editDuration = e.target.value;
               setUpdating(u => !u);
