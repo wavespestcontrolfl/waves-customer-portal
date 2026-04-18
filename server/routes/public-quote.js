@@ -35,16 +35,28 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const lot = Math.max(500, Math.min(200000, Number(lotSqFt) || sqft * 4));
     const ep = (enriched && typeof enriched === 'object') ? enriched : {};
 
-    // NOTE: enriched density/pool/complexity fields are captured on the lead
-    // row for follow-up but NOT passed into the pricing engine here. Flipping
-    // those inputs on would quietly raise public quotes by ~$10/visit vs the
-    // pre-lookup flow (LIGHT defaults → MODERATE defaults). Keep public quote
-    // pricing stable until explicitly greenlit.
+    // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
+    // density, landscape complexity, near-water, large-driveway) flow into the
+    // pricing engine so public quotes match what admin /estimate would price.
+    // Same per-visit modifiers as admin (+$10 pool cage, +$5 moderate shrubs,
+    // etc. — see constants.js PEST.additionalAdjustments). The customer still
+    // sees a ±5% range (variance_low/high below) so AI misclassification has
+    // headroom. Zero retroactive impact: no quote_wizard leads existed when
+    // this landed.
     const engineInput = {
       homeSqFt: sqft,
-      stories: 1,
+      stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
       propertyType: propertyType || ep.propertyType || 'Single Family',
+      features: {
+        pool: ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES',
+        poolCage: ep.poolCage === 'YES' || ep.poolCage === true,
+        shrubs: (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined,
+        trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
+        complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,
+        nearWater: ep.nearWater === 'YES' || ep.nearWater === true,
+        largeDriveway: ep.hasLargeDriveway === true || ep.largeDriveway === true,
+      },
       services: {},
     };
     if (services.pest) {
