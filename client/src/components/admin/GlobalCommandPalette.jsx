@@ -1,16 +1,23 @@
 /**
- * Global Command Palette (⌘K)
+ * Global Command Palette (⌘K / mobile bottom sheet)
  * client/src/components/admin/GlobalCommandPalette.jsx
  *
- * Fixed overlay triggered by ⌘K / Ctrl+K from any admin page.
+ * Desktop: centered modal triggered by ⌘K / Ctrl+K from any admin page.
+ * Mobile:  full-height bottom sheet triggered by the Sparkles button in
+ *          MobileAdminShell's top bar. Also opens via ⌘K if a keyboard
+ *          is attached.
+ *
  * Auto-detects which page you're on and loads the right context/tools.
- * One component, one backend route, works everywhere.
+ * Recent prompts (last 5) surfaced at the top on mobile for fast re-run.
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { useLocation } from 'react-router-dom';
+import useIsMobile from '../../hooks/useIsMobile';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const RECENTS_KEY = 'admin_ib_recents';
+const RECENTS_MAX = 5;
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#fff' };
 
 function adminFetch(path, options = {}) {
@@ -80,15 +87,27 @@ const CONTEXT_COLORS = {
 };
 
 function detectContext(pathname) {
-  // Exact match first
   if (ROUTE_CONTEXT_MAP[pathname]) return ROUTE_CONTEXT_MAP[pathname];
-  // Prefix match
   for (const [route, ctx] of Object.entries(ROUTE_CONTEXT_MAP)) {
     if (pathname.startsWith(route)) return ctx;
   }
-  return 'dashboard'; // fallback
+  return 'dashboard';
 }
 
+function loadRecents() {
+  try {
+    const raw = localStorage.getItem(RECENTS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveRecent(prompt) {
+  if (!prompt || !prompt.trim()) return;
+  const t = prompt.trim();
+  const list = loadRecents().filter(p => p !== t);
+  list.unshift(t);
+  try { localStorage.setItem(RECENTS_KEY, JSON.stringify(list.slice(0, RECENTS_MAX))); } catch {}
+}
 
 // ─── Markdown renderer ──────────────────────────────────────────
 function renderMarkdown(text) {
@@ -116,19 +135,29 @@ function renderInline(text) {
 
 
 // ─── MAIN COMPONENT ─────────────────────────────────────────────
-export default function GlobalCommandPalette() {
+function GlobalCommandPalette(_props, ref) {
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
+  const [recents, setRecents] = useState(() => loadRecents());
+  const [dragY, setDragY] = useState(0);
+  const dragStartRef = useRef(null);
   const inputRef = useRef(null);
   const location = useLocation();
+  const isMobile = useIsMobile(768);
 
   const context = detectContext(location.pathname);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || 'Admin';
+
+  useImperativeHandle(ref, () => ({
+    open: () => setOpen(true),
+    close: () => setOpen(false),
+    toggle: () => setOpen(v => !v),
+  }), []);
 
   // ⌘K / Ctrl+K listener
   useEffect(() => {
@@ -145,10 +174,12 @@ export default function GlobalCommandPalette() {
     return () => window.removeEventListener('keydown', handler);
   }, [open]);
 
-  // Focus input when opening
+  // Focus input when opening + refresh recents
   useEffect(() => {
-    if (open && inputRef.current) {
-      setTimeout(() => inputRef.current?.focus(), 50);
+    if (open) {
+      setRecents(loadRecents());
+      setDragY(0);
+      setTimeout(() => inputRef.current?.focus(), 80);
     }
   }, [open]);
 
@@ -160,7 +191,7 @@ export default function GlobalCommandPalette() {
       .catch(() => setQuickActions([]));
   }, [context, open]);
 
-  // Clear conversation when context changes (navigated to different page)
+  // Clear conversation when context changes
   useEffect(() => {
     setConversationHistory([]);
     setResponse(null);
@@ -170,6 +201,8 @@ export default function GlobalCommandPalette() {
     const q = (text || prompt).trim();
     if (!q || loading) return;
     setLoading(true); setResponse(null);
+    saveRecent(q);
+    setRecents(loadRecents());
 
     try {
       const data = await adminFetch('/admin/intelligence-bar/query', {
@@ -200,25 +233,61 @@ export default function GlobalCommandPalette() {
     setPrompt('');
   };
 
-  const close = () => {
-    setOpen(false);
-    // Don't clear conversation — user might reopen
+  const close = () => setOpen(false);
+
+  // Touch handlers for swipe-down-to-close on mobile
+  const onTouchStart = (e) => {
+    if (!isMobile) return;
+    dragStartRef.current = e.touches[0].clientY;
+  };
+  const onTouchMove = (e) => {
+    if (!isMobile || dragStartRef.current == null) return;
+    const dy = e.touches[0].clientY - dragStartRef.current;
+    if (dy > 0) setDragY(dy);
+  };
+  const onTouchEnd = () => {
+    if (!isMobile) return;
+    if (dragY > 120) {
+      setOpen(false);
+    } else {
+      setDragY(0);
+    }
+    dragStartRef.current = null;
   };
 
-  if (!open) {
-    // Render just the ⌘K hint in the sidebar or a floating button
-    return null;
+  if (!open) return null;
+
+  if (isMobile) {
+    return (
+      <MobileSheet
+        close={close}
+        dragY={dragY}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        inputRef={inputRef}
+        prompt={prompt}
+        setPrompt={setPrompt}
+        submit={submit}
+        handleKeyDown={handleKeyDown}
+        loading={loading}
+        response={response}
+        recents={recents}
+        quickActions={quickActions}
+        contextLabel={contextLabel}
+        clear={clear}
+      />
+    );
   }
 
+  // ─── Desktop centered modal (unchanged from original) ─────────
   return (
     <>
-      {/* Backdrop */}
       <div onClick={close} style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
         backdropFilter: 'blur(4px)', zIndex: 9998,
       }} />
 
-      {/* Palette */}
       <div style={{
         position: 'fixed', top: '10%', left: '50%', transform: 'translateX(-50%)',
         width: '90%', maxWidth: 640, maxHeight: '75vh',
@@ -228,7 +297,6 @@ export default function GlobalCommandPalette() {
         animation: 'paletteIn 0.15s ease',
       }}>
 
-        {/* Header with context badge */}
         <div style={{
           padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12,
           borderBottom: `1px solid ${D.border}44`,
@@ -267,12 +335,10 @@ export default function GlobalCommandPalette() {
                 }}>Go</button>
               ) : (
                 <span style={{ padding: '4px 8px', borderRadius: 4, background: D.bg, border: `1px solid ${D.border}`, fontSize: 10, color: D.muted, fontFamily: 'JetBrains Mono, monospace' }}>ESC</span>
-
               )}
             </div>
           </div>
 
-          {/* Context badge */}
           <div style={{
             padding: '4px 10px', borderRadius: 8,
             background: `${accentColor}15`, border: `1px solid ${accentColor}33`,
@@ -280,7 +346,6 @@ export default function GlobalCommandPalette() {
           }}>{contextLabel}</div>
         </div>
 
-        {/* Quick Actions */}
         {!response && !loading && quickActions.length > 0 && (
           <div style={{ padding: '12px 18px', display: 'flex', flexWrap: 'wrap', gap: 6, borderBottom: `1px solid ${D.border}22` }}>
             {quickActions.map(a => (
@@ -302,7 +367,6 @@ export default function GlobalCommandPalette() {
           </div>
         )}
 
-        {/* Loading */}
         {loading && (
           <div style={{ padding: '14px 18px' }}>
             {[90, 70, 85, 55].map((w, i) => (
@@ -315,7 +379,6 @@ export default function GlobalCommandPalette() {
           </div>
         )}
 
-        {/* Response */}
         {response && !loading && (
           <div style={{ flex: 1, overflow: 'auto', padding: '14px 18px' }}>
             <div style={{ fontSize: 13, lineHeight: 1.65, color: D.text, fontFamily: 'DM Sans, sans-serif' }}>
@@ -324,7 +387,6 @@ export default function GlobalCommandPalette() {
           </div>
         )}
 
-        {/* Footer with follow-up */}
         {response && !loading && (
           <div style={{ padding: '10px 18px', borderTop: `1px solid ${D.border}33`, display: 'flex', gap: 8 }}>
             <input
@@ -347,7 +409,6 @@ export default function GlobalCommandPalette() {
           </div>
         )}
 
-        {/* Keyboard hint */}
         <div style={{
           padding: '6px 18px', borderTop: `1px solid ${D.border}22`,
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -372,3 +433,199 @@ export default function GlobalCommandPalette() {
     </>
   );
 }
+
+// ─── Mobile bottom sheet ───────────────────────────────────────
+function MobileSheet({
+  close, dragY, onTouchStart, onTouchMove, onTouchEnd, inputRef,
+  prompt, setPrompt, submit, handleKeyDown, loading, response,
+  recents, quickActions, contextLabel, clear,
+}) {
+  return (
+    <>
+      {/* Backdrop */}
+      <div onClick={close} style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+        zIndex: 9998, touchAction: 'none',
+      }} />
+
+      {/* Sheet */}
+      <div
+        style={{
+          position: 'fixed', left: 0, right: 0, bottom: 0, top: 64,
+          background: '#FFFFFF', zIndex: 9999,
+          display: 'flex', flexDirection: 'column',
+          borderTopLeftRadius: 16, borderTopRightRadius: 16,
+          boxShadow: '0 -12px 40px rgba(0,0,0,0.18)',
+          transform: `translateY(${dragY}px)`,
+          transition: dragY === 0 ? 'transform 0.2s ease' : 'none',
+          paddingBottom: 'env(safe-area-inset-bottom, 0)',
+        }}
+      >
+        {/* Drag handle + header */}
+        <div
+          onTouchStart={onTouchStart}
+          onTouchMove={onTouchMove}
+          onTouchEnd={onTouchEnd}
+          style={{ paddingTop: 8, paddingBottom: 4, touchAction: 'pan-y' }}
+        >
+          <div style={{
+            width: 40, height: 4, borderRadius: 2, background: '#D4D4D8',
+            margin: '0 auto',
+          }} />
+        </div>
+
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '8px 16px 12px',
+        }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B', letterSpacing: '-0.01em' }}>
+              Intelligence Bar
+            </div>
+            <div style={{ fontSize: 11, color: '#71717A', letterSpacing: '0.06em', textTransform: 'uppercase', marginTop: 2 }}>
+              {contextLabel}
+            </div>
+          </div>
+          <button
+            onClick={close}
+            aria-label="Close"
+            style={{
+              width: 36, height: 36, borderRadius: 8, border: 'none',
+              background: '#F4F4F5', color: '#18181B', fontSize: 18,
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >✕</button>
+        </div>
+
+        {/* Input */}
+        <div style={{ padding: '0 16px 12px' }}>
+          <input
+            ref={inputRef}
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask anything…"
+            style={{
+              width: '100%', padding: '14px 16px', boxSizing: 'border-box',
+              background: '#FAFAFA', border: '1px solid #E4E4E7',
+              borderRadius: 10, color: '#18181B', fontSize: 16,
+              fontFamily: 'Inter, sans-serif', outline: 'none',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              onClick={() => submit()}
+              disabled={!prompt.trim() || loading}
+              style={{
+                flex: 1, padding: '12px 16px', borderRadius: 10, border: 'none',
+                background: prompt.trim() && !loading ? '#18181B' : '#E4E4E7',
+                color: prompt.trim() && !loading ? '#FFFFFF' : '#A1A1AA',
+                fontSize: 14, fontWeight: 500, cursor: prompt.trim() && !loading ? 'pointer' : 'not-allowed',
+                fontFamily: 'Inter, sans-serif', letterSpacing: '0.06em', textTransform: 'uppercase',
+              }}
+            >{loading ? 'Thinking…' : 'Ask'}</button>
+            {(response || prompt) && (
+              <button
+                onClick={clear}
+                style={{
+                  padding: '12px 16px', borderRadius: 10, border: '1px solid #E4E4E7',
+                  background: '#FFFFFF', color: '#52525B', fontSize: 13,
+                  fontFamily: 'Inter, sans-serif', fontWeight: 500, cursor: 'pointer',
+                }}
+              >Clear</button>
+            )}
+          </div>
+        </div>
+
+        {/* Body: scrollable region below the input */}
+        <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '0 16px 20px' }}>
+          {loading && (
+            <div style={{ padding: '8px 0' }}>
+              {[90, 70, 85, 55].map((w, i) => (
+                <div key={i} style={{
+                  height: 14, borderRadius: 6, marginBottom: 8,
+                  background: 'linear-gradient(90deg, #E4E4E744, #E4E4E7AA, #E4E4E744)',
+                  backgroundSize: '200% 100%', animation: 'shimmer 1.5s ease infinite', width: `${w}%`,
+                }} />
+              ))}
+            </div>
+          )}
+
+          {response && !loading && (
+            <div style={{ fontSize: 14, lineHeight: 1.7, color: '#27272A', fontFamily: 'Inter, sans-serif' }}>
+              {renderMarkdown(response)}
+            </div>
+          )}
+
+          {!response && !loading && recents.length > 0 && (
+            <Section label="Recent">
+              {recents.map((r, i) => (
+                <SheetRow key={`r-${i}`} onClick={() => { setPrompt(r); submit(r); }}>
+                  <span style={{ fontSize: 14, color: '#18181B' }}>{r}</span>
+                </SheetRow>
+              ))}
+            </Section>
+          )}
+
+          {!response && !loading && quickActions.length > 0 && (
+            <Section label="Quick actions">
+              {quickActions.map(a => (
+                <SheetRow key={a.id} onClick={() => { setPrompt(a.prompt); submit(a.prompt); }}>
+                  <span style={{ fontSize: 16 }}>{a.icon}</span>
+                  <span style={{ fontSize: 14, color: '#18181B' }}>{a.label}</span>
+                </SheetRow>
+              ))}
+            </Section>
+          )}
+
+          {!response && !loading && recents.length === 0 && quickActions.length === 0 && (
+            <div style={{
+              padding: '32px 16px', textAlign: 'center',
+              fontSize: 13, color: '#71717A',
+            }}>
+              Ask a question, or try a quick action once they load.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+      `}</style>
+    </>
+  );
+}
+
+function Section({ label, children }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{
+        fontSize: 10, fontWeight: 500, color: '#71717A',
+        letterSpacing: '0.06em', textTransform: 'uppercase',
+        padding: '6px 4px',
+      }}>{label}</div>
+      <div style={{
+        background: '#FFFFFF', border: '1px solid #E4E4E7', borderRadius: 10,
+        overflow: 'hidden',
+      }}>{children}</div>
+    </div>
+  );
+}
+
+function SheetRow({ children, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 12,
+        width: '100%', padding: '14px 16px',
+        background: '#FFFFFF', border: 'none',
+        borderBottom: '0.5px solid #E4E4E7',
+        cursor: 'pointer', textAlign: 'left',
+        minHeight: 52,
+      }}
+    >{children}</button>
+  );
+}
+
+export default forwardRef(GlobalCommandPalette);

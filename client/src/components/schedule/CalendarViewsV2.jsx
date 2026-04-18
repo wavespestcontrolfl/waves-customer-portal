@@ -95,8 +95,9 @@ export function WeekViewV2({ startDate, onDateClick }) {
 
   return (
     <div>
-      {/* Week grid */}
-      <div className="grid grid-cols-7 gap-2 mb-4">
+      {/* Week grid — horizontal scroll on mobile (≤768px); 7 equal cols on desktop */}
+      <div className="-mx-4 md:mx-0 overflow-x-auto mb-4">
+        <div className="grid grid-cols-7 gap-2 px-4 md:px-0 min-w-[700px]">
         {data.days.map((day) => {
           const isToday = day.date === today;
           const isSelected = day.date === startDate;
@@ -168,6 +169,7 @@ export function WeekViewV2({ startDate, onDateClick }) {
             </button>
           );
         })}
+        </div>
       </div>
 
       {/* Week summary bar */}
@@ -251,8 +253,9 @@ export function MonthViewV2({ date, onDateClick }) {
         </div>
       )}
 
-      {/* Calendar grid */}
-      <Card className="overflow-hidden">
+      {/* Calendar grid — horizontal scroll on mobile (≤768px) */}
+      <div className="-mx-4 md:mx-0 overflow-x-auto">
+      <Card className="overflow-hidden min-w-[700px] md:min-w-0 md:mx-0 mx-4">
         {/* Day of week headers */}
         <div className="grid grid-cols-7 border-b border-hairline border-zinc-200 bg-zinc-50">
           {DOW.map((d) => (
@@ -340,6 +343,7 @@ export function MonthViewV2({ date, onDateClick }) {
           </div>
         ))}
       </Card>
+      </div>
 
       {/* Tech workload for the month */}
       {Object.keys(summary.byTech || {}).length > 0 && (

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { CustomerActionBar } from './StickyActionBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#fff' };
@@ -233,7 +234,12 @@ export default function Customer360Profile({ customerId, onClose }) {
             .c360-billing-grid { grid-template-columns: 1fr !important; }
             .c360-property-grid { grid-template-columns: 1fr !important; }
             .c360-panel { width: 100% !important; max-width: 100% !important; }
+            /* Hide the header pill row on mobile — actions move to the sticky bottom bar */
+            .c360-header-actions { display: none !important; }
+            /* Reserve space for the 56px sticky action bar + safe-area inset */
+            .c360-mobile-footer-spacer { display: block !important; }
           }
+          .c360-mobile-footer-spacer { display: none; }
         `}</style>
 
         {/* ========= ZONE 1: STICKY HEADER ========= */}
@@ -679,7 +685,13 @@ export default function Customer360Profile({ customerId, onClose }) {
             {filteredTimeline.length === 0 && <div style={{ color: D.muted, fontSize: 12, textAlign: 'center', padding: 16 }}>No timeline events</div>}
           </div>
         </div>
+
+        {/* Mobile-only spacer so final content isn't hidden under the sticky action bar */}
+        <div className="c360-mobile-footer-spacer" style={{ height: 'calc(56px + env(safe-area-inset-bottom, 0px))' }} aria-hidden="true" />
       </div>
+
+      {/* Mobile-only sticky bottom action bar — mirrors the desktop header pills */}
+      <CustomerActionBar customer={{ id: customerId, phone: c.phone }} standalone />
     </div>
   );
 }

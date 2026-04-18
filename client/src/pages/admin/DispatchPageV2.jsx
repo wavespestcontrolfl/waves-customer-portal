@@ -706,7 +706,7 @@ export default function DispatchPageV2() {
       : new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
   return (
-    <div className="bg-surface-page min-h-full p-6 font-sans text-zinc-900">
+    <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900">
       {/* Header */}
       <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
         <div>

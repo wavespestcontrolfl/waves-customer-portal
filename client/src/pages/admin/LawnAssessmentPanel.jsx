@@ -12,6 +12,7 @@ function adminFetch(path, options = {}) {
 }
 
 const scoreColor = (v) => v >= 75 ? D.green : v >= 50 ? D.amber : D.red;
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
 
 export default function LawnAssessmentPanel() {
   const [step, setStep] = useState('select'); // select, capture, analyzing, review, history
@@ -178,7 +179,7 @@ export default function LawnAssessmentPanel() {
           </div>
 
           {/* Photo grid */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)', gap: 10, marginBottom: 16 }}>
             {photos.map((p, i) => (
               <div key={i} style={{ position: 'relative', aspectRatio: '4/3', borderRadius: 10, overflow: 'hidden', border: `1px solid ${D.border}` }}>
                 <img src={p.preview} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -222,7 +223,7 @@ export default function LawnAssessmentPanel() {
             <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>AI Scorecard — {selectedCustomer?.firstName} {selectedCustomer?.lastName}</div>
 
             {/* Scores */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: 10 }}>
               {[
                 { key: 'turf_density', label: 'Turf Density' },
                 { key: 'weed_suppression', label: 'Weed Suppression' },
@@ -286,7 +287,7 @@ export default function LawnAssessmentPanel() {
                   {a.is_baseline && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: `${D.amber}22`, color: D.amber }}>Baseline</span>}
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: 12, fontSize: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: isMobile ? 4 : 12, fontSize: 12 }}>
                 {[
                   ['Turf', a.turf_density],
                   ['Weed', a.weed_suppression],
@@ -294,9 +295,9 @@ export default function LawnAssessmentPanel() {
                   ['Fungus', a.fungus_control],
                   ['Thatch', a.thatch_level],
                 ].map(([label, val]) => (
-                  <div key={label} style={{ textAlign: 'center' }}>
-                    <div style={{ fontFamily: MONO, fontSize: 16, fontWeight: 700, color: scoreColor(val || 0) }}>{val || 0}%</div>
-                    <div style={{ fontSize: 10, color: D.muted }}>{label}</div>
+                  <div key={label} style={{ textAlign: 'center', minWidth: 0 }}>
+                    <div style={{ fontFamily: MONO, fontSize: isMobile ? 13 : 16, fontWeight: 700, color: scoreColor(val || 0) }}>{val || 0}%</div>
+                    <div style={{ fontSize: isMobile ? 9 : 10, color: D.muted }}>{label}</div>
                   </div>
                 ))}
               </div>

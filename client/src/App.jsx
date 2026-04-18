@@ -111,6 +111,7 @@ const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystem
 const DesignSystemFlagsPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemFlagsPage'));
 const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
+const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
 import BookingPage from './pages/BookingPage';
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
@@ -213,6 +214,7 @@ export default function App() {
             <Route path="banking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading banking...</div>}><AdminBankingPage /></Suspense>} />
             <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingLogicPage /></Suspense>} />
             <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
+            <Route path="more" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading…</div>}><AdminMorePage /></Suspense>} />
             <Route path="_design-system" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading design system...</div>}><DesignSystemPage /></Suspense>} />
             <Route path="_design-system/flags" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading flags...</div>}><DesignSystemFlagsPage /></Suspense>} />
           </Route>

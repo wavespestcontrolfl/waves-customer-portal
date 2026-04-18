@@ -17,7 +17,7 @@ const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius:
 const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
 const fmt = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : '—';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
+const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
 
 export default function PricingStrategyPage() {
   const [tab, setTab] = useState('money-model');
@@ -119,7 +119,7 @@ function MoneyModelTab({ dashboard, loading }) {
       {/* Conversion Funnel */}
       <div style={sCard}>
         <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Conversion Funnel</div>
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(5, 1fr)' : 'repeat(5, 1fr)', gap: isMobile ? 2 : 4, alignItems: 'center' }}>
           {[
             { label: 'Leads', value: funnel.leads, color: D.muted },
             { label: 'Estimates', value: funnel.estimates, color: D.blue },
@@ -127,10 +127,10 @@ function MoneyModelTab({ dashboard, loading }) {
             { label: 'Active', value: funnel.active, color: D.green },
             { label: 'Retained 6mo+', value: funnel.retained, color: D.teal },
           ].map((s, i) => (
-            <div key={s.label} style={{ flex: 1, textAlign: 'center' }}>
-              <div style={{ fontFamily: MONO, fontSize: 18, fontWeight: 700, color: s.color }}>{s.value || 0}</div>
-              <div style={{ fontSize: 10, color: D.muted, marginTop: 2 }}>{s.label}</div>
-              {i < 4 && <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>{s.value && funnel.leads ? `${Math.round((s.value / funnel.leads) * 100)}%` : ''}</div>}
+            <div key={s.label} style={{ textAlign: 'center', minWidth: 0 }}>
+              <div style={{ fontFamily: MONO, fontSize: isMobile ? 14 : 18, fontWeight: 700, color: s.color }}>{s.value || 0}</div>
+              <div style={{ fontSize: isMobile ? 9 : 10, color: D.muted, marginTop: 2, lineHeight: 1.2 }}>{s.label}</div>
+              {i < 4 && <div style={{ fontSize: isMobile ? 9 : 10, color: D.muted, marginTop: 4 }}>{s.value && funnel.leads ? `${Math.round((s.value / funnel.leads) * 100)}%` : ''}</div>}
             </div>
           ))}
         </div>

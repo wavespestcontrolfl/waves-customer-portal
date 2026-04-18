@@ -1,7 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import NotificationBell from './NotificationBell';
 import GlobalCommandPalette from './admin/GlobalCommandPalette';
+import MobileAdminShell from './admin/MobileAdminShell';
+import { useFeatureFlag } from '../hooks/useFeatureFlag';
+import useIsMobile from '../hooks/useIsMobile';
 
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', blue: '#0A7EC2', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', input: '#FFFFFF', inputBorder: '#CBD5E1' };
 const SB = { bg: '#04395E', active: 'rgba(255,255,255,0.1)', hover: 'rgba(255,255,255,0.08)', border: 'rgba(255,255,255,0.1)', section: 'rgba(255,255,255,0.4)', text: 'rgba(255,255,255,0.65)' };
@@ -56,6 +59,10 @@ export default function AdminLayout() {
   const location = useLocation();
   const [user, setUser] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isMobile = useIsMobile(768);
+  const mobileShellEnabled = useFeatureFlag('mobile-shell-v2');
+  const useMobileShell = isMobile && mobileShellEnabled;
+  const paletteRef = useRef(null);
 
   useEffect(() => {
     const token = localStorage.getItem('waves_admin_token');
@@ -90,33 +97,40 @@ export default function AdminLayout() {
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: D.bg, fontFamily: "'DM Sans', sans-serif" }}>
 
-      {/* Mobile top bar */}
-      <div style={{
-        display: 'none', position: 'fixed', top: 0, left: 0, right: 0, height: 56, zIndex: 60,
-        background: D.white, borderBottom: `1px solid ${D.border}`, padding: '0 16px',
-        alignItems: 'center', justifyContent: 'space-between',
-      }} className="mobile-topbar">
-        <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{
-          background: 'none', border: 'none', color: D.heading, fontSize: 24, cursor: 'pointer', padding: 4,
-        }}>☰</button>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
-          <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>WAVES</span>
-        </div>
-        <NotificationBell type="admin" />
-      </div>
+      {/* Mobile shell v2 (flag-gated) — replaces hamburger + drawer on <768px */}
+      {useMobileShell && (
+        <MobileAdminShell onCommandOpen={() => paletteRef.current?.open()} />
+      )}
 
-      {/* Sidebar overlay (mobile) */}
-      {sidebarOpen && (
+      {/* Legacy mobile top bar (hidden when shell v2 is active) */}
+      {!useMobileShell && (
+        <div style={{
+          display: 'none', position: 'fixed', top: 0, left: 0, right: 0, height: 56, zIndex: 60,
+          background: D.white, borderBottom: `1px solid ${D.border}`, padding: '0 16px',
+          alignItems: 'center', justifyContent: 'space-between',
+        }} className="mobile-topbar">
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{
+            background: 'none', border: 'none', color: D.heading, fontSize: 24, cursor: 'pointer', padding: 4,
+          }}>☰</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>WAVES</span>
+          </div>
+          <NotificationBell type="admin" />
+        </div>
+      )}
+
+      {/* Sidebar overlay (mobile, legacy only) */}
+      {!useMobileShell && sidebarOpen && (
         <div onClick={() => setSidebarOpen(false)} style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 90,
         }} className="sidebar-overlay" />
       )}
 
-      {/* Sidebar */}
+      {/* Sidebar — always rendered so desktop keeps it; on mobile with shell v2, CSS hides it. */}
       <div style={{
         width: 240, background: SB.bg, borderRight: `1px solid ${SB.border}`,
-        display: 'flex', flexDirection: 'column', flexShrink: 0,
+        display: useMobileShell ? 'none' : 'flex', flexDirection: 'column', flexShrink: 0,
         position: 'fixed', left: 0, top: 0, bottom: 0, zIndex: 100,
         transform: sidebarOpen ? 'translateX(0)' : (isDesktop ? 'translateX(0)' : 'translateX(-100%)'),
         transition: 'transform 0.2s ease',
@@ -184,35 +198,46 @@ export default function AdminLayout() {
       </div>
 
       {/* Main content */}
-      <div style={{ flex: 1, marginLeft: 240, padding: '24px 28px', overflowY: 'auto', minHeight: '100vh' }} className="admin-main">
+      <div
+        style={{
+          flex: 1,
+          marginLeft: useMobileShell ? 0 : 240,
+          padding: useMobileShell ? '68px 16px 84px' : '24px 28px',
+          overflowY: 'auto',
+          minHeight: '100vh',
+        }}
+        className={useMobileShell ? 'admin-main admin-main--mobile-shell' : 'admin-main'}
+      >
         <Outlet />
       </div>
 
       {/* Global ⌘K Command Palette */}
-      <GlobalCommandPalette />
+      <GlobalCommandPalette ref={paletteRef} />
 
-      {/* Mobile-responsive CSS */}
-      <style>{`
-        @media (max-width: 767px) {
-          .mobile-topbar { display: flex !important; }
-          .admin-sidebar {
-            transform: translateX(-100%);
-            box-shadow: 8px 0 32px rgba(0,0,0,0.3);
+      {/* Mobile-responsive CSS — only applies when shell v2 is OFF */}
+      {!useMobileShell && (
+        <style>{`
+          @media (max-width: 767px) {
+            .mobile-topbar { display: flex !important; }
+            .admin-sidebar {
+              transform: translateX(-100%);
+              box-shadow: 8px 0 32px rgba(0,0,0,0.3);
+            }
+            .admin-sidebar[style*="translateX(0)"] {
+              transform: translateX(0) !important;
+            }
+            .sidebar-close { display: block !important; }
+            .desktop-bell { display: none !important; }
+            .admin-main {
+              margin-left: 0 !important;
+              padding: 68px 16px 24px !important;
+            }
           }
-          .admin-sidebar[style*="translateX(0)"] {
-            transform: translateX(0) !important;
-          }
-          .sidebar-close { display: block !important; }
-          .desktop-bell { display: none !important; }
-          .admin-main {
-            margin-left: 0 !important;
-            padding: 68px 16px 24px !important;
-          }
-        }
-        .admin-sidebar::-webkit-scrollbar { width: 4px; }
-        .admin-sidebar::-webkit-scrollbar-track { background: transparent; }
-        .admin-sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
-      `}</style>
+          .admin-sidebar::-webkit-scrollbar { width: 4px; }
+          .admin-sidebar::-webkit-scrollbar-track { background: transparent; }
+          .admin-sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
+        `}</style>
+      )}
     </div>
   );
 }
