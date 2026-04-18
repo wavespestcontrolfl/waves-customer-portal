@@ -104,18 +104,25 @@ export default function LoginPage() {
       <div style={{
         position: 'relative', zIndex: 2,
         background: B.white,
-        borderRadius: 20,
-        padding: '32px 28px',
+        borderRadius: 24,
+        padding: 32,
         maxWidth: 380,
         width: '100%',
         boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)',
       }}>
         {step === 'phone' ? (
           <>
-            <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
+            <div style={{
+              fontSize: 20, fontWeight: 700, color: B.blueDeeper,
+              fontFamily: FONTS.heading, letterSpacing: '-0.01em',
+              marginBottom: 6,
+            }}>
               Sign in to your account
             </div>
-            <p style={{ fontSize: 14, color: B.grayDark, fontWeight: 600, marginBottom: 18, lineHeight: 1.65 }}>
+            <p style={{
+              fontSize: 14, color: B.grayDark, fontWeight: 500,
+              fontFamily: FONTS.body, marginBottom: 20, lineHeight: 1.6,
+            }}>
               Enter the phone number on your Waves account. We'll text you a quick verification code.
             </p>
             <input
@@ -125,12 +132,19 @@ export default function LoginPage() {
               placeholder="(941) 555-0147"
               style={{
                 width: '100%', padding: '14px 16px', borderRadius: 12,
-                border: `2px solid ${B.grayLight}`, fontSize: 18, fontWeight: 600,
-                fontFamily: FONTS.body, color: B.navy,
+                border: `1.5px solid ${B.slate200}`, fontSize: 18, fontWeight: 600,
+                fontFamily: FONTS.body, color: B.blueDeeper,
                 outline: 'none', boxSizing: 'border-box', letterSpacing: 1,
+                transition: 'border-color 150ms cubic-bezier(0.4,0,0.2,1), box-shadow 150ms cubic-bezier(0.4,0,0.2,1)',
               }}
-              onFocus={(e) => e.target.style.borderColor = B.wavesBlue}
-              onBlur={(e) => e.target.style.borderColor = B.grayLight}
+              onFocus={(e) => {
+                e.target.style.borderColor = B.wavesBlue;
+                e.target.style.boxShadow = `0 0 0 3px rgba(0,156,222,0.15)`;
+              }}
+              onBlur={(e) => {
+                e.target.style.borderColor = B.slate200;
+                e.target.style.boxShadow = 'none';
+              }}
             />
             <button
               onClick={handleSendCode}
@@ -142,17 +156,27 @@ export default function LoginPage() {
                 fontSize: 15, marginTop: 16,
                 opacity: sending ? 0.7 : 1,
                 boxShadow: '0 4px 14px rgba(0,0,0,0.15)',
+                transition: 'background-color 150ms cubic-bezier(0.4,0,0.2,1), transform 150ms cubic-bezier(0.4,0,0.2,1)',
               }}
+              onMouseEnter={(e) => { if (!sending && phoneReady) e.currentTarget.style.background = B.yellowHover; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = B.yellow; }}
             >
               {sending ? 'Sending...' : 'Send Verification Code'}
             </button>
           </>
         ) : (
           <>
-            <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
+            <div style={{
+              fontSize: 20, fontWeight: 700, color: B.blueDeeper,
+              fontFamily: FONTS.heading, letterSpacing: '-0.01em',
+              marginBottom: 6,
+            }}>
               Check your texts
             </div>
-            <p style={{ fontSize: 14, color: B.grayDark, marginBottom: 18, lineHeight: 1.65 }}>
+            <p style={{
+              fontSize: 14, color: B.grayDark, fontWeight: 500,
+              fontFamily: FONTS.body, marginBottom: 20, lineHeight: 1.6,
+            }}>
               We sent a 6-digit code to <strong>{phone}</strong>
             </p>
             <input
@@ -164,13 +188,20 @@ export default function LoginPage() {
               maxLength={6}
               style={{
                 width: '100%', padding: '14px 16px', borderRadius: 12,
-                border: `2px solid ${B.grayLight}`, fontSize: 28, fontWeight: 800,
-                fontFamily: FONTS.ui, color: B.navy,
+                border: `1.5px solid ${B.slate200}`, fontSize: 28, fontWeight: 800,
+                fontFamily: FONTS.ui, color: B.blueDeeper,
                 outline: 'none', textAlign: 'center', letterSpacing: 12,
                 boxSizing: 'border-box',
+                transition: 'border-color 150ms cubic-bezier(0.4,0,0.2,1), box-shadow 150ms cubic-bezier(0.4,0,0.2,1)',
               }}
-              onFocus={(e) => e.target.style.borderColor = B.wavesBlue}
-              onBlur={(e) => e.target.style.borderColor = B.grayLight}
+              onFocus={(e) => {
+                e.target.style.borderColor = B.wavesBlue;
+                e.target.style.boxShadow = `0 0 0 3px rgba(0,156,222,0.15)`;
+              }}
+              onBlur={(e) => {
+                e.target.style.borderColor = B.slate200;
+                e.target.style.boxShadow = 'none';
+              }}
               autoFocus
             />
             <button
@@ -183,7 +214,10 @@ export default function LoginPage() {
                 fontSize: 15, marginTop: 16,
                 opacity: sending ? 0.7 : 1,
                 boxShadow: '0 4px 14px rgba(0,0,0,0.15)',
+                transition: 'background-color 150ms cubic-bezier(0.4,0,0.2,1)',
               }}
+              onMouseEnter={(e) => { if (!sending && codeReady) e.currentTarget.style.background = B.yellowHover; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = B.yellow; }}
             >
               {sending ? 'Verifying...' : 'Sign In'}
             </button>
