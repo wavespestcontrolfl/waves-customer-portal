@@ -7,6 +7,7 @@ import {
 } from './SchedulePage';
 import ProtocolReferenceTabV2 from './ProtocolReferenceTabV2';
 import { ViewModeSelectorV2, WeekViewV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
+import TimeGridDay from '../../components/schedule/TimeGridDay';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import ScheduleIntelligenceBarV2 from '../../components/admin/ScheduleIntelligenceBarV2';
@@ -859,72 +860,19 @@ export default function DispatchPageV2() {
             </span>
           </div>
 
-          {/* Tech sections */}
-          {techSummary.map((tech) => (
-            <TechSectionV2
-              key={tech.technicianId}
-              tech={tech}
-              zoneColors={zoneColors}
-              zoneLabels={zoneLabels}
-              onStatusChange={handleStatusChange}
-              onComplete={handleComplete}
-              onReschedule={(svc) => setRescheduleService(svc)}
-              onDelete={handleDelete}
-              onProtocol={(svc) => setProtocolService(svc)}
-              onEdit={(svc) => setEditingService(svc)}
-            />
-          ))}
-
-          {/* Unassigned */}
-          {unassigned.length > 0 && (
-            <div className="mb-5">
-              <div className="bg-alert-bg border-hairline border-alert-fg rounded-md px-4 py-3 mb-3 text-14 font-medium text-alert-fg">
-                Unassigned ({unassigned.length})
-              </div>
-              <div className="pl-5">
-                {unassigned.map((svc) => (
-                  <div key={svc.id}>
-                    <div className="mb-2">
-                      <select
-                        onChange={async (e) => {
-                          if (!e.target.value) return;
-                          try {
-                            await adminFetch(`/admin/schedule/${svc.id}/assign`, {
-                              method: 'PUT',
-                              body: JSON.stringify({ technicianId: e.target.value }),
-                            });
-                            fetchSchedule(date);
-                          } catch (err) { alert('Assign failed: ' + err.message); }
-                        }}
-                        defaultValue=""
-                        className="w-full h-9 px-3 rounded-sm bg-white text-zinc-900 border-hairline border-alert-fg text-12 font-medium u-focus-ring"
-                      >
-                        <option value="">Assign to technician…</option>
-                        {technicians.map((t) => (
-                          <option key={t.id} value={t.id}>{t.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <ServiceCardV2
-                      service={svc}
-                      zoneColors={zoneColors}
-                      onStatusChange={handleStatusChange}
-                      onComplete={handleComplete}
-                      onReschedule={(svc2) => setRescheduleService(svc2)}
-                      onDelete={handleDelete}
-                      onProtocol={(svc2) => setProtocolService(svc2)}
-                      onEdit={(svc2) => setEditingService(svc2)}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {techSummary.length === 0 && unassigned.length === 0 && (
+          {/* Square-style time grid */}
+          {services.length === 0 ? (
             <div className="text-ink-secondary text-center py-16 text-13">
               No services scheduled for {formatDateDisplay(date)}.
             </div>
+          ) : (
+            <TimeGridDay
+              date={date}
+              services={services}
+              technicians={technicians}
+              onEdit={(svc) => setEditingService(svc)}
+              onChange={() => fetchSchedule(date)}
+            />
           )}
         </>
       )}
