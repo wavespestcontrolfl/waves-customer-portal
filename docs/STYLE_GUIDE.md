@@ -241,6 +241,38 @@ disabled:opacity-50
 ```
 Resolved: bg `#FFD700`, text `#04395e`, 14px / 800, height 40px, horizontal padding 20px, pill.
 
+### Portal `<Button>` component (canonical)
+
+**In `waves-customer-portal`, use `<Button>` from `client/src/components/Button.jsx`** for every CTA, back link, and ghost/utility action. Styles live in `client/src/styles/buttons.css` (imported by `index.css`). Do not introduce new inline-style gold pills — they've all been consolidated here.
+
+```jsx
+import { Button } from '../components/Button';
+
+<Button variant="primary">Get My Free Quote</Button>                        {/* gold pill, hero CTA */}
+<Button variant="secondary" onClick={back}>Back</Button>                    {/* teal-outline ghost */}
+<Button variant="tertiary" icon={<Chevron/>} iconPosition="left">Back</Button>  {/* blue text link */}
+<Button variant="nav" as="a" href="/quote">Free Quote</Button>              {/* compact gold pill */}
+<Button variant="utility">Pest Control</Button>                              {/* navy-outline chip */}
+
+<Button variant="primary" surface="admin">Save</Button>                      {/* D palette + DM Sans + 6px radius */}
+```
+
+**Customer surface (default):** `#FFD700` / `#1B2C5B` / `#009CDE` / `Inter 800` / `rounded-full`. Responsive padding scales at `640px` and `1024px` breakpoints.
+
+**Admin surface (`surface="admin"`):** `#0ea5e9` / `DM Sans 600` / `6px radius`. Required on admin pages — see §14 admin-exclusion note. Do not pass `surface="customer"` (or omit it) on `/admin/*`.
+
+| Variant | Role | Visual |
+|---|---|---|
+| `primary` | Hero / form-submit CTA | Gold fill, navy text, `0 4px 14px` shadow |
+| `secondary` | Ghost paired with primary (Back, cancel) | Transparent, teal `1.5px` outline, teal text |
+| `tertiary` | Subdued back link / inline action | Transparent, blue text, underline on hover |
+| `nav` | Header / toolbar CTA | Compact gold pill (40px) |
+| `utility` | Filter / chip / compact action | Transparent, navy `1.5px` outline, small (36px) |
+
+**Props:** `variant`, `surface` (default `"customer"`), `fullWidthMobile`, `icon` + `iconPosition` (`"left"|"right"` default `"right"`), `as` (polymorphic — pass `"a"` for link CTAs), `className`, plus all native `<button>` / `<a>` props via spread.
+
+**In production on:** BookingPage, PayPage, PublicBookingPage, ReviewPage, RatePage, QuotePage. `/button-examples` route is a throwaway visual-QA harness — delete once all customer pages are migrated.
+
 ### FAB (bottom-right chat launcher)
 ```
 w-16 h-16 rounded-full
@@ -384,6 +416,6 @@ The customer-facing portal (LoginPage, OnboardingPage, EstimateViewPage, PortalP
 | `--font-subheading` | `FONTS.heading` | `'Montserrat', 'Inter', system-ui, sans-serif` |
 | `--font-sans` | `FONTS.body` / `FONTS.ui` | `'Inter', system-ui, sans-serif` |
 
-**Admin portal (`/admin/*`) is out of scope** — admin stays on the `D` dark palette + DM Sans. Do not apply customer brand palette to admin pages (see `feedback_admin_style_guide_exclusion`).
+**Admin portal (`/admin/*`) is out of scope** — admin stays on the `D` dark palette + DM Sans. Do not apply customer brand palette to admin pages (see `feedback_admin_style_guide_exclusion`). The shared `<Button>` component (§8) supports this via `surface="admin"` — use it there rather than inline-styled admin buttons.
 
 **BookingPage exception:** has its own local `BRAND` object (does not import from `theme-brand.js`). Keep its tokens aligned manually.
