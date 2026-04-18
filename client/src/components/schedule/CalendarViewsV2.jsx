@@ -17,19 +17,49 @@
  *   - No emoji icons
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Card, CardBody, cn } from '../ui';
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  useDraggable,
+  useDroppable,
+  pointerWithin,
+} from '@dnd-kit/core';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-function adminFetch(path) {
+function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
-  }).then((r) => {
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+    ...options,
+  }).then(async (r) => {
     if (r.status === 401) { window.location.href = '/admin/login'; throw new Error('Session expired'); }
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error(text || `HTTP ${r.status}`);
+    }
     return r.json();
   });
+}
+
+function parseHHMM(s) {
+  if (!s || typeof s !== 'string') return null;
+  const m = s.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+
+function minutesToHHMM(min) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
 function formatDateISO(d) { return d.toISOString().split('T')[0]; }
@@ -194,24 +224,192 @@ export function WeekViewV2({ startDate, onDateClick }) {
 
 // ─── MONTH VIEW ──────────────────────────────────────────────────
 
+function MonthServiceChip({ service }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `msvc-${service.id}`,
+    data: { service },
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      className={cn(
+        'text-11 truncate leading-tight cursor-grab active:cursor-grabbing select-none',
+        service.status === 'completed' ? 'line-through text-ink-tertiary' : 'text-ink-primary',
+        isDragging && 'opacity-60'
+      )}
+      style={{
+        transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
+        zIndex: isDragging ? 50 : undefined,
+      }}
+      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.techName ? ' · ' + service.techName : ''}`}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {service.customerName?.split(' ')[0] || '—'}
+    </div>
+  );
+}
+
+function MonthDayCell({ day, di, onDateClick }) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: `mday-${day.date}`,
+    data: { date: day.date },
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      role="button"
+      tabIndex={0}
+      onClick={() => onDateClick(day.date)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onDateClick(day.date); }
+      }}
+      className={cn(
+        'text-left min-h-[90px] p-2 transition-colors u-focus-ring cursor-pointer',
+        di < 6 && 'border-r border-hairline border-zinc-200',
+        day.isToday ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
+        !day.isCurrentMonth && 'opacity-40',
+        isOver && 'bg-zinc-100 ring-1 ring-zinc-400 ring-inset'
+      )}
+    >
+      {/* Day number + count */}
+      <div className="flex items-center justify-between mb-1">
+        <span
+          className={cn(
+            'u-nums text-13',
+            day.isToday
+              ? 'font-medium text-white bg-zinc-900 rounded-full w-6 h-6 inline-flex items-center justify-center'
+              : 'text-ink-primary'
+          )}
+        >
+          {day.dayNum}
+        </span>
+        {day.count > 0 && (
+          <span className="u-nums text-11 font-medium text-zinc-900">
+            {day.count}
+          </span>
+        )}
+      </div>
+
+      {/* Category dots */}
+      {day.count > 0 && Object.keys(day.categoryCounts || {}).length > 0 && (
+        <div className="flex gap-1 flex-wrap mb-1">
+          {Object.entries(day.categoryCounts).map(([cat, count]) => (
+            <span
+              key={cat}
+              title={`${cat}: ${count}`}
+              className="u-dot u-dot--filled"
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Draggable service list (first 3) */}
+      <div className="space-y-0.5">
+        {day.services.slice(0, 3).map((s) => (
+          <MonthServiceChip key={s.id} service={s} />
+        ))}
+      </div>
+      {day.count > 3 && (
+        <div className="text-11 text-ink-tertiary mt-0.5">
+          +{day.count - 3}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function MonthViewV2({ date, onDateClick }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [optimistic, setOptimistic] = useState(null);
+  const [busy, setBusy] = useState(false);
 
   const yearMonth = date.slice(0, 7); // "2026-04"
 
-  useEffect(() => {
-    setLoading(true);
-    adminFetch(`/admin/schedule/month?month=${yearMonth}`)
-      .then((res) => { setData(res); setLoading(false); })
+  const reload = useCallback(() => {
+    setOptimistic(null);
+    return adminFetch(`/admin/schedule/month?month=${yearMonth}`)
+      .then((res) => { setData(res); setLoading(false); return res; })
       .catch(() => setLoading(false));
   }, [yearMonth]);
 
+  useEffect(() => {
+    setLoading(true);
+    reload();
+  }, [reload]);
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+
+  const onDragEnd = useCallback(async (event) => {
+    const { active, over } = event;
+    if (!over) return;
+    const svc = active.data.current?.service;
+    const drop = over.data.current;
+    if (!svc || !drop?.date) return;
+
+    // Find the day currently containing this svc
+    const weeks = (optimistic?.weeks || data?.weeks || []);
+    let fromDate = null;
+    for (const w of weeks) {
+      for (const d of w) {
+        if (d.services?.some((s) => s.id === svc.id)) { fromDate = d.date; break; }
+      }
+      if (fromDate) break;
+    }
+    const toDate = drop.date;
+    if (!fromDate || fromDate === toDate) return;
+
+    // Build newWindow from current svc.windowStart + duration
+    const startMin = parseHHMM(svc.windowStart);
+    const dur = svc.duration || 30;
+    const newWindow = startMin != null
+      ? `${minutesToHHMM(startMin)}-${minutesToHHMM(startMin + dur)}`
+      : '08:00-09:00';
+
+    // Optimistic: remove from fromDate, add to toDate
+    const source = optimistic || data;
+    const nextWeeks = source.weeks.map((w) => w.map((d) => {
+      if (d.date === fromDate) {
+        const filtered = d.services.filter((s) => s.id !== svc.id);
+        return { ...d, services: filtered, count: filtered.length };
+      }
+      if (d.date === toDate) {
+        const added = [...d.services, svc];
+        return { ...d, services: added, count: added.length };
+      }
+      return d;
+    }));
+    setOptimistic({ ...source, weeks: nextWeeks });
+    setBusy(true);
+    try {
+      await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+        method: 'POST',
+        body: JSON.stringify({
+          newDate: toDate,
+          newWindow,
+          reasonCode: 'dispatch_drag',
+          reasonText: 'Rescheduled via drag-and-drop on month grid',
+          notifyCustomer: false,
+        }),
+      });
+      await reload();
+    } catch (err) {
+      alert('Reschedule failed: ' + err.message);
+      setOptimistic(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [data, optimistic, reload]);
+
+  const viewData = optimistic || data;
+
   if (loading) return <div className="py-10 text-center text-13 text-ink-secondary">Loading calendar…</div>;
-  if (!data?.weeks) return null;
+  if (!viewData?.weeks) return null;
 
   const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const { summary } = data;
+  const { summary } = viewData;
 
   const SUMMARY_STATS = [
     { label: 'Total Services', value: summary.totalServices },
@@ -254,104 +452,46 @@ export function MonthViewV2({ date, onDateClick }) {
         </div>
       )}
 
-      {/* Calendar grid — horizontal scroll on mobile (≤768px) */}
-      <div className="-mx-4 md:mx-0 overflow-x-auto">
-      <Card className="overflow-hidden min-w-[700px] md:min-w-0 md:mx-0 mx-4">
-        {/* Day of week headers */}
-        <div className="grid grid-cols-7 border-b border-hairline border-zinc-200 bg-zinc-50">
-          {DOW.map((d) => (
-            <div key={d} className="u-label text-ink-secondary py-2 text-center">
-              {d}
-            </div>
-          ))}
-        </div>
-
-        {/* Weeks */}
-        {data.weeks.map((week, wi) => (
-          <div
-            key={wi}
-            className={cn(
-              'grid grid-cols-7',
-              wi < data.weeks.length - 1 && 'border-b border-hairline border-zinc-200'
-            )}
-          >
-            {week.map((day, di) => (
-              <button
-                key={day.date}
-                onClick={() => onDateClick(day.date)}
-                className={cn(
-                  'text-left min-h-[90px] p-2 transition-colors u-focus-ring',
-                  di < 6 && 'border-r border-hairline border-zinc-200',
-                  day.isToday ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
-                  !day.isCurrentMonth && 'opacity-40'
-                )}
-              >
-                {/* Day number + count */}
-                <div className="flex items-center justify-between mb-1">
-                  <span
-                    className={cn(
-                      'u-nums text-13',
-                      day.isToday
-                        ? 'font-medium text-white bg-zinc-900 rounded-full w-6 h-6 inline-flex items-center justify-center'
-                        : 'text-ink-primary'
-                    )}
-                  >
-                    {day.dayNum}
-                  </span>
-                  {day.count > 0 && (
-                    <span className="u-nums text-11 font-medium text-zinc-900">
-                      {day.count}
-                    </span>
-                  )}
-                </div>
-
-                {/* Category dots — all zinc-900 filled, hover title reveals category */}
-                {day.count > 0 && Object.keys(day.categoryCounts || {}).length > 0 && (
-                  <div className="flex gap-1 flex-wrap mb-1">
-                    {Object.entries(day.categoryCounts).map(([cat, count]) => (
-                      <span
-                        key={cat}
-                        title={`${cat}: ${count}`}
-                        className="u-dot u-dot--filled"
-                      />
-                    ))}
-                  </div>
-                )}
-
-                {/* Compact service list (first 3) */}
-                <div className="space-y-0.5">
-                  {day.services.slice(0, 3).map((s) => (
-                    <div
-                      key={s.id}
-                      className={cn(
-                        'text-11 truncate leading-tight',
-                        s.status === 'completed'
-                          ? 'line-through text-ink-tertiary'
-                          : 'text-ink-primary'
-                      )}
-                    >
-                      {s.customerName?.split(' ')[0] || '—'}
-                    </div>
-                  ))}
-                </div>
-                {day.count > 3 && (
-                  <div className="text-11 text-ink-tertiary mt-0.5">
-                    +{day.count - 3}
-                  </div>
-                )}
-              </button>
+      {/* Calendar grid — drag blocks to reschedule across days */}
+      <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
+        <div className="-mx-4 md:mx-0 overflow-x-auto">
+        <Card className="overflow-hidden min-w-[700px] md:min-w-0 md:mx-0 mx-4">
+          {/* Day of week headers */}
+          <div className="grid grid-cols-7 border-b border-hairline border-zinc-200 bg-zinc-50">
+            {DOW.map((d) => (
+              <div key={d} className="u-label text-ink-secondary py-2 text-center">
+                {d}
+              </div>
             ))}
           </div>
-        ))}
-      </Card>
-      </div>
+
+          {/* Weeks */}
+          {viewData.weeks.map((week, wi) => (
+            <div
+              key={wi}
+              className={cn(
+                'grid grid-cols-7',
+                wi < viewData.weeks.length - 1 && 'border-b border-hairline border-zinc-200'
+              )}
+            >
+              {week.map((day, di) => (
+                <MonthDayCell key={day.date} day={day} di={di} onDateClick={onDateClick} />
+              ))}
+            </div>
+          ))}
+        </Card>
+        </div>
+        {busy && (
+          <div className="mt-2 text-11 text-ink-secondary text-center">Saving…</div>
+        )}
+      </DndContext>
 
       {/* Tech workload for the month */}
       {Object.keys(summary.byTech || {}).length > 0 && (
         <Card className="mt-4">
           <CardBody className="p-4">
             <div className="u-label text-ink-secondary mb-3">
-              Tech Workload — {data.monthName}
+              Tech Workload — {viewData.monthName}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {Object.entries(summary.byTech)
