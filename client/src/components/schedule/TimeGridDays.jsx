@@ -173,7 +173,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       className={cn(
         'absolute px-1.5 py-0.5 rounded-sm cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
-        isDragging && 'opacity-60 z-50 shadow-lg',
+        isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
       style={{
         top,
@@ -428,7 +428,11 @@ export default function TimeGridDays({
     return <div className="py-10 text-center text-13 text-ink-secondary">Loading…</div>;
   }
   if (!days.length) {
-    return <div className="py-10 text-center text-13 text-ink-secondary">No data.</div>;
+    return (
+      <div className="py-10 text-center text-13 text-ink-secondary">
+        No services scheduled this week.
+      </div>
+    );
   }
 
   return (

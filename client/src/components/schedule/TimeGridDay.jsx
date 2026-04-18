@@ -174,7 +174,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       className={cn(
         'absolute px-2 py-1 rounded-sm cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
-        isDragging && 'opacity-60 z-50 shadow-lg',
+        isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
       style={{
         top,
