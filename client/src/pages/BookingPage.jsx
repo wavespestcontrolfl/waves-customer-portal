@@ -180,7 +180,7 @@ export default function BookingPage() {
         <div style={{ position: 'relative', zIndex: 1 }}>
           <h1 style={{
             color: "#fff",
-            fontFamily: "'Luckiest Guy', 'Baloo 2', cursive",
+            fontFamily: "'Anton', 'Luckiest Guy', cursive",
             fontWeight: 400, fontSize: 22,
             letterSpacing: "0.02em", lineHeight: 1,
             margin: 0,
@@ -281,7 +281,7 @@ export default function BookingPage() {
                 letterSpacing: "0.02em",
                 cursor: "pointer",
                 transition: "background 0.15s cubic-bezier(0.4,0,0.2,1)",
-                fontFamily: "'Baloo 2', 'Nunito', sans-serif",
+                fontFamily: "'Inter', system-ui, sans-serif",
               }}
               onMouseEnter={(e) => (e.target.style.background = "#FFF176")}
               onMouseLeave={(e) => (e.target.style.background = "#FFD700")}
@@ -516,7 +516,7 @@ export default function BookingPage() {
                   cursor: "pointer",
                   animation: "slideUp 0.3s ease-out",
                   transition: "background 0.15s cubic-bezier(0.4,0,0.2,1)",
-                  fontFamily: "'Baloo 2', 'Nunito', sans-serif",
+                  fontFamily: "'Inter', system-ui, sans-serif",
                 }}
                 onMouseEnter={(e) => (e.target.style.background = "#FFF176")}
                 onMouseLeave={(e) => (e.target.style.background = "#FFD700")}
@@ -651,7 +651,7 @@ export default function BookingPage() {
                 cursor: loading ? "wait" : "pointer",
                 transition: "all 0.15s cubic-bezier(0.4,0,0.2,1)",
                 position: "relative",
-                fontFamily: "'Baloo 2', 'Nunito', sans-serif",
+                fontFamily: "'Inter', system-ui, sans-serif",
               }}
             >
               {loading ? (
