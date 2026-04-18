@@ -33,7 +33,7 @@ import AdminLoginPage from './pages/AdminLoginPage';
 import AdminLayout from './components/AdminLayout';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
-import AdminDashboardPage from './pages/admin/DashboardPage';
+import AdminDashboardGate from './pages/admin/DashboardGate';
 import EstimateViewPage from './pages/EstimateViewPage';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
 import AdminSchedulePage from './pages/admin/SchedulePage';
@@ -108,6 +108,7 @@ const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'
 const BadgesPage = lazyWithRetry(() => import('./pages/admin/BadgesPage'));
 const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
 const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemPage'));
+const DesignSystemFlagsPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemFlagsPage'));
 const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
 import BookingPage from './pages/BookingPage';
@@ -174,7 +175,7 @@ export default function App() {
           </Route>
           <Route path="/admin" element={<PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
-            <Route path="dashboard" element={<AdminDashboardPage />} />
+            <Route path="dashboard" element={<AdminDashboardGate />} />
             <Route path="customers" element={<AdminCustomersPage />} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
             <Route path="schedule" element={<AdminSchedulePage />} />
@@ -213,6 +214,7 @@ export default function App() {
             <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingLogicPage /></Suspense>} />
             <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
             <Route path="_design-system" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading design system...</div>}><DesignSystemPage /></Suspense>} />
+            <Route path="_design-system/flags" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading flags...</div>}><DesignSystemFlagsPage /></Suspense>} />
           </Route>
           <Route
             path="/*"

@@ -193,6 +193,7 @@ app.use('/api/admin/tool-health', toolHealthRoutes);
 app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/dashboard', adminDashboardRoutes);
+app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));
 app.use('/api/admin/estimates', adminEstimateRoutes);
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);

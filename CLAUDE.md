@@ -18,6 +18,10 @@ Authoritative specs live in `docs/design/`:
 
 Tier 1 scope (full redesign): Dashboard, Dispatch (absorbs Schedule), Customers + Detail, Estimates + `/new`, Communications. Everything else = tier 2 token pass only. `/tech` Home, Intelligence Bar, and customer-facing surfaces are **out of scope**.
 
+**Feature flags (landed PR #2):** The redesign is rolled out page-by-page behind per-user flags stored in `user_feature_flags`. On the client, use `useFeatureFlag('<key>')` from `client/src/hooks/useFeatureFlag.js` — it fetches once per session, caches in-memory, fails closed (returns `false` if the API is unreachable), and does NOT persist to localStorage. Server routes live at `/api/admin/feature-flags` (admin-only for `/all` and `/toggle`). Flip flags via the UI at `/admin/_design-system/flags`. Do not add percentage rollouts, environment variants, or LaunchDarkly-style features to the schema — it is intentionally minimal.
+
+**Dashboard (landed PR #2):** `/admin/dashboard` renders `DashboardGate`, which switches between `DashboardPage` (V1, default) and `DashboardPageV2` (monochrome redesign) based on the `dashboard-v2` flag. **Visual-refresh PRs are strict 1:1 on data, metrics, routing, and behavior** — V2 calls the exact same APIs and shows the exact same metric set as V1. Content changes and visual changes never share a PR.
+
 Foundation landed (PR #1):
 - `client/src/components/ui/` — 13 hand-rolled primitives (Button, Input, Select, Checkbox, Radio, Switch, Textarea, Badge, Card, Table, Dialog, Sheet, Tabs) + `cn` helper. Import via `import { Button } from 'components/ui'`.
 - `client/tailwind.config.js` — authoritative source for redesign tokens (zinc ramp, alert red, type scale 11–28, letterSpacing `label`/`tight`/`display`, radii xs/sm/md/lg, hairline border width). `darkMode: false` and `fontWeight` restricted to `normal`/`medium` by design — do not add weight 600/700.
