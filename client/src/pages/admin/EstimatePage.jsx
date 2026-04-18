@@ -786,6 +786,31 @@ function EstimateToolView() {
     setSending(false);
   }
 
+  /* ── batch-flow helper: reset customer/property/estimate, keep service selections ── */
+  function nextEstimate() {
+    setForm(f => ({
+      ...f,
+      address: '', homeSqFt: '', stories: '1', lotSqFt: '', propertyType: 'Single Family',
+      hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', nearWater: 'NO',
+      shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
+      urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
+      bedArea: '', palmCount: '', treeCount: '',
+      boracareSqft: '', preslabSqft: '',
+      customerName: '', customerPhone: '', customerEmail: '',
+      _boracareAuto: false, _preslabAuto: false,
+    }));
+    setEstimate(null);
+    setSavedId(null);
+    setShowSendForm(false);
+    setLookupStatus({ type: '', msg: '' });
+    setEnrichedProfile(null);
+    setExistingCustomerMatch(null);
+    setSatelliteStatus({ type: '', msg: '' });
+    setSatelliteData(null);
+    setCustomerSearch('');
+    setCustomers([]);
+  }
+
   /* ── one-shot save + send (used by SMS/Email/Both buttons) ── */
   async function saveAndSend(method) {
     if (!estimate) { alert('Click "Generate Estimate" first.'); return; }
@@ -1260,7 +1285,8 @@ function EstimateToolView() {
           ) : (
             <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
             <div style={sPanel}>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8 }}>
+                <button style={{ padding: '6px 14px', background: 'transparent', border: `1px solid ${C.teal}`, borderRadius: 8, color: C.teal, fontSize: 12, fontWeight: 600, cursor: 'pointer' }} onClick={nextEstimate}>Next Estimate (keep services)</button>
                 <button style={{ padding: '6px 14px', background: 'transparent', border: `1px solid ${C.border}`, borderRadius: 8, color: C.gray, fontSize: 12, fontWeight: 600, cursor: 'pointer' }} onClick={() => { setEstimate(null); setSavedId(null); setShowSendForm(false); }}>New Estimate</button>
               </div>
               <div style={{ maxHeight: 'calc(100vh - 120px)', overflowY: 'auto', paddingRight: 10 }}>
