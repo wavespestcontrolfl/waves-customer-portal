@@ -10,6 +10,7 @@
 // from CustomersPage.jsx (PR #4b/#4c/#4d will reskin those in later passes).
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { Filter, Phone, MessageSquare } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
 import IntelligenceBar from '../../components/admin/IntelligenceBar';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -449,6 +450,7 @@ export default function CustomersPageV2() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [filterCity, setFilterCity] = useState('all');
   const [filterHasBalance, setFilterHasBalance] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
   const [selected360Id, setSelected360Id] = useState(() => {
     const id = searchParams.get('customerId');
     return id ? Number(id) : null;
@@ -580,7 +582,13 @@ export default function CustomersPageV2() {
     );
   }
 
-  const TABLE_COLS = '1.6fr 0.3fr 0.5fr 0.5fr 0.5fr 0.5fr 0.5fr 0.6fr 0.6fr 0.5fr 0.5fr';
+  const TABLE_COLS = '2fr 0.3fr 0.6fr 0.9fr';
+
+  const activeFilterCount =
+    (filterCity !== 'all' ? 1 : 0) +
+    (filterTier !== 'all' ? 1 : 0) +
+    (filterStage !== 'all' ? 1 : 0) +
+    (filterHasBalance ? 1 : 0);
 
   return (
     <div>
@@ -602,6 +610,21 @@ export default function CustomersPageV2() {
           <Button variant="primary" onClick={() => setShowAddModal(true)}>
             + Add Customer
           </Button>
+          {view === 'directory' && (
+            <button
+              type="button"
+              onClick={() => setShowFilters(true)}
+              className="inline-flex items-center gap-1.5 h-9 px-3 u-label border-hairline border-zinc-300 rounded-sm text-ink-secondary bg-white hover:bg-zinc-50"
+            >
+              <Filter size={14} strokeWidth={1.75} />
+              Filter
+              {activeFilterCount > 0 && (
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-zinc-900 text-white u-nums text-11">
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
+          )}
         </div>
       </div>
 
@@ -611,55 +634,80 @@ export default function CustomersPageV2() {
       {/* ======================= DIRECTORY ======================= */}
       {view === 'directory' && (
         <>
-          {/* Filter pills — City */}
-          <div className="flex items-center gap-1.5 flex-wrap mb-2 mt-4">
-            {!isMobile && <span className="u-label text-ink-tertiary mr-1">City:</span>}
-            {['all', 'Lakewood Ranch', 'Parrish', 'Sarasota', 'Venice', 'Bradenton'].map((city) => (
-              <FilterPill key={city} active={filterCity === city} onClick={() => setFilterCity(city)}>
-                {city === 'all' ? 'All Cities' : city}
-              </FilterPill>
-            ))}
-          </div>
-
-          {/* Filter pills — Tier */}
-          <div className="flex items-center gap-1.5 flex-wrap mb-2">
-            {!isMobile && <span className="u-label text-ink-tertiary mr-1">Tier:</span>}
-            {[
-              { v: 'all', l: 'All Tiers' },
-              { v: 'Platinum', l: 'Platinum' },
-              { v: 'Gold', l: 'Gold' },
-              { v: 'Silver', l: 'Silver' },
-              { v: 'Bronze', l: 'Bronze' },
-              { v: 'One-Time', l: 'One-Time' },
-              { v: 'none', l: 'No Plan' },
-            ].map((t) => (
-              <FilterPill key={t.v} active={filterTier === t.v} onClick={() => setFilterTier(t.v)}>
-                {t.l}
-              </FilterPill>
-            ))}
-          </div>
-
-          {/* Filter pills — Status */}
-          <div className="flex items-center gap-1.5 flex-wrap mb-2">
-            {!isMobile && <span className="u-label text-ink-tertiary mr-1">Status:</span>}
-            {[
-              { v: 'all', l: 'All' },
-              { v: 'active_customer', l: 'Active' },
-              { v: 'new_lead', l: 'New Lead' },
-              { v: 'at_risk', l: 'At Risk', alert: true },
-            ].map((s) => (
-              <FilterPill key={s.v} active={filterStage === s.v} alert={s.alert} onClick={() => setFilterStage(s.v)}>
-                {s.l}
-              </FilterPill>
-            ))}
-            <FilterPill active={filterHasBalance} alert onClick={() => setFilterHasBalance(!filterHasBalance)}>
-              Has Balance
-            </FilterPill>
-          </div>
-
-          <div className="u-nums text-11 text-ink-tertiary text-right mb-3">
+          <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
             {filteredSorted.length} result{filteredSorted.length !== 1 ? 's' : ''}
           </div>
+
+          {/* Filters dialog */}
+          <Dialog open={showFilters} onClose={() => setShowFilters(false)}>
+            <DialogHeader onClose={() => setShowFilters(false)}>
+              <DialogTitle>Filter customers</DialogTitle>
+            </DialogHeader>
+            <DialogBody>
+              <div className="mb-4">
+                <div className="u-label text-ink-tertiary mb-1.5">City</div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {['all', 'Lakewood Ranch', 'Parrish', 'Sarasota', 'Venice', 'Bradenton'].map((city) => (
+                    <FilterPill key={city} active={filterCity === city} onClick={() => setFilterCity(city)}>
+                      {city === 'all' ? 'All Cities' : city}
+                    </FilterPill>
+                  ))}
+                </div>
+              </div>
+              <div className="mb-4">
+                <div className="u-label text-ink-tertiary mb-1.5">Tier</div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: 'all', l: 'All Tiers' },
+                    { v: 'Platinum', l: 'Platinum' },
+                    { v: 'Gold', l: 'Gold' },
+                    { v: 'Silver', l: 'Silver' },
+                    { v: 'Bronze', l: 'Bronze' },
+                    { v: 'One-Time', l: 'One-Time' },
+                    { v: 'none', l: 'No Plan' },
+                  ].map((t) => (
+                    <FilterPill key={t.v} active={filterTier === t.v} onClick={() => setFilterTier(t.v)}>
+                      {t.l}
+                    </FilterPill>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="u-label text-ink-tertiary mb-1.5">Status</div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: 'all', l: 'All' },
+                    { v: 'active_customer', l: 'Active' },
+                    { v: 'new_lead', l: 'New Lead' },
+                    { v: 'at_risk', l: 'At Risk', alert: true },
+                  ].map((s) => (
+                    <FilterPill key={s.v} active={filterStage === s.v} alert={s.alert} onClick={() => setFilterStage(s.v)}>
+                      {s.l}
+                    </FilterPill>
+                  ))}
+                  <FilterPill active={filterHasBalance} alert onClick={() => setFilterHasBalance(!filterHasBalance)}>
+                    Has Balance
+                  </FilterPill>
+                </div>
+              </div>
+            </DialogBody>
+            <DialogFooter>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setFilterCity('all');
+                  setFilterTier('all');
+                  setFilterStage('all');
+                  setFilterHasBalance(false);
+                }}
+              >
+                Clear all
+              </Button>
+              <Button variant="primary" onClick={() => setShowFilters(false)}>
+                Done
+              </Button>
+            </DialogFooter>
+          </Dialog>
 
           {/* Desktop table header */}
           {!isMobile && (
@@ -669,14 +717,7 @@ export default function CustomersPageV2() {
             >
               <SortHeaderV2 label="Name" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
               <div className="text-ink-tertiary">HP</div>
-              <div className="text-ink-tertiary">Services</div>
-              <div className="text-ink-tertiary">Tier</div>
-              <SortHeaderV2 label="$/Mo" sortKey="monthlyRate" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-              <div className="text-ink-tertiary">Balance</div>
-              <div className="text-ink-tertiary">City</div>
               <div className="text-ink-tertiary">Next Svc</div>
-              <div className="text-ink-tertiary">Stage</div>
-              <div className="text-ink-tertiary">Rating</div>
               <div />
             </div>
           )}
@@ -691,9 +732,6 @@ export default function CustomersPageV2() {
             </Card>
           ) : (
             filteredSorted.map((c) => {
-              const inits = serviceInitials(c);
-              const tier = detectTier(c);
-              const hasBalance = (c.balanceOwed || 0) > 0;
               return (
                 <div key={c.id} className="mb-2">
                   {isMobile ? (
@@ -706,24 +744,27 @@ export default function CustomersPageV2() {
                         <div className="text-14 font-medium text-ink-primary flex-1 min-w-0 truncate">
                           {c.firstName} {c.lastName}
                         </div>
-                        {tier && <TierBadgeV2 tier={tier} />}
+                        {c.phone && (
+                          <a
+                            href={`tel:${c.phone}`}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="Call"
+                            className="inline-flex items-center justify-center h-7 w-7 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white"
+                          >
+                            <Phone size={14} strokeWidth={1.75} />
+                          </a>
+                        )}
+                        {c.phone && (
+                          <a
+                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="SMS"
+                            className="inline-flex items-center justify-center h-7 w-7 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white"
+                          >
+                            <MessageSquare size={14} strokeWidth={1.75} />
+                          </a>
+                        )}
                       </div>
-                      {c.phone && (
-                        <a
-                          href={`tel:${c.phone}`}
-                          onClick={(e) => e.stopPropagation()}
-                          className="u-nums text-13 text-ink-primary underline pl-5"
-                        >
-                          {c.phone}
-                        </a>
-                      )}
-                      {(c.city || c.pipelineStage) && (
-                        <div className="flex items-center gap-2 pl-5 flex-wrap">
-                          {c.city && <span className="text-13 text-ink-secondary">{c.city}</span>}
-                          {c.city && c.pipelineStage && <span className="text-ink-tertiary">·</span>}
-                          {c.pipelineStage && <StageBadgeV2 stage={c.pipelineStage} />}
-                        </div>
-                      )}
                       {c.healthScore != null && (
                         <div className="flex items-center gap-2.5 pl-5 mt-0.5">
                           <div className="u-label text-ink-tertiary">Health</div>
@@ -744,11 +785,6 @@ export default function CustomersPageV2() {
                           </div>
                         </div>
                       )}
-                      {hasBalance && (
-                        <div className="u-nums text-12 text-alert-fg font-medium pl-5">
-                          Balance: ${parseFloat(c.balanceOwed).toFixed(0)}
-                        </div>
-                      )}
                     </div>
                   ) : (
                     <div
@@ -756,68 +792,40 @@ export default function CustomersPageV2() {
                       className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
                       style={{ gridTemplateColumns: TABLE_COLS }}
                     >
-                      <div>
-                        <div className="text-13 font-medium text-ink-primary">
-                          {c.firstName} {c.lastName}
-                        </div>
-                        {c.phone ? (
-                          <a
-                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="u-nums text-11 text-ink-secondary hover:text-ink-primary"
-                          >
-                            {c.phone}
-                          </a>
-                        ) : (
-                          <span className="text-11 text-ink-tertiary">{c.email || '—'}</span>
-                        )}
+                      <div className="text-13 font-medium text-ink-primary">
+                        {c.firstName} {c.lastName}
                       </div>
                       <div className="flex items-center justify-center">
                         <HealthDot score={c.healthScore} />
-                      </div>
-                      <div className="flex gap-1 flex-wrap">
-                        {inits.length > 0 ? inits.map((i) => (
-                          <span key={i} className="inline-flex items-center justify-center w-5 h-5 rounded-xs bg-zinc-100 text-11 font-medium text-ink-primary">
-                            {i}
-                          </span>
-                        )) : <span className="text-11 text-ink-tertiary">—</span>}
-                      </div>
-                      <div><TierBadgeV2 tier={tier} /></div>
-                      <div className="u-nums text-12 text-ink-primary">
-                        {c.monthlyRate ? `$${c.monthlyRate}` : <span className="text-ink-tertiary">—</span>}
-                      </div>
-                      <div className={cn(
-                        'u-nums text-12',
-                        hasBalance ? 'text-alert-fg font-medium' : 'text-ink-tertiary'
-                      )}>
-                        {hasBalance ? `$${parseFloat(c.balanceOwed).toFixed(0)}` : '—'}
-                      </div>
-                      <div className="text-11 text-ink-secondary overflow-hidden text-ellipsis whitespace-nowrap">
-                        {c.city || '—'}
                       </div>
                       <div className="u-nums text-11 text-ink-secondary">
                         {c.nextServiceDate
                           ? new Date(c.nextServiceDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
                           : <span className="text-ink-tertiary">—</span>}
                       </div>
-                      <div><StageBadgeV2 stage={c.pipelineStage} /></div>
-                      <div>
-                        {c.lastRating != null ? (
-                          <span className={cn(
-                            'u-nums text-12 font-medium',
-                            c.lastRating >= 4 ? 'text-ink-primary'
-                              : c.lastRating >= 3 ? 'text-ink-secondary'
-                              : 'text-alert-fg'
-                          )}>
-                            {c.lastRating}/5
-                          </span>
-                        ) : c.leadScore != null ? (
-                          <span className="u-nums text-12 text-ink-secondary">{c.leadScore}</span>
-                        ) : (
-                          <span className="text-11 text-ink-tertiary">—</span>
+                      <div className="flex gap-1 justify-end">
+                        {c.phone && (
+                          <a
+                            href={`tel:${c.phone}`}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="Call"
+                            title={`Call ${c.phone}`}
+                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                          >
+                            <Phone size={12} strokeWidth={1.75} />
+                          </a>
                         )}
-                      </div>
-                      <div className="flex gap-1">
+                        {c.phone && (
+                          <a
+                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="SMS"
+                            title={`SMS ${c.phone}`}
+                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                          >
+                            <MessageSquare size={12} strokeWidth={1.75} />
+                          </a>
+                        )}
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); startEdit(c); }}
