@@ -243,6 +243,21 @@ const REGRESSION_CASES = [
       paymentMethod: 'card',
     },
   },
+  {
+    // Session 11a Step 2b-4 — pins manualDiscount fan-out.
+    // Exercises 10% manual discount applied to WaveGuard-discounted recurring
+    // annual (here: bronze tier so wg discount=0 → discount applies straight
+    // to the unflattened pest annual). v2 calcTotals semantics.
+    name: 'manual_discount_percent_recurring_pest',
+    input: {
+      homeSqFt: 2000, stories: 1, lotSqFt: 10000,
+      propertyType: 'single_family', zone: 'A',
+      features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+      services: { pest: { frequency: 'quarterly' } },
+      manualDiscount: { type: 'PERCENT', value: 10 },
+      paymentMethod: 'card',
+    },
+  },
 ];
 
 async function getEstimate(input) {

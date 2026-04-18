@@ -275,9 +275,9 @@ function mapV1ToLegacyShape(v1Result) {
       year1,
       year2,
       year2mo: summary.year2Monthly || recurringMonthly,
-      manualDiscount: null,
+      manualDiscount: summary.manualDiscount || null,
     },
-    manualDiscount: null,
+    manualDiscount: summary.manualDiscount || null,
     results: R,
     specItems: v1SpecItems,
   };

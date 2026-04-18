@@ -286,5 +286,23 @@
       },
       "german_roach_initial": {}
     }
+  },
+  "manual_discount_percent_recurring_pest": {
+    "summary": {
+      "recurringAnnualAfterDiscount": 457.2,
+      "recurringMonthlyAfterDiscount": 38.1,
+      "year1Total": 457
+    },
+    "waveGuard": {
+      "tier": "bronze",
+      "discount": 0,
+      "qualifyingCount": 1
+    },
+    "lineItems": {
+      "pest_control": {
+        "annual": 508,
+        "monthly": 42.33
+      }
+    }
   }
 }

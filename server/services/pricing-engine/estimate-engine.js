@@ -437,7 +437,32 @@ function generateEstimate(input) {
   const specialtyItems = lineItems.filter(i => i.total && !i.annual);
 
   const recurringAnnualBefore = recurringItems.reduce((sum, i) => sum + (i.annualBeforeDiscount || 0), 0);
-  const recurringAnnualAfter = recurringItems.reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
+  const recurringAnnualAfterWG = recurringItems.reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
+
+  // Session 11a Step 2b-4: manual discount fan-out. Mirrors v2's calcTotals
+  // (pricing-engine-v2.js:1417-1437) — applies to the WaveGuard-discounted
+  // recurring annual (including rodent bait), capped at the base. Does not
+  // touch one-time/specialty totals.
+  let manualDiscountAmount = 0;
+  let manualDiscountInfo = null;
+  const md = input.manualDiscount;
+  if (md && Number(md.value) > 0) {
+    const v = Number(md.value);
+    if (md.type === 'PERCENT') {
+      manualDiscountAmount = Math.round(recurringAnnualAfterWG * (v / 100) * 100) / 100;
+    } else {
+      manualDiscountAmount = Math.round(v * 100) / 100;
+    }
+    manualDiscountAmount = Math.min(manualDiscountAmount, recurringAnnualAfterWG);
+    manualDiscountInfo = {
+      type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
+      value: v,
+      amount: manualDiscountAmount,
+      label: md.label || (md.type === 'PERCENT' ? `Discount (${v}%)` : `Discount -$${v.toFixed(2)}`),
+    };
+  }
+
+  const recurringAnnualAfter = Math.round((recurringAnnualAfterWG - manualDiscountAmount) * 100) / 100;
   const recurringMonthlyAfter = Math.round(recurringAnnualAfter / 12 * 100) / 100;
 
   const oneTimeTotal = oneTimeItems.reduce((sum, i) => sum + (i.priceAfterDiscount || i.price || 0), 0);
@@ -480,7 +505,10 @@ function generateEstimate(input) {
       recurringAnnualBeforeDiscount: recurringAnnualBefore,
       recurringAnnualAfterDiscount: recurringAnnualAfter,
       recurringMonthlyAfterDiscount: recurringMonthlyAfter,
-      waveGuardSavings: recurringAnnualBefore - recurringAnnualAfter,
+      // waveGuardSavings tracks tier-discount only (matches v2 wg.savings).
+      // Manual discount surfaced separately via summary.manualDiscount.
+      waveGuardSavings: recurringAnnualBefore - recurringAnnualAfterWG,
+      manualDiscount: manualDiscountInfo,
       oneTimeTotal,
       specialtyTotal,
       installationTotal,
