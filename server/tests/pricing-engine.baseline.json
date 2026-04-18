@@ -23,9 +23,9 @@
   },
   "zone_b_monthly_pest_bermuda_premium": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2551.5,
-      "recurringMonthlyAfterDiscount": 212.63,
-      "year1Total": 2552
+      "recurringAnnualAfterDiscount": 2239.87,
+      "recurringMonthlyAfterDiscount": 186.66,
+      "year1Total": 2240
     },
     "waveGuard": {
       "tier": "silver",
@@ -34,20 +34,20 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1676,
-        "monthly": 139.67
+        "annual": 1384.74,
+        "monthly": 115.4
       },
       "lawn_care": {
-        "annual": 1159,
-        "monthly": 96.58
+        "annual": 1104,
+        "monthly": 92
       }
     }
   },
   "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
     "summary": {
-      "recurringAnnualAfterDiscount": 3777.4,
-      "recurringMonthlyAfterDiscount": 314.78,
-      "year1Total": 3777
+      "recurringAnnualAfterDiscount": 3662.63,
+      "recurringMonthlyAfterDiscount": 305.22,
+      "year1Total": 3663
     },
     "waveGuard": {
       "tier": "gold",
@@ -56,12 +56,12 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 813,
-        "monthly": 67.75
+        "annual": 753.98,
+        "monthly": 62.83
       },
       "lawn_care": {
-        "annual": 712,
-        "monthly": 59.33
+        "annual": 636,
+        "monthly": 53
       },
       "tree_shrub": {
         "annual": 2919,
@@ -71,9 +71,9 @@
   },
   "zone_d_quarterly_pest_bahia_basic": {
     "summary": {
-      "recurringAnnualAfterDiscount": 885.6,
-      "recurringMonthlyAfterDiscount": 73.8,
-      "year1Total": 886
+      "recurringAnnualAfterDiscount": 820.8,
+      "recurringMonthlyAfterDiscount": 68.4,
+      "year1Total": 821
     },
     "waveGuard": {
       "tier": "silver",
@@ -86,8 +86,8 @@
         "monthly": 46
       },
       "lawn_care": {
-        "annual": 432,
-        "monthly": 36
+        "annual": 360,
+        "monthly": 30
       }
     }
   },
@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 8915.2,
-      "recurringMonthlyAfterDiscount": 742.93,
-      "year1Total": 8915
+      "recurringAnnualAfterDiscount": 8660.8,
+      "recurringMonthlyAfterDiscount": 721.73,
+      "year1Total": 8661
     },
     "waveGuard": {
       "tier": "platinum",
@@ -122,8 +122,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1788,
-        "monthly": 149
+        "annual": 1470,
+        "monthly": 122.5
       },
       "lawn_care": {
         "annual": 1344,

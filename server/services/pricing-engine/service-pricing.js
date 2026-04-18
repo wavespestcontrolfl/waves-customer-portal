@@ -79,8 +79,11 @@ function pricePestControl(property, options = {}) {
   const freqMult = freqDiscounts[frequency] || 1.0;
   const visitsPerYear = PEST.frequencies[frequency] || 4;
 
-  const perApp = Math.round(basePrice * freqMult + roachAddOn);
-  const annual = perApp * visitsPerYear;
+  // 2-decimal rounding to match v2 (pricing-engine-v2.js:758). Prior integer
+  // round was the source of $0.02/mo drift on bimonthly/monthly cadences vs
+  // v2's live output.
+  const perApp = Math.round((basePrice * freqMult + roachAddOn) * 100) / 100;
+  const annual = Math.round(perApp * visitsPerYear * 100) / 100;
   const monthly = Math.round(annual / 12 * 100) / 100;
 
   // Cost estimate — fully allocated (on-site + drive time + chemicals)
@@ -99,8 +102,8 @@ function pricePestControl(property, options = {}) {
   const tiers = Object.keys(PEST.frequencies).map((freqKey) => {
     const v = PEST.frequencies[freqKey];
     const fm = freqDiscounts[freqKey] || 1.0;
-    const pa = Math.round(basePrice * fm + roachAddOn);
-    const ann = pa * v;
+    const pa = Math.round((basePrice * fm + roachAddOn) * 100) / 100;
+    const ann = Math.round(pa * v * 100) / 100;
     return {
       frequency: freqKey,
       freq: v,

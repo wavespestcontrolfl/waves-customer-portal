@@ -1084,22 +1084,153 @@ function buildFieldVerifyFlags(rc, ai) {
 
 
 // ─────────────────────────────────────────────
-// CALCULATE ESTIMATE (uses v2 pricing engine)
+// CALCULATE ESTIMATE (uses v1 modular pricing engine via adapter)
+//
+// Session 11a: v2's calculateEstimate has been retired. This handler now
+// translates the (profile, selectedServices, options) call shape into v1's
+// single-input shape, calls generateEstimate, and remaps the v1 output into
+// the legacy envelope EstimatePage consumes (via v1-legacy-mapper).
+//
+// Sub-steps land incrementally: urgency/afterHours fan-out → 2b-2,
+// roachModifier auto-fire → 2b-3, manualDiscount → 2b-4.
 // ─────────────────────────────────────────────
+function translateV2CallToV1Input(profile, selectedServices, options) {
+  const p = profile || {};
+  const o = options || {};
+  const sel = new Set(selectedServices || []);
+
+  // Grass track — v2 accepts old A/B/C1/C2/D letters AND new keys.
+  const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
+  const rawGrass = o.grassType || 'st_augustine';
+  const track = TRACK_MAP[rawGrass] || rawGrass;
+
+  // Frequency integer → v1 key
+  const PEST_FREQ = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
+  const LAWN_TIER_FROM_FREQ = { 4: 'basic', 6: 'standard', 9: 'enhanced', 12: 'premium' };
+
+  const pestFreq = PEST_FREQ[o.pestFreq] || 'quarterly';
+  const lawnTier = LAWN_TIER_FROM_FREQ[o.lawnFreq] || 'enhanced';
+
+  const services = {};
+
+  // Recurring
+  if (sel.has('PEST')) services.pest = { frequency: pestFreq };
+  if (sel.has('LAWN')) services.lawn = { track, tier: lawnTier };
+  if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
+  if (sel.has('MOSQUITO')) services.mosquito = { tier: 'silver' };
+  if (sel.has('TERMITE_BAIT')) services.termite = { system: 'trelona', monitoringTier: 'basic' };
+  if (sel.has('RODENT_BAIT')) services.rodentBait = {};
+
+  // One-time (urgency/afterHours fan-out deferred to Step 2b-2)
+  if (sel.has('OT_PEST')) {
+    services.oneTimePest = { urgency: 'NONE', afterHours: false };
+  }
+  if (sel.has('OT_LAWN')) {
+    services.oneTimeLawn = {
+      treatmentType: o.onetimeLawnType === 'FERT' ? 'fert' : 'weed',
+      urgency: 'NONE', afterHours: false,
+    };
+  }
+  if (sel.has('OT_MOSQUITO')) services.oneTimeMosquito = {};
+
+  // Specialty
+  if (sel.has('TRENCHING')) services.trenching = {};
+  if (sel.has('BORACARE')) services.boraCare = { atticSqFt: o.boracareSqft };
+  if (sel.has('PRESLAB')) {
+    services.preSlab = {
+      slabSqFt: o.preslabSqft,
+      volumeDiscount: o.preslabVolume && o.preslabVolume !== 'NONE' ? o.preslabVolume.toLowerCase() : 'none',
+      warranty: o.preslabWarranty || 'BASIC',
+    };
+  }
+  if (sel.has('FOAM')) services.foam = { points: o.foamPoints || 5 };
+  if (sel.has('RODENT_TRAP')) services.rodentTrapping = {};
+  if (sel.has('WDO')) services.wdo = {};
+  if (sel.has('FLEA')) services.flea = {};
+  // ROACH auto-fire via options.roachModifier='GERMAN' — deferred to Step 2b-3
+  if (sel.has('ROACH')) services.germanRoach = {};
+  if (sel.has('BEDBUG')) {
+    services.bedBug = {
+      rooms: o.bedbugRooms || 1,
+      method: (o.bedbugMethod || 'BOTH').toLowerCase(),
+    };
+  }
+  if (sel.has('STING')) {
+    services.stinging = {
+      species: o.stingSpecies || 'PAPER_WASP',
+      tier: o.stingTier || 2,
+      removal: o.stingRemoval || 'NONE',
+      aggressive: o.stingAggressive || 'NO',
+      height: o.stingHeight || 'GROUND',
+      confined: o.stingConfined || 'NO',
+    };
+  }
+  if (sel.has('EXCLUSION')) {
+    services.exclusion = {
+      simple: o.exclSimple || 0,
+      moderate: o.exclModerate || 0,
+      advanced: o.exclAdvanced || 0,
+      waiveInspection: !!o.exclWaiveInspection,
+    };
+  }
+  if (sel.has('TOPDRESS')) services.topDressing = { depth: 'eighth' };
+  if (sel.has('DETHATCH')) services.dethatching = {};
+  if (sel.has('PLUGGING')) {
+    services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12 };
+  }
+
+  // Features — normalize v2's UPPERCASE enum shape to v1's lowercase boolean/string shape
+  const features = {
+    pool: p.pool === 'YES',
+    poolCage: p.poolCage === 'YES',
+    trees: (p.treeDensity || 'LIGHT').toLowerCase(),
+    shrubs: (p.shrubDensity || 'LIGHT').toLowerCase(),
+    complexity: (p.landscapeComplexity || 'SIMPLE').toLowerCase(),
+    nearWater: p.nearWater === 'YES',
+    irrigation: !!p.irrigation,
+    largeDriveway: !!p.hasLargeDriveway,
+    treeCount: p.treeCount || 0,
+  };
+
+  return {
+    homeSqFt: p.homeSqFt,
+    stories: p.stories || 1,
+    lotSqFt: p.lotSqFt,
+    propertyType: p.propertyType || 'Single Family',
+    serviceZone: p.serviceZone,
+    lawnSqFt: p.estimatedTurfSf,
+    bedArea: p.estimatedBedAreaSf,
+    features,
+    yearBuilt: p.yearBuilt,
+    constructionMaterial: p.constructionMaterial,
+    foundationType: p.foundationType,
+    roofType: p.roofType,
+    nearWater: p.nearWater,
+    waterDistance: p.waterDistance,
+    isHOA: p.isHOA,
+    hoaFee: p.hoaFee,
+    isRental: p.isRental,
+    isNewHomeowner: p.isNewHomeowner,
+    fenceType: p.fenceType,
+    outbuildingCount: p.outbuildingCount,
+    attachedGarage: p.attachedGarage,
+    services,
+  };
+}
+
 router.post('/calculate-estimate', async (req, res) => {
   try {
     const { profile, selectedServices, options } = req.body;
     if (!profile) return res.status(400).json({ error: 'Profile required' });
 
-    const { calculateEstimate } = require('../services/pricing-engine-v2');
-    const { mapV2ToLegacyShape } = require('../services/pricing-engine/v2-legacy-mapper');
-    const v2 = await calculateEstimate(profile, selectedServices || [], options || {});
-
-    const mapped = mapV2ToLegacyShape(v2, selectedServices || []);
-
+    const { generateEstimate } = require('../services/pricing-engine');
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
+    const v1 = generateEstimate(v1Input);
+    const mapped = mapV1ToLegacyShape(v1);
     res.json(mapped);
   } catch (err) {
-    console.error('[estimate-v2] Calculation error:', err.message, err.stack);
+    console.error('[estimate-v1-adapter] Calculation error:', err.message, err.stack);
     res.status(500).json({ error: err.message });
   }
 });

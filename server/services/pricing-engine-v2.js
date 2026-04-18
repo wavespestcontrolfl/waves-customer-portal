@@ -535,14 +535,19 @@ async function calculateEstimate(profile, selectedServices, options = {}) {
 // INTERPOLATION UTILITY
 // ─────────────────────────────────────────────
 function interpolate(v, breakpoints) {
+  if (!breakpoints.length) return 0;
   if (v <= breakpoints[0].at) return breakpoints[0].adj;
   if (v >= breakpoints[breakpoints.length - 1].at) return breakpoints[breakpoints.length - 1].adj;
-  for (let i = 1; i < breakpoints.length; i++) {
-    if (v <= breakpoints[i].at) {
-      return breakpoints[i - 1].adj;
+  for (let i = 0; i < breakpoints.length - 1; i++) {
+    const lo = breakpoints[i], hi = breakpoints[i + 1];
+    if (v >= lo.at && v <= hi.at) {
+      const span = hi.at - lo.at;
+      if (span === 0) return lo.adj;
+      const ratio = (v - lo.at) / span;
+      return lo.adj + ratio * (hi.adj - lo.adj);
     }
   }
-  return 0;
+  return breakpoints[breakpoints.length - 1].adj;
 }
 
 
@@ -568,9 +573,17 @@ function calcLawn(turfSf, grassType, p, cfg = null, lawnFreq = 9) {
 
   function lawnLookup(sf, freqIdx) {
     const pts = lp.pts;
+    if (!pts.length) return 0;
+    if (sf <= pts[0][0]) return pts[0][freqIdx + 1];
     if (sf >= pts[pts.length - 1][0]) return pts[pts.length - 1][freqIdx + 1];
-    for (let i = 1; i < pts.length; i++) {
-      if (sf <= pts[i][0]) return pts[i - 1][freqIdx + 1];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const lo = pts[i], hi = pts[i + 1];
+      if (sf >= lo[0] && sf <= hi[0]) {
+        const span = hi[0] - lo[0];
+        if (span === 0) return lo[freqIdx + 1];
+        const ratio = (sf - lo[0]) / span;
+        return Math.round(lo[freqIdx + 1] + ratio * (hi[freqIdx + 1] - lo[freqIdx + 1]));
+      }
     }
     return pts[pts.length - 1][freqIdx + 1];
   }

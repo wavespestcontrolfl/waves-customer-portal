@@ -110,7 +110,11 @@ const PEST = {
   roachModifier: { german: 0.25, regular: 0.10, none: 0 },
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
-    v1: { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 },  //  8% / 15% off per-visit for higher cadence
+    // Session 11a byte-parity: v1 lowered from 0.92/0.85 to 0.85/0.70 to match
+    // v2's currently-live hardcoded curve (pricing-engine-v2.js:751-755) so
+    // customers see the same bimonthly/monthly prices after the engine swap.
+    // Session 6 may intentionally restore a milder curve via pricing_changelog.
+    v1: { quarterly: 1.00, bimonthly: 0.85, monthly: 0.70 },
     v2: { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 },  // Was 0.85/0.70. Test for one quarter.
   },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },

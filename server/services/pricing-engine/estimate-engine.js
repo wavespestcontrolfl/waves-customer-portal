@@ -94,9 +94,21 @@ function generateEstimate(input) {
       roachType: services.pest.roachType || 'none',
       modifiers,
     });
-    result.annual = Math.round(result.annual * zoneMult);
+    // 2-decimal rounding matches v2 (pricing-engine-v2.js:758-760).
+    result.annual = Math.round(result.annual * zoneMult * 100) / 100;
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.perApp = Math.round(result.annual / result.visitsPerYear * 100) / 100;
+    if (Array.isArray(result.tiers)) {
+      result.tiers = result.tiers.map(t => {
+        const zAnn = Math.round(t.annual * zoneMult * 100) / 100;
+        return {
+          ...t,
+          perApp: Math.round(t.perApp * zoneMult * 100) / 100,
+          annual: zAnn,
+          monthly: Math.round(zAnn / 12 * 100) / 100,
+        };
+      });
+    }
     lineItems.push(result);
     activeServiceKeys.push('pest_control');
   }
@@ -108,8 +120,9 @@ function generateEstimate(input) {
       tier: services.lawn.tier || 'enhanced',
       shadeClassification: services.lawn.shadeClassification || 'FULL_SUN',
     });
-    result.annual = Math.round(result.annual * zoneMult);
-    result.monthly = Math.round(result.annual / 12 * 100) / 100;
+    // Lawn brackets are zone-agnostic in v2's calcLawn (pricing-engine-v2.js:557+);
+    // dropping the zone mult here preserves parity so Session 11a's engine swap
+    // doesn't silently raise lawn prices on Zone B/C/D customers.
     lineItems.push(result);
     activeServiceKeys.push('lawn_care');
   }
