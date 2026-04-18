@@ -315,8 +315,8 @@ export default function OnboardingPage() {
   return (
     <div style={{
       minHeight: '100vh',
-      background: `linear-gradient(180deg, ${B.blueDark} 0%, #1976D2 100%)`,
-      backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(180deg, ${B.blueDark} 0%, #1976D2 100%)`,
+      background: `linear-gradient(180deg, ${B.blueDark} 0%, ${B.wavesBlue} 100%)`,
+      backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(180deg, ${B.blueDark} 0%, ${B.wavesBlue} 100%)`,
       backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
       fontFamily: FONTS.body,
       position: 'relative', overflow: 'hidden',
@@ -398,7 +398,7 @@ export default function OnboardingPage() {
                 <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 12 }} />
 
                 {stripeError && (
-                  <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: '#C62828', marginBottom: 12 }}>
+                  <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: B.red, marginBottom: 12 }}>
                     {stripeError}
                   </div>
                 )}
@@ -421,7 +421,7 @@ export default function OnboardingPage() {
                   opacity: submitting ? 0.7 : 1,
                 }}>{submitting ? 'Processing...' : !stripeReady ? 'Loading payment form...' : 'Save Payment Method'}</button>
 
-                <div style={{ fontSize: 11, color: '#90A4AE', marginTop: 10, textAlign: 'center' }}>
+                <div style={{ fontSize: 11, color: B.textCaption, marginTop: 10, textAlign: 'center' }}>
                   Secured by Stripe. We never store your card details directly.
                 </div>
               </div>
@@ -501,7 +501,7 @@ export default function OnboardingPage() {
               {hasYardGate && (
                 <PasswordInput value={prefs.propertyGateCode} onChange={v => updatePref('propertyGateCode', v)} placeholder="e.g., Combo lock: 4821" />
               )}
-              <div style={{ fontSize: 11, color: '#90A4AE', marginTop: 8 }}>🔒 Only visible to your assigned tech on service day</div>
+              <div style={{ fontSize: 11, color: B.textCaption, marginTop: 8 }}>🔒 Only visible to your assigned tech on service day</div>
 
               {/* Pets */}
               {sectionHead('🐾', 'Pets & Household')}
@@ -607,7 +607,7 @@ export default function OnboardingPage() {
             <div style={{ background: '#fff', borderRadius: 16, padding: 24, marginTop: 20, textAlign: 'left' }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>Your Plan</div>
               <div style={{ fontSize: 13, color: B.grayDark }}>{q.serviceType}</div>
-              {q.tier && <span style={{ display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '3px 9px', borderRadius: 10, background: B.yellow, color: '#1E1E2B', marginTop: 4 }}>WaveGuard {q.tier}</span>}
+              {q.tier && <span style={{ display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '3px 9px', borderRadius: 10, background: B.yellow, color: B.blueDeeper, marginTop: 4 }}>WaveGuard {q.tier}</span>}
               <div style={{ fontSize: 22, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui, marginTop: 6 }}>${q.monthlyRate.toFixed(2)}/mo</div>
 
               {svc && (
@@ -635,7 +635,7 @@ export default function OnboardingPage() {
                 prefs.preferredDay !== 'no_preference' ? '✅ Scheduling preferences set' : '✖ No scheduling prefs',
                 (prefs.specialFeatures || []).length > 0 ? '✅ Property features noted' : '✖ No property features',
               ].map((line, i) => (
-                <div key={i} style={{ fontSize: 12, color: line.startsWith('✅') ? B.grayDark : '#90A4AE', marginBottom: 2 }}>{line}</div>
+                <div key={i} style={{ fontSize: 12, color: line.startsWith('✅') ? B.grayDark : B.textCaption, marginBottom: 2 }}>{line}</div>
               ))}
             </div>
 
@@ -646,7 +646,7 @@ export default function OnboardingPage() {
             }}>Explore Your Portal →</a>
 
             {/* Referral card */}
-            <div style={{ background: B.blueSurface, borderRadius: 14, padding: 18, marginTop: 16, textAlign: 'center' }}>
+            <div style={{ background: B.blueSurface, borderRadius: 16, padding: 18, marginTop: 16, textAlign: 'center' }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>Know someone who needs pest control? 🏡</div>
               <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4 }}>Share your link — you both get $25</div>
               <a href={`sms:?body=${encodeURIComponent(`Hey! I just signed up with Waves Pest Control and they're awesome. Use my referral link and we both get $25 off: https://wavespestcontrol.com?ref=${c.referralCode}`)}`} style={{
