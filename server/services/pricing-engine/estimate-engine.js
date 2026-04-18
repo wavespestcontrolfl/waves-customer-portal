@@ -188,8 +188,18 @@ function generateEstimate(input) {
   }
 
   // ── One-Time Services ──────────────────────────────────────
-  const isRecurringCustomer = activeServiceKeys.length > 0;
+  // Explicit input.recurringCustomer (v2 vocab) or input.isRecurringCustomer
+  // (v1 test vocab) overrides auto-derivation — matches v2 which takes the
+  // flag straight from the UI toggle rather than inferring from cart contents.
+  const isRecurringCustomer = input.recurringCustomer !== undefined
+    ? !!input.recurringCustomer
+    : input.isRecurringCustomer !== undefined
+      ? !!input.isRecurringCustomer
+      : activeServiceKeys.length > 0;
 
+  // One-time and specialty services are ZONE-AGNOSTIC (v2 parity — see
+  // Session 11a Step 2b-2). Zone multiplier is applied only to recurring
+  // services above; one-times use the floor/formula price straight through.
   if (services.oneTimePest) {
     const result = priceOneTimePest(property, {
       urgency: services.oneTimePest.urgency || 'NONE',
@@ -198,7 +208,6 @@ function generateEstimate(input) {
       recurringPestPerApp: services.pest ? lineItems.find(l => l.service === 'pest_control')?.perApp : null,
       roachType: services.oneTimePest.roachType || 'none',
     });
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
 
@@ -210,13 +219,11 @@ function generateEstimate(input) {
       isRecurringCustomer,
       hasRecurringLawn: !!services.lawn,
     });
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
 
   if (services.oneTimeMosquito) {
     const result = priceOneTimeMosquito(property);
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
 
@@ -293,7 +300,6 @@ function generateEstimate(input) {
         afterHours: services.plugging.afterHours || false,
       }
     );
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   if (services.foam) {
@@ -301,7 +307,6 @@ function generateEstimate(input) {
       urgency: services.foam.urgency || 'ROUTINE',
       afterHours: services.foam.afterHours || false,
     });
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   if (services.stinging) {
@@ -316,7 +321,6 @@ function generateEstimate(input) {
       afterHours: services.stinging.afterHours || false,
       hasRecurringPest: !!services.pest,
     });
-    if (!result.includedOnProgram) result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   if (services.exclusion) {
@@ -328,7 +332,6 @@ function generateEstimate(input) {
       urgency: services.exclusion.urgency || 'ROUTINE',
       afterHours: services.exclusion.afterHours || false,
     });
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   // Rodent Guarantee fires automatically when BOTH trap + exclusion are present
@@ -342,17 +345,14 @@ function generateEstimate(input) {
   // ── Spec-version services (v2 missing-services spec, Apr 2026) ──
   if (services.rodentPlugging) {
     const result = calculatePluggingPrice(services.rodentPlugging);
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   if (services.termiteFoam) {
     const result = calculateFoamPrice(services.termiteFoam);
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   if (services.stingingV2) {
     const result = calculateStingingPrice(services.stingingV2);
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   if (services.exclusionV2) {
@@ -364,7 +364,6 @@ function generateEstimate(input) {
       includesScreening: services.exclusionV2.includesScreening,
       constructionType: services.exclusionV2.constructionType || property.constructionMaterial,
     });
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
   if (services.rodentGuaranteeCombo) {
@@ -379,7 +378,6 @@ function generateEstimate(input) {
       stationCount: services.rodentGuaranteeCombo.stationCount,
       guaranteeTerm: services.rodentGuaranteeCombo.guaranteeTerm || 12,
     });
-    result.price = Math.round(result.price * zoneMult);
     lineItems.push(result);
   }
 

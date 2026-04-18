@@ -552,16 +552,14 @@ function priceOneTimePest(property, options = {}) {
 
   let price = Math.max(ONE_TIME.pest.floor, Math.round(base * ONE_TIME.pest.multiplier));
 
-  if (isRecurringCustomer) {
-    price = Math.round(price * (1 - WAVEGUARD_RECURRING_DISC()));
-  }
-
+  // Combine urgency × rc into a single Math.round to match v2's applyOT helper
+  // exactly (pricing-engine-v2.js:183). Prior stepwise rounding + mid-calc floor
+  // clamp produced $1 drift on SOON/URGENT × recurringCustomer combos.
   const urgencyMult = afterHours
     ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
     : (URGENCY[urgency] || URGENCY.NONE).standard;
-  price = Math.round(price * urgencyMult);
-
-  // Re-apply floor after discounts
+  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
+  price = Math.round(price * urgencyMult * rcDisc);
   price = Math.max(ONE_TIME.pest.floor, price);
 
   return { service: 'one_time_pest', price, urgency, afterHours, isRecurringCustomer };
@@ -599,14 +597,13 @@ function priceOneTimeLawn(property, options = {}) {
   const treatMult = ONE_TIME.lawn.treatmentMultipliers[treatmentType] || 1.0;
   let price = Math.max(ONE_TIME.lawn.floor, Math.round(base * ONE_TIME.lawn.oneTimeMultiplier * treatMult));
 
-  if (isRecurringCustomer) {
-    price = Math.round(price * (1 - WAVEGUARD_RECURRING_DISC()));
-  }
-
+  // Combine urgency × rc into a single Math.round to match v2's applyOT helper
+  // exactly (pricing-engine-v2.js:183). See priceOneTimePest for rationale.
   const urgencyMult = afterHours
     ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
     : (URGENCY[urgency] || URGENCY.NONE).standard;
-  price = Math.round(price * urgencyMult);
+  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
+  price = Math.round(price * urgencyMult * rcDisc);
   price = Math.max(ONE_TIME.lawn.floor, price);
 
   return { service: 'one_time_lawn', price, treatmentType, urgency, afterHours, isRecurringCustomer };

@@ -1111,6 +1111,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const pestFreq = PEST_FREQ[o.pestFreq] || 'quarterly';
   const lawnTier = LAWN_TIER_FROM_FREQ[o.lawnFreq] || 'enhanced';
 
+  // Urgency / afterHours / recurringCustomer (Step 2b-2). v2 uses 'ROUTINE'
+  // as the no-urgency sentinel; v1 uses 'NONE' for OT pest/lawn (and falls
+  // back to NONE for any unknown value in specialty services). Remap here.
+  const rawUrg = o.urgency || 'ROUTINE';
+  const urgency = rawUrg === 'ROUTINE' ? 'NONE' : rawUrg;
+  const afterHours = !!o.afterHours;
+  const recurringCustomer = !!o.recurringCustomer;
+
   const services = {};
 
   // Recurring
@@ -1121,14 +1129,13 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('TERMITE_BAIT')) services.termite = { system: 'trelona', monitoringTier: 'basic' };
   if (sel.has('RODENT_BAIT')) services.rodentBait = {};
 
-  // One-time (urgency/afterHours fan-out deferred to Step 2b-2)
-  if (sel.has('OT_PEST')) {
-    services.oneTimePest = { urgency: 'NONE', afterHours: false };
-  }
+  // One-time — urgency/afterHours threaded through; recurringCustomer perk
+  // applied inside priceOneTimePest/priceOneTimeLawn via top-level override.
+  if (sel.has('OT_PEST')) services.oneTimePest = { urgency, afterHours };
   if (sel.has('OT_LAWN')) {
     services.oneTimeLawn = {
       treatmentType: o.onetimeLawnType === 'FERT' ? 'fert' : 'weed',
-      urgency: 'NONE', afterHours: false,
+      urgency, afterHours,
     };
   }
   if (sel.has('OT_MOSQUITO')) services.oneTimeMosquito = {};
@@ -1143,7 +1150,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       warranty: o.preslabWarranty || 'BASIC',
     };
   }
-  if (sel.has('FOAM')) services.foam = { points: o.foamPoints || 5 };
+  if (sel.has('FOAM')) services.foam = { points: o.foamPoints || 5, urgency, afterHours };
   if (sel.has('RODENT_TRAP')) services.rodentTrapping = {};
   if (sel.has('WDO')) services.wdo = {};
   if (sel.has('FLEA')) services.flea = {};
@@ -1163,6 +1170,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       aggressive: o.stingAggressive || 'NO',
       height: o.stingHeight || 'GROUND',
       confined: o.stingConfined || 'NO',
+      urgency, afterHours,
     };
   }
   if (sel.has('EXCLUSION')) {
@@ -1171,12 +1179,13 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       moderate: o.exclModerate || 0,
       advanced: o.exclAdvanced || 0,
       waiveInspection: !!o.exclWaiveInspection,
+      urgency, afterHours,
     };
   }
   if (sel.has('TOPDRESS')) services.topDressing = { depth: 'eighth' };
   if (sel.has('DETHATCH')) services.dethatching = {};
   if (sel.has('PLUGGING')) {
-    services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12 };
+    services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12, urgency, afterHours };
   }
 
   // Features — normalize v2's UPPERCASE enum shape to v1's lowercase boolean/string shape
@@ -1214,6 +1223,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     fenceType: p.fenceType,
     outbuildingCount: p.outbuildingCount,
     attachedGarage: p.attachedGarage,
+    recurringCustomer,
     services,
   };
 }
