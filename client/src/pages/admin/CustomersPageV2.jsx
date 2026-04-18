@@ -10,7 +10,7 @@
 // from CustomersPage.jsx (PR #4b/#4c/#4d will reskin those in later passes).
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import Customer360Profile from '../../components/admin/Customer360Profile';
+import Customer360Profile from '../../components/admin/Customer360ProfileV2';
 import IntelligenceBar from '../../components/admin/IntelligenceBar';
 import useIsMobile from '../../hooks/useIsMobile';
 import { CustomerHealthSection } from './CustomerHealthTabs';
