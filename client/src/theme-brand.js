@@ -4,10 +4,10 @@
 // can swap to `'../theme-brand'` without touching JSX.
 
 export const COLORS = {
-  // Primary Blues (from Astro @theme brand tokens, verified via live audit)
-  wavesBlue: '#097ABD',    // --color-brand-blue
+  // Primary Blues (from Astro @theme brand tokens, van-vinyl spec)
+  wavesBlue: '#009CDE',    // --color-brand-blue (PMS 2925)
   blueDark: '#065A8C',     // --color-brand-blueDark
-  blueDeeper: '#04395E',   // --color-brand-blueDeeper — headings on light bg
+  blueDeeper: '#1B2C5B',   // --color-brand-blueDeeper (PMS 2766) — headings on light bg
   blueLight: '#E3F5FD',    // --color-brand-blueLight — hover fills, soft wash
   sky: '#4DC9F6',          // --color-brand-sky — hero bg
   bluePale: '#4DC9F6',     // alias for sky
@@ -16,8 +16,8 @@ export const COLORS = {
   // Accents (gold pills are the primary CTA pattern)
   yellow: '#FFD700',       // --color-brand-gold — CTA pill fill
   yellowHover: '#FFF176',  // --color-brand-yellow — hover state for gold CTA
-  red: '#C0392B',          // --color-brand-red — emergency/accent only
-  redBright: '#C0392B',
+  red: '#C8102E',          // --color-brand-red (PMS 186) — emergency/accent only
+  redBright: '#C8102E',
 
   // Text hierarchy (Tailwind slate scale)
   navy: '#0F172A',         // slate-900 — strongest text, Astro html color
@@ -46,16 +46,16 @@ COLORS.blueSky = COLORS.bluePale;
 COLORS.redDark = COLORS.red;
 COLORS.orangeBright = '#FB923C';
 
-// Font hierarchy mirrors wavespestcontrol.com global.css:
-//   h1, h2 → Luckiest Guy (blocky "WAVES" van font) — heroes only
-//   h3–h6 → Baloo 2 (rounded subhead)
-//   body  → Nunito
-//   mono  → JetBrains Mono
+// Font hierarchy mirrors wavespestcontrol.com global.css (Astro):
+//   h1, h2 → Anton (condensed heavy display, van-wrap character)
+//   h3, h4 → Montserrat (proportional geometric, step-down)
+//   body   → Inter (neutral UI sans)
+//   mono   → JetBrains Mono
 export const FONTS = {
-  display: "'Luckiest Guy', 'Baloo 2', cursive",   // H1/H2 heroes only
-  heading: "'Baloo 2', 'Nunito', sans-serif",      // H3–H6, card titles, buttons
-  body: "'Nunito', sans-serif",                    // default body
-  ui: "'Baloo 2', 'Nunito', sans-serif",           // buttons, labels (same as heading — kept for clarity)
+  display: "'Anton', 'Luckiest Guy', cursive",              // H1/H2 heroes only
+  heading: "'Montserrat', 'Inter', system-ui, sans-serif",  // H3/H4, card titles
+  body: "'Inter', system-ui, sans-serif",                   // default body, H5/H6
+  ui: "'Inter', system-ui, sans-serif",                     // buttons, labels, form fields
   mono: "'JetBrains Mono', ui-monospace, monospace",
 };
 

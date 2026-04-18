@@ -7,13 +7,13 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // ── Brand tokens ──
 // Mirrored from wavespestcontrol.com — semantic keys preserved, values swapped to brand
 const BRAND = {
-  navy: "#04395E",
-  teal: "#097ABD",
-  tealDark: "#065A8C",
-  tealLight: "#E3F5FD",
+  navy: "#1B2C5B",      // brand-blueDeeper (PMS 2766)
+  teal: "#009CDE",      // brand-blue (PMS 2925)
+  tealDark: "#065A8C",  // brand-blueDark
+  tealLight: "#E3F5FD", // brand-blueLight
   sand: "#FEF7E0",
   warmWhite: "#FFFFFF",
-  coral: "#C0392B",
+  coral: "#C8102E",     // brand-red (PMS 186)
   green: "#16A34A",
   greenLight: "#DCFCE7",
   gray100: "#F1F5F9",
