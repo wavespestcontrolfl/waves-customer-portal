@@ -35,7 +35,7 @@ const GRASS_TYPES = [
   { id: 'zoysia', label: 'Zoysia' },
 ];
 
-export default function PestControlCalculatorPage() {
+export default function QuotePage() {
   const [step, setStep] = useState(1);
   const [address, setAddress] = useState({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
   const [svcPest, setSvcPest] = useState(true);
@@ -119,8 +119,8 @@ export default function PestControlCalculatorPage() {
     <div style={sPage}>
       <header style={{ background: BRAND.navy, color: BRAND.warmWhite, padding: '20px 20px' }}>
         <div style={{ maxWidth: 640, margin: '0 auto' }}>
-          <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: 0.2 }}>Pest Control Calculator</div>
-          <div style={{ fontSize: 13, opacity: 0.85, marginTop: 4 }}>Get an instant quote from Waves Pest Control · SWFL</div>
+          <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: 0.2 }}>Get a Quote</div>
+          <div style={{ fontSize: 13, opacity: 0.85, marginTop: 4 }}>Instant pricing from Waves Pest Control & Lawn Care · SWFL</div>
         </div>
       </header>
 
