@@ -4,10 +4,12 @@
 //   - PATCH /admin/estimates/:id            (isPriority, status, declineReason)
 //   - POST  /admin/estimates/:id/send
 //   - POST  /admin/estimates/:id/follow-up
-// Scope: Pipeline tab (stats bar + filter pills + list rows) + tab chrome
-// redesigned. Leads / Create Estimate / Pricing tabs render V1 panels via
-// named exports from EstimatePage.jsx. FollowUp/Decline modals stay V1 in
-// PR #5a — restyled in PR #5c.
+// Scope (post PR #5b):
+//   PR #5a → tab chrome + Pipeline tab (stats bar + filter pills + list rows)
+//   PR #5b → Create Estimate tab now renders EstimateToolViewV2 (monochrome
+//            estimator — same endpoints/state/pricing as V1)
+// Leads / Pricing Logic tabs still render V1 panels. FollowUp/Decline modals
+// stay V1 — restyled in PR #5c.
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   STATUS_CONFIG,
@@ -15,13 +17,13 @@ import {
   classifyEstimate,
   getUrgencyIndicator,
   detectCompetitor,
-  EstimateToolView,
   FollowUpModal,
   DeclineModal,
 } from './EstimatePage';
 import { LeadsSection } from './LeadsTabs';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
 import { MarginCalculator } from './PricingLogicPage';
+import EstimateToolViewV2 from './EstimateToolViewV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -507,7 +509,7 @@ export default function EstimatesPageV2() {
 
       {activeTab === 'leads' && <LeadsSection />}
       {activeTab === 'estimates' && <EstimatePipelineViewV2 />}
-      {activeTab === 'new' && <EstimateToolView />}
+      {activeTab === 'new' && <EstimateToolViewV2 />}
       {activeTab === 'pricing' && (
         <>
           <MarginCalculator />
