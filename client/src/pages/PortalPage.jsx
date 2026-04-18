@@ -8005,7 +8005,16 @@ function ChatWidget({ customer, onClose }) {
 
 export default function PortalPage() {
   const { customer, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState('dashboard');
+  // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
+  // card" link in autopay-failure texts) land the customer on the right tab.
+  const initialTab = (() => {
+    try {
+      const t = new URLSearchParams(window.location.search).get('tab');
+      const allowed = ['dashboard', 'plan', 'schedule', 'billing', 'services', 'request', 'refer', 'documents', 'property'];
+      return t && allowed.includes(t) ? t : 'dashboard';
+    } catch { return 'dashboard'; }
+  })();
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [showMenu, setShowMenu] = useState(false);
   const [showReportIssue, setShowReportIssue] = useState(false);
   const [showChat, setShowChat] = useState(false);
