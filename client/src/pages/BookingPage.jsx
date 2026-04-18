@@ -285,17 +285,15 @@ export default function BookingPage() {
         {/* ════ STEP 1: Pick a Date ════ */}
         {step === 1 && (
           <div style={{ animation: "slideUp 0.4s ease-out" }}>
-            <button
+            <Button
+              variant="tertiary"
               onClick={() => { setStep(0); setSelectedDate(null); setSelectedSlot(null); }}
-              style={{
-                background: "none", border: "none", color: BRAND.gray400,
-                fontSize: 13, cursor: "pointer", marginBottom: 16,
-                display: "flex", alignItems: "center", gap: 4,
-              }}
+              icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>}
+              iconPosition="left"
+              style={{ marginBottom: 16 }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
               Back
-            </button>
+            </Button>
 
             <h2 style={{
               fontSize: 22, fontWeight: 600, color: BRAND.navy,
@@ -411,17 +409,15 @@ export default function BookingPage() {
         {/* ════ STEP 2: Pick a Time ════ */}
         {step === 2 && selectedDay && (
           <div style={{ animation: "slideUp 0.4s ease-out" }}>
-            <button
+            <Button
+              variant="tertiary"
               onClick={() => { setStep(1); setSelectedSlot(null); }}
-              style={{
-                background: "none", border: "none", color: BRAND.gray400,
-                fontSize: 13, cursor: "pointer", marginBottom: 16,
-                display: "flex", alignItems: "center", gap: 4,
-              }}
+              icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>}
+              iconPosition="left"
+              style={{ marginBottom: 16 }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
               Back to dates
-            </button>
+            </Button>
 
             <h2 style={{
               fontSize: 22, fontWeight: 600, color: BRAND.navy,
@@ -510,17 +506,15 @@ export default function BookingPage() {
         {/* ════ STEP 3: Confirm ════ */}
         {step === 3 && selectedDay && selectedSlot && (
           <div style={{ animation: "slideUp 0.4s ease-out" }}>
-            <button
+            <Button
+              variant="tertiary"
               onClick={() => setStep(2)}
-              style={{
-                background: "none", border: "none", color: BRAND.gray400,
-                fontSize: 13, cursor: "pointer", marginBottom: 16,
-                display: "flex", alignItems: "center", gap: 4,
-              }}
+              icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>}
+              iconPosition="left"
+              style={{ marginBottom: 16 }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
               Back
-            </button>
+            </Button>
 
             <h2 style={{
               fontSize: 22, fontWeight: 600, color: BRAND.navy,

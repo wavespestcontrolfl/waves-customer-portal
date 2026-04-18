@@ -168,12 +168,7 @@ export default function PublicBookingPage() {
   };
 
   // ── shared styles ──
-  // Primary CTAs now use <Button variant="primary"> (see usages below).
-  const btnSecondary = {
-    padding: '10px 16px', borderRadius: 8, background: 'transparent',
-    border: `1px solid ${BRAND.gray300}`, color: BRAND.gray600,
-    fontSize: 13, fontWeight: 500, cursor: 'pointer',
-  };
+  // CTAs use <Button variant="primary"|"tertiary"> (see usages below).
   const inputStyle = {
     width: '100%', padding: '12px 14px', borderRadius: 8,
     border: `1.5px solid ${BRAND.gray300}`, fontSize: 15,
@@ -392,7 +387,7 @@ export default function PublicBookingPage() {
             )}
 
             <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
-              <button onClick={() => setStep(1)} style={btnSecondary}>← Back</button>
+              <Button variant="tertiary" onClick={() => setStep(1)}>← Back</Button>
               <Button
                 variant="primary"
                 onClick={() => setStep(3)}
@@ -497,7 +492,7 @@ export default function PublicBookingPage() {
             )}
 
             <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => setStep(2)} style={btnSecondary}>← Back</button>
+              <Button variant="tertiary" onClick={() => setStep(2)}>← Back</Button>
               <Button
                 variant="primary"
                 onClick={handleConfirm}
