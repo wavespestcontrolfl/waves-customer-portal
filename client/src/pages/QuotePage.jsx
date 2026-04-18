@@ -1,8 +1,82 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import { COLORS, FONTS, SHADOWS } from '../theme-brand';
+
+// ───────── Step config ─────────
+function OptionIcon({ name }) {
+  const common = {
+    width: 28,
+    height: 28,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 2,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': true,
+  };
+  switch (name) {
+    case 'shield': return <svg {...common}><path d="M12 3l8 3v6c0 4.5-3.4 8.6-8 9-4.6-.4-8-4.5-8-9V6l8-3z"/><path d="M9 12l2 2 4-4"/></svg>;
+    case 'leaf':   return <svg {...common}><path d="M5 21c0-8 6-14 16-16-.5 10-6 16-14 16"/><path d="M5 21c4-4 8-6 12-8"/></svg>;
+    case 'home':   return <svg {...common}><path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg>;
+    case 'repeat': return <svg {...common}><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>;
+    case 'one':    return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M10 9l2-1v8"/></svg>;
+    case 'help':   return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 015 0c0 1.5-2.5 2-2.5 3.5"/><circle cx="12" cy="17" r="0.6" fill="currentColor"/></svg>;
+    case 'chat':   return <svg {...common}><path d="M21 11.5a8.4 8.4 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.4 8.4 0 01-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.4 8.4 0 013.8-.9h.5a8.5 8.5 0 018 8v.5z"/></svg>;
+    case 'bug':    return <svg {...common}><ellipse cx="12" cy="13" rx="4" ry="6"/><line x1="12" y1="7" x2="12" y2="4"/><line x1="10" y1="5" x2="9" y2="3"/><line x1="14" y1="5" x2="15" y2="3"/><line x1="8" y1="11" x2="5" y2="10"/><line x1="16" y1="11" x2="19" y2="10"/><line x1="8" y1="15" x2="5" y2="17"/><line x1="16" y1="15" x2="19" y2="17"/></svg>;
+    case 'mosquito': return <svg {...common}><ellipse cx="12" cy="14" rx="2" ry="4"/><line x1="12" y1="10" x2="12" y2="5"/><path d="M5 8c2 0 5 1 7 3"/><path d="M19 8c-2 0-5 1-7 3"/><line x1="12" y1="18" x2="10" y2="21"/><line x1="12" y1="18" x2="14" y2="21"/></svg>;
+    case 'rodent': return <svg {...common}><circle cx="9" cy="7" r="2"/><circle cx="15" cy="7" r="2"/><path d="M5 17c0-3 3-7 7-7s7 4 7 7c0 1-1 2-2 2H7c-1 0-2-1-2-2z"/><path d="M19 18c1 1 2 2 3 3"/></svg>;
+    default:       return null;
+  }
+}
+
+const INTEREST_OPTIONS = [
+  { value: 'pest',  label: 'Pest Control',   icon: 'shield' },
+  { value: 'lawn',  label: 'Lawn Care',      icon: 'leaf'   },
+  { value: 'both',  label: 'Pest + Lawn',    icon: 'home'   },
+  { value: 'other', label: 'Other Services', icon: 'chat'   },
+];
+
+const OTHER_OPTIONS = [
+  { value: 'termite',  label: 'Termite',  icon: 'bug'      },
+  { value: 'mosquito', label: 'Mosquito', icon: 'mosquito' },
+  { value: 'rodent',   label: 'Rodent',   icon: 'rodent'   },
+];
+
+const FREQUENCY_OPTIONS = [
+  { value: 'ongoing',  label: 'Ongoing Service', icon: 'repeat' },
+  { value: 'one-time', label: 'One-Time',        icon: 'one'    },
+  { value: 'not-sure', label: 'Not Sure Yet',    icon: 'help'   },
+];
+
+const PEST_FREQS = [
+  { id: 'quarterly', label: 'Quarterly', sub: '4 visits / yr' },
+  { id: 'bimonthly', label: 'Bi-Monthly', sub: '6 visits / yr' },
+  { id: 'monthly',   label: 'Monthly',    sub: '12 visits / yr' },
+];
+
+const GRASS_TYPES = [
+  { id: 'st_augustine', label: 'St. Augustine' },
+  { id: 'bahia',        label: 'Bahia' },
+  { id: 'bermuda',      label: 'Bermuda' },
+  { id: 'zoysia',       label: 'Zoysia' },
+];
+
+const STEPS_PRICED = ['interest', 'frequency',    'name', 'email', 'phone', 'address'];
+const STEPS_OTHER  = ['interest', 'otherService', 'name', 'email', 'phone', 'address'];
+const TOTAL_STAGES_PRICED = STEPS_PRICED.length + 3; // + lookup + confirm + result
+const TOTAL_STAGES_OTHER  = STEPS_OTHER.length  + 1; // + result-other
+
+const NEXT_STEPS = [
+  { n: 1, text: <><strong>You tell us who you are</strong> — takes about 30 seconds</> },
+  { n: 2, text: <><strong>We analyze your property</strong> — RentCast records + AI satellite imagery</> },
+  { n: 3, text: <><strong>We generate your price</strong> — instant, honest, no haggling</> },
+  { n: 4, text: <><strong>A Waves specialist confirms</strong> — text or call to lock it in same-day</> },
+];
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 function captureAttribution() {
   if (typeof window === 'undefined') return null;
@@ -26,32 +100,26 @@ function captureAttribution() {
   }
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+function splitName(full) {
+  const parts = (full || '').trim().split(/\s+/);
+  if (parts.length < 2) return { firstName: parts[0] || '', lastName: '' };
+  return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
+}
 
-const PEST_FREQS = [
-  { id: 'quarterly', label: 'Quarterly', sub: '4 visits / yr' },
-  { id: 'bimonthly', label: 'Bi-Monthly', sub: '6 visits / yr' },
-  { id: 'monthly', label: 'Monthly', sub: '12 visits / yr' },
-];
-
-const GRASS_TYPES = [
-  { id: 'st_augustine', label: 'St. Augustine' },
-  { id: 'bahia', label: 'Bahia' },
-  { id: 'bermuda', label: 'Bermuda' },
-  { id: 'zoysia', label: 'Zoysia' },
-];
-
-const NEXT_STEPS = [
-  { n: 1, text: <><strong>You tell us who you are</strong> — takes about 30 seconds</> },
-  { n: 2, text: <><strong>We analyze your property</strong> — RentCast records + AI satellite imagery</> },
-  { n: 3, text: <><strong>We generate your price</strong> — instant, honest, no haggling</> },
-  { n: 4, text: <><strong>A Waves specialist confirms</strong> — text or call to lock it in same-day</> },
-];
+function formatPhoneDigits(d) {
+  if (!d) return '';
+  if (d.length <= 3) return `(${d}`;
+  if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
 
 export default function QuotePage() {
-  const [step, setStep] = useState(1);
-  const [contact, setContact] = useState({ firstName: '', lastName: '', email: '', phone: '' });
+  const [stage, setStage] = useState('intake'); // intake | lookup | confirm | result
+  const [intakeIdx, setIntakeIdx] = useState(0);
+  const [dir, setDir] = useState('next');
+  const [intake, setIntake] = useState({ interest: '', frequency: '', otherService: '', name: '', email: '', phone: '', address: '' });
   const [address, setAddress] = useState({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
+
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -62,7 +130,7 @@ export default function QuotePage() {
   const [satellite, setSatellite] = useState(null);
   const [aiSources, setAiSources] = useState(null);
 
-  const [svcPest, setSvcPest] = useState(true);
+  const [svcPest, setSvcPest] = useState(false);
   const [svcLawn, setSvcLawn] = useState(false);
   const [pestFreq, setPestFreq] = useState('quarterly');
   const [grassType, setGrassType] = useState('st_augustine');
@@ -72,45 +140,87 @@ export default function QuotePage() {
   const [result, setResult] = useState(null);
   const [attribution] = useState(() => captureAttribution());
 
-  function setPhone(raw) {
-    let digits = raw.replace(/\D/g, '');
-    if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
-    setContact(c => ({ ...c, phone: digits.slice(0, 10) }));
+  const inputRef = useRef(null);
+
+  // Step list + total stages depend on whether the user picked "other".
+  const isOtherFlow = intake.interest === 'other';
+  const INTAKE_STEPS = isOtherFlow ? STEPS_OTHER : STEPS_PRICED;
+  const TOTAL_STAGES = isOtherFlow ? TOTAL_STAGES_OTHER : TOTAL_STAGES_PRICED;
+  const currentKey = INTAKE_STEPS[intakeIdx];
+
+  useEffect(() => {
+    if (stage !== 'intake') return;
+    if (currentKey !== 'interest' && currentKey !== 'frequency' && currentKey !== 'otherService' && currentKey !== 'address') {
+      inputRef.current?.focus();
+    }
+  }, [stage, intakeIdx, currentKey]);
+
+  function setIntakeField(key, value) {
+    setIntake(prev => ({ ...prev, [key]: value }));
   }
 
-  function formatPhone(d) {
-    if (!d) return '';
-    if (d.length <= 3) return `(${d}`;
-    if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
-    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
-  }
-
-  function validateLeadForm() {
-    if (!contact.firstName.trim()) return 'Enter your first name.';
-    if (!contact.lastName.trim()) return 'Enter your last name.';
-    if (!/^\S+@\S+\.\S+$/.test(contact.email)) return 'Enter a valid email.';
-    if (contact.phone.length !== 10) return 'Enter a 10-digit phone number.';
-    if (!address.formatted || address.formatted.trim().length < 5) return 'Enter your address.';
+  function validateCurrent() {
+    const v = (intake[currentKey] || '').trim();
+    if (currentKey === 'interest' && !v) return 'Pick what we can help with.';
+    if (currentKey === 'frequency' && !v) return 'Pick a frequency.';
+    if (currentKey === 'otherService' && !v) return 'Pick which service you need.';
+    if (currentKey === 'name') {
+      const parts = v.split(/\s+/);
+      if (parts.length < 2 || !parts[0] || !parts[1]) return 'Enter your first and last name.';
+    }
+    if (currentKey === 'email' && !/^\S+@\S+\.\S+$/.test(v)) return 'Enter a valid email.';
+    if (currentKey === 'phone' && v.replace(/\D/g, '').length !== 10) return 'Enter a 10-digit phone number.';
+    if (currentKey === 'address' && v.length < 5) return 'Enter your address.';
     return '';
   }
 
-  async function runLookup() {
-    const v = validateLeadForm();
-    if (v) { setError(v); return; }
+  function advance() {
+    const err = validateCurrent();
+    if (err) { setError(err); return; }
     setError('');
-    setLookupStatus('Looking up property... (RentCast + AI Satellite Analysis)');
-    setLookupSub('Running AI satellite analysis...');
-    setStep(2);
+    setDir('next');
+    if (intakeIdx < INTAKE_STEPS.length - 1) setIntakeIdx(i => i + 1);
+    else submitIntake();
+  }
+
+  function pickTile(key, value) {
+    // Picking "other" on the interest tile flips the step list; recompute length
+    // off the post-pick value so we advance past `interest` into `otherService`.
+    const nextSteps = (key === 'interest' ? value === 'other' : isOtherFlow) ? STEPS_OTHER : STEPS_PRICED;
+    setIntakeField(key, value);
+    setError('');
+    setDir('next');
+    setTimeout(() => {
+      if (intakeIdx < nextSteps.length - 1) setIntakeIdx(i => i + 1);
+      else submitIntake();
+    }, 180);
+  }
+
+  function goBack() {
+    setError('');
+    setDir('prev');
+    if (intakeIdx > 0) setIntakeIdx(i => i - 1);
+  }
+
+  async function submitIntake() {
+    setError('');
+    if (isOtherFlow) { return submitOther(); }
+    const { firstName, lastName } = splitName(intake.name);
+    const phoneDigits = intake.phone.replace(/\D/g, '');
+
+    setStage('lookup');
+    setLookupStatus('Looking up your property...');
+    setLookupSub('Pulling records + satellite imagery...');
     try {
       const r = await fetch(`${API_BASE}/public/estimator/property-lookup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          firstName: contact.firstName.trim(),
-          lastName: contact.lastName.trim(),
-          email: contact.email.trim(),
-          phone: contact.phone,
-          address: address.formatted,
+          firstName,
+          lastName,
+          email: intake.email.trim(),
+          phone: phoneDigits,
+          address: address.formatted || intake.address,
           attribution: attribution || undefined,
         }),
       });
@@ -120,16 +230,56 @@ export default function QuotePage() {
       setEnriched(d.enriched || null);
       setSatellite(d.satellite || null);
       setAiSources(d.aiAnalysis?.sources || null);
-      if (d.enriched?.homeSqFt) setHomeSqFt(String(d.enriched.homeSqFt));
-      if (d.enriched?.lotSqFt) setLotSqFt(String(d.enriched.lotSqFt));
+      // Always seed the confirm step with a real value — the input's placeholder
+      // is easy to mistake for a prefilled value, and the user gets a "min 500"
+      // error on submit. Defaults are SWFL median-ish and editable.
+      setHomeSqFt(d.enriched?.homeSqFt ? String(d.enriched.homeSqFt) : '2000');
+      setLotSqFt(d.enriched?.lotSqFt   ? String(d.enriched.lotSqFt)   : '8000');
+      setSvcPest(intake.interest === 'pest' || intake.interest === 'both');
+      setSvcLawn(intake.interest === 'lawn' || intake.interest === 'both');
+      setPestFreq('quarterly');
       setLookupStatus('Property analyzed');
       setLookupSub('');
-      setStep(3);
+      setStage('confirm');
     } catch (e) {
       setError(e.message || 'Lookup failed.');
-      setLookupStatus('');
-      setLookupSub('');
-      setStep(1);
+      setStage('intake');
+      setIntakeIdx(INTAKE_STEPS.length - 1);
+    }
+  }
+
+  // Termite/Mosquito/Rodent skip the public pricing engine (it doesn't price
+  // them) and route to lead capture so a Waves specialist can quote by hand.
+  async function submitOther() {
+    setError('');
+    setLoading(true);
+    try {
+      const { firstName, lastName } = splitName(intake.name);
+      const phoneDigits = intake.phone.replace(/\D/g, '');
+      const otherLabel = OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || intake.otherService;
+      const res = await fetch(`${API_BASE}/leads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: intake.name,
+          firstName,
+          lastName,
+          email: intake.email.trim(),
+          phone: phoneDigits,
+          address: address.formatted || intake.address,
+          interest: 'other',
+          otherService: intake.otherService,
+          service_interest: otherLabel,
+          source: 'quote-page-divert',
+          attribution: attribution || undefined,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setStage('result-other');
+    } catch (e) {
+      setError(e?.message || 'Could not send your request. Please call us.');
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -141,16 +291,17 @@ export default function QuotePage() {
 
     setLoading(true);
     try {
+      const { firstName, lastName } = splitName(intake.name);
       const r = await fetch(`${API_BASE}/public/quote/calculate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           leadId: leadId || undefined,
-          firstName: contact.firstName,
-          lastName: contact.lastName,
-          email: contact.email,
-          phone: contact.phone,
-          address: address.line1 || address.formatted,
+          firstName,
+          lastName,
+          email: intake.email,
+          phone: intake.phone.replace(/\D/g, ''),
+          address: address.line1 || address.formatted || intake.address,
           city: address.city,
           zip: address.zip,
           homeSqFt: sq,
@@ -168,7 +319,7 @@ export default function QuotePage() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Could not calculate.');
       setResult(d);
-      setStep(4);
+      setStage('result');
     } catch (e) {
       setError(e.message);
     } finally {
@@ -177,209 +328,81 @@ export default function QuotePage() {
   }
 
   function resetAll() {
-    setStep(1);
+    setStage('intake');
+    setIntakeIdx(0);
+    setIntake({ interest: '', frequency: '', otherService: '', name: '', email: '', phone: '', address: '' });
+    setAddress({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
     setResult(null);
     setError('');
-    setLookupStatus('');
-    setLookupSub('');
-    setLeadId(null);
-    setEnriched(null);
-    setSatellite(null);
-    setAiSources(null);
-    setHomeSqFt('');
-    setLotSqFt('');
+    setLookupStatus(''); setLookupSub('');
+    setLeadId(null); setEnriched(null); setSatellite(null); setAiSources(null);
+    setSvcPest(false); setSvcLawn(false);
+    setHomeSqFt(''); setLotSqFt('');
   }
 
-  // ---------- Style tokens (mirrors Astro homepage) ----------
-  const sPage = {
-    minHeight: '100vh',
-    background: COLORS.white,
-    fontFamily: FONTS.body,
-    color: COLORS.navy,
-    display: 'flex',
-    flexDirection: 'column',
-  };
+  // ───── Progress ─────
+  let progressStep = 0;
+  if (stage === 'intake')       progressStep = intakeIdx + 1;
+  if (stage === 'lookup')       progressStep = INTAKE_STEPS.length + 1;
+  if (stage === 'confirm')      progressStep = INTAKE_STEPS.length + 2;
+  if (stage === 'result')       progressStep = TOTAL_STAGES;
+  if (stage === 'result-other') progressStep = TOTAL_STAGES;
+  const progress = (progressStep / TOTAL_STAGES) * 100;
 
-  const sHero = {
-    position: 'relative',
-    background: COLORS.blueDeeper,
-    color: COLORS.white,
-    padding: 'clamp(64px, 8vw, 112px) 24px',
-    textAlign: 'center',
-    overflow: 'hidden',
-  };
+  // ───── Styles ─────
+  const sPage = { minHeight: '100vh', background: COLORS.white, fontFamily: FONTS.body, color: COLORS.navy, display: 'flex', flexDirection: 'column' };
+  const sHero = { position: 'relative', background: COLORS.blueDeeper, color: COLORS.white, padding: 'clamp(64px, 8vw, 112px) 24px', textAlign: 'center', overflow: 'hidden' };
+  const sHeroOverlay = { position: 'absolute', inset: 0, background: `linear-gradient(135deg, ${COLORS.blueDeeper}E6 0%, ${COLORS.blueDark}B3 55%, ${COLORS.wavesBlue}80 100%)`, pointerEvents: 'none' };
+  const sH1 = { fontFamily: FONTS.display, fontSize: 'clamp(36px, 6vw, 60px)', fontWeight: 400, lineHeight: 1.05, letterSpacing: '0.02em', margin: '0 0 16px', color: COLORS.white };
+  const sHeroSub = { fontSize: 'clamp(16px, 2vw, 20px)', lineHeight: 1.55, margin: '0 auto 24px', maxWidth: 640, color: COLORS.white };
 
-  const sHeroOverlay = {
-    position: 'absolute',
-    inset: 0,
-    background: `linear-gradient(135deg, ${COLORS.blueDeeper}E6 0%, ${COLORS.blueDark}B3 55%, ${COLORS.wavesBlue}80 100%)`,
-    pointerEvents: 'none',
-  };
-
-  const sH1 = {
-    fontFamily: FONTS.display,
-    fontSize: 'clamp(36px, 6vw, 60px)',
-    fontWeight: 400,
-    lineHeight: 1.05,
-    letterSpacing: '0.02em',
-    margin: '0 0 16px',
-    color: COLORS.white,
-  };
-
-  const sHeroSub = {
-    fontSize: 'clamp(16px, 2vw, 20px)',
-    lineHeight: 1.55,
-    margin: '0 auto 24px',
-    maxWidth: 640,
-    color: COLORS.white,
-  };
-
-  const sFormSection = {
-    background: COLORS.wavesBlue,
-    padding: 'clamp(56px, 7vw, 96px) 24px',
-  };
-
-  const sFormWrap = {
-    maxWidth: 1120,
-    margin: '0 auto',
-    display: 'grid',
-    gap: 48,
-    gridTemplateColumns: '1fr',
-    alignItems: 'start',
-  };
-
+  const sFormSection = { background: COLORS.wavesBlue, padding: 'clamp(56px, 7vw, 96px) 24px' };
+  const sFormWrap = { maxWidth: 1120, margin: '0 auto', display: 'grid', gap: 48, gridTemplateColumns: '1fr', alignItems: 'start' };
   const sLeft = { color: COLORS.white };
+  const sLeftH2 = { fontFamily: FONTS.display, fontSize: 'clamp(28px, 4vw, 42px)', fontWeight: 400, lineHeight: 1.1, letterSpacing: '0.02em', margin: '0 0 12px', color: COLORS.white };
+  const sLeftSub = { fontFamily: FONTS.body, fontSize: 18, lineHeight: 1.55, margin: '0 0 28px', color: COLORS.white, opacity: 0.95 };
+  const sLeftH3 = { fontFamily: FONTS.display, fontSize: 22, fontWeight: 400, letterSpacing: '0.02em', margin: '0 0 16px', color: COLORS.white };
+  const sStepBadge = { flexShrink: 0, width: 32, height: 32, borderRadius: 9999, background: COLORS.yellow, color: COLORS.blueDeeper, fontFamily: FONTS.ui, fontWeight: 800, fontSize: 16, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' };
 
-  const sLeftH2 = {
-    fontFamily: FONTS.display,
-    fontSize: 'clamp(28px, 4vw, 42px)',
-    fontWeight: 400,
-    lineHeight: 1.1,
-    letterSpacing: '0.02em',
-    margin: '0 0 12px',
-    color: COLORS.white,
-  };
-
-  const sLeftSub = {
-    fontFamily: FONTS.body,
-    fontSize: 18,
-    lineHeight: 1.55,
-    margin: '0 0 28px',
-    color: COLORS.white,
-    opacity: 0.95,
-  };
-
-  const sLeftH3 = {
-    fontFamily: FONTS.display,
-    fontSize: 22,
-    fontWeight: 400,
-    letterSpacing: '0.02em',
-    margin: '0 0 16px',
-    color: COLORS.white,
-  };
-
-  const sStepBadge = {
-    flexShrink: 0,
-    width: 32,
-    height: 32,
-    borderRadius: 9999,
-    background: COLORS.yellow,
-    color: COLORS.blueDeeper,
-    fontFamily: FONTS.ui,
-    fontWeight: 800,
-    fontSize: 16,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  };
-
-  const sCard = {
-    background: COLORS.white,
-    borderRadius: 16,
-    padding: 'clamp(24px, 3vw, 40px)',
-    boxShadow: SHADOWS.goldRing,
-    minHeight: 420,
-  };
-
-  const sLabel = {
-    display: 'block',
-    fontFamily: FONTS.ui,
-    fontSize: 13,
-    fontWeight: 600,
-    color: COLORS.navy,
-    marginBottom: 6,
-  };
-
-  const sInput = {
-    width: '100%',
-    padding: '12px 14px',
-    border: `1.5px solid ${COLORS.grayLight}`,
-    borderRadius: 10,
-    fontSize: 16,
-    fontFamily: FONTS.body,
-    color: COLORS.navy,
-    boxSizing: 'border-box',
-    background: COLORS.white,
-    outline: 'none',
-  };
-
+  const sCard = { background: COLORS.white, borderRadius: 16, padding: 'clamp(24px, 3vw, 40px)', boxShadow: SHADOWS.goldRing, minHeight: 420 };
+  const sLabel = { display: 'block', fontFamily: FONTS.ui, fontSize: 15, fontWeight: 600, color: COLORS.navy, marginBottom: 8 };
+  const sInput = { width: '100%', padding: '14px 16px', border: `1.5px solid ${COLORS.grayLight}`, borderRadius: 12, fontSize: 16, fontFamily: FONTS.body, color: COLORS.navy, boxSizing: 'border-box', background: COLORS.white, outline: 'none', minHeight: 52 };
   const sChip = (on) => ({
-    padding: '14px 18px',
-    borderRadius: 12,
+    padding: '14px 18px', borderRadius: 12,
     border: `2px solid ${on ? COLORS.wavesBlue : COLORS.slate200}`,
     background: on ? COLORS.blueLight : COLORS.white,
-    cursor: 'pointer',
-    fontFamily: FONTS.body,
-    fontSize: 15,
+    cursor: 'pointer', fontFamily: FONTS.body, fontSize: 15,
     fontWeight: on ? 700 : 500,
     color: on ? COLORS.blueDeeper : COLORS.textBody,
-    textAlign: 'left',
-    display: 'block',
-    width: '100%',
+    textAlign: 'left', display: 'block', width: '100%',
     transition: 'transform 0.15s cubic-bezier(0.4,0,0.2,1), background 0.15s, border-color 0.15s',
   });
-
-  const sCardH2 = {
-    fontFamily: FONTS.heading,
-    fontSize: 24,
-    fontWeight: 700,
-    color: COLORS.blueDeeper,
-    margin: '0 0 6px',
-    lineHeight: 1.2,
-  };
-
-  const sCardSub = {
-    fontFamily: FONTS.body,
-    fontSize: 14,
-    color: COLORS.textBody,
-    margin: '0 0 22px',
-    lineHeight: 1.55,
-  };
-
-  const sError = {
-    marginTop: 16,
-    padding: 12,
-    background: '#FEE2E2',
-    color: COLORS.red,
-    borderRadius: 8,
-    fontSize: 14,
-    fontFamily: FONTS.body,
-  };
-
-  const totalSteps = 4;
-  const progress = (step / totalSteps) * 100;
+  const sTile = (on) => ({
+    padding: '16px 12px', borderRadius: 14,
+    border: `2px solid ${on ? COLORS.wavesBlue : COLORS.slate200}`,
+    background: on ? COLORS.blueLight : COLORS.white,
+    cursor: 'pointer', fontFamily: FONTS.body, fontSize: 14, fontWeight: 700,
+    color: on ? COLORS.blueDeeper : COLORS.textBody,
+    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+    minHeight: 110, width: '100%',
+    transition: 'transform 0.15s cubic-bezier(0.4,0,0.2,1), background 0.15s, border-color 0.15s',
+  });
+  const sCardH2 = { fontFamily: FONTS.heading, fontSize: 26, fontWeight: 700, color: COLORS.blueDeeper, margin: '0 0 8px', lineHeight: 1.2 };
+  const sCardSub = { fontFamily: FONTS.body, fontSize: 16, color: COLORS.textBody, margin: '0 0 22px', lineHeight: 1.55 };
+  const sError = { marginTop: 14, padding: 12, background: '#FEE2E2', color: COLORS.red, borderRadius: 10, fontSize: 14, fontFamily: FONTS.body };
 
   return (
     <div style={sPage}>
       <style>{`
         @keyframes qp-spin { to { transform: rotate(360deg); } }
+        @keyframes qp-slideInRight { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes qp-slideInLeft  { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: translateX(0); } }
         @media (min-width: 900px) {
           .qp-form-grid { grid-template-columns: 1fr 1fr !important; gap: 64px !important; }
         }
-        .qp-chip:hover { transform: scale(1.02); }
+        .qp-chip:hover, .qp-tile:hover { transform: scale(1.02); }
       `}</style>
 
-      {/* Hero */}
       <section style={sHero}>
         <div style={sHeroOverlay} aria-hidden />
         <div style={{ position: 'relative', maxWidth: 880, margin: '0 auto' }}>
@@ -396,10 +419,8 @@ export default function QuotePage() {
         </div>
       </section>
 
-      {/* Form section */}
       <section style={sFormSection}>
         <div className="qp-form-grid" style={sFormWrap}>
-          {/* Left: next-steps explainer */}
           <div style={sLeft}>
             <h2 style={sLeftH2}>Get Your Price. Keep Your Saturday.</h2>
             <p style={sLeftSub}>
@@ -416,65 +437,204 @@ export default function QuotePage() {
             </ul>
           </div>
 
-          {/* Right: card */}
           <div style={sCard}>
-            {/* Progress bar */}
-            <div style={{ height: 6, background: COLORS.offWhite, borderRadius: 4, marginBottom: 20, overflow: 'hidden' }}>
+            <div style={{ height: 6, background: COLORS.offWhite, borderRadius: 4, marginBottom: 22, overflow: 'hidden' }}>
               <div style={{ height: '100%', width: `${progress}%`, background: COLORS.wavesBlue, transition: 'width 0.3s' }} />
             </div>
 
-            {step === 1 && (
-              <div>
-                <h2 style={sCardH2}>Tell us where to send your quote</h2>
-                <p style={sCardSub}>Takes about 30 seconds. We serve Manatee, Sarasota, and Charlotte counties.</p>
+            {stage === 'intake' && (
+              <div
+                key={`${stage}-${intakeIdx}`}
+                style={{ animation: dir === 'next' ? 'qp-slideInRight 0.3s ease-out' : 'qp-slideInLeft 0.3s ease-out' }}
+              >
+                {currentKey === 'interest' && (
+                  <>
+                    <h2 style={sCardH2}>What's Bugging You?</h2>
+                    <p style={sCardSub}>30 seconds. No obligation. Most quotes same-day.</p>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
+                      {INTEREST_OPTIONS.map(opt => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          className="qp-tile"
+                          style={sTile(intake.interest === opt.value)}
+                          onClick={() => pickTile('interest', opt.value)}
+                        >
+                          <OptionIcon name={opt.icon} />
+                          <span style={{ textAlign: 'center' }}>{opt.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                  <div>
-                    <label style={sLabel}>First name</label>
-                    <input style={sInput} value={contact.firstName} onChange={(e) => setContact(c => ({ ...c, firstName: e.target.value }))} autoComplete="given-name" />
-                  </div>
-                  <div>
-                    <label style={sLabel}>Last name</label>
-                    <input style={sInput} value={contact.lastName} onChange={(e) => setContact(c => ({ ...c, lastName: e.target.value }))} autoComplete="family-name" />
-                  </div>
-                </div>
-                <div style={{ marginBottom: 12 }}>
-                  <label style={sLabel}>Mobile phone</label>
-                  <input style={sInput} type="tel" value={formatPhone(contact.phone)} onChange={(e) => setPhone(e.target.value)} placeholder="(941) 555-1234" autoComplete="tel" />
-                </div>
-                <div style={{ marginBottom: 12 }}>
-                  <label style={sLabel}>Email</label>
-                  <input style={sInput} type="email" value={contact.email} onChange={(e) => setContact(c => ({ ...c, email: e.target.value }))} autoComplete="email" />
-                </div>
-                <div>
-                  <label style={sLabel}>Property address</label>
-                  <AddressAutocomplete
-                    value={address.formatted}
-                    onChange={(v) => setAddress(a => ({ ...a, formatted: v }))}
-                    onSelect={(p) => setAddress({ formatted: p.formatted, line1: p.line1, city: p.city, state: p.state, zip: p.zip })}
-                    placeholder="Start typing your address..."
-                    style={sInput}
-                  />
-                </div>
+                {currentKey === 'otherService' && (
+                  <>
+                    <h2 style={sCardH2}>Which Service Do You Need?</h2>
+                    <p style={sCardSub}>These need a quick site visit, so a Waves specialist will quote you direct.</p>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                      {OTHER_OPTIONS.map(opt => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          className="qp-tile"
+                          style={sTile(intake.otherService === opt.value)}
+                          onClick={() => pickTile('otherService', opt.value)}
+                        >
+                          <OptionIcon name={opt.icon} />
+                          <span style={{ textAlign: 'center' }}>{opt.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {currentKey === 'frequency' && (
+                  <>
+                    <h2 style={sCardH2}>Ongoing or One-Time?</h2>
+                    <p style={sCardSub}>Helps us tailor the right plan for your property.</p>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                      {FREQUENCY_OPTIONS.map(opt => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          className="qp-tile"
+                          style={sTile(intake.frequency === opt.value)}
+                          onClick={() => pickTile('frequency', opt.value)}
+                        >
+                          <OptionIcon name={opt.icon} />
+                          <span style={{ textAlign: 'center' }}>{opt.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {currentKey === 'name' && (
+                  <>
+                    <h2 style={sCardH2}>What's Your Name?</h2>
+                    <p style={sCardSub}>So we know who to write the estimate for.</p>
+                    <label style={sLabel}>Full name</label>
+                    <input
+                      ref={inputRef}
+                      type="text"
+                      value={intake.name}
+                      onChange={e => setIntakeField('name', e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
+                      placeholder="Your first and last name"
+                      autoComplete="name"
+                      style={sInput}
+                    />
+                  </>
+                )}
+
+                {currentKey === 'email' && (
+                  <>
+                    <h2 style={sCardH2}>Best Email?</h2>
+                    <p style={sCardSub}>We'll send your quote here same-day.</p>
+                    <label style={sLabel}>Email</label>
+                    <input
+                      ref={inputRef}
+                      type="email"
+                      value={intake.email}
+                      onChange={e => setIntakeField('email', e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
+                      placeholder="you@example.com"
+                      autoComplete="email"
+                      style={sInput}
+                    />
+                  </>
+                )}
+
+                {currentKey === 'phone' && (
+                  <>
+                    <h2 style={sCardH2}>Where Can We Reach You?</h2>
+                    <p style={sCardSub}>We'll text or call only to confirm your quote.</p>
+                    <label style={sLabel}>Mobile phone</label>
+                    <input
+                      ref={inputRef}
+                      type="tel"
+                      value={formatPhoneDigits(intake.phone.replace(/\D/g, '').slice(0, 10))}
+                      onChange={e => {
+                        const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+                        setIntakeField('phone', digits);
+                      }}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
+                      placeholder="(941) 555-0100"
+                      autoComplete="tel"
+                      style={sInput}
+                    />
+                  </>
+                )}
+
+                {currentKey === 'address' && (
+                  <>
+                    <h2 style={sCardH2}>Property Address</h2>
+                    <p style={sCardSub}>Last one — we'll pull records and satellite imagery to build your quote.</p>
+                    <label style={sLabel}>Service address</label>
+                    <AddressAutocomplete
+                      value={intake.address}
+                      onChange={(v) => { setIntakeField('address', v); setAddress(a => ({ ...a, formatted: v })); }}
+                      onSelect={(p) => {
+                        setIntakeField('address', p.formatted);
+                        setAddress({ formatted: p.formatted, line1: p.line1, city: p.city, state: p.state, zip: p.zip });
+                      }}
+                      placeholder="Start typing your address..."
+                      style={sInput}
+                    />
+                  </>
+                )}
 
                 {error && <div style={sError}>{error}</div>}
 
-                <div style={{ marginTop: 24, display: 'flex', justifyContent: 'flex-end' }}>
-                  <Button variant="primary" onClick={runLookup} style={{ fontSize: 16 }}>Continue</Button>
+                <div style={{
+                  marginTop: 24,
+                  display: 'flex',
+                  justifyContent: intakeIdx > 0 ? 'space-between' : 'flex-end',
+                  gap: 12,
+                }}>
+                  {intakeIdx > 0 && (
+                    <Button variant="tertiary" onClick={goBack} style={{ textTransform: 'none' }}>← Back</Button>
+                  )}
+                  {currentKey !== 'interest' && currentKey !== 'frequency' && currentKey !== 'otherService' && (
+                    <Button
+                      variant="primary"
+                      onClick={advance}
+                      disabled={loading}
+                      style={{ fontSize: 16, textTransform: 'none' }}
+                    >
+                      {loading ? 'Sending...' : (intakeIdx === INTAKE_STEPS.length - 1 ? (isOtherFlow ? 'Send My Request' : 'Get My Quote') : 'Next →')}
+                    </Button>
+                  )}
                 </div>
-                <p style={{ fontSize: 12, color: COLORS.textCaption, marginTop: 16, lineHeight: 1.5 }}>
-                  By continuing you agree to receive texts and emails from Waves about your quote. Msg &amp; data rates may apply. Reply STOP to opt out.
-                </p>
+
+                {intakeIdx === INTAKE_STEPS.length - 1 && (
+                  <p style={{ fontSize: 11, color: COLORS.textCaption, marginTop: 16, lineHeight: 1.5 }}>
+                    By completing this form, you agree to the Waves{' '}
+                    <a href="https://wavespestcontrol.com/terms-of-service/" style={{ textDecoration: 'underline', color: 'inherit' }}>Terms of Service</a>
+                    {' '}and{' '}
+                    <a href="https://wavespestcontrol.com/privacy-policy/" style={{ textDecoration: 'underline', color: 'inherit' }}>Privacy Policy</a>,
+                    {' '}and consent to receive automated service notifications and promotional offers via SMS.
+                    Consent is not a condition of purchase. Message frequency varies. Msg &amp; data rates may apply.
+                    Text HELP for help, STOP to unsubscribe.
+                  </p>
+                )}
               </div>
             )}
 
-            {step === 2 && (
-              <LookupLoading status={lookupStatus} sub={lookupSub} satellite={satellite} aiSources={aiSources} address={address.formatted} />
+            {stage === 'lookup' && (
+              <LookupLoading
+                status={lookupStatus}
+                sub={lookupSub}
+                satellite={satellite}
+                aiSources={aiSources}
+                address={address.formatted || intake.address}
+              />
             )}
 
-            {step === 3 && (
+            {stage === 'confirm' && (
               <div>
-                <h2 style={sCardH2}>Generate your quote</h2>
+                <h2 style={sCardH2}>Confirm Your Quote</h2>
                 <p style={sCardSub}>
                   {enriched?.homeSqFt
                     ? <>We detected a <strong>{Number(enriched.homeSqFt).toLocaleString()} sq ft</strong> {enriched.propertyType || 'home'}{enriched.yearBuilt ? <> built in {enriched.yearBuilt}</> : null}. Confirm and pick your service below.</>
@@ -483,11 +643,15 @@ export default function QuotePage() {
 
                 {satellite?.closeUrl && (
                   <div style={{ marginBottom: 16, borderRadius: 12, overflow: 'hidden', border: `1px solid ${COLORS.slate200}` }}>
-                    <img src={satellite.closeUrl} alt="Property satellite view" style={{ width: '100%', maxHeight: 220, objectFit: 'cover', objectPosition: 'center', display: 'block' }} />
+                    <img
+                      src={satellite.closeUrl}
+                      alt="Property satellite view"
+                      style={{ width: '100%', maxHeight: 220, objectFit: 'cover', objectPosition: 'center', display: 'block' }}
+                    />
                   </div>
                 )}
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
                   <div>
                     <label style={sLabel}>Home square footage</label>
                     <input style={sInput} type="number" inputMode="numeric" value={homeSqFt} onChange={(e) => setHomeSqFt(e.target.value)} placeholder="2000" />
@@ -499,25 +663,25 @@ export default function QuotePage() {
                 </div>
 
                 <label style={sLabel}>Which services do you want?</label>
-                <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
+                <div style={{ display: 'grid', gap: 12, marginBottom: 18 }}>
                   <button type="button" className="qp-chip" style={sChip(svcPest)} onClick={() => setSvcPest(!svcPest)}>
                     <div style={{ fontSize: 16 }}>Pest Control</div>
-                    <div style={{ fontSize: 13, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>Interior + exterior treatment, covered pests</div>
+                    <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>Interior + exterior treatment, covered pests</div>
                   </button>
                   <button type="button" className="qp-chip" style={sChip(svcLawn)} onClick={() => setSvcLawn(!svcLawn)}>
                     <div style={{ fontSize: 16 }}>Lawn Care</div>
-                    <div style={{ fontSize: 13, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>Fertilization + weed control program</div>
+                    <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>Fertilization + weed control program</div>
                   </button>
                 </div>
 
                 {svcPest && (
-                  <div style={{ marginBottom: 16 }}>
+                  <div style={{ marginBottom: 18 }}>
                     <label style={sLabel}>Pest treatment frequency</label>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
                       {PEST_FREQS.map(f => (
                         <button key={f.id} type="button" className="qp-chip" style={sChip(pestFreq === f.id)} onClick={() => setPestFreq(f.id)}>
                           <div style={{ fontSize: 14 }}>{f.label}</div>
-                          <div style={{ fontSize: 11, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>{f.sub}</div>
+                          <div style={{ fontSize: 12, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>{f.sub}</div>
                         </button>
                       ))}
                     </div>
@@ -525,7 +689,7 @@ export default function QuotePage() {
                 )}
 
                 {svcLawn && (
-                  <div style={{ marginBottom: 16 }}>
+                  <div style={{ marginBottom: 18 }}>
                     <label style={sLabel}>Grass type</label>
                     <select style={sInput} value={grassType} onChange={(e) => setGrassType(e.target.value)}>
                       {GRASS_TYPES.map(g => <option key={g.id} value={g.id}>{g.label}</option>)}
@@ -536,34 +700,79 @@ export default function QuotePage() {
                 {error && <div style={sError}>{error}</div>}
 
                 <div style={{ marginTop: 24, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                  <Button variant="secondary" onClick={() => setStep(1)} disabled={loading} style={{ fontSize: 16 }}>Back</Button>
-                  <Button variant="primary" onClick={generateQuote} disabled={loading} style={{ fontSize: 16 }}>{loading ? 'Calculating…' : 'Generate Quote'}</Button>
+                  <Button variant="secondary" onClick={resetAll} disabled={loading} style={{ fontSize: 16, textTransform: 'none' }}>Start Over</Button>
+                  <Button variant="primary" onClick={generateQuote} disabled={loading} style={{ fontSize: 16, textTransform: 'none' }}>
+                    {loading ? 'Calculating...' : 'See My Price'}
+                  </Button>
                 </div>
               </div>
             )}
 
-            {step === 4 && result && (
+            {stage === 'result' && result && (
               <div>
                 <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
-                  <div style={{ fontSize: 13, color: COLORS.textCaption, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.2 }}>Your estimated price</div>
+                  <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Estimated Price</div>
                   <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
                     ${result.monthly_total}
                     <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>/mo</span>
                   </div>
-                  <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12 }}>Typical range: <strong>${result.variance_low} – ${result.variance_high}</strong> per month</div>
-                  <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 4 }}>${result.annual_total} per year · {result.service_interest}</div>
+                  <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>Typical range: <strong>${result.variance_low} – ${result.variance_high}</strong> per month</div>
+                  <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${result.annual_total} per year · {result.service_interest}</div>
                 </div>
 
-                <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 14, lineHeight: 1.55 }}>
+                <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
                   We just sent this to our team. <strong>A Waves specialist will text or call you shortly</strong> to confirm the final price and schedule your first visit.
                 </div>
 
+                <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 14, lineHeight: 1.55 }}>
+                  <div style={{ fontWeight: 700, marginBottom: 4 }}>100% Satisfaction Guarantee</div>
+                  <div>If pests return between visits, so do we — free. No contracts, cancel anytime. Licensed &amp; Insured Florida Pest Control Operator.</div>
+                </div>
+
                 <div style={{ marginTop: 24, display: 'grid', gap: 12 }}>
-                  <Button variant="primary" as="a" href="tel:+19413187612" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none' }}>Call (941) 318-7612</Button>
-                  <Button variant="secondary" onClick={resetAll} style={{ fontSize: 16 }}>Start a new quote</Button>
+                  <Button variant="primary" as="a" href="tel:+19413187612" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', textTransform: 'none' }}>Call (941) 318-7612</Button>
+                  <Button variant="secondary" onClick={resetAll} style={{ fontSize: 16, textTransform: 'none' }}>Start a New Quote</Button>
                 </div>
               </div>
             )}
+
+            {stage === 'result-other' && (() => {
+              const otherLabel = OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || 'service';
+              const firstName = (intake.name || '').trim().split(/\s+/)[0] || '';
+              return (
+                <div>
+                  <div style={{ textAlign: 'center', padding: '8px 0 20px' }}>
+                    <div style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      width: 56, height: 56, borderRadius: '50%',
+                      background: 'rgba(255, 215, 0, 0.2)', color: COLORS.blueDeeper, marginBottom: 16,
+                    }}>
+                      <svg width="28" height="28" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    </div>
+                    <h2 style={sCardH2}>Request Received</h2>
+                    <p style={sCardSub}>
+                      Thanks{firstName ? `, ${firstName}` : ''}. {otherLabel} jobs need a quick site visit so we can quote you accurately — a Waves specialist will text or call you shortly to set it up.
+                    </p>
+                  </div>
+
+                  <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
+                    No contracts. No call centers. Just a local team that picks up the phone and gets it done.
+                  </div>
+
+                  <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 14, lineHeight: 1.55 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 4 }}>100% Satisfaction Guarantee</div>
+                    <div>If the fix doesn't hold, we come back — free. Licensed &amp; Insured Florida Pest Control Operator.</div>
+                  </div>
+
+                  <div style={{ marginTop: 24, display: 'grid', gap: 12 }}>
+                    <Button variant="primary" as="a" href="tel:+19413187612" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', textTransform: 'none' }}>Call (941) 318-7612</Button>
+                    <Button variant="secondary" onClick={resetAll} style={{ fontSize: 16, textTransform: 'none' }}>Start a New Request</Button>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       </section>
@@ -582,22 +791,26 @@ function LookupLoading({ status, sub, satellite, aiSources, address }) {
 
   return (
     <div style={{ textAlign: 'center', padding: '16px 0' }}>
-      <div style={{ fontSize: 12, color: COLORS.textCaption, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.2, marginBottom: 6, fontFamily: FONTS.ui }}>Property Lookup</div>
-      <h2 style={{ margin: '0 0 8px', fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700, color: COLORS.blueDeeper, lineHeight: 1.2 }}>
+      <div style={{ fontSize: 13, color: COLORS.textCaption, fontWeight: 600, marginBottom: 6, fontFamily: FONTS.ui }}>Property Lookup</div>
+      <h2 style={{ margin: '0 0 8px', fontFamily: FONTS.heading, fontSize: 24, fontWeight: 700, color: COLORS.blueDeeper, lineHeight: 1.2 }}>
         {status || 'Looking up property...'}{dots}
       </h2>
-      {sub && <div style={{ fontSize: 14, color: COLORS.textBody, marginBottom: 20 }}>{sub}</div>}
-      <div style={{ fontSize: 13, color: COLORS.textCaption, marginBottom: 20 }}>{address}</div>
+      {sub && <div style={{ fontSize: 15, color: COLORS.textBody, marginBottom: 20 }}>{sub}</div>}
+      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 20 }}>{address}</div>
 
       <div style={{ width: 80, height: 80, margin: '24px auto', borderRadius: '50%', border: `4px solid ${COLORS.offWhite}`, borderTopColor: COLORS.wavesBlue, animation: 'qp-spin 0.9s linear infinite' }} />
 
       {satellite?.closeUrl && (
         <div style={{ marginTop: 16, borderRadius: 12, overflow: 'hidden', border: `1px solid ${COLORS.slate200}` }}>
-          <img src={satellite.closeUrl} alt="Property satellite view" style={{ width: '100%', maxHeight: 220, objectFit: 'cover', objectPosition: 'center', display: 'block' }} />
+          <img
+            src={satellite.closeUrl}
+            alt="Property satellite view"
+            style={{ width: '100%', maxHeight: 220, objectFit: 'cover', objectPosition: 'center', display: 'block' }}
+          />
         </div>
       )}
       {aiSources && (
-        <div style={{ fontSize: 12, color: COLORS.textCaption, marginTop: 12 }}>
+        <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 12 }}>
           AI sources: {aiSources.join(' + ')}
         </div>
       )}

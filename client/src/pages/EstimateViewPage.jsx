@@ -433,9 +433,9 @@ function ServiceDropdown({ title, children, defaultOpen = false }) {
 function DetailSection({ title, sub, text }) {
   return (
     <div style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: B.red, fontFamily: FONTS.heading }}>{title}</div>
-      {sub && <div style={{ fontSize: 12, fontStyle: 'italic', color: B.grayDark, marginTop: 1 }}>{sub}</div>}
-      <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginTop: 4, fontFamily: FONTS.body }}>{text}</div>
+      <div style={{ fontSize: 15, fontWeight: 700, color: B.red, fontFamily: FONTS.heading }}>{title}</div>
+      {sub && <div style={{ fontSize: 14, fontStyle: 'italic', color: B.grayDark, marginTop: 1 }}>{sub}</div>}
+      <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginTop: 4, fontFamily: FONTS.body }}>{text}</div>
     </div>
   );
 }
@@ -448,7 +448,7 @@ function TierMatrix({ summary, rows, bottomNote }) {
   return (
     <div style={{ marginBottom: 18, background: `${B.wavesBlue}08`, border: `1px solid ${B.wavesBlue}26`, borderRadius: 12, padding: 12 }}>
       {summary && (
-        <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8, letterSpacing: 0.2 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8, letterSpacing: 0.2 }}>
           {summary}
         </div>
       )}
@@ -463,11 +463,11 @@ function TierMatrix({ summary, rows, bottomNote }) {
               color: sel ? '#fff' : B.navy,
               boxShadow: sel ? `0 2px 6px ${B.wavesBlue}55` : 'none',
             }}>
-              <div style={{ fontSize: 12, fontWeight: 800, fontFamily: FONTS.heading, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+              <div style={{ fontSize: 14, fontWeight: 800, fontFamily: FONTS.heading, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
                 {r.label}{sel ? ' ✓' : ''}
               </div>
               {r.perApp != null && (
-                <div style={{ fontSize: 11, marginTop: 2, opacity: sel ? 0.95 : 0.8 }}>
+                <div style={{ fontSize: 13, marginTop: 2, opacity: sel ? 0.95 : 0.8 }}>
                   ${Number(r.perApp).toFixed(2)}/{r.perAppUnit || 'app'}{r.freqLabel ? ` × ${r.freqLabel}` : ''}
                 </div>
               )}
@@ -475,7 +475,7 @@ function TierMatrix({ summary, rows, bottomNote }) {
           );
         })}
       </div>
-      {bottomNote && <div style={{ fontSize: 11, color: B.grayDark, marginTop: 8, fontStyle: 'italic' }}>{bottomNote}</div>}
+      {bottomNote && <div style={{ fontSize: 13, color: B.grayDark, marginTop: 8, fontStyle: 'italic' }}>{bottomNote}</div>}
     </div>
   );
 }
@@ -505,14 +505,14 @@ function OneTimeBreakdown({ items }) {
             display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'start',
           }}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{it.name}</div>
-              {it.detail && <div style={{ fontSize: 12, color: '#455A64', lineHeight: 1.55, marginTop: 3 }}>{it.detail}</div>}
+              <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{it.name}</div>
+              {it.detail && <div style={{ fontSize: 14, color: '#455A64', lineHeight: 1.55, marginTop: 3 }}>{it.detail}</div>}
               <a
                 href={`/book?service=${svc}&source=estimate`}
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{
-                  display: 'inline-block', marginTop: 6, fontSize: 11, fontWeight: 700,
+                  display: 'inline-block', marginTop: 6, fontSize: 13, fontWeight: 700,
                   color: B.wavesBlue, textDecoration: 'none',
                   padding: '4px 10px', borderRadius: 999,
                   border: `1px solid ${B.wavesBlue}55`, background: `${B.wavesBlue}0d`,
@@ -539,10 +539,10 @@ function PerksTable({ tier }) {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <img src="/waves-logo.png" alt="" style={{ height: 20 }} />
-          <span style={{ fontSize: 13, fontWeight: 700, fontFamily: FONTS.heading }}>Perk</span>
+          <span style={{ fontSize: 15, fontWeight: 700, fontFamily: FONTS.heading }}>Perk</span>
         </div>
-        <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, fontFamily: FONTS.heading }}>WaveGuard</div>
-        <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, fontFamily: FONTS.heading, opacity: 0.7 }}>Non-Member</div>
+        <div style={{ textAlign: 'center', fontSize: 13, fontWeight: 700, fontFamily: FONTS.heading }}>WaveGuard</div>
+        <div style={{ textAlign: 'center', fontSize: 13, fontWeight: 700, fontFamily: FONTS.heading, opacity: 0.7 }}>Non-Member</div>
       </div>
       {PERKS.map((perk, i) => (
         <div key={i} style={{
@@ -551,13 +551,13 @@ function PerksTable({ tier }) {
           background: i % 2 === 0 ? '#fff' : B.blueSurface,
           borderTop: `1px solid ${SAND_DARK}`,
         }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: B.navy, fontFamily: FONTS.heading }}>{perk}</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: B.navy, fontFamily: FONTS.heading }}>{perk}</span>
           <div style={{ textAlign: 'center', fontSize: 16, color: B.green }}>✅</div>
           <div style={{ textAlign: 'center', fontSize: 16, color: B.red }}>❌</div>
         </div>
       ))}
       <div style={{ padding: '12px 14px', background: B.blueSurface, borderTop: `1px solid ${SAND_DARK}` }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, fontFamily: FONTS.heading, textAlign: 'center' }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: B.wavesBlue, fontFamily: FONTS.heading, textAlign: 'center' }}>
           Your estimate includes WaveGuard {tier} — all perks included automatically.
         </div>
       </div>
@@ -568,7 +568,7 @@ function PerksTable({ tier }) {
 function FAQCategory({ category, questions }) {
   return (
     <div style={{ marginBottom: 16 }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>{category}</div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, letterSpacing: 0.8, marginBottom: 8 }}>{category}</div>
       {questions.map((faq, i) => <FAQItem key={i} q={faq.q} a={faq.a} />)}
     </div>
   );
@@ -611,11 +611,11 @@ if (typeof document !== 'undefined' && !document.getElementById(pulseStyleId)) {
 // =========================================================================
 function TierComparisonCards({ options, onSelect, saving, selectedTier }) {
   return (
-    <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 16, border: `1px solid ${SAND_DARK}` }}>
+    <div style={{ background: '#fff', borderRadius: 16, padding: 24, marginTop: 16, border: `1px solid ${SAND_DARK}` }}>
       <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textAlign: 'center', marginBottom: 4 }}>
         Choose Your WaveGuard Level
       </div>
-      <div style={{ fontSize: 13, color: B.grayDark, textAlign: 'center', marginBottom: 16, fontFamily: FONTS.body }}>
+      <div style={{ fontSize: 15, color: B.grayDark, textAlign: 'center', marginBottom: 16, fontFamily: FONTS.body }}>
         More services = bigger savings on every line item
       </div>
 
@@ -634,47 +634,47 @@ function TierComparisonCards({ options, onSelect, saving, selectedTier }) {
                 <div style={{
                   position: 'absolute', top: -10, left: '50%', transform: 'translateX(-50%)',
                   background: B.wavesBlue, color: '#fff', padding: '3px 12px', borderRadius: 10,
-                  fontSize: 10, fontWeight: 700, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+                  fontSize: 13, fontWeight: 700, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
                 }}>
-                  BEST VALUE
+                  Best Value
                 </div>
               )}
 
               <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: opt.isRecommended ? 4 : 0 }}>
                 {opt.tier}
               </div>
-              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600, marginTop: 2 }}>
+              <div style={{ fontSize: 14, color: B.grayMid, fontWeight: 600, marginTop: 2 }}>
                 {opt.discount > 0 ? `${Math.round(opt.discount * 100)}% off all services` : 'Base pricing'}
               </div>
 
               <div style={{ fontSize: 28, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui, marginTop: 10 }}>
-                ${Number(opt.monthly).toFixed(0)}<span style={{ fontSize: 13, fontWeight: 400 }}>/mo</span>
+                ${Number(opt.monthly).toFixed(0)}<span style={{ fontSize: 15, fontWeight: 400 }}>/mo</span>
               </div>
 
               <div style={{ margin: '12px 0', borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>
                 {opt.services.map((svc, j) => (
                   <div key={j} style={{
-                    fontSize: 13, color: B.navy, fontWeight: 600, marginBottom: 3, fontFamily: FONTS.body,
+                    fontSize: 15, color: B.navy, fontWeight: 600, marginBottom: 3, fontFamily: FONTS.body,
                   }}>
                     {svc.name || svc}
                   </div>
                 ))}
                 {opt.additionalService && (
-                  <div style={{ fontSize: 13, color: B.green, fontWeight: 700, marginTop: 6, fontFamily: FONTS.body }}>
+                  <div style={{ fontSize: 15, color: B.green, fontWeight: 700, marginTop: 6, fontFamily: FONTS.body }}>
                     + {opt.additionalService}
                   </div>
                 )}
               </div>
 
               {opt.savings > 0 && (
-                <div style={{ fontSize: 13, fontWeight: 700, color: B.green, marginBottom: 10, fontFamily: FONTS.body }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: B.green, marginBottom: 10, fontFamily: FONTS.body }}>
                   Save ${Math.round(opt.savings)}/yr
                 </div>
               )}
 
               {opt.isCurrent ? (
                 <div style={{
-                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 13,
+                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 15,
                   background: SAND, color: B.navy, border: `1px solid ${SAND_DARK}`,
                   fontWeight: 700,
                 }}>
@@ -682,14 +682,14 @@ function TierComparisonCards({ options, onSelect, saving, selectedTier }) {
                 </div>
               ) : isSelected ? (
                 <div style={{
-                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 13,
+                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 15,
                   background: B.green, color: '#fff', fontWeight: 700,
                 }}>
                   Selected
                 </div>
               ) : (
                 <button onClick={() => onSelect(opt)} disabled={saving} style={{
-                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 13,
+                  ...BUTTON_BASE, width: '100%', padding: '10px 12px', fontSize: 15,
                   background: opt.isRecommended ? B.wavesBlue : B.navy,
                   color: '#fff', opacity: saving ? 0.7 : 1,
                   cursor: saving ? 'wait' : 'pointer',
@@ -702,7 +702,7 @@ function TierComparisonCards({ options, onSelect, saving, selectedTier }) {
         })}
       </div>
 
-      <div style={{ fontSize: 12, color: B.grayMid, textAlign: 'center', marginTop: 14, fontFamily: FONTS.body, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 14, color: B.grayMid, textAlign: 'center', marginTop: 14, fontFamily: FONTS.body, lineHeight: 1.6 }}>
         All plans include: priority scheduling, unlimited callbacks, 24-hour response, transferable warranty
       </div>
     </div>
@@ -715,7 +715,7 @@ function TierComparisonCards({ options, onSelect, saving, selectedTier }) {
 function UpsellNudge({ currentService, suggestedService, onInquiry, sent }) {
   if (sent) {
     return (
-      <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${B.green}33`, textAlign: 'center' }}>
+      <div style={{ background: '#fff', borderRadius: 16, padding: 24, marginTop: 12, border: `1px solid ${B.green}33`, textAlign: 'center' }}>
         <div style={{ fontSize: 15, fontWeight: 700, color: B.green, fontFamily: FONTS.heading }}>
           Got it! We'll reach out shortly with a bundled quote.
         </div>
@@ -724,7 +724,7 @@ function UpsellNudge({ currentService, suggestedService, onInquiry, sent }) {
   }
 
   return (
-    <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}`, borderLeft: `4px solid ${B.wavesBlue}` }}>
+    <div style={{ background: '#fff', borderRadius: 16, padding: 24, marginTop: 12, border: `1px solid ${SAND_DARK}`, borderLeft: `4px solid ${B.wavesBlue}` }}>
       <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6 }}>
         Did you know?
       </div>
@@ -1159,7 +1159,7 @@ export default function EstimateViewPage() {
         <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: B.blueLight, marginTop: 8, fontWeight: 600 }}>{(e.address || '').replace(/, USA$/i, '')}</div>
 
         {(property.homeSqFt || property.lotSqFt) && (
-          <div style={{ position: 'relative', zIndex: 1, fontSize: 13, color: B.blueLight, marginTop: 4 }}>
+          <div style={{ position: 'relative', zIndex: 1, fontSize: 15, color: B.blueLight, marginTop: 4 }}>
             {property.homeSqFt ? `${Number(property.homeSqFt).toLocaleString()} sq ft home` : ''}
             {property.homeSqFt && property.lotSqFt ? ' · ' : ''}
             {property.lotSqFt ? `${Number(property.lotSqFt).toLocaleString()} sq ft lot` : ''}
@@ -1183,11 +1183,11 @@ export default function EstimateViewPage() {
           </div>
         )}
 
-        <div style={{ position: 'relative', zIndex: 1, fontSize: 13, color: '#ffffffcc', marginTop: 6 }}>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 15, color: '#ffffffcc', marginTop: 6 }}>
           That's just ${dailyCost}/day for complete home protection
         </div>
 
-        <div style={{ position: 'relative', zIndex: 1, fontSize: 12, color: '#ffffffaa', marginTop: 8, fontStyle: 'italic', fontFamily: FONTS.body }}>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: '#ffffffaa', marginTop: 8, fontStyle: 'italic', fontFamily: FONTS.body }}>
           Try us risk-free — 90-day money-back guarantee
         </div>
 
@@ -1195,7 +1195,7 @@ export default function EstimateViewPage() {
           <div style={{
             position: 'relative', zIndex: 1,
             display: 'inline-block', marginTop: 12, padding: '6px 16px', borderRadius: 20,
-            background: `${B.yellow}25`, color: B.yellow, fontSize: 13, fontWeight: 700,
+            background: `${B.yellow}25`, color: B.yellow, fontSize: 15, fontWeight: 700,
             fontFamily: FONTS.heading,
           }}>
             WaveGuard {e.tier}
@@ -1257,7 +1257,7 @@ export default function EstimateViewPage() {
           const annualRate = monthlyTotal * 12;
           const savings = totalValue - annualRate;
           return (
-            <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 16, border: `1px solid ${SAND_DARK}` }}>
+            <div style={{ background: '#fff', borderRadius: 16, padding: 24, marginTop: 16, border: `1px solid ${SAND_DARK}` }}>
               <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
                 What You're Getting
               </div>
@@ -1301,7 +1301,7 @@ export default function EstimateViewPage() {
         {/* GUARANTEE BLOCK                                                */}
         {/* ============================================================= */}
         <div style={{
-          background: '#fff', borderRadius: 16, padding: 20, marginTop: 12,
+          background: '#fff', borderRadius: 16, padding: 24, marginTop: 12,
           border: `1px solid ${SAND_DARK}`, borderLeft: `4px solid ${B.green}`,
         }}>
           <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
@@ -1346,7 +1346,7 @@ export default function EstimateViewPage() {
 
         {/* One-time services — value framed */}
         {otItems.length > 0 && (
-          <div style={{ background: '#fff', borderRadius: 16, padding: 20, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
+          <div style={{ background: '#fff', borderRadius: 16, padding: 24, marginTop: 12, border: `1px solid ${SAND_DARK}` }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
               Your Initial Service Visit
             </div>
@@ -1359,10 +1359,10 @@ export default function EstimateViewPage() {
                     <span style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{item.name}</span>
                     <span style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui }}>${price}</span>
                   </div>
-                  <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6, marginTop: 4, fontFamily: FONTS.body }}>
+                  <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.6, marginTop: 4, fontFamily: FONTS.body }}>
                     Includes: comprehensive property assessment, full interior + exterior treatment, granular lawn application, and baseline pest monitoring setup.
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: B.green, marginTop: 4, fontFamily: FONTS.body }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: B.green, marginTop: 4, fontFamily: FONTS.body }}>
                     A ${retailValue} value — yours for ${price}.
                   </div>
                 </div>
@@ -1371,7 +1371,7 @@ export default function EstimateViewPage() {
 
             {/* Incentive offers */}
             <div style={{ marginTop: 16, padding: 14, borderRadius: 12, background: `linear-gradient(135deg, ${B.green}08, ${B.green}15)`, border: `1.5px solid ${B.green}33` }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: B.green, fontFamily: FONTS.heading, marginBottom: 8 }}>
+              <div style={{ fontSize: 15, fontWeight: 800, color: B.green, fontFamily: FONTS.heading, marginBottom: 8 }}>
                 Save on your initial service:
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1381,7 +1381,7 @@ export default function EstimateViewPage() {
                     <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
                       Accept today — <span style={{ color: B.green }}>Initial service FREE</span>
                     </div>
-                    <div style={{ fontSize: 12, color: B.grayDark }}>Pay in full for your first year and the ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0))} initial visit is waived completely.</div>
+                    <div style={{ fontSize: 14, color: B.grayDark }}>Pay in full for your first year and the ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0))} initial visit is waived completely.</div>
                   </div>
                 </div>
                 <div style={{ height: 1, background: `${B.green}22` }} />
@@ -1391,7 +1391,7 @@ export default function EstimateViewPage() {
                     <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
                       Accept within 24 hours — <span style={{ color: B.green }}>50% off initial service</span>
                     </div>
-                    <div style={{ fontSize: 12, color: B.grayDark }}>Sign up within 24 hours and pay just ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0) / 2)} instead of ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0))}.</div>
+                    <div style={{ fontSize: 14, color: B.grayDark }}>Sign up within 24 hours and pay just ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0) / 2)} instead of ${Math.round(otItems.reduce((s, i) => s + (i.price || 0), 0))}.</div>
                   </div>
                 </div>
               </div>
@@ -1437,7 +1437,7 @@ export default function EstimateViewPage() {
                   <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
                     {step.emoji} {step.title}
                   </div>
-                  <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.65, marginTop: 4, fontFamily: FONTS.body }}>
+                  <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.65, marginTop: 4, fontFamily: FONTS.body }}>
                     {step.desc}
                   </div>
                 </div>
@@ -1455,11 +1455,11 @@ export default function EstimateViewPage() {
 
           {hasLawn && (
             <ServiceDropdown title="🌿 Lawn Care Program" defaultOpen={firstOpenService === 'lawn'}>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 14 }}>{SERVICE_DETAILS.lawn.subheader}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 14 }}>{SERVICE_DETAILS.lawn.subheader}</div>
               <TierMatrix summary={lawnSummary} rows={lawnRows} bottomNote="Select a frequency — ✓ marks your current plan." />
               {SERVICE_DETAILS.lawn.sections.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
               <div style={{ borderTop: `1px solid ${SAND_DARK}`, marginTop: 10, paddingTop: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Additional Services</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.grayMid, letterSpacing: 0.8, marginBottom: 8 }}>Additional Services</div>
                 {SERVICE_DETAILS.lawn.extras.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
               </div>
             </ServiceDropdown>
@@ -1467,8 +1467,8 @@ export default function EstimateViewPage() {
 
           {hasPest && (
             <ServiceDropdown title="🐛 Pest Control" defaultOpen={firstOpenService === 'pest'}>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pest.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pest.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pest.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pest.intro}</div>
               <TierMatrix summary={pestSummary} rows={pestRows} bottomNote="Quarterly, bi-monthly, or monthly — ✓ marks your current plan." />
               {SERVICE_DETAILS.pest.sections.map((s, i) => <DetailSection key={i} title={s.title} text={s.text} />)}
             </ServiceDropdown>
@@ -1477,8 +1477,8 @@ export default function EstimateViewPage() {
           {hasMosquito && (
             <ServiceDropdown title="🦟 Mosquito Control" defaultOpen={firstOpenService === 'mosquito'}>
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.mosquito.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.mosquito.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.mosquito.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.mosquito.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.mosquito.intro}</div>
               <TierMatrix rows={mqRows} bottomNote="✓ marks your current plan." />
               {SERVICE_DETAILS.mosquito.sections.map((s, i) => (
                 <div key={i} style={{ marginBottom: 14 }}>
@@ -1486,7 +1486,7 @@ export default function EstimateViewPage() {
                   {s.tags && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                       {s.tags.map((tag, ti) => (
-                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                        <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                       ))}
                     </div>
                   )}
@@ -1498,8 +1498,8 @@ export default function EstimateViewPage() {
           {hasTS && (
             <ServiceDropdown title="🌳 Tree & Shrub Care" defaultOpen={firstOpenService === 'treeShrub'}>
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.treeShrub.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.treeShrub.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.treeShrub.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.treeShrub.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.treeShrub.intro}</div>
               <TierMatrix summary={tsSummary} rows={tsRows} bottomNote="✓ marks your current plan." />
               {SERVICE_DETAILS.treeShrub.sections.map((s, i) => (
                 <div key={i} style={{ marginBottom: 14 }}>
@@ -1507,7 +1507,7 @@ export default function EstimateViewPage() {
                   {s.tags && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                       {s.tags.map((tag, ti) => (
-                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                        <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                       ))}
                     </div>
                   )}
@@ -1519,15 +1519,15 @@ export default function EstimateViewPage() {
           {hasTS && (
             <ServiceDropdown title="🌴 Palm Injection Services">
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.palmInjection.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.palmInjection.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.palmInjection.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.palmInjection.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.palmInjection.intro}</div>
               {SERVICE_DETAILS.palmInjection.sections.map((s, i) => (
                 <div key={i} style={{ marginBottom: 14 }}>
                   <DetailSection title={s.title} text={s.text} />
                   {s.tags && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                       {s.tags.map((tag, ti) => (
-                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                        <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                       ))}
                     </div>
                   )}
@@ -1539,15 +1539,15 @@ export default function EstimateViewPage() {
           {hasTermite && (
             <ServiceDropdown title="🏠 Termite Bait Station Protection" defaultOpen={firstOpenService === 'termite'}>
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.termite.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.termite.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.termite.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.termite.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.termite.intro}</div>
               {SERVICE_DETAILS.termite.sections.map((s, i) => (
                 <div key={i} style={{ marginBottom: 14 }}>
                   <DetailSection title={s.title} text={s.text} />
                   {s.tags && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                       {s.tags.map((tag, ti) => (
-                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                        <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                       ))}
                     </div>
                   )}
@@ -1559,18 +1559,18 @@ export default function EstimateViewPage() {
           {hasRodent && (
             <ServiceDropdown title="🐀 Rodent Control">
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.rodent.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.rodent.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.rodent.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.rodent.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.rodent.intro}</div>
               {SERVICE_DETAILS.rodent.sections.map((s, i) => (
                 <div key={i} style={{ marginBottom: 14 }}>
                   {s.oneTime && (
-                    <div style={{ fontSize: 9, fontWeight: 700, color: B.wavesBlue, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 2 }}>One-Time Service</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: B.wavesBlue, letterSpacing: 0.8, marginBottom: 2 }}>One-Time Service</div>
                   )}
                   <DetailSection title={s.title} text={s.text} />
                   {s.tags && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                       {s.tags.map((tag, ti) => (
-                        <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                        <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                       ))}
                     </div>
                   )}
@@ -1582,19 +1582,19 @@ export default function EstimateViewPage() {
           {hasOneTimeLawn && (
             <ServiceDropdown title="🌱 One-Time Lawn Services">
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.lawnOneTime.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.lawnOneTime.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.lawnOneTime.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.lawnOneTime.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.lawnOneTime.intro}</div>
               <OneTimeBreakdown items={oneTimeItemsEnriched} />
               {SERVICE_DETAILS.lawnOneTime.groups.map((g, gi) => (
                 <div key={gi}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
                   {g.sections.map((s, i) => (
                     <div key={i} style={{ marginBottom: 14 }}>
                       <DetailSection title={s.title} text={s.text} />
                       {s.tags && (
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                           {s.tags.map((tag, ti) => (
-                            <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                            <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                           ))}
                         </div>
                       )}
@@ -1602,25 +1602,25 @@ export default function EstimateViewPage() {
                   ))}
                 </div>
               ))}
-              <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.lawnOneTime.footer}</div>
+              <div style={{ fontSize: 14, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.lawnOneTime.footer}</div>
             </ServiceDropdown>
           )}
 
           {hasTermite && (
             <ServiceDropdown title="🔨 One-Time Termite Treatments">
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.termiteOneTime.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.termiteOneTime.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.termiteOneTime.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.termiteOneTime.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.termiteOneTime.intro}</div>
               {SERVICE_DETAILS.termiteOneTime.groups.map((g, gi) => (
                 <div key={gi}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
                   {g.sections.map((s, i) => (
                     <div key={i} style={{ marginBottom: 14 }}>
                       <DetailSection title={s.title} text={s.text} />
                       {s.tags && (
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                           {s.tags.map((tag, ti) => (
-                            <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                            <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                           ))}
                         </div>
                       )}
@@ -1628,26 +1628,26 @@ export default function EstimateViewPage() {
                   ))}
                 </div>
               ))}
-              <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.termiteOneTime.footer}</div>
+              <div style={{ fontSize: 14, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.termiteOneTime.footer}</div>
             </ServiceDropdown>
           )}
 
           {hasOneTimePest && (
             <ServiceDropdown title="🐛 One-Time Pest Treatments">
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.pestOneTime.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pestOneTime.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pestOneTime.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.pestOneTime.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.pestOneTime.intro}</div>
               <OneTimeBreakdown items={specialtyItemsEnriched} />
               {SERVICE_DETAILS.pestOneTime.groups.map((g, gi) => (
                 <div key={gi}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
                   {g.sections.map((s, i) => (
                     <div key={i} style={{ marginBottom: 14 }}>
                       <DetailSection title={s.title} text={s.text} />
                       {s.tags && (
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                           {s.tags.map((tag, ti) => (
-                            <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                            <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                           ))}
                         </div>
                       )}
@@ -1655,25 +1655,25 @@ export default function EstimateViewPage() {
                   ))}
                 </div>
               ))}
-              <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.pestOneTime.footer}</div>
+              <div style={{ fontSize: 14, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.pestOneTime.footer}</div>
             </ServiceDropdown>
           )}
 
           {hasRodent && (
             <ServiceDropdown title="🐀 One-Time Rodent Services">
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 2 }}>{SERVICE_DETAILS.rodentOneTime.header}</div>
-              <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.rodentOneTime.subheader}</div>
-              <div style={{ fontSize: 13, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.rodentOneTime.intro}</div>
+              <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginBottom: 10 }}>{SERVICE_DETAILS.rodentOneTime.subheader}</div>
+              <div style={{ fontSize: 15, color: '#455A64', lineHeight: 1.65, marginBottom: 14, fontFamily: FONTS.body }}>{SERVICE_DETAILS.rodentOneTime.intro}</div>
               {SERVICE_DETAILS.rodentOneTime.groups.map((g, gi) => (
                 <div key={gi}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, letterSpacing: 0.6, marginTop: gi > 0 ? 16 : 0, marginBottom: 10, paddingBottom: 4, borderBottom: `1px solid ${SAND_DARK}` }}>{g.groupTitle}</div>
                   {g.sections.map((s, i) => (
                     <div key={i} style={{ marginBottom: 14 }}>
                       <DetailSection title={s.title} text={s.text} />
                       {s.tags && (
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4, paddingLeft: 2 }}>
                           {s.tags.map((tag, ti) => (
-                            <span key={ti} style={{ fontSize: 10, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
+                            <span key={ti} style={{ fontSize: 13, fontWeight: 600, color: B.wavesBlue, background: `${B.wavesBlue}12`, padding: '2px 8px', borderRadius: 10 }}>{tag}</span>
                           ))}
                         </div>
                       )}
@@ -1681,7 +1681,7 @@ export default function EstimateViewPage() {
                   ))}
                 </div>
               ))}
-              <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.rodentOneTime.footer}</div>
+              <div style={{ fontSize: 14, color: B.grayMid, fontStyle: 'italic', marginTop: 12, lineHeight: 1.6, borderTop: `1px solid ${SAND_DARK}`, paddingTop: 10 }}>{SERVICE_DETAILS.rodentOneTime.footer}</div>
             </ServiceDropdown>
           )}
         </div>
@@ -1696,7 +1696,7 @@ export default function EstimateViewPage() {
             <div style={{ fontSize: 18, fontWeight: 900, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4, textAlign: 'center' }}>
               Perks That Actually Matter.
             </div>
-            <div style={{ fontSize: 13, color: '#455A64', textAlign: 'center', marginBottom: 14, lineHeight: 1.5, fontFamily: FONTS.body }}>
+            <div style={{ fontSize: 15, color: '#455A64', textAlign: 'center', marginBottom: 14, lineHeight: 1.5, fontFamily: FONTS.body }}>
               {hasLawn
                 ? 'When turf issues arise, WaveGuard delivers prompt, data-driven diagnostics and precise treatment applications — ensuring efficient, stress-free restoration and long-term lawn health.'
                 : 'When pest activity occurs, WaveGuard ensures rapid, efficient response and resolution — minimizing disruption and maintaining control with simplicity and precision.'}
@@ -1747,21 +1747,21 @@ export default function EstimateViewPage() {
               }}>
                 <div style={{ fontSize: 16, color: B.yellow, marginBottom: 8 }}>★★★★★</div>
                 <div style={{
-                  fontSize: 13, color: B.grayDark, lineHeight: 1.65, fontFamily: FONTS.body,
+                  fontSize: 15, color: B.grayDark, lineHeight: 1.65, fontFamily: FONTS.body,
                   display: '-webkit-box', WebkitLineClamp: 5, WebkitBoxOrient: 'vertical', overflow: 'hidden',
                 }}>
                   "{r.text}"
                 </div>
-                <div style={{ marginTop: 10, fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
+                <div style={{ marginTop: 10, fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
                   — {r.name}
                 </div>
-                <div style={{ fontSize: 12, color: B.grayMid }}>{r.location}</div>
+                <div style={{ fontSize: 14, color: B.grayMid }}>{r.location}</div>
               </div>
             ))}
                 </div>
                 {matchedCity && (
                   <div style={{
-                    textAlign: 'center', marginTop: 12, fontSize: 13, color: B.grayDark,
+                    textAlign: 'center', marginTop: 12, fontSize: 15, color: B.grayDark,
                     fontFamily: FONTS.body, lineHeight: 1.5,
                   }}>
                     Your neighbors trust Waves — join 200+ homeowners in {matchedCity} protected by WaveGuard.
@@ -1793,7 +1793,7 @@ export default function EstimateViewPage() {
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>
             Local Expertise. Real People.
           </div>
-          <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.65, marginTop: 6, fontFamily: FONTS.body, maxWidth: 420, margin: '6px auto 0' }}>
+          <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.65, marginTop: 6, fontFamily: FONTS.body, maxWidth: 420, margin: '6px auto 0' }}>
             Waves is a family-owned lawn and pest company serving Southwest Florida. We combine modern technology with old-school accountability — every customer gets a dedicated tech, transparent pricing, and real results.
           </div>
         </div>
@@ -1814,11 +1814,11 @@ export default function EstimateViewPage() {
                 <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
                   {loc.name}
                 </div>
-                <div style={{ fontSize: 11, color: B.grayDark, lineHeight: 1.5, marginBottom: 6, fontFamily: FONTS.body }}>
+                <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.5, marginBottom: 6, fontFamily: FONTS.body }}>
                   {loc.address}
                 </div>
                 <a href={`tel:${loc.tel}`} style={{
-                  fontSize: 12, fontWeight: 700, color: B.wavesBlue, textDecoration: 'none', fontFamily: FONTS.heading,
+                  fontSize: 14, fontWeight: 700, color: B.wavesBlue, textDecoration: 'none', fontFamily: FONTS.heading,
                 }}>
                   {loc.phone}
                 </a>
@@ -1834,16 +1834,16 @@ export default function EstimateViewPage() {
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textAlign: 'center', marginBottom: 4 }}>
             Questions? We've Got Answers.
           </div>
-          <div style={{ fontSize: 13, color: B.grayDark, textAlign: 'center', marginBottom: 16, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 15, color: B.grayDark, textAlign: 'center', marginBottom: 16, lineHeight: 1.5 }}>
             Real questions from SWFL homeowners — answered by your Waves team.
           </div>
           <div style={{ background: '#fff', borderRadius: 16, padding: '12px 18px', border: `1px solid ${SAND_DARK}` }}>
             {FAQ_CATEGORIES.map((cat, i) => <FAQCategory key={i} category={cat.category} questions={cat.questions} />)}
           </div>
           <div style={{ textAlign: 'center', marginTop: 12 }}>
-            <div style={{ fontSize: 13, color: B.grayDark }}>Still have a question?</div>
+            <div style={{ fontSize: 15, color: B.grayDark }}>Still have a question?</div>
             <a href="sms:+19413187612?body=Hi%2C%20I%20have%20a%20question%20about%20my%20Waves%20estimate" style={{
-              ...BUTTON_BASE, padding: '10px 22px', fontSize: 13, marginTop: 6,
+              ...BUTTON_BASE, padding: '10px 22px', fontSize: 15, marginTop: 6,
               borderRadius: 9999, background: B.yellow, color: B.blueDeeper,
               textDecoration: 'none', display: 'inline-flex', fontWeight: 800,
             }}>💬 Text Us — (941) 318-7612</a>
@@ -1860,6 +1860,15 @@ export default function EstimateViewPage() {
 
           {e.status !== 'accepted' ? (
             <>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                padding: '10px 14px', marginBottom: 12, borderRadius: 12,
+                background: '#E8F5E9', color: B.green, fontSize: 14, fontWeight: 700, fontFamily: FONTS.body,
+              }}>
+                <span aria-hidden="true">✓</span>
+                100% Satisfaction Guarantee — if pests return between visits, so do we, free.
+              </div>
+
               <button onClick={handleAccept} disabled={accepting} style={{
                 ...BUTTON_BASE, width: '100%', padding: 18, fontSize: 17,
                 background: B.yellow, color: B.blueDeeper, opacity: accepting ? 0.7 : 1,
@@ -1868,8 +1877,16 @@ export default function EstimateViewPage() {
                 {accepting ? 'Processing...' : 'Accept Estimate'}
               </button>
 
-              <div style={{ textAlign: 'center', marginTop: 8, fontSize: 12, color: B.grayMid, lineHeight: 1.5, fontFamily: FONTS.body }}>
-                First month charged on signup. Auto-pay via card on file. Cancel anytime — no fees.
+              <div style={{
+                marginTop: 12, padding: 14, borderRadius: 12,
+                background: '#F8FAFC', border: `1px solid ${B.grayLight || '#E2E8F0'}`,
+                fontSize: 14, color: B.grayDark, lineHeight: 1.6, fontFamily: FONTS.body, textAlign: 'left',
+              }}>
+                <div style={{ fontWeight: 700, color: B.navy, marginBottom: 6 }}>What you're approving</div>
+                <div>• First service scheduled within 5 business days</div>
+                <div>• Billing starts on your first service date — recurring monthly</div>
+                <div>• Cancel anytime by text or from your account — no fees, no contracts</div>
+                <div>• Licensed &amp; Insured Florida Pest Control Operator</div>
               </div>
 
               <a href={`sms:+19413187612?body=${encodeURIComponent(`Hi, I have a question about my Waves estimate for ${e.address}`)}`} style={{
@@ -1881,7 +1898,7 @@ export default function EstimateViewPage() {
               </a>
 
               <div onClick={handleDecline} style={{
-                textAlign: 'center', marginTop: 14, fontSize: 12, color: B.grayMid, cursor: 'pointer',
+                textAlign: 'center', marginTop: 14, fontSize: 14, color: B.grayMid, cursor: 'pointer',
               }}>
                 No thanks, decline this estimate
               </div>
@@ -1890,16 +1907,16 @@ export default function EstimateViewPage() {
             <div style={{ textAlign: 'center', padding: 24, background: '#E8F5E9', borderRadius: 14 }}>
               <div style={{ fontSize: 18, fontWeight: 800, color: B.green, marginBottom: 8 }}>{'✅'} Estimate Accepted!</div>
               <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 8 }}>Welcome to Waves! Check your texts for the setup link.</div>
-              <div style={{ fontSize: 13, color: B.grayMid, lineHeight: 1.6 }}>We'll walk you through payment setup, property preferences, and scheduling your first service — all in under 2 minutes.</div>
+              <div style={{ fontSize: 15, color: B.grayMid, lineHeight: 1.6 }}>We'll walk you through payment setup, property preferences, and scheduling your first service — all in under 2 minutes.</div>
             </div>
           )}
 
           {e.expiresAt && (
             <div style={{ textAlign: 'center', marginTop: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.red, fontFamily: FONTS.heading, marginBottom: 4 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: B.red, fontFamily: FONTS.heading, marginBottom: 4 }}>
                 Pre-summer pricing — lock in {fmt(monthlyTotal)}/mo before peak pest season rates.
               </div>
-              <div style={{ fontSize: 11, color: B.grayMid }}>
+              <div style={{ fontSize: 13, color: B.grayMid }}>
                 Estimate valid until {new Date(e.expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
               </div>
             </div>
@@ -1909,6 +1926,12 @@ export default function EstimateViewPage() {
         {/* ============================================================= */}
         {/* 12. FOOTER                                                     */}
         {/* ============================================================= */}
+        <div style={{
+          textAlign: 'center', padding: '20px 0 12px',
+          fontSize: 13, color: B.grayMid, fontFamily: FONTS.body,
+        }}>
+          Licensed &amp; Insured Florida Pest Control Operator
+        </div>
         <BrandFooter borderColor={SAND_DARK} />
       </div>
 
@@ -1929,13 +1952,13 @@ export default function EstimateViewPage() {
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: '#fff', fontFamily: FONTS.ui }}>
-                  {fmt(monthlyTotal)}<span style={{ fontSize: 12, fontWeight: 400, opacity: 0.7 }}>/mo</span>
+                  {fmt(monthlyTotal)}<span style={{ fontSize: 14, fontWeight: 400, opacity: 0.7 }}>/mo</span>
                 </span>
                 {e.tier && (
                   <span style={{
                     padding: '3px 10px', borderRadius: 12,
                     background: `${B.yellow}25`, color: B.yellow,
-                    fontSize: 10, fontWeight: 700, fontFamily: FONTS.heading,
+                    fontSize: 13, fontWeight: 700, fontFamily: FONTS.heading,
                   }}>
                     {e.tier}
                   </span>
@@ -1946,7 +1969,7 @@ export default function EstimateViewPage() {
               </div>
             </div>
             <button onClick={handleAccept} disabled={accepting} style={{
-              ...BUTTON_BASE, padding: '12px 24px', fontSize: 14,
+              ...BUTTON_BASE, padding: '14px 24px', fontSize: 15, minHeight: 48,
               background: B.yellow, color: B.blueDeeper, opacity: accepting ? 0.7 : 1,
               animation: 'wavesPulse 2s ease-in-out infinite',
               whiteSpace: 'nowrap',
@@ -1955,7 +1978,7 @@ export default function EstimateViewPage() {
             </button>
           </div>
           <div style={{
-            textAlign: 'center', marginTop: 4, fontSize: 11, color: '#ffffff88',
+            textAlign: 'center', marginTop: 4, fontSize: 13, color: '#ffffff88',
           }}>
             or text us: <a href="sms:+19413187612" style={{ color: B.blueLight, textDecoration: 'none', fontWeight: 600 }}>(941) 318-7612</a>
           </div>
