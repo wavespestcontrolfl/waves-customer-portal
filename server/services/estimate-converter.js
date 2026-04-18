@@ -9,6 +9,43 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const AvailabilityEngine = require('./availability');
+
+/**
+ * Pick the first service date for a freshly-converted customer.
+ *
+ * Preference order:
+ *   1. Earliest date from AvailabilityEngine (a day when a tech is already
+ *      working the customer's zone AND zone capacity isn't full). This keeps
+ *      new customers clustered onto existing routes instead of creating
+ *      one-off detours.
+ *   2. Fallback: today + 7 days, bumped forward off Sunday. Used when we
+ *      can't resolve the customer's zone (empty city, new area) or when no
+ *      tech is scheduled in that zone across the 14-day window.
+ *
+ * Returns a YYYY-MM-DD string ready for scheduled_services.scheduled_date.
+ */
+async function pickFirstServiceDate(customer, estimateId) {
+  try {
+    if (customer.city) {
+      const avail = await AvailabilityEngine.getAvailableSlots(customer.city, estimateId);
+      const first = avail?.days?.[0]?.date;
+      if (first) {
+        logger.info(`[estimate-converter] Snapped first service to route day ${first} (zone: ${avail.zone})`);
+        return first;
+      }
+    }
+  } catch (e) {
+    logger.error(`[estimate-converter] Availability lookup failed, falling back: ${e.message}`);
+  }
+
+  // Fallback — today + 7, snap off Sunday
+  const fallback = new Date(Date.now() + 7 * 86400000);
+  while (fallback.getDay() === 0) fallback.setDate(fallback.getDate() + 1);
+  const dateStr = fallback.toISOString().split('T')[0];
+  logger.info(`[estimate-converter] No route-day match for city "${customer.city || '(empty)'}", using fallback ${dateStr}`);
+  return dateStr;
+}
 
 /**
  * Determine WaveGuard tier based on number of recurring services selected.
@@ -68,33 +105,20 @@ const EstimateConverter = {
     });
 
     // 2. Create scheduled_services for recurring services
+    //    All recurring services for this new customer bundle onto the same
+    //    first date — they'll be done on one visit. Pick a date where a tech
+    //    is already working the zone (falls back safely if we can't resolve).
     let scheduledCount = 0;
-    const today = new Date();
+    const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
 
     for (const svc of recurringServices) {
       const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
       const frequency = svc.frequency || 'monthly';
 
-      // Determine interval in days
-      let intervalDays;
-      switch (frequency.toLowerCase()) {
-        case 'weekly': intervalDays = 7; break;
-        case 'bi-weekly': case 'biweekly': intervalDays = 14; break;
-        case 'monthly': intervalDays = 30; break;
-        case 'bi-monthly': case 'bimonthly': intervalDays = 60; break;
-        case 'quarterly': intervalDays = 90; break;
-        case 'annually': case 'annual': intervalDays = 365; break;
-        default: intervalDays = 30; break;
-      }
-
-      // Schedule first service 7 days from now
-      const scheduledDate = new Date(today.getTime() + 7 * 86400000);
-      const dateStr = scheduledDate.toISOString().split('T')[0];
-
       try {
         await db('scheduled_services').insert({
           customer_id: customerId,
-          scheduled_date: dateStr,
+          scheduled_date: firstServiceDate,
           service_type: serviceName,
           status: 'pending',
           notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}`,
