@@ -330,21 +330,30 @@ async function executeTool(toolName, input, sessionData) {
       }
 
       // Create estimate record
+      // Schema-aligned: address (not property_address), service_interest (not service_type),
+      // customer_phone/customer_email (not phone/email), notes (not description),
+      // lead_source (not referral_source), status='draft' (CHECK constraint allows
+      // draft|sent|viewed|accepted|declined|expired only — 'new' fails silently).
       let estimateId = null;
+      let estimateError = null;
       try {
+        const combinedNotes = [
+          input.issue_description ? `Issue: ${input.issue_description}` : null,
+          input.notes ? `Notes: ${input.notes}` : null,
+        ].filter(Boolean).join('\n\n') || null;
+
         const [row] = await db("estimates").insert({
           customer_id: customerId || null,
           customer_name: input.caller_name,
-          phone: input.phone,
-          email: input.email || null,
-          property_address: input.property_address,
-          service_type: input.service_category,
-          description: input.issue_description,
+          customer_phone: input.phone,
+          customer_email: input.email || null,
+          address: input.property_address,
+          service_interest: input.service_category,
           urgency: input.urgency,
           source: "voice_agent",
-          status: "new",
-          referral_source: input.referral_source || null,
-          notes: input.notes || null,
+          status: "draft",
+          lead_source: input.referral_source || null,
+          notes: combinedNotes,
           is_priority: input.service_category === "termite_wdo" || input.urgency >= 4,
           created_at: new Date(),
         }).returning("id");
@@ -352,7 +361,25 @@ async function executeTool(toolName, input, sessionData) {
         sessionData.leadId = estimateId;
         console.log(`[VoiceAgent] ✅ Estimate created: #${estimateId} → pipeline running`);
       } catch (err) {
+        estimateError = err.message;
         console.error("[VoiceAgent] Failed to create estimate:", err.message);
+      }
+
+      // Post-INSERT assertion: surface schema/constraint failures loudly instead of
+      // silently telling the caller "you'll get an SMS" when no row was written.
+      if (!estimateId) {
+        console.error('[VoiceAgent] capture_lead: no estimate_id returned — possible schema or constraint problem', {
+          err: estimateError,
+          customer_id: customerId,
+          service_category: input.service_category,
+        });
+        return {
+          success: false,
+          error: 'Failed to create estimate — internal error',
+          estimate_id: null,
+          customer_id: customerId,
+          message: "I had trouble saving your info — let me have our office call you back to get this sorted. What's the best number to reach you?",
+        };
       }
 
       // Log customer interaction
