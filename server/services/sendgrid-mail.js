@@ -13,10 +13,19 @@
  * without colliding on a top-level module name.
  *
  * Env vars:
- *   SENDGRID_API_KEY       — secret from sendgrid.com/settings/api_keys
- *   SENDGRID_FROM_EMAIL    — default from (newsletter@wavespestcontrol.com)
- *   SENDGRID_FROM_NAME     — default from name (Waves Pest Control)
- *   PUBLIC_PORTAL_URL      — used for unsubscribe link (e.g. https://portal.wavespestcontrol.com)
+ *   SENDGRID_API_KEY                 — secret from sendgrid.com/settings/api_keys
+ *   SENDGRID_FROM_EMAIL              — default from (newsletter@wavespestcontrol.com)
+ *   SENDGRID_FROM_NAME               — default from name (Waves Pest Control)
+ *   PUBLIC_PORTAL_URL                — used for unsubscribe link (e.g. https://portal.wavespestcontrol.com)
+ *   SENDGRID_ASM_GROUP_NEWSLETTER    — numeric group id (sendgrid.com/suppressions/advanced_suppression_manager)
+ *   SENDGRID_ASM_GROUP_SERVICE       — numeric group id for transactional/service notifications
+ *
+ * Unsubscribe Groups (ASM): SendGrid suppresses at the group level so a
+ * newsletter opt-out does NOT kill service notifications (invoice receipts,
+ * appointment reminders, review requests). Every broadcast must carry the
+ * NEWSLETTER group; every transactional send SHOULD carry the SERVICE group
+ * so the customer has a single place to opt out of each category without
+ * losing the other.
  *
  * DNS prerequisites for the SENDGRID_FROM_EMAIL domain:
  *   - 2× DKIM CNAMEs at s1._domainkey + s2._domainkey on the root
@@ -68,11 +77,26 @@ function defaultFrom(overrideEmail, overrideName) {
   };
 }
 
+function newsletterGroupId() {
+  const v = process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+  return v ? Number(v) : null;
+}
+
+function serviceGroupId() {
+  const v = process.env.SENDGRID_ASM_GROUP_SERVICE;
+  return v ? Number(v) : null;
+}
+
+function asmBlockFor(groupId) {
+  if (!groupId) return undefined;
+  return { group_id: Number(groupId) };
+}
+
 /**
  * Send one email. Used for test sends and one-off transactional. Returns
  * { messageId } where messageId is read from the X-Message-Id response header.
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const payload = {
@@ -88,6 +112,7 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
       ...(html ? [{ type: 'text/html', value: html }] : []),
     ],
     categories: categories || undefined,
+    asm: asmBlockFor(asmGroupId),
     // Disable SendGrid's own tracking pixels by default — we use our own
     // open/click events via webhooks. Operator can re-enable via env later.
     tracking_settings: {
@@ -120,7 +145,7 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
  *
  * Each `recipients[i]` is { email, unsubscribeUrl }.
  */
-async function sendBatch({ recipients, fromEmail, fromName, subject, html, text, replyTo, categories }) {
+async function sendBatch({ recipients, fromEmail, fromName, subject, html, text, replyTo, categories, asmGroupId }) {
   if (!Array.isArray(recipients) || recipients.length === 0) {
     throw new Error('sendBatch: recipients[] required');
   }
@@ -147,6 +172,7 @@ async function sendBatch({ recipients, fromEmail, fromName, subject, html, text,
       ...(html ? [{ type: 'text/html', value: html }] : []),
     ],
     categories: categories || undefined,
+    asm: asmBlockFor(asmGroupId),
     tracking_settings: {
       click_tracking: { enable: true, enable_text: false },
       open_tracking: { enable: true },
@@ -200,10 +226,77 @@ function injectUnsubscribeFooter(html, { realUrl } = {}) {
   return (html || '') + footer;
 }
 
+/**
+ * Send a transactional email via a SendGrid dynamic template. Preferred path
+ * for operational emails (invoice receipts, appointment reminders, review
+ * requests, post-service surveys) so copy can be edited in the SendGrid
+ * dashboard without redeploying.
+ *
+ *   templateId      — 'd-...' id from sendgrid.com/dynamic_templates
+ *   dynamicData     — { customer_name, appt_date, ... } — template variables
+ *   asmGroupId      — defaults to SENDGRID_ASM_GROUP_SERVICE if not passed
+ *
+ * Passing `asmGroupId: 0` opts out of suppression entirely — only do that for
+ * truly transactional-legal sends (password reset, security alerts) that
+ * must bypass unsubscribe state.
+ */
+async function sendTemplated({ to, templateId, dynamicData, fromEmail, fromName, replyTo, categories, asmGroupId }) {
+  if (!to || !templateId) throw new Error('sendTemplated: to + templateId required');
+
+  const effectiveGroup = asmGroupId === 0
+    ? null
+    : (asmGroupId ?? serviceGroupId());
+
+  const payload = {
+    personalizations: [{
+      to: (Array.isArray(to) ? to : [to]).map((email) => ({ email })),
+      dynamic_template_data: dynamicData || {},
+    }],
+    from: defaultFrom(fromEmail, fromName),
+    reply_to: { email: replyTo || 'contact@wavespestcontrol.com' },
+    template_id: templateId,
+    categories: categories || undefined,
+    asm: asmBlockFor(effectiveGroup),
+    tracking_settings: {
+      click_tracking: { enable: true, enable_text: false },
+      open_tracking: { enable: true },
+      subscription_tracking: { enable: false },
+    },
+  };
+
+  const res = await fetch(`${API_BASE}/mail/send`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    logger.error(`[sendgrid] sendTemplated ${res.status}: ${txt}`);
+    throw new Error(`SendGrid ${res.status}: ${txt}`);
+  }
+  return { messageId: res.headers.get('x-message-id') || null };
+}
+
+/**
+ * Newsletter broadcast — thin wrapper around sendBatch that defaults the ASM
+ * group to the newsletter group so an unsub here does NOT affect service
+ * notifications. Use this for all marketing/monthly-issue sends.
+ */
+async function sendBroadcast(args) {
+  return sendBatch({
+    ...args,
+    asmGroupId: args.asmGroupId ?? newsletterGroupId(),
+  });
+}
+
 module.exports = {
   isConfigured,
   sendOne,
   sendBatch,
+  sendTemplated,
+  sendBroadcast,
   unsubscribeUrl,
   injectUnsubscribeFooter,
+  newsletterGroupId,
+  serviceGroupId,
 };

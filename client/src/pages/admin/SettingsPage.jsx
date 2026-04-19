@@ -235,7 +235,7 @@ const INTEGRATION_GROUPS = [
     title: 'Communication',
     items: [
       { name: 'Twilio', platform: 'twilio', gateKey: 'twilioSms', keys: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN'], desc: 'SMS, OTP login, voice calls' },
-      { name: 'SendGrid', platform: 'sendgrid', keys: ['SENDGRID_API_KEY', 'SENDGRID_FROM_EMAIL'], desc: 'Newsletter + transactional email (primary)' },
+      { name: 'SendGrid', platform: 'sendgrid', keys: ['SENDGRID_API_KEY', 'SENDGRID_FROM_EMAIL', 'SENDGRID_ASM_GROUP_NEWSLETTER', 'SENDGRID_ASM_GROUP_SERVICE'], desc: 'Newsletter + transactional email (primary)' },
       { name: 'Beehiiv', platform: 'beehiiv', keys: ['BEEHIIV_API_KEY', 'BEEHIIV_PUB_ID'], desc: 'Legacy subscriber/automation API', deprecating: true },
     ],
   },
