@@ -64,6 +64,23 @@ const GRASS_TYPES = [
   { id: 'zoysia',       label: 'Zoysia' },
 ];
 
+// Upsell catalog — IDs must match UPSELL_LABELS in server/routes/public-quote.js.
+// Specialist quotes these on the confirmation call, so no price shown here.
+const UPSELL_OPTIONS = {
+  mosquito:     { title: 'Mosquito & No-See-Um Control', desc: 'Monthly yard treatments so you can use your lanai again. Covers mosquitoes, fleas, ticks.' },
+  lawn_care:    { title: 'Lawn Care',                    desc: 'Fertilization, weed control, and seasonal treatments dialed in for your grass type.' },
+  pest_control: { title: 'Pest Control',                 desc: 'Inside + outside every visit. 30+ pests covered with our money-back guarantee.' },
+  tree_shrub:   { title: 'Tree & Shrub Care',            desc: 'Feed and protect your landscape — fertilizer, fungicide, and pest defense for ornamentals.' },
+  termite:      { title: 'Termite Protection',           desc: 'Annual termite monitoring and guarantee — protect your biggest asset.' },
+};
+
+function getUpsellRecs(svcPest, svcLawn) {
+  if (svcPest && svcLawn) return ['mosquito'];
+  if (svcPest)            return ['lawn_care'];
+  if (svcLawn)            return ['pest_control'];
+  return ['pest_control'];
+}
+
 const STEPS_PRICED = ['interest', 'frequency',    'name', 'email', 'phone', 'address'];
 const STEPS_OTHER  = ['interest', 'otherService', 'name', 'email', 'phone', 'address'];
 const TOTAL_STAGES_PRICED = STEPS_PRICED.length + 3; // + lookup + confirm + result
@@ -139,6 +156,18 @@ export default function QuotePage() {
 
   const [result, setResult] = useState(null);
   const [attribution] = useState(() => captureAttribution());
+
+  const [upsellSelected, setUpsellSelected] = useState({});
+  const [upsellLoading, setUpsellLoading] = useState(false);
+  const [upsellError, setUpsellError] = useState('');
+
+  // Addons variant is URL-gated so the original /estimate flow stays untouched
+  // for all traffic except explicit opt-ins (/estimate?addons=1). Locked at mount.
+  const [showUpsell] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try { return new URLSearchParams(window.location.search).get('addons') === '1'; }
+    catch { return false; }
+  });
 
   const inputRef = useRef(null);
 
@@ -362,7 +391,7 @@ export default function QuotePage() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Could not calculate.');
       setResult(d);
-      setStage('result');
+      setStage(showUpsell ? 'upsell' : 'result');
     } catch (e) {
       setError(e.message);
     } finally {
@@ -381,16 +410,50 @@ export default function QuotePage() {
     setLeadId(null); setEnriched(null); setSatellite(null); setAiSources(null);
     setSvcPest(false); setSvcLawn(false);
     setHomeSqFt(''); setLotSqFt('');
+    setUpsellSelected({}); setUpsellLoading(false); setUpsellError('');
+  }
+
+  async function submitUpsell() {
+    const selected = Object.keys(upsellSelected).filter(k => upsellSelected[k]);
+    // Skip path: nothing checked, advance to result without a network round-trip.
+    if (selected.length === 0 || !result?.lead_id) {
+      setStage('result');
+      return;
+    }
+    setUpsellError('');
+    setUpsellLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/public/quote/upsell`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          leadId: result.lead_id,
+          email: intake.email,
+          addOns: selected,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Could not add to your plan.');
+      setStage('result');
+    } catch (e) {
+      setUpsellError(e.message || 'Could not add to your plan.');
+    } finally {
+      setUpsellLoading(false);
+    }
   }
 
   // ───── Progress ─────
+  // When the addons flag is on the priced flow gains one extra stage (upsell),
+  // pushing TOTAL_STAGES from +3 to +4 past INTAKE_STEPS.
+  const totalStagesAdjusted = (!isOtherFlow && showUpsell) ? TOTAL_STAGES + 1 : TOTAL_STAGES;
   let progressStep = 0;
   if (stage === 'intake')       progressStep = intakeIdx + 1;
   if (stage === 'lookup')       progressStep = INTAKE_STEPS.length + 1;
   if (stage === 'confirm')      progressStep = INTAKE_STEPS.length + 2;
-  if (stage === 'result')       progressStep = TOTAL_STAGES;
-  if (stage === 'result-other') progressStep = TOTAL_STAGES;
-  const progress = (progressStep / TOTAL_STAGES) * 100;
+  if (stage === 'upsell')       progressStep = INTAKE_STEPS.length + 3;
+  if (stage === 'result')       progressStep = totalStagesAdjusted;
+  if (stage === 'result-other') progressStep = totalStagesAdjusted;
+  const progress = (progressStep / totalStagesAdjusted) * 100;
 
   // ───── Styles ─────
   const sPage = { minHeight: '100vh', background: COLORS.white, fontFamily: FONTS.body, color: COLORS.navy, display: 'flex', flexDirection: 'column' };
@@ -747,6 +810,49 @@ export default function QuotePage() {
                   <Button variant="primary" onClick={generateQuote} disabled={loading} style={{ fontSize: 16, textTransform: 'none' }}>
                     {loading ? 'Calculating...' : 'See My Price'}
                   </Button>
+                </div>
+              </div>
+            )}
+
+            {stage === 'upsell' && result && (
+              <div>
+                <div style={{ textAlign: 'center', padding: '4px 0 20px' }}>
+                  <div style={{ fontSize: 13, color: COLORS.textCaption, fontWeight: 600, marginBottom: 6, fontFamily: FONTS.ui }}>Your price is ready</div>
+                  <h2 style={sCardH2}>Level up your plan.</h2>
+                  <p style={sCardSub}>Most homes in your area add one of these. Pick what you want and your specialist will include it on your confirmation call.</p>
+                </div>
+
+                <div style={{ display: 'grid', gap: 12, marginBottom: 18 }}>
+                  {getUpsellRecs(svcPest, svcLawn).map(id => {
+                    const opt = UPSELL_OPTIONS[id];
+                    if (!opt) return null;
+                    const on = !!upsellSelected[id];
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        className="qp-chip"
+                        style={sChip(on)}
+                        onClick={() => setUpsellSelected(s => ({ ...s, [id]: !s[id] }))}
+                      >
+                        <div style={{ fontSize: 16 }}>{opt.title}</div>
+                        <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>{opt.desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {upsellError && <div style={sError}>{upsellError}</div>}
+
+                <div style={{ marginTop: 8, display: 'grid', gap: 10 }}>
+                  <Button variant="primary" onClick={submitUpsell} disabled={upsellLoading} style={{ fontSize: 16, textTransform: 'none' }}>
+                    {upsellLoading ? 'Saving...' : (Object.values(upsellSelected).some(Boolean) ? 'Add to my plan →' : 'Continue to my quote →')}
+                  </Button>
+                  {Object.values(upsellSelected).some(Boolean) && (
+                    <Button variant="tertiary" onClick={() => { setUpsellSelected({}); setStage('result'); }} disabled={upsellLoading} style={{ textTransform: 'none' }}>
+                      No thanks, just show my price
+                    </Button>
+                  )}
                 </div>
               </div>
             )}

@@ -250,4 +250,70 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
   }
 });
 
+// Upsell labels: client sends IDs, server owns the copy that hits the lead row
+// and the admin SMS. Keep in sync with UPSELL_OPTIONS in QuotePage.jsx.
+const UPSELL_LABELS = {
+  mosquito: 'Mosquito & No-See-Um Control',
+  lawn_care: 'Lawn Care',
+  pest_control: 'Pest Control',
+  tree_shrub: 'Tree & Shrub Care',
+  termite: 'Termite Protection',
+};
+
+router.post('/upsell', quoteLimiter, async (req, res) => {
+  try {
+    const { leadId, email, addOns } = req.body || {};
+    if (!leadId || !email || !Array.isArray(addOns) || addOns.length === 0) {
+      return res.status(400).json({ error: 'Missing leadId, email, or addOns.' });
+    }
+
+    const valid = addOns.filter(id => UPSELL_LABELS[id]);
+    if (valid.length === 0) {
+      return res.status(400).json({ error: 'No recognized add-ons.' });
+    }
+
+    // leadId + email match = good-enough public auth (customer just typed the
+    // email in the same session). Avoids any-id-overwrite abuse.
+    const lead = await db('leads')
+      .where({ id: leadId })
+      .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+      .first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+
+    const addLabels = valid.map(id => UPSELL_LABELS[id]);
+    const existing = (lead.service_interest || '').split(' + ').filter(Boolean);
+    const mergedInterest = Array.from(new Set([...existing, ...addLabels])).join(' + ');
+
+    // pg returns jsonb columns as already-parsed JS objects; only JSON.parse if
+    // it somehow came back as a string (legacy rows, manual edits).
+    let existingData = {};
+    if (lead.extracted_data && typeof lead.extracted_data === 'object') {
+      existingData = lead.extracted_data;
+    } else if (typeof lead.extracted_data === 'string') {
+      try { existingData = JSON.parse(lead.extracted_data); } catch { existingData = {}; }
+    }
+    const updatedData = { ...existingData, upsell_interests: valid, upsell_added_at: new Date().toISOString() };
+
+    await db('leads').where({ id: leadId }).update({
+      service_interest: mergedInterest,
+      extracted_data: JSON.stringify(updatedData),
+      updated_at: new Date(),
+    });
+
+    const firstName = lead.first_name || '';
+    const lastName = lead.last_name || '';
+    try {
+      await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+        `\u{2728} Upsell added\n${firstName} ${lastName}\n+ ${addLabels.join(', ')}`,
+        { messageType: 'internal_alert' }
+      );
+    } catch (e) { logger.error(`[public-quote] Upsell admin SMS failed: ${e.message}`); }
+
+    res.json({ ok: true, service_interest: mergedInterest });
+  } catch (err) {
+    logger.error(`[public-quote] upsell failed: ${err.message}`, { stack: err.stack });
+    res.status(500).json({ error: 'Something went wrong.' });
+  }
+});
+
 module.exports = router;
