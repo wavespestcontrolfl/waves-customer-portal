@@ -7,9 +7,14 @@
  *   buildPageData    — fn → object injected as pageData on each submit
  *   fallbackActions  — array of {id,label,prompt} when quick-actions API fails
  *   onAfterSubmit    — (data) => void, runs after every successful query
- *   recentsEnabled   — whether to track last-5 recent prompts (session-scoped)
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  getRecents,
+  addRecent,
+  getFavorites,
+  toggleFavorite as toggleFavoriteStorage,
+} from '../utils/ibStorage';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -31,7 +36,6 @@ export function useIntelligenceBar({
   buildPageData,
   fallbackActions,
   onAfterSubmit,
-  recentsEnabled = false,
 } = {}) {
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
@@ -40,7 +44,8 @@ export function useIntelligenceBar({
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
   const [expanded, setExpanded] = useState(false);
-  const [recentPrompts, setRecentPrompts] = useState([]);
+  const [recentPrompts, setRecentPrompts] = useState(() => getRecents(context));
+  const [favorites, setFavorites] = useState(() => getFavorites(context));
 
   const buildPageDataRef = useRef(buildPageData);
   const onAfterSubmitRef = useRef(onAfterSubmit);
@@ -48,11 +53,22 @@ export function useIntelligenceBar({
   useEffect(() => { onAfterSubmitRef.current = onAfterSubmit; }, [onAfterSubmit]);
 
   useEffect(() => {
+    setRecentPrompts(getRecents(context));
+    setFavorites(getFavorites(context));
+  }, [context]);
+
+  useEffect(() => {
     const qs = context ? `?context=${context}` : '';
     adminFetch(`/admin/intelligence-bar/quick-actions${qs}`)
       .then((d) => setQuickActions(d.actions || []))
       .catch(() => setQuickActions(fallbackActions || []));
   }, [context, fallbackActions]);
+
+  const toggleFavorite = useCallback((text) => {
+    if (!text) return;
+    const next = toggleFavoriteStorage(context, text);
+    setFavorites(next);
+  }, [context]);
 
   const submit = useCallback(async (text) => {
     const q = (text ?? prompt).trim();
@@ -63,12 +79,7 @@ export function useIntelligenceBar({
     setResponse(null);
     setStructuredData(null);
 
-    if (recentsEnabled) {
-      setRecentPrompts((prev) => {
-        const filtered = prev.filter((p) => p !== q);
-        return [q, ...filtered].slice(0, 5);
-      });
-    }
+    setRecentPrompts(addRecent(context, q));
 
     const body = { prompt: q, conversationHistory };
     if (context) body.context = context;
@@ -94,7 +105,7 @@ export function useIntelligenceBar({
 
     setLoading(false);
     setPrompt('');
-  }, [prompt, loading, conversationHistory, context, recentsEnabled]);
+  }, [prompt, loading, conversationHistory, context]);
 
   const clear = useCallback(() => {
     setConversationHistory([]);
@@ -117,6 +128,8 @@ export function useIntelligenceBar({
     quickActions,
     expanded, setExpanded,
     recentPrompts,
+    favorites,
+    toggleFavorite,
     submit,
     clear,
     handleKeyDown,

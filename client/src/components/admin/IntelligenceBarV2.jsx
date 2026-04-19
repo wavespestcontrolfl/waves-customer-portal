@@ -67,7 +67,6 @@ export default function IntelligenceBarV2({ onSelectCustomer }) {
     <IntelligenceBarShell
       fallbackActions={FALLBACK_ACTIONS}
       placeholder="Ask anything about your customers, schedule, or revenue…"
-      recentsEnabled
       responseSlot={(data) => {
         const list = data?.customers || data?.overdue_customers;
         if (!list?.length) return null;

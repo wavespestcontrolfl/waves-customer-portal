@@ -18,9 +18,11 @@
  *   headerSlot           — ReactNode | (state) => ReactNode — right of input
  *   responseSlot         — (structuredData) => ReactNode, rendered under response
  *   responseMaxHeight    — CSS max-height for response pane (default '520px')
- *   recentsEnabled       — show last-5 recents (session-scoped)
+ *   promotions           — {actionId: {reason}} — surfaces chips as suggested
  *   skeletonBars         — widths array for loading skeleton bars
  *   bodyClassName        — extra classes on outer container
+ *
+ * Recents + favorites are persisted in localStorage per-context by the hook.
  */
 
 import { useRef } from 'react';
@@ -140,7 +142,6 @@ export default function IntelligenceBarShell({
   headerSlot = null,
   responseSlot = null,
   responseMaxHeight = '520px',
-  recentsEnabled = false,
   skeletonBars = [92, 75, 88, 60],
   bodyClassName = '',
   promotions = null,
@@ -154,6 +155,8 @@ export default function IntelligenceBarShell({
     quickActions,
     expanded, setExpanded,
     recentPrompts,
+    favorites,
+    toggleFavorite,
     submit,
     clear,
     handleKeyDown,
@@ -162,7 +165,6 @@ export default function IntelligenceBarShell({
     buildPageData,
     fallbackActions,
     onAfterSubmit,
-    recentsEnabled,
   });
 
   const inputRef = useRef(null);
@@ -217,6 +219,35 @@ export default function IntelligenceBarShell({
         )}
       </div>
 
+      {/* Pinned favorites */}
+      {expanded && !response && !loading && favorites.length > 0 && (
+        <div className="px-4 pb-3">
+          <div className="u-label text-ink-tertiary mb-1.5">Pinned</div>
+          <div className="flex flex-wrap gap-2">
+            {favorites.map((p, i) => (
+              <div key={i} className="inline-flex items-center border-hairline border-zinc-200 bg-white rounded-sm overflow-hidden">
+                <button
+                  onClick={() => { setPrompt(p); submit(p); }}
+                  title={p}
+                  aria-label={p}
+                  className="h-6 px-3 text-11 font-medium text-ink-primary hover:bg-zinc-50 u-focus-ring max-w-[240px] truncate"
+                >
+                  {p}
+                </button>
+                <button
+                  onClick={() => toggleFavorite(p)}
+                  title="Unpin"
+                  aria-label={`Unpin ${p}`}
+                  className="h-6 px-1.5 text-11 text-ink-primary border-l border-hairline border-zinc-200 hover:bg-zinc-50 u-focus-ring"
+                >
+                  ★
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Quick actions */}
       {expanded && !response && !loading && quickActions.length > 0 && (
         <div className="px-4 pb-3">
@@ -247,19 +278,37 @@ export default function IntelligenceBarShell({
         </div>
       )}
 
-      {/* Recents (opt-in) */}
-      {recentsEnabled && expanded && !response && !loading && recentPrompts.length > 0 && (
+      {/* Recents */}
+      {expanded && !response && !loading && recentPrompts.length > 0 && (
         <div className="px-4 pb-3">
           <div className="u-label text-ink-tertiary mb-1.5">Recent</div>
-          {recentPrompts.map((p, i) => (
-            <div
-              key={i}
-              onClick={() => { setPrompt(p); submit(p); }}
-              className="px-2 py-1 text-12 text-ink-secondary cursor-pointer rounded-xs hover:bg-zinc-50 hover:text-ink-primary transition-colors truncate"
-            >
-              {p}
-            </div>
-          ))}
+          {recentPrompts.map((p, i) => {
+            const isFav = favorites.includes(p);
+            return (
+              <div
+                key={i}
+                className="flex items-center gap-1 px-2 py-1 rounded-xs hover:bg-zinc-50 transition-colors"
+              >
+                <button
+                  onClick={() => { setPrompt(p); submit(p); }}
+                  className="flex-1 text-left text-12 text-ink-secondary hover:text-ink-primary truncate u-focus-ring"
+                >
+                  {p}
+                </button>
+                <button
+                  onClick={() => toggleFavorite(p)}
+                  title={isFav ? 'Unpin' : 'Pin'}
+                  aria-label={isFav ? `Unpin ${p}` : `Pin ${p}`}
+                  className={cn(
+                    'h-5 w-5 flex items-center justify-center text-11 rounded-xs u-focus-ring transition-colors',
+                    isFav ? 'text-ink-primary' : 'text-ink-tertiary hover:text-ink-primary'
+                  )}
+                >
+                  {isFav ? '★' : '☆'}
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
 
