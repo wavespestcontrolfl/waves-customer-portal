@@ -280,26 +280,38 @@ Generate the reply now.`;
 // GET /api/admin/reviews/outreach-candidates — customers eligible for review request
 router.get('/outreach-candidates', async (req, res, next) => {
   try {
-    const thirtyDaysAgo = etDateString(addETDays(new Date(), -30));
+    const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 90));
+    const windowStart = etDateString(addETDays(new Date(), -days));
 
-    // Active customers with completed services in last 30 days who haven't left a review
+    // Active customers with completed services inside window who haven't left a review
     const customers = await db('customers')
       .where('customers.active', true)
       .whereExists(function () {
         this.select(db.raw(1)).from('scheduled_services')
           .whereRaw('scheduled_services.customer_id = customers.id')
           .where('scheduled_services.status', 'completed')
-          .where('scheduled_services.scheduled_date', '>=', thirtyDaysAgo);
+          .where('scheduled_services.scheduled_date', '>=', windowStart);
       })
       .whereNotExists(function () {
         this.select(db.raw(1)).from('google_reviews')
           .whereRaw('google_reviews.customer_id = customers.id');
       })
-      .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.city', 'customers.waveguard_tier', 'customers.nearest_location_id')
+      .select(
+        'customers.id',
+        'customers.first_name',
+        'customers.last_name',
+        'customers.phone',
+        'customers.address_line1',
+        'customers.city',
+        'customers.zip',
+        'customers.waveguard_tier',
+        'customers.nearest_location_id',
+        'customers.lifetime_revenue'
+      )
       .orderBy('customers.last_contact_date', 'desc')
-      .limit(100);
+      .limit(200);
 
-    // Get last service for each customer
+    // Get last completed service for each customer
     const customerIds = customers.map(c => c.id);
     const lastServices = customerIds.length > 0
       ? await db('scheduled_services')
@@ -314,28 +326,42 @@ router.get('/outreach-candidates', async (req, res, next) => {
       if (!lastSvcMap[s.customer_id]) lastSvcMap[s.customer_id] = s;
     });
 
-    // Check if review request was already sent (via sms_log)
-    const sentRequests = customerIds.length > 0
+    // Aggregate review_request SMS history (count + most recent) per customer
+    const askStats = customerIds.length > 0
       ? await db('sms_log')
           .whereIn('customer_id', customerIds)
           .where('message_type', 'review_request')
+          .groupBy('customer_id')
           .select('customer_id')
+          .count({ askCount: '*' })
+          .max({ lastAsked: 'created_at' })
       : [];
-    const sentSet = new Set(sentRequests.map(s => s.customer_id));
+    const askMap = {};
+    askStats.forEach(a => {
+      askMap[a.customer_id] = { askCount: Number(a.askCount) || 0, lastAsked: a.lastAsked };
+    });
 
     res.json({
       customers: customers.map(c => {
         const ls = lastSvcMap[c.id];
+        const ask = askMap[c.id] || { askCount: 0, lastAsked: null };
         return {
           id: c.id,
           name: `${c.first_name} ${c.last_name}`,
+          firstName: c.first_name,
+          lastName: c.last_name,
           phone: c.phone,
+          addressLine1: c.address_line1,
           city: c.city,
+          zip: c.zip,
           tier: c.waveguard_tier,
           locationId: c.nearest_location_id,
+          lifetimeRevenue: Number(c.lifetime_revenue) || 0,
           lastService: ls?.service_type || null,
           lastServiceDate: ls?.scheduled_date || null,
-          requestSent: sentSet.has(c.id),
+          askCount: ask.askCount,
+          lastAsked: ask.lastAsked,
+          requestSent: ask.askCount > 0,
         };
       }),
     });

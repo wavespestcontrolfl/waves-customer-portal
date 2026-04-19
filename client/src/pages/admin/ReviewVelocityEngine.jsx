@@ -146,82 +146,42 @@ function hydrate(body, c) {
     .replace(/\{date\}/g, c.lastDate);
 }
 
-function generateDemoData() {
-  const names = [
-    'Johnson, Mike','Garcia, Maria','Williams, James','Martinez, Sofia','Anderson, Robert',
-    'Thomas, Patricia','Jackson, David','White, Jennifer','Harris, Chris','Martin, Linda',
-    'Thompson, Daniel','Robinson, Sarah','Clark, Andrew','Lewis, Karen','Lee, Brian',
-    'Walker, Nancy','Hall, Steven','Allen, Betty','Young, Kevin','King, Dorothy',
-    'Wright, Kenneth','Lopez, Ashley','Hill, Joshua','Scott, Kimberly','Green, Timothy',
-    'Adams, Emily','Baker, Richard','Nelson, Sandra','Carter, George','Mitchell, Susan',
-    'Perez, Edward','Roberts, Margaret','Turner, Donald','Phillips, Helen','Campbell, Mark',
-    'Parker, Donna','Evans, Paul','Edwards, Deborah','Collins, Larry','Stewart, Carol',
-  ];
-  const addresses = [
-    '4521 Gulf Dr, Bradenton, FL 34209','8912 Lakewood Ranch Blvd, Sarasota, FL 34240',
-    '1247 Tamiami Trail, Venice, FL 34285','3389 El Jobean Rd, Port Charlotte, FL 33953',
-    '6701 Cortez Rd W, Bradenton, FL 34210','2018 Fruitville Rd, Sarasota, FL 34237',
-    '992 Center Rd, Venice, FL 34292','4410 Murdock Cir, Port Charlotte, FL 33948',
-    '7744 Manatee Ave W, Bradenton, FL 34209','1533 Main St, Sarasota, FL 34236',
-    '145 Nokomis Ave S, Venice, FL 34285','2899 Tamiami Trl, Punta Gorda, FL 33950',
-    '3120 53rd Ave E, Bradenton, FL 34203','5580 Bee Ridge Rd, Sarasota, FL 34233',
-    '801 US-41 BYP, Venice, FL 34293','18501 Murdock Cir, Port Charlotte, FL 33948',
-    '6027 14th St W, Bradenton, FL 34207','4200 S Tamiami Trl, Sarasota, FL 34231',
-    '1600 E Venice Ave, Venice, FL 34292','3400 Tamiami Trail, Port Charlotte, FL 33952',
-    '1205 Manatee Ave E, Bradenton, FL 34208','8374 Market St, Lakewood Ranch, FL 34202',
-    '330 W Olympia Ave, Punta Gorda, FL 33950','9108 59th Ave E, Parrish, FL 34219',
-    '2100 University Pkwy, Sarasota, FL 34243','4901 Milano Way, Palmetto, FL 34221',
-    '711 S Nokomis Ave, Venice, FL 34285','22145 Peachland Blvd, Port Charlotte, FL 33954',
-    '5511 Pebble Beach Blvd, Bradenton, FL 34210','6834 Superior Ave, Sarasota, FL 34231',
-    '401 N Tamiami Trail, North Port, FL 34287','824 Bermont Rd, Punta Gorda, FL 33955',
-    '3708 26th St W, Bradenton, FL 34205','1250 S Tamiami Trl, Sarasota, FL 34239',
-    '1800 Wellen Park Way, Venice, FL 34293','18900 Veterans Blvd, Port Charlotte, FL 33954',
-    '4700 El Conquistador Pkwy, Parrish, FL 34219','7210 Lorraine Rd, Sarasota, FL 34241',
-    '800 Knights Trail Rd, North Port, FL 34286','2500 Harbor Blvd, Port Charlotte, FL 33952',
-  ];
-  const services = ['General Pest Control','Lawn Care','Mosquito Control','Termite Protection','Tree & Shrub Care','Rodent Control'];
-  const techs = ['Adam','Adam','Adam','Adam','Jake','Jake'];
-  const sentiments = ['happy','happy','happy','happy','happy','neutral','neutral','neutral','issue'];
-  const stagePool = ['not_contacted','not_contacted','not_contacted','not_contacted','sms_sent','sms_sent','reminded','reviewed','issue'];
+// Map a row from /admin/reviews/outreach-candidates to the UI customer shape.
+// Stage is derived from askCount (server-backed) — no localStorage override.
+function apiToCustomer(row) {
+  const gbp = GBP_LOCATIONS.find(l => l.id === row.locationId) || routeToGBP(row.city || '');
+  const svcDate = row.lastServiceDate ? new Date(row.lastServiceDate) : null;
+  const daysAgo = svcDate ? Math.max(0, Math.floor((Date.now() - svcDate.getTime()) / 86400000)) : 999;
+  const askCount = Number(row.askCount) || 0;
+  const stage = askCount >= 2 ? 'reminded' : askCount === 1 ? 'sms_sent' : 'not_contacted';
+  const sentiment = 'happy'; // PR 1: default. Sentiment signal wiring is a later PR.
+  const revenue = Number(row.lifetimeRevenue) || 0;
+  const svc = row.lastService || 'General Pest Control';
+  const score = calcScore(sentiment, daysAgo, revenue, stage, askCount, svc);
+  const first = row.firstName || (row.name || '').split(' ')[0] || row.name;
+  const addr = [row.addressLine1, row.city, row.zip].filter(Boolean).join(', ');
 
-  const now = Date.now();
-  return names.map((name, i) => {
-    const addr = addresses[i] || addresses[i % addresses.length];
-    const daysAgo = Math.floor(Math.random() * 120);
-    const lastDate = new Date(now - daysAgo * 86400000);
-    const svc = services[Math.floor(Math.random() * services.length)];
-    const tech = techs[Math.floor(Math.random() * techs.length)];
-    const sent = sentiments[Math.floor(Math.random() * sentiments.length)];
-    const stage = stagePool[Math.floor(Math.random() * stagePool.length)];
-    const revenue = 45 + Math.floor(Math.random() * 250);
-    const gbp = routeToGBP(addr);
-    const askCount = stage === 'not_contacted' ? 0 : stage === 'sms_sent' ? 1 : stage === 'reminded' ? 2 : stage === 'reviewed' ? 1 : 0;
-    const score = calcScore(sent, daysAgo, revenue, stage, askCount, svc);
-    const first = name.split(',')[1]?.trim() || name.split(' ')[0];
-
-    const smsHistory = [];
-    if (Math.random() > 0.4) {
-      const smsDate = new Date(now - (daysAgo + Math.floor(Math.random() * 30)) * 86400000);
-      smsHistory.push({ date: fmtDate(smsDate), text: `Hi ${first}, your ${svc} appointment is confirmed for tomorrow.`, dir: 'out' });
-      if (Math.random() > 0.5) smsHistory.push({ date: fmtDate(smsDate), text: sent === 'happy' ? 'Thank you! Looking forward to it 👍' : 'Ok got it', dir: 'in' });
-    }
-
-    return {
-      id: i, name, nameKey: name.toLowerCase().replace(/[^a-z]/g, ''), first, addr,
-      phone: `194${Math.floor(1000000 + Math.random() * 8999999)}`,
-      phoneF: '', email: `${first.toLowerCase()}@email.com`,
-      lastDate: fmtDate(lastDate), lastSvc: svc, lastTech: tech,
-      sentiment: sent, stage, score,
-      gbpId: gbp?.id || 'bradenton', gbpName: gbp?.name || 'Bradenton / Parrish',
-      reviewUrl: gbp?.reviewUrl || GBP_LOCATIONS[0].reviewUrl,
-      revenue, daysAgo,
-      jobs: [{ date: fmtDate(lastDate), svcType: svc, tech, revenue, notes: sent === 'happy' ? 'Customer very satisfied. Property in great shape.' : sent === 'issue' ? 'Customer reported issue with previous treatment. Follow-up needed.' : 'Standard service completed.' }],
-      sms: smsHistory, calls: [],
-      askCount, lastAsked: askCount > 0 ? fmtDate(new Date(now - Math.floor(Math.random() * 14) * 86400000)) : null,
-      seqStep: stage === 'reminded' ? 2 : stage === 'sms_sent' ? 1 : 0,
-      seqId: null, suppressed: false, suppressReason: null,
-    };
-  }).map(c => ({ ...c, phoneF: fmtPh(c.phone) }));
+  return {
+    id: row.id,
+    name: row.name || `${row.firstName || ''} ${row.lastName || ''}`.trim() || 'Unknown',
+    nameKey: (row.name || '').toLowerCase().replace(/[^a-z]/g, ''),
+    first,
+    addr,
+    phone: row.phone || '',
+    phoneF: fmtPh(row.phone || ''),
+    email: '',
+    lastDate: svcDate ? fmtDate(svcDate) : '—',
+    lastSvc: svc,
+    lastTech: 'Adam',
+    sentiment, stage, score,
+    gbpId: gbp.id, gbpName: gbp.name, reviewUrl: gbp.reviewUrl,
+    revenue, daysAgo,
+    jobs: [], sms: [], calls: [],
+    askCount,
+    lastAsked: row.lastAsked ? fmtDate(new Date(row.lastAsked)) : null,
+    seqStep: stage === 'reminded' ? 2 : stage === 'sms_sent' ? 1 : 0,
+    seqId: null, suppressed: false, suppressReason: null,
+  };
 }
 
 // ── Shared styles ──
@@ -262,78 +222,49 @@ const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 // ══════════════════════════════════════════════════════════════
 export default function ReviewVelocityEngine() {
   const [page, setPage] = useState('dashboard');
-  const [customers, setCustomers] = useState(() => generateDemoData());
+  const [customers, setCustomers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [currentFilter, setCurrentFilter] = useState('all');
   const [pipeSearch, setPipeSearch] = useState('');
-  const [activityLog, setActivityLog] = useState([]);
+  const [activityLog, setActivityLog] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('wrev_activity_log') || '[]'); } catch { return []; }
+  });
   const [supRules, setSupRules] = useState(SUP_RULES_DEFAULT);
   const [drawerCust, setDrawerCust] = useState(null);
   const [toast, setToast] = useState('');
   const [batchModal, setBatchModal] = useState(false);
 
-  // Load persisted state
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('wrev_state_v2');
-      if (saved) {
-        const s = JSON.parse(saved);
-        if (s.activityLog) setActivityLog(s.activityLog);
-        if (s.customerStages) {
-          setCustomers(prev => prev.map(c => {
-            const cs = s.customerStages.find(x => x.key === c.nameKey);
-            if (cs) return { ...c, stage: cs.stage, seqStep: cs.seqStep || 0, askCount: cs.askCount || 0, lastAsked: cs.lastAsked };
-            return c;
-          }));
-        }
-      }
-    } catch (e) { /* ignore */ }
-  }, []);
-
-  // Try to load real outreach candidates and merge
-  useEffect(() => {
+  // Load real outreach candidates from the API — no demo fallback.
+  const loadCandidates = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
     adminFetch('/admin/reviews/outreach-candidates')
       .then(d => {
-        if (d.customers?.length > 0) {
-          const apiCustomers = d.customers.map((c, i) => {
-            const gbp = routeToGBP(c.city || '');
-            const daysAgo = c.lastServiceDate ? Math.floor((Date.now() - new Date(c.lastServiceDate)) / 86400000) : 30;
-            const sentiment = 'happy';
-            const stage = c.requestSent ? 'sms_sent' : 'not_contacted';
-            const askCount = c.requestSent ? 1 : 0;
-            const score = calcScore(sentiment, daysAgo, 100, stage, askCount, c.lastService || 'General Pest Control');
-            const first = (c.name || '').split(' ')[0] || c.name;
-            return {
-              id: 1000 + i, name: c.name || 'Unknown', nameKey: (c.name || '').toLowerCase().replace(/[^a-z]/g, ''),
-              first, addr: c.city || '', phone: c.phone || '', phoneF: fmtPh(c.phone || ''),
-              email: '', lastDate: c.lastServiceDate ? new Date(c.lastServiceDate).toLocaleDateString() : '—',
-              lastSvc: c.lastService || 'General Pest Control', lastTech: 'Adam',
-              sentiment, stage, score,
-              gbpId: gbp.id, gbpName: gbp.name, reviewUrl: gbp.reviewUrl,
-              revenue: 100, daysAgo, jobs: [], sms: [], calls: [],
-              askCount, lastAsked: null, seqStep: 0, seqId: null,
-              suppressed: false, suppressReason: null, _real: true,
-            };
-          });
-          setCustomers(prev => [...apiCustomers, ...prev]);
-        }
+        setCustomers((d.customers || []).map(apiToCustomer));
+        setLoading(false);
       })
-      .catch(() => { /* use demo data */ });
+      .catch(err => {
+        setLoadError(err?.message || 'Failed to load outreach candidates');
+        setLoading(false);
+      });
   }, []);
 
-  const saveState = useCallback((custs, log) => {
+  useEffect(() => { loadCandidates(); }, [loadCandidates]);
+
+  // Activity log persists locally for now (server-side log is PR 2).
+  const saveState = useCallback((_custs, log) => {
     try {
-      localStorage.setItem('wrev_state_v2', JSON.stringify({
-        activityLog: (log || activityLog).slice(0, 200),
-        customerStages: (custs || customers).map(c => ({ key: c.nameKey, stage: c.stage, seqStep: c.seqStep, askCount: c.askCount, lastAsked: c.lastAsked })),
-      }));
+      localStorage.setItem('wrev_activity_log', JSON.stringify((log || activityLog).slice(0, 200)));
     } catch (e) { /* ignore */ }
-  }, [customers, activityLog]);
+  }, [activityLog]);
 
   const addLog = useCallback((type, msg) => {
     const entry = { type, msg, time: new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) };
     setActivityLog(prev => {
       const next = [entry, ...prev].slice(0, 200);
+      try { localStorage.setItem('wrev_activity_log', JSON.stringify(next)); } catch { /* ignore */ }
       return next;
     });
   }, []);
@@ -344,12 +275,31 @@ export default function ReviewVelocityEngine() {
   }, []);
 
   const updateCustomer = useCallback((id, updates) => {
-    setCustomers(prev => {
-      const next = prev.map(c => c.id === id ? { ...c, ...updates } : c);
-      saveState(next);
-      return next;
-    });
-  }, [saveState]);
+    setCustomers(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c));
+  }, []);
+
+  // Send a real review request SMS via the server. Optimistic UI update on success.
+  const sendReviewRequest = useCallback(async (customer) => {
+    const svcType = customer.lastSvc;
+    try {
+      const res = await adminFetch('/admin/reviews/send-request', {
+        method: 'POST',
+        body: JSON.stringify({ customerId: customer.id, serviceType: svcType, techName: customer.lastTech }),
+      });
+      if (!res?.success) throw new Error(res?.error || 'Send failed');
+      const newAsk = (customer.askCount || 0) + 1;
+      const newStage = newAsk >= 2 ? 'reminded' : 'sms_sent';
+      updateCustomer(customer.id, {
+        askCount: newAsk,
+        lastAsked: fmtDate(new Date()),
+        stage: newStage,
+        seqStep: Math.min((customer.seqStep || 0) + 1, 3),
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || 'Send failed' };
+    }
+  }, [updateCustomer]);
 
   // ── KPI calculations ──
   const eligible = useMemo(() => customers.filter(c => !c.suppressed && c.stage !== 'reviewed'), [customers]);
@@ -381,23 +331,24 @@ export default function ReviewVelocityEngine() {
   ];
 
   // ── Actions ──
-  const quickSend = (id) => {
+  const quickSend = async (id) => {
     const c = customers.find(x => x.id === id);
     if (!c) return;
-    const tpl = TEMPLATES.find(t => t.id === (c.sentiment === 'happy' ? 'friendly_ask' : c.sentiment === 'issue' ? 'resolution_check' : 'winback_ask'));
-    if (!tpl) return;
-    const newStage = c.stage === 'not_contacted' ? 'sms_sent' : c.stage === 'sms_sent' ? 'reminded' : c.stage;
-    updateCustomer(id, {
-      askCount: c.askCount + 1,
-      lastAsked: fmtDate(new Date()),
-      stage: newStage,
-      seqStep: Math.min(c.seqStep + 1, 3),
-      sms: [...c.sms, { date: fmtDate(new Date()), text: hydrate(tpl.body, c), dir: 'out' }],
-    });
-    addLog('sms', `Quick review request sent to ${c.name}`);
-    showToast(`SMS sent to ${c.name}`);
+    if (!c.phone) { showToast(`No phone on file for ${c.name}`); return; }
+    showToast(`Sending to ${c.name}...`);
+    const result = await sendReviewRequest(c);
+    if (result.ok) {
+      addLog('sms', `Review request sent to ${c.name} → ${c.gbpName}`);
+      showToast(`SMS sent to ${c.name}`);
+    } else {
+      addLog('stage', `Failed to send to ${c.name}: ${result.error}`);
+      showToast(`Failed: ${result.error}`);
+    }
   };
 
+  // Manual stage override — in-memory only for PR 1 (stage is otherwise derived
+  // from server askCount on next reload). PR 2 adds review_outreach_state table
+  // for persisted overrides.
   const setStage = (id, stage) => {
     updateCustomer(id, { stage });
     const c = customers.find(x => x.id === id);
@@ -426,6 +377,19 @@ export default function ReviewVelocityEngine() {
         ))}
       </div>
 
+      {/* Load banner */}
+      {loading && (
+        <div style={{ padding: 14, border: `1px solid ${C.bdr}`, background: C.surface, borderRadius: 10, fontSize: 12, color: C.t2, marginBottom: 14 }}>
+          Loading outreach candidates…
+        </div>
+      )}
+      {loadError && (
+        <div style={{ padding: 14, border: `1px solid ${C.red}`, background: C.redG, borderRadius: 10, fontSize: 12, color: C.red, marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>Couldn't load candidates: {loadError}</span>
+          <Btn onClick={loadCandidates}>Retry</Btn>
+        </div>
+      )}
+
       {/* Pages */}
       {page === 'dashboard' && (
         <Dashboard customers={customers} eligible={eligible} sent={sent} reviewed={reviewed} winback={winback} queue={queue} activityLog={activityLog} setPage={setPage} />
@@ -452,8 +416,8 @@ export default function ReviewVelocityEngine() {
       {drawerCust && (
         <CustomerDrawer
           customer={drawerCust} onClose={() => setDrawerCust(null)}
-          updateCustomer={updateCustomer} addLog={addLog} showToast={showToast}
-          customers={customers}
+          addLog={addLog} showToast={showToast}
+          sendReviewRequest={sendReviewRequest}
         />
       )}
 
@@ -462,8 +426,9 @@ export default function ReviewVelocityEngine() {
         <BatchModal
           selectedIds={selectedIds} customers={customers}
           onClose={() => setBatchModal(false)}
-          updateCustomer={updateCustomer} addLog={addLog} showToast={showToast}
-          setSelectedIds={setSelectedIds} saveState={saveState}
+          addLog={addLog} showToast={showToast}
+          setSelectedIds={setSelectedIds}
+          sendReviewRequest={sendReviewRequest}
         />
       )}
 
@@ -487,8 +452,8 @@ export default function ReviewVelocityEngine() {
 // ══════════════════════════════════════════════════════════════
 function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activityLog, setPage }) {
   const kpis = [
-    { label: 'Reviews Received', value: reviewed.length, desc: `${(reviewed.length / Math.max(1, customers.length) * 100).toFixed(0)}% of all customers`, accent: C.acc },
-    { label: 'Requests Sent', value: sent.length, desc: `${(reviewed.length / Math.max(1, sent.length) * 100).toFixed(0)}% conversion rate`, accent: C.grn },
+    { label: 'In Pipeline', value: customers.length, desc: 'Active customers without a review', accent: C.acc },
+    { label: 'Requests Sent', value: sent.length, desc: `${customers.length > 0 ? Math.round(sent.length / customers.length * 100) : 0}% of pipeline asked`, accent: C.grn },
     { label: 'In Queue', value: queue.length, desc: `${eligible.length} total eligible`, accent: C.org },
     { label: 'Win-Back Pool', value: winback.length, desc: 'Customers 60+ days, never asked', accent: C.blu },
   ];
@@ -500,8 +465,8 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
       {/* KPIs */}
       <div style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Review Health — All Locations</div>
-          <SectionLabel>Last 30 Days</SectionLabel>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>Outreach Pipeline — All Locations</div>
+          <SectionLabel>Last 90 Days</SectionLabel>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 12 }}>
           {kpis.map(k => (
@@ -625,12 +590,9 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
     setSelectedIds(new Set());
   };
 
+  // PR 1: suppression has no backing table yet. Drop in a later PR — no-op + toast.
   const batchSuppress = () => {
-    selectedIds.forEach(id => {
-      updateCustomer(id, { suppressed: true, suppressReason: 'Manual batch suppression' });
-    });
-    addLog('stage', `${selectedIds.size} customers suppressed`);
-    setSelectedIds(new Set());
+    showToast('Suppression persists in a later PR');
   };
 
   return (
@@ -919,9 +881,10 @@ function ActivityList({ log, max }) {
 // ══════════════════════════════════════════════════════════════
 // CUSTOMER DRAWER
 // ══════════════════════════════════════════════════════════════
-function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, customers }) {
+function CustomerDrawer({ customer, onClose, addLog, showToast, sendReviewRequest }) {
   const [msg, setMsg] = useState('');
   const [selectedTpl, setSelectedTpl] = useState('');
+  const [sending, setSending] = useState(false);
   const c = customer;
 
   const applyTpl = (tplId) => {
@@ -930,25 +893,25 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
     if (tpl) setMsg(hydrate(tpl.body, c));
   };
 
-  const sendSms = () => {
-    if (!msg.trim()) { showToast('Write a message first'); return; }
-    const newStage = c.stage === 'not_contacted' ? 'sms_sent' : c.stage === 'sms_sent' ? 'reminded' : c.stage;
-    updateCustomer(c.id, {
-      askCount: c.askCount + 1,
-      lastAsked: fmtDate(new Date()),
-      stage: newStage,
-      seqStep: Math.min(c.seqStep + 1, 3),
-      sms: [...c.sms, { date: fmtDate(new Date()), text: msg, dir: 'out' }],
-    });
-    addLog('sms', `Review request sent to ${c.name} → ${c.gbpName}`);
-    showToast(`SMS sent to ${c.name}`);
-    setMsg('');
+  // Fires the server's canonical review-request flow (NPS gate + rate page link).
+  // Composed message is ignored by the server for PR 1 — it always sends the
+  // canonical template. Custom message body ships in PR 3 with templates table.
+  const sendSms = async () => {
+    if (!c.phone) { showToast('No phone on file'); return; }
+    setSending(true);
+    const result = await sendReviewRequest(c);
+    setSending(false);
+    if (result.ok) {
+      addLog('sms', `Review request sent to ${c.name} → ${c.gbpName}`);
+      showToast(`SMS sent to ${c.name}`);
+      setMsg('');
+    } else {
+      showToast(`Failed: ${result.error}`);
+    }
   };
 
   const startSequence = () => {
-    updateCustomer(c.id, { seqId: 'standard', seqStep: 0 });
-    addLog('stage', `${c.name} enrolled in Standard Review Ask sequence`);
-    showToast(`Sequence started for ${c.name}`);
+    showToast('Sequences ship in a later PR — send manually for now');
   };
 
   const scoreColor = c.score >= 70 ? C.grn : c.score >= 40 ? C.org : C.red;
@@ -1048,8 +1011,11 @@ function CustomerDrawer({ customer, onClose, updateCustomer, addLog, showToast, 
                 color: C.t1, fontFamily: C.sans, fontSize: 12, resize: 'none', minHeight: 80, outline: 'none', boxSizing: 'border-box',
               }}
             />
+            <div style={{ fontSize: 10, color: C.t3, marginTop: 6, lineHeight: 1.5 }}>
+              Template is preview-only for now. The send uses the canonical review-request flow with a rating link that routes happy customers to Google and issues to a recovery inbox.
+            </div>
             <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-              <Btn variant="success" onClick={sendSms}>📤 Send SMS</Btn>
+              <Btn variant="success" onClick={sendSms} disabled={sending || !c.phone}>{sending ? 'Sending…' : '📤 Send Review Request'}</Btn>
               <Btn variant="primary" onClick={() => { addLog('call', `Call initiated to ${c.name} at ${c.phoneF}`); showToast(`Calling ${c.name}...`); }}>📞 Call</Btn>
               <Btn onClick={startSequence}>🔄 Start Sequence</Btn>
             </div>
@@ -1072,30 +1038,31 @@ function DrawerSection({ title, children }) {
 // ══════════════════════════════════════════════════════════════
 // BATCH MODAL
 // ══════════════════════════════════════════════════════════════
-function BatchModal({ selectedIds, customers, onClose, updateCustomer, addLog, showToast, setSelectedIds }) {
+function BatchModal({ selectedIds, customers, onClose, addLog, showToast, setSelectedIds, sendReviewRequest }) {
   const [tplId, setTplId] = useState(TEMPLATES[0].id);
   const [stagger, setStagger] = useState('0');
+  const [sending, setSending] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
 
-  const confirm = () => {
-    const tpl = TEMPLATES.find(t => t.id === tplId) || TEMPLATES[0];
-    let count = 0;
-    selectedIds.forEach(id => {
-      const c = customers.find(x => x.id === id);
-      if (!c || c.suppressed) return;
-      const newStage = c.stage === 'not_contacted' ? 'sms_sent' : c.stage === 'sms_sent' ? 'reminded' : c.stage;
-      updateCustomer(id, {
-        askCount: c.askCount + 1,
-        lastAsked: fmtDate(new Date()),
-        stage: newStage,
-        seqStep: Math.min(c.seqStep + 1, 3),
-        sms: [...c.sms, { date: fmtDate(new Date()), text: hydrate(tpl.body, c), dir: 'out' }],
-      });
-      count++;
-    });
-    addLog('batch', `Batch review request sent to ${count} customers using "${tpl.name}" template`);
+  // PR 1: stagger is cosmetic (all sends fire immediately). True scheduler ships in PR 5.
+  const confirm = async () => {
+    const targets = [...selectedIds]
+      .map(id => customers.find(x => x.id === id))
+      .filter(c => c && c.phone);
+    if (targets.length === 0) { showToast('No eligible customers with phone'); return; }
+    setSending(true);
+    setProgress({ done: 0, total: targets.length });
+    let ok = 0, fail = 0;
+    for (let i = 0; i < targets.length; i++) {
+      const result = await sendReviewRequest(targets[i]);
+      if (result.ok) ok++; else fail++;
+      setProgress({ done: i + 1, total: targets.length });
+    }
+    setSending(false);
+    addLog('batch', `Batch review request — ${ok} sent, ${fail} failed`);
+    showToast(fail === 0 ? `${ok} review requests sent` : `${ok} sent · ${fail} failed`);
     setSelectedIds(new Set());
     onClose();
-    showToast(`${count} review requests queued`);
   };
 
   const happyTpls = TEMPLATES.filter(t => t.sentiment === 'happy' || t.sentiment === 'neutral');
@@ -1133,9 +1100,14 @@ function BatchModal({ selectedIds, customers, onClose, updateCustomer, addLog, s
           </select>
         </div>
 
+        {sending && (
+          <div style={{ fontSize: 12, color: C.t2, padding: '10px 12px', background: C.input, borderRadius: 8, marginTop: 8 }}>
+            Sending… {progress.done}/{progress.total}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-          <Btn onClick={onClose}>Cancel</Btn>
-          <Btn variant="success" onClick={confirm}>Confirm & Send</Btn>
+          <Btn onClick={onClose} disabled={sending}>Cancel</Btn>
+          <Btn variant="success" onClick={confirm} disabled={sending}>{sending ? 'Sending…' : 'Confirm & Send'}</Btn>
         </div>
       </div>
     </div>
