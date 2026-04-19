@@ -190,6 +190,20 @@ router.post('/blog/:id/merge-astro', async (req, res, next) => {
   }
 });
 
+// POST /api/admin/content/blog/:id/unpublish-astro — open a revert PR that
+// deletes the markdown + hero from the astro repo. Merging the PR flips
+// the post back to draft in the portal.
+router.post('/blog/:id/unpublish-astro', async (req, res, next) => {
+  try {
+    const AstroPublisher = require('../services/content-astro/astro-publisher');
+    const result = await AstroPublisher.unpublishAstro(req.params.id);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    logger.error(`[content] unpublish-astro failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/content/blog/:id/refresh-astro — ask CF Pages for the
 // latest preview-build status right now (UI button next to the state pill).
 router.post('/blog/:id/refresh-astro', async (req, res, next) => {

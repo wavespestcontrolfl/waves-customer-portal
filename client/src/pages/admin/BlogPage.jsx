@@ -146,6 +146,7 @@ function PostEditor({ post, onBack, onUpdate }) {
   const [astroPublishing, setAstroPublishing] = useState(false);
   const [astroMerging, setAstroMerging] = useState(false);
   const [astroRefreshing, setAstroRefreshing] = useState(false);
+  const [astroUnpublishing, setAstroUnpublishing] = useState(false);
   const [authors, setAuthors] = useState([]);
   const [serviceAreas, setServiceAreas] = useState([]);
   const [optimization, setOptimization] = useState(
@@ -269,6 +270,28 @@ function PostEditor({ post, onBack, onUpdate }) {
       // Silent — refresh is best-effort
     }
     setAstroRefreshing(false);
+  };
+
+  const handleUnpublishAstro = async () => {
+    if (!window.confirm('Open a revert PR to take this post offline? After the PR merges, the post returns to draft and disappears from the live site.')) return;
+    setAstroUnpublishing(true);
+    try {
+      const result = await adminPost(`/admin/content/blog/${post.id}/unpublish-astro`, {});
+      if (result.error) {
+        alert(`Unpublish failed: ${result.error}`);
+      } else {
+        setEditing(prev => ({
+          ...prev,
+          astro_status: 'unpublish_pending',
+          astro_pr_number: result.pr_number,
+          astro_branch_name: result.branch,
+          astro_preview_url: null,
+        }));
+      }
+    } catch (err) {
+      alert('Unpublish failed: ' + err.message);
+    }
+    setAstroUnpublishing(false);
   };
 
   const [sharing, setSharing] = useState(false);
@@ -538,9 +561,11 @@ function PostEditor({ post, onBack, onUpdate }) {
         onPublish={handlePublishAstro}
         onMerge={handleMergeAstro}
         onRefresh={handleRefreshAstro}
+        onUnpublish={handleUnpublishAstro}
         publishing={astroPublishing}
         merging={astroMerging}
         refreshing={astroRefreshing}
+        unpublishing={astroUnpublishing}
       />}
 
       {/* Actions */}
@@ -564,7 +589,7 @@ function PostEditor({ post, onBack, onUpdate }) {
 // Visual state machine for the blog → GitHub PR → Cloudflare preview →
 // merge → live pipeline. Reads `astro_status` on the post and surfaces
 // the next actionable step only.
-function AstroPublishPanel({ post, onPublish, onMerge, onRefresh, publishing, merging, refreshing }) {
+function AstroPublishPanel({ post, onPublish, onMerge, onRefresh, onUnpublish, publishing, merging, refreshing, unpublishing }) {
   const status = post.astro_status || 'draft';
   const pill = ASTRO_PILLS[status] || ASTRO_PILLS.draft;
 
@@ -628,11 +653,31 @@ function AstroPublishPanel({ post, onPublish, onMerge, onRefresh, publishing, me
             }}>Refresh</button>
           </>
         )}
-        {status === 'live' && post.astro_live_url && (
-          <a href={post.astro_live_url} target="_blank" rel="noreferrer" style={{
-            padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.green}`,
-            color: D.green, fontSize: 12, textDecoration: 'none', fontWeight: 600,
-          }}>View Live ↗</a>
+        {status === 'live' && (
+          <>
+            {post.astro_live_url && (
+              <a href={post.astro_live_url} target="_blank" rel="noreferrer" style={{
+                padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.green}`,
+                color: D.green, fontSize: 12, textDecoration: 'none', fontWeight: 600,
+              }}>View Live ↗</a>
+            )}
+            <button onClick={onUnpublish} disabled={unpublishing} style={{
+              padding: '8px 14px', borderRadius: 8, border: '1px solid #d6d3d1', background: '#fafaf9',
+              color: '#991B1B', fontSize: 12, fontWeight: 500, cursor: 'pointer', opacity: unpublishing ? 0.5 : 1,
+            }}>{unpublishing ? 'Opening revert PR…' : 'Unpublish'}</button>
+          </>
+        )}
+        {status === 'unpublish_pending' && (
+          <>
+            <button onClick={onRefresh} disabled={refreshing} style={{
+              padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent',
+              color: D.muted, fontSize: 12, cursor: 'pointer', opacity: refreshing ? 0.5 : 1,
+            }}>{refreshing ? 'Checking…' : 'Refresh status'}</button>
+            <button onClick={onMerge} disabled={merging} style={{
+              padding: '10px 18px', borderRadius: 8, border: 'none', background: '#991B1B',
+              color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: merging ? 0.5 : 1,
+            }}>{merging ? 'Removing…' : 'Approve & Remove'}</button>
+          </>
         )}
         {status === 'publish_failed' && (
           <button onClick={onPublish} disabled={publishing} style={{
@@ -651,12 +696,13 @@ function AstroPublishPanel({ post, onPublish, onMerge, onRefresh, publishing, me
 }
 
 const ASTRO_PILLS = {
-  draft:          { label: 'DRAFT',          bg: '#F4F4F5', fg: '#71717A', border: '#E4E4E7' },
-  pr_open:        { label: 'PREVIEW OPEN',   bg: '#EFF6FF', fg: '#1D4ED8', border: '#BFDBFE' },
-  build_failed:   { label: 'BUILD FAILED',   bg: '#FEF2F2', fg: '#991B1B', border: '#FECACA' },
-  merged:         { label: 'MERGED',         bg: '#ECFDF5', fg: '#065F46', border: '#A7F3D0' },
-  live:           { label: 'LIVE',           bg: '#ECFDF5', fg: '#15803D', border: '#86EFAC' },
-  publish_failed: { label: 'PUBLISH FAILED', bg: '#FEF2F2', fg: '#991B1B', border: '#FECACA' },
+  draft:             { label: 'DRAFT',             bg: '#f5f5f4', fg: '#57534e', border: '#e7e5e4' },
+  pr_open:           { label: 'PREVIEW OPEN',      bg: '#EFF6FF', fg: '#1D4ED8', border: '#BFDBFE' },
+  build_failed:      { label: 'BUILD FAILED',      bg: '#FEF2F2', fg: '#991B1B', border: '#FECACA' },
+  merged:            { label: 'MERGED',            bg: '#ECFDF5', fg: '#065F46', border: '#A7F3D0' },
+  live:              { label: 'LIVE',              bg: '#ECFDF5', fg: '#15803D', border: '#86EFAC' },
+  publish_failed:    { label: 'PUBLISH FAILED',    bg: '#FEF2F2', fg: '#991B1B', border: '#FECACA' },
+  unpublish_pending: { label: 'UNPUBLISH PENDING', bg: '#fafaf9', fg: '#991B1B', border: '#e7e5e4' },
 };
 
 // =========================================================================

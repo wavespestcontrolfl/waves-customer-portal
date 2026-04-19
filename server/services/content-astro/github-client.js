@@ -107,6 +107,15 @@ async function putBinary({ path, buffer, message, branch, sha }) {
   return ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}`, { method: 'PUT', body });
 }
 
+async function deleteFile({ path, message, branch, sha }) {
+  const { owner, repo } = env();
+  if (!sha) throw new Error('deleteFile requires file sha');
+  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}`, {
+    method: 'DELETE',
+    body: { message, branch, sha },
+  });
+}
+
 // ── Branches + PRs ────────────────────────────────────────────────
 
 async function getBranchSha(branch) {
@@ -160,6 +169,7 @@ module.exports = {
   getFile,
   putFile,
   putBinary,
+  deleteFile,
   getBranchSha,
   createBranch,
   createPr,

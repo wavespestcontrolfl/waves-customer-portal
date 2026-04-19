@@ -7,6 +7,10 @@
  *   pr_open → mergeAstro()    → merged   (PR merged to main; live build kicks off)
  *   merged → (Pages poll)     → live     (CF Pages deployment completes)
  *
+ * Unpublish (soft):
+ *   live → unpublishAstro()           → unpublish_pending (revert PR open)
+ *   unpublish_pending → mergeAstro()  → draft (file gone from main; clears astro_* urls)
+ *
  * Any GitHub failure → publish_failed with the error recorded. A CF Pages
  * build failure on the preview is flagged as build_failed by the poll
  * worker (not this service).
@@ -224,14 +228,12 @@ async function mergeAstro(postId) {
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.astro_pr_number) throw new Error('post has no open PR');
 
+  const isUnpublish = post.astro_status === 'unpublish_pending';
+
   try {
     const pr = await gh.getPr(post.astro_pr_number);
     if (pr.merged) {
-      await db('blog_posts').where({ id: postId }).update({
-        astro_status: 'merged',
-        astro_merged_at: new Date(pr.merged_at),
-        updated_at: new Date(),
-      });
+      await applyMergeEffect(postId, post, pr.merged_at ? new Date(pr.merged_at) : new Date(), isUnpublish, null);
       return { already_merged: true, pr_number: pr.number };
     }
     if (pr.state !== 'open') {
@@ -240,23 +242,117 @@ async function mergeAstro(postId) {
 
     const result = await gh.mergePr(post.astro_pr_number, {
       method: 'squash',
-      title: `Blog: ${post.title}`.slice(0, 72),
+      title: isUnpublish ? `Unpublish: ${post.title}`.slice(0, 72) : `Blog: ${post.title}`.slice(0, 72),
+    });
+
+    await applyMergeEffect(postId, post, new Date(), isUnpublish, result?.sha);
+
+    logger.info(`[astro-publisher] merged PR #${post.astro_pr_number} for post ${postId}${isUnpublish ? ' (unpublish)' : ''}`);
+    return { merged: true, pr_number: post.astro_pr_number, sha: result?.sha, unpublished: isUnpublish };
+  } catch (err) {
+    logger.error(`[astro-publisher] merge failed for ${postId}: ${err.message}`);
+    await db('blog_posts').where({ id: postId }).update({
+      astro_publish_error: err.message.slice(0, 1000),
+      updated_at: new Date(),
+    });
+    throw err;
+  }
+}
+
+async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
+  if (isUnpublish) {
+    await db('blog_posts').where({ id: postId }).update({
+      astro_status: 'draft',
+      astro_pr_number: null,
+      astro_branch_name: null,
+      astro_preview_url: null,
+      astro_live_url: null,
+      astro_merged_at: null,
+      astro_published_at: null,
+      astro_publish_error: null,
+      astro_commit_sha: sha || post.astro_commit_sha,
+      status: 'draft',
+      updated_at: new Date(),
+    });
+    return;
+  }
+  await db('blog_posts').where({ id: postId }).update({
+    astro_status: 'merged',
+    astro_merged_at: mergedAt,
+    astro_commit_sha: sha || post.astro_commit_sha,
+    status: 'published',
+    astro_live_url: `${process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com'}/${post.slug || slugify(post.title)}/`,
+    astro_published_at: new Date(),
+    updated_at: new Date(),
+  });
+}
+
+// ── Unpublish (soft, via revert PR) ────────────────────────────────
+
+async function unpublishAstro(postId) {
+  const post = await db('blog_posts').where({ id: postId }).first();
+  if (!post) throw new Error(`blog_post ${postId} not found`);
+  if (post.astro_status !== 'live' && post.astro_status !== 'merged') {
+    throw new Error(`cannot unpublish from status "${post.astro_status}"; expected live or merged`);
+  }
+
+  const slug = post.slug || slugify(post.title);
+  const branch = `content/unpublish-${slug}-${shortId()}`;
+
+  try {
+    await gh.createBranch(branch);
+
+    const mdPath = `${ASTRO_BLOG_DIR}/${slug}.md`;
+    const mdFile = await gh.getFile(mdPath);
+    if (!mdFile) throw new Error(`markdown not found on main: ${mdPath}`);
+
+    await gh.deleteFile({
+      path: mdPath,
+      message: `chore(blog): unpublish ${slug}`,
+      branch,
+      sha: mdFile.sha,
+    });
+
+    const heroPath = `${ASTRO_HERO_DIR}/${slug}/hero.webp`;
+    const heroFile = await gh.getFile(heroPath);
+    if (heroFile) {
+      await gh.deleteFile({
+        path: heroPath,
+        message: `chore(blog): remove hero for ${slug}`,
+        branch,
+        sha: heroFile.sha,
+      });
+    }
+
+    const prBody = [
+      `**Unpublish from admin portal**`,
+      ``,
+      `Removes \`${mdPath}\`${heroFile ? ` and \`${heroPath}\`` : ''} from main.`,
+      ``,
+      `Merge to take the post offline. After merge the post returns to \`draft\` state in the portal and can be republished later.`,
+      ``,
+      `Branch: \`${branch}\``,
+    ].join('\n');
+
+    const pr = await gh.createPr({
+      head: branch,
+      title: `Unpublish: ${post.title}`.slice(0, 72),
+      body: prBody,
     });
 
     await db('blog_posts').where({ id: postId }).update({
-      astro_status: 'merged',
-      astro_merged_at: new Date(),
-      astro_commit_sha: result?.sha || post.astro_commit_sha,
-      status: 'published',
-      astro_live_url: `${process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com'}/${post.slug || slugify(post.title)}/`,
-      astro_published_at: new Date(),
+      astro_status: 'unpublish_pending',
+      astro_branch_name: branch,
+      astro_pr_number: pr.number,
+      astro_preview_url: null,
+      astro_publish_error: null,
       updated_at: new Date(),
     });
 
-    logger.info(`[astro-publisher] merged PR #${post.astro_pr_number} for post ${postId}`);
-    return { merged: true, pr_number: post.astro_pr_number, sha: result?.sha };
+    logger.info(`[astro-publisher] opened unpublish PR #${pr.number} for ${slug} on ${branch}`);
+    return { pr_number: pr.number, pr_url: pr.html_url, branch };
   } catch (err) {
-    logger.error(`[astro-publisher] merge failed for ${postId}: ${err.message}`);
+    logger.error(`[astro-publisher] unpublish failed for ${slug}: ${err.message}`);
     await db('blog_posts').where({ id: postId }).update({
       astro_publish_error: err.message.slice(0, 1000),
       updated_at: new Date(),
@@ -301,4 +397,4 @@ function formatList(v) {
   return arr.length ? arr.join(', ') : '—';
 }
 
-module.exports = { publishAstro, mergeAstro, buildFrontmatter };
+module.exports = { publishAstro, mergeAstro, unpublishAstro, buildFrontmatter };
