@@ -95,15 +95,31 @@ export function renderMarkdown(text) {
   return elements;
 }
 
-export function QuickChip({ label, onClick }) {
+export function QuickChip({ label, onClick, title }) {
   return (
     <button
       onClick={onClick}
+      title={title}
+      aria-label={title ? `${label} — ${title}` : label}
       className="inline-flex items-center h-6 px-3 text-11 font-medium border-hairline border-zinc-200 bg-white text-ink-secondary rounded-sm hover:bg-zinc-50 hover:text-ink-primary u-focus-ring transition-colors whitespace-nowrap"
     >
       {label}
     </button>
   );
+}
+
+function groupActions(actions) {
+  const groups = [];
+  const seen = new Map();
+  for (const a of actions) {
+    const key = a.group || null;
+    if (!seen.has(key)) {
+      seen.set(key, groups.length);
+      groups.push({ group: key, items: [] });
+    }
+    groups[seen.get(key)].items.push(a);
+  }
+  return groups;
 }
 
 export default function IntelligenceBarShell({
@@ -196,13 +212,23 @@ export default function IntelligenceBarShell({
 
       {/* Quick actions */}
       {expanded && !response && !loading && quickActions.length > 0 && (
-        <div className="px-4 pb-3 flex flex-wrap gap-2">
-          {quickActions.map((a) => (
-            <QuickChip
-              key={a.id}
-              label={a.label}
-              onClick={() => { setPrompt(a.prompt); submit(a.prompt); }}
-            />
+        <div className="px-4 pb-3">
+          {groupActions(quickActions).map((g, gi) => (
+            <div key={g.group ?? `g-${gi}`} className={gi === 0 ? '' : 'mt-2'}>
+              {g.group && (
+                <div className="u-label text-ink-tertiary mb-1.5">{g.group}</div>
+              )}
+              <div className="flex flex-wrap gap-2">
+                {g.items.map((a) => (
+                  <QuickChip
+                    key={a.id}
+                    label={a.label}
+                    title={a.prompt}
+                    onClick={() => { setPrompt(a.prompt); submit(a.prompt); }}
+                  />
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       )}

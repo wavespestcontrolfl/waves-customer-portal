@@ -10,14 +10,14 @@ import { useCallback } from 'react';
 import IntelligenceBarShell from './IntelligenceBarShell';
 
 const FALLBACK_ACTIONS = [
-  { id: 'briefing', label: 'Morning Briefing', prompt: 'Give me a morning briefing' },
-  { id: 'week_compare', label: 'This vs Last Week', prompt: 'How did we do this week vs last week?' },
-  { id: 'mrr', label: 'MRR Trend', prompt: "What's our MRR trend?" },
-  { id: 'close_rate', label: 'Close Rate', prompt: "What's our estimate close rate?" },
-  { id: 'revenue', label: 'Revenue Breakdown', prompt: 'Break down revenue by service type' },
-  { id: 'churn', label: 'Churn Check', prompt: 'Any churn this month?' },
-  { id: 'leads', label: 'Lead Sources', prompt: 'Where are new customers coming from?' },
-  { id: 'balances', label: 'Balances', prompt: "What's outstanding?" },
+  { id: 'briefing', group: 'Summary', label: 'Morning Briefing', prompt: 'Give me a morning briefing' },
+  { id: 'week_compare', group: 'Summary', label: 'This vs Last Week', prompt: 'How did we do this week vs last week?' },
+  { id: 'mrr', group: 'Metrics', label: 'MRR Trend', prompt: "What's our MRR trend?" },
+  { id: 'close_rate', group: 'Metrics', label: 'Close Rate', prompt: "What's our estimate close rate?" },
+  { id: 'revenue', group: 'Metrics', label: 'Revenue Breakdown', prompt: 'Break down revenue by service type' },
+  { id: 'churn', group: 'Metrics', label: 'Churn Check', prompt: 'Any churn this month?' },
+  { id: 'leads', group: 'Ops', label: 'Lead Sources', prompt: 'Where are new customers coming from?' },
+  { id: 'balances', group: 'Ops', label: 'Balances', prompt: "What's outstanding?" },
 ];
 
 export default function DashboardIntelligenceBarV2({ kpiData }) {

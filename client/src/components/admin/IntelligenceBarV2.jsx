@@ -11,14 +11,14 @@ import { cn } from '../ui';
 import IntelligenceBarShell from './IntelligenceBarShell';
 
 const FALLBACK_ACTIONS = [
-  { id: 'missing_city', label: 'Missing Cities', prompt: 'Show me customers with no city on their profile' },
-  { id: 'pest_overdue', label: 'Pest Overdue', prompt: 'Which quarterly pest control customers are overdue for service?' },
-  { id: 'lawn_overdue', label: 'Lawn Overdue', prompt: 'Which monthly lawn care customers are overdue?' },
-  { id: 'at_risk', label: 'At Risk', prompt: 'Show me customers with health scores below 40' },
-  { id: 'high_balance', label: 'Balances', prompt: 'Who has an outstanding balance over $100?' },
-  { id: 'duplicates', label: 'Duplicates', prompt: 'Find duplicate customers by phone number' },
-  { id: 'tech_perf', label: 'Tech Stats', prompt: 'Compare technician performance this month' },
-  { id: 'win_back', label: 'Win Back', prompt: 'Show churned Gold/Platinum customers from the last 6 months' },
+  { id: 'missing_city', group: 'Find', label: 'Missing Cities', prompt: 'Show me customers with no city on their profile' },
+  { id: 'pest_overdue', group: 'Find', label: 'Pest Overdue', prompt: 'Which quarterly pest control customers are overdue for service?' },
+  { id: 'lawn_overdue', group: 'Find', label: 'Lawn Overdue', prompt: 'Which monthly lawn care customers are overdue?' },
+  { id: 'at_risk', group: 'Find', label: 'At Risk', prompt: 'Show me customers with health scores below 40' },
+  { id: 'high_balance', group: 'Find', label: 'Balances', prompt: 'Who has an outstanding balance over $100?' },
+  { id: 'duplicates', group: 'Find', label: 'Duplicates', prompt: 'Find duplicate customers by phone number' },
+  { id: 'win_back', group: 'Find', label: 'Win Back', prompt: 'Show churned Gold/Platinum customers from the last 6 months' },
+  { id: 'tech_perf', group: 'Analyze', label: 'Tech Stats', prompt: 'Compare technician performance this month' },
 ];
 
 function CustomerRow({ customer, onSelect }) {

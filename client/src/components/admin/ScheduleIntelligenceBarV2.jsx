@@ -11,12 +11,12 @@ import { useCallback } from 'react';
 import IntelligenceBarShell from './IntelligenceBarShell';
 
 const FALLBACK_ACTIONS = [
-  { id: 'day_briefing', label: 'Day Briefing', prompt: 'Give me a full briefing for today' },
-  { id: 'optimize', label: 'Optimize Routes', prompt: 'Optimize all routes for today' },
-  { id: 'unassigned', label: 'Unassigned', prompt: 'Show me unassigned stops and suggest tech assignments' },
-  { id: 'zone_density', label: 'Zone Density', prompt: 'Analyze zone density — any consolidation opportunities?' },
-  { id: 'gaps', label: 'Gaps This Week', prompt: 'Where do we have open capacity this week?' },
-  { id: 'far_out', label: 'Far-Out Appts', prompt: 'Find appointments more than 30 days out that we could move sooner' },
+  { id: 'day_briefing', group: 'Plan', label: 'Day Briefing', prompt: 'Give me a full briefing for today' },
+  { id: 'gaps', group: 'Plan', label: 'Gaps This Week', prompt: 'Where do we have open capacity this week?' },
+  { id: 'optimize', group: 'Optimize', label: 'Optimize Routes', prompt: 'Optimize all routes for today' },
+  { id: 'zone_density', group: 'Optimize', label: 'Zone Density', prompt: 'Analyze zone density — any consolidation opportunities?' },
+  { id: 'far_out', group: 'Optimize', label: 'Far-Out Appts', prompt: 'Find appointments more than 30 days out that we could move sooner' },
+  { id: 'unassigned', group: 'Fix', label: 'Unassigned', prompt: 'Show me unassigned stops and suggest tech assignments' },
 ];
 
 const WRITE_TOOLS = [
