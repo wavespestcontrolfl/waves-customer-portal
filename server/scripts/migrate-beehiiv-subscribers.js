@@ -5,20 +5,27 @@
  * Reads a beehiiv subscriber CSV export, matches each row against customers
  * by email, and writes into the existing newsletter_subscribers table.
  *
- * Four buckets:
- *   - matched_active      beehiiv active   + customer exists  → active sub, customer_id set
- *   - matched_suppressed  beehiiv unsub    + customer exists  → unsubscribed sub, customer_id set
- *   - orphan_active       beehiiv active   + no customer      → active sub, customer_id NULL
- *   - orphan_suppressed   beehiiv unsub    + no customer      → unsubscribed sub, customer_id NULL
+ * Five buckets:
+ *   - matched_active            beehiiv active + customer exists → active sub, customer_id set
+ *   - matched_suppressed        beehiiv unsub + customer exists → unsubscribed sub, customer_id set
+ *   - orphan_active             beehiiv active + no customer → active sub, customer_id NULL
+ *   - orphan_suppressed         beehiiv unsub + no customer → unsubscribed sub, customer_id NULL
+ *   - fresh_consent_protected   beehiiv says unsub but local row is active AND its source
+ *                               indicates post-beehiiv consent (quote wizard, /subscribe, etc).
+ *                               Guard skips the downgrade — local consent is fresher.
  *
  * The orphan_active bucket is the "in your orbit but never converted" list —
- * a lead pool Virginia can review for outreach.
+ * a lead pool Virginia can review for outreach. The fresh_consent_protected
+ * bucket is the "guard saved us" audit trail — empty on first-run against a
+ * clean table, non-empty signals that the script is running against data that
+ * accumulated real opt-ins after the beehiiv export.
  *
  * Safety:
  *   - default is dry-run (prints buckets, writes no rows)
  *   - --apply commits the inserts/updates
- *   - never downgrades an existing 'active' row to 'unsubscribed' unless the
- *     CSV explicitly says so (the local record is already-more-recent truth)
+ *   - never downgrades an existing 'active' row sourced from our own forms
+ *     (see POST_BEEHIIV_CONSENT_SOURCES below) to 'unsubscribed' based on CSV
+ *     state — those users re-opted in after leaving beehiiv
  *   - email comparisons are lowercase+trim on both sides
  *   - rows with no @ in the email are skipped (printed to `skipped_invalid_email`)
  *
@@ -45,6 +52,20 @@ const db = require('../models/db');
 
 const APPLY = process.argv.includes('--apply');
 const csvPath = process.argv.slice(2).find((a) => !a.startsWith('--'));
+
+// Source strings that mean "this row came from our own forms after the beehiiv
+// era." Active rows from these sources are protected from the CSV-driven
+// downgrade — their consent is fresher than anything the beehiiv export knows.
+// Keep this list in sync with source values written by public-newsletter.js,
+// public-quote.js, and any future customer-facing signup endpoint.
+const POST_BEEHIIV_CONSENT_SOURCES = new Set([
+  'quote_wizard',           // public-quote.js /calculate consent dual-write
+  'quote_wizard_deferred',  // QuotePage.jsx result-other CTA
+  'public_form',            // public-newsletter.js /subscribe default
+  'website',                // newsletter.js legacy /subscribe default
+  'public_subscribe',       // forward-looking
+  'portal_signup',          // forward-looking
+]);
 
 function fail(msg) {
   console.error(`\n✖ ${msg}\n`);
@@ -98,9 +119,18 @@ async function reconcileRow(row) {
     .whereRaw('LOWER(email) = ?', [emailLc])
     .first();
 
-  const bucket = customer
+  // Guard: if the CSV says unsub but the local row is active AND sourced from
+  // one of our own post-beehiiv forms, the local row is fresher consent. Skip
+  // the downgrade and route the row into fresh_consent_protected so Virginia
+  // has an audit trail of protected rows.
+  const wouldDowngrade = !isActive && existing && existing.status === 'active';
+  const hasFreshLocalConsent = existing && POST_BEEHIIV_CONSENT_SOURCES.has(existing.source);
+  const guardProtects = wouldDowngrade && hasFreshLocalConsent;
+
+  const naturalBucket = customer
     ? (isActive ? 'matched_active' : 'matched_suppressed')
     : (isActive ? 'orphan_active' : 'orphan_suppressed');
+  const bucket = guardProtects ? 'fresh_consent_protected' : naturalBucket;
 
   if (!APPLY) {
     return {
@@ -109,11 +139,14 @@ async function reconcileRow(row) {
       hadCustomerMatch: !!customer,
       alreadyInList: !!existing,
       existingStatus: existing?.status || null,
-      action: existing
-        ? (isActive
-            ? 'would_update_existing'
-            : (existing.status !== 'unsubscribed' ? 'would_unsubscribe_existing' : 'no_change'))
-        : 'would_insert',
+      existingSource: existing?.source || null,
+      action: guardProtects
+        ? 'would_protect_fresh_consent'
+        : existing
+          ? (isActive
+              ? 'would_update_existing'
+              : (existing.status !== 'unsubscribed' ? 'would_unsubscribe_existing' : 'no_change'))
+          : 'would_insert',
     };
   }
 
@@ -123,12 +156,17 @@ async function reconcileRow(row) {
     if (!existing.first_name && firstName) update.first_name = firstName;
     if (!existing.last_name && lastName) update.last_name = lastName;
 
-    // Only beehiiv → unsub flips the local status. An existing 'active' row
-    // that we created via /subscribe is more recent truth than the CSV; we
-    // never downgrade it to 'unsubscribed' based on stale beehiiv state.
-    if (!isActive && existing.status !== 'unsubscribed') {
+    // CSV-driven downgrade: flip active → unsubscribed, BUT only for rows
+    // that weren't created by our own post-beehiiv signup paths. Those rows
+    // represent consent captured after the beehiiv export was taken, so the
+    // CSV's unsub state is stale by definition.
+    if (wouldDowngrade && !hasFreshLocalConsent) {
       update.status = 'unsubscribed';
       update.unsubscribed_at = unsubscribedAt || new Date();
+    }
+
+    if (guardProtects) {
+      return { bucket, email: emailLc, action: 'protected_fresh_consent', existingSource: existing.source };
     }
 
     if (Object.keys(update).length === 0) {
@@ -176,6 +214,7 @@ async function run() {
     matched_suppressed: [],
     orphan_active: [],
     orphan_suppressed: [],
+    fresh_consent_protected: [],
     skipped_invalid_email: [],
   };
 
