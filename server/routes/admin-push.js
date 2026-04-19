@@ -17,7 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { triggerNotification, listTriggers } = require('../services/notification-triggers');
-const { requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 
 // VAPID public key is public by design (browsers need it to subscribe).
 // Keep this endpoint UNAUTHENTICATED so an expired admin token can't
@@ -33,7 +33,7 @@ router.get('/vapid-key', (req, res) => {
 // Admin-only diagnostic — reveals whether the server sees the env vars,
 // without leaking the private key. Hit this from the browser console
 // when push fails to confirm what's actually loaded.
-router.get('/diagnostics', requireAdmin, (req, res) => {
+router.get('/diagnostics', adminAuthenticate, requireAdmin, (req, res) => {
   res.json({
     vapid_public_key_set: !!(process.env.VAPID_PUBLIC_KEY || '').trim(),
     vapid_public_key_length: (process.env.VAPID_PUBLIC_KEY || '').trim().length,
@@ -46,14 +46,14 @@ router.get('/diagnostics', requireAdmin, (req, res) => {
 });
 
 // All write operations + preferences still require admin
-router.use(requireAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 router.post('/subscribe', async (req, res, next) => {
   try {
     const { subscription, deviceInfo } = req.body;
     if (!subscription?.endpoint) return res.status(400).json({ error: 'subscription required' });
 
-    const adminUserId = req.admin?.id || req.user?.id;
+    const adminUserId = req.technicianId;
     const subData = JSON.stringify(subscription);
 
     const existing = await db('push_subscriptions')
@@ -82,7 +82,7 @@ router.post('/subscribe', async (req, res, next) => {
 router.post('/unsubscribe', async (req, res, next) => {
   try {
     const { endpoint } = req.body;
-    const adminUserId = req.admin?.id || req.user?.id;
+    const adminUserId = req.technicianId;
     if (!endpoint) {
       await db('push_subscriptions').where({ admin_user_id: adminUserId }).update({ active: false });
     } else {
@@ -100,7 +100,7 @@ router.post('/unsubscribe', async (req, res, next) => {
 
 router.get('/preferences', async (req, res, next) => {
   try {
-    const adminUserId = req.admin?.id || req.user?.id;
+    const adminUserId = req.technicianId;
     const triggers = listTriggers();
 
     let rows = [];
@@ -124,7 +124,7 @@ router.get('/preferences', async (req, res, next) => {
 
 router.put('/preferences', async (req, res, next) => {
   try {
-    const adminUserId = req.admin?.id || req.user?.id;
+    const adminUserId = req.technicianId;
     const updates = Array.isArray(req.body.preferences) ? req.body.preferences : [];
 
     for (const u of updates) {
