@@ -31,24 +31,27 @@ Customer UI is the opposite situation. A homeowner sees one estimate in their in
 
 ## Design direction (not a spec)
 
-### Color
+> **Brand authority lives in `client/src/theme-brand.js`** — mirror of the live wavespestcontrol.com Astro marketing site. Customer-facing portal surfaces inherit that brand verbatim so a homeowner who clicks an estimate link from a marketing site lands on a portal that looks like the same company. The "warmth, mobile-first, generous spacing" intent below layers ON TOP of the brand, not in place of it.
 
-Brand color is **Wave Teal** — a deep ocean teal around `#0F6E56` (the color reserved from the admin spec as "not used there, but appropriate here"). Plus a warmer supporting palette:
+### Color (from `theme-brand.js`)
 
-- Wave Teal (primary brand) — buttons, links, key accents
-- Sand — warm off-white for backgrounds, `#F9F5EF` or similar
-- Deep navy — for text on light backgrounds, warmer than pure black
-- Coral or sunset — a warm accent for highlights and "hot" moments
-- Still use restraint — 2 brand colors + 1 accent is enough, not a rainbow
+- **Waves Blue `#009CDE`** (PMS 2925) — primary brand, hero backgrounds, links, key accents
+- **Blue Deeper `#1B2C5B`** (PMS 2766) — text on light bg, button border/3D-shadow color
+- **Gold `#FFD700`** — primary CTA fill (with navy 3D-offset shadow)
+- **Sand `#FDF6EC`** — warm off-white page background
+- **Slate-700 `#334155`** — body text on sand/white
+- **Red `#C8102E`** (PMS 186), **Green `#16A34A`**, **Amber `#F59E0B`** — alerts, success, attention only
 
-Colors are allowed to *decorate*, not just signal, on customer surfaces. A hero section can have brand color. A testimonial can have a warm tint. A call-to-action can pop. This is a marketing context.
+Colors are allowed to *decorate* on customer surfaces (unlike admin). A hero can be saturated blue, a CTA can pop gold, a testimonial can have a warm tint. The 5 sand→white→blue section-rhythm pattern from the marketing site applies.
 
-### Typography
+### Typography (from `theme-brand.js`)
 
-- Still Inter (or switch to something with more character like **Instrument Serif** for headlines + Inter for body — decide during detailed spec)
-- Larger sizes than admin. Body 16px, headlines 32–56px on hero moments.
-- Can use weight 600 and 700 here — bolder weights read as confident on marketing surfaces.
-- Title Case acceptable in headlines. Sentence case in body. Never UPPERCASE for CTAs here — feels institutional.
+- **Anton** (condensed display) — H1/H2 hero moments only. `clamp(32px, 6.5vw, 54px)`. Letter-spacing `0.02em`.
+- **Montserrat** — H3/H4, card titles
+- **Inter** — body, buttons, forms, labels. **Body min 16px** — never under that on customer surfaces.
+- **Source Serif 4** — long-form prose blocks (rare on portal, common on PDFs)
+- Weights 600/700/800 are encouraged here (admin restricts to 400/500 — customer surfaces don't).
+- **UPPERCASE CTAs are part of the brand identity** (the `BTN_BASE` token enforces this). Do not strip it on customer surfaces — it matches the marketing site's button system. Sentence case is fine in body and links.
 
 ### Spacing
 
@@ -73,12 +76,14 @@ Colors are allowed to *decorate*, not just signal, on customer surfaces. A hero 
 ## What NOT to do
 
 - Don't copy the admin spec's monochrome palette
-- Don't use UPPERCASE CTAs on customer surfaces — reads cold, institutional
-- Don't use 13px body text — customers' eyes are older and unfocused
+- Don't introduce a new brand color (e.g. teal) — the live brand is Waves Blue + Gold, mirrored from `theme-brand.js`
+- Don't strip UPPERCASE from CTAs — it's part of the brand identity (enforced by `BTN_BASE`). Sentence case stays for body and inline links.
+- Don't use 13px body text — customers' eyes are older and unfocused. 16px minimum.
 - Don't use 0.5px hairline borders as the primary structural language — feels fragile and clinical on consumer surfaces
 - Don't use `text-tertiary` for anything important — customers aren't scanning for muscle memory, they're reading
 - Don't use `tabular-nums` on everything — feels like a spreadsheet
 - Don't deploy a coldly professional estimate page at the exact moment a homeowner is deciding whether to trust Waves with $3,140/year
+- Don't duplicate brand colors inline (`const W = { blue: '#009CDE', ... }`). Always `import { COLORS, FONTS, BTN_BASE, GOLD_CTA } from '../theme-brand'`.
 
 ---
 
