@@ -12,19 +12,21 @@ function adminFetch(path, options = {}) {
   });
 }
 
-// ── Colors (matched to admin panel theme) ──
+// V2 token pass: chrome folds to zinc ramp; non-semantic accents
+// (acc/blu/pur) collapse to zinc-900 with zinc-100 pastel glows.
+// Semantic green/amber/red preserved as V2-legal variants.
 const C = {
-  bg: '#F1F5F9', raised: '#FFFFFF', surface: '#FFFFFF', hover: '#F0F7FC', input: '#FFFFFF',
-  bdr: 'rgba(10,126,194,0.08)', bdrA: 'rgba(10,126,194,0.25)',
-  acc: '#0A7EC2', accG: 'rgba(10,126,194,0.15)', accD: '#065A8C',
-  grn: '#16A34A', grnG: 'rgba(22,163,74,0.12)',
-  org: '#F0A500', orgG: 'rgba(240,165,0,0.12)',
-  red: '#C0392B', redG: 'rgba(192,57,43,0.12)',
-  blu: '#3b82f6', bluG: 'rgba(59,130,246,0.12)',
-  pur: '#7C3AED', purG: 'rgba(124,58,237,0.12)',
-  t1: '#334155', t2: '#64748B', t3: '#64748b',
-  heading: '#0F172A',
-  inputBorder: '#CBD5E1',
+  bg: '#F4F4F5', raised: '#FFFFFF', surface: '#FFFFFF', hover: '#FAFAFA', input: '#FFFFFF',
+  bdr: 'rgba(24,24,27,0.06)', bdrA: 'rgba(24,24,27,0.15)',
+  acc: '#18181B', accG: '#F4F4F5', accD: '#09090B',
+  grn: '#15803D', grnG: '#DCFCE7',
+  org: '#A16207', orgG: '#FEF3C7',
+  red: '#991B1B', redG: '#FEE2E2',
+  blu: '#18181B', bluG: '#F4F4F5',
+  pur: '#18181B', purG: '#F4F4F5',
+  t1: '#27272A', t2: '#71717A', t3: '#71717A',
+  heading: '#09090B',
+  inputBorder: '#D4D4D8',
   sans: "'DM Sans', sans-serif",
 };
 

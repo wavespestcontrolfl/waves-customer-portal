@@ -17,24 +17,29 @@ function adminFetch(path, opts = {}) {
 // ---------------------------------------------------------------------------
 // Color / style helpers
 // ---------------------------------------------------------------------------
+// V2 token pass: chrome folds to zinc ramp; teal/purple non-semantic accents
+// collapse to zinc-900. GRADE_COLORS uses explicit hex map so 5 grades
+// (A/B/C/D/F) stay distinct — naive fold would make B = heading-black.
+// RISK / TREND maps are semantic and fold cleanly. '#f97316' kept for
+// D-grade / high-risk warning-orange between amber and red.
 const COLORS = {
-  bg: '#F1F5F9',
+  bg: '#F4F4F5',
   card: '#FFFFFF',
-  cardHover: '#F0F7FC',
-  border: '#E2E8F0',
-  text: '#334155',
-  textMuted: '#64748B',
-  teal: '#0A7EC2',
-  green: '#16A34A',
-  amber: '#F0A500',
-  red: '#C0392B',
-  purple: '#7C3AED',
+  cardHover: '#FAFAFA',
+  border: '#E4E4E7',
+  text: '#27272A',
+  textMuted: '#71717A',
+  teal: '#18181B',
+  green: '#15803D',
+  amber: '#A16207',
+  red: '#991B1B',
+  purple: '#18181B',
   white: '#FFFFFF',
-  heading: '#0F172A',
-  inputBorder: '#CBD5E1',
+  heading: '#09090B',
+  inputBorder: '#D4D4D8',
 };
 
-const GRADE_COLORS = { A: COLORS.green, B: COLORS.teal, C: COLORS.amber, D: '#f97316', F: COLORS.red };
+const GRADE_COLORS = { A: '#15803D', B: '#3F3F46', C: '#A16207', D: '#f97316', F: '#991B1B' };
 const RISK_COLORS = { low: COLORS.green, moderate: COLORS.amber, high: '#f97316', critical: COLORS.red };
 const RISK_LABELS = { low: 'Low', moderate: 'Moderate', high: 'High', critical: 'Critical' };
 const TREND_ARROWS = { improving: '\u2191', declining: '\u2193', stable: '\u2192' };

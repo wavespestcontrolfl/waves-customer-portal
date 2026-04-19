@@ -3,7 +3,11 @@ import { useSearchParams } from 'react-router-dom';
 import { DiscountsSection } from './DiscountsTabs';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
+// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
+// catColors / billingColors converted to V2-friendly hexes that keep semantic
+// distinction (lawn=green, termite=red, inspection=amber) while folding
+// non-semantic categories to zinc shades.
+const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', purple: '#18181B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', input: '#FFFFFF', heading: '#09090B', inputBorder: '#D4D4D8' };
 
 async function aFetch(path, opts = {}) {
   const r = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' }, ...opts });
@@ -34,8 +38,8 @@ const BILLING_TYPES = [
   { value: 'free', label: 'Free' },
 ];
 
-const catColors = { pest_control: '#0A7EC2', lawn_care: '#10b981', mosquito: '#6366f1', termite: '#dc2626', rodent: '#78716c', tree_shrub: '#059669', inspection: '#f59e0b', specialty: '#8b5cf6', other: '#64748b' };
-const billingColors = { recurring: '#0A7EC2', one_time: '#f59e0b', free: '#64748b' };
+const catColors = { pest_control: '#18181B', lawn_care: '#15803D', mosquito: '#3F3F46', termite: '#991B1B', rodent: '#71717A', tree_shrub: '#166534', inspection: '#A16207', specialty: '#52525B', other: '#A1A1AA' };
+const billingColors = { recurring: '#18181B', one_time: '#A16207', free: '#A1A1AA' };
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16 };
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box', width: '100%' };
 const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
@@ -50,7 +54,7 @@ const EMPTY_SVC = {
   pricing_type: 'variable', base_price: '', pricing_model_key: '',
   is_taxable: false, tax_service_key: '', requires_license: false, license_category: '',
   min_tech_skill_level: 1, customer_visible: true, booking_enabled: true,
-  sort_order: 100, icon: '', color: '#0A7EC2', is_active: true,
+  sort_order: 100, icon: '', color: '#18181B', is_active: true,
 };
 
 function Field({ label, children, half }) {
@@ -125,7 +129,7 @@ function ServiceForm({ svc, onSave, onCancel }) {
         <Field label="Tax Service Key" half>{inp('tax_service_key')}</Field>
         <Field label="License Category" half>{inp('license_category')}</Field>
         <Field label="Min Tech Skill Level" half>{inp('min_tech_skill_level', 'number')}</Field>
-        <Field label="Color" half><input style={{ ...sInput, height: 36 }} type="color" value={form.color || '#0A7EC2'} onChange={e => set('color', e.target.value)} /></Field>
+        <Field label="Color" half><input style={{ ...sInput, height: 36 }} type="color" value={form.color || '#18181B'} onChange={e => set('color', e.target.value)} /></Field>
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10 }}>
