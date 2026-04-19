@@ -132,41 +132,7 @@ export default function SettingsPage() {
       )}
 
       {/* ── INTEGRATIONS ── */}
-      {tab === 'integrations' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {[
-            { name: 'Twilio', icon: '📱', status: gates.twilioSms, keys: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN'], desc: 'SMS notifications, OTP login, voice calls' },
-            { name: 'Stripe', icon: '💳', status: true, keys: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'], desc: 'Payment processing, invoicing' },
-            { name: 'Anthropic (Claude)', icon: '🤖', status: true, keys: ['ANTHROPIC_API_KEY'], desc: 'AI assistant, blog writer, CSR coach, voice agent' },
-            { name: 'Google APIs', icon: '🔍', status: true, keys: ['GOOGLE_API_KEY'], desc: 'Maps, Search Console, PageSpeed, Places Autocomplete' },
-            { name: 'DataForSEO', icon: '📊', status: gates.seoIntelligence, keys: ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD'], desc: 'Rank tracking, SERP analysis, backlink monitoring' },
-            { name: 'RentCast', icon: '🏠', status: true, keys: ['RENTCAST_API_KEY'], desc: 'Property data lookup for estimates' },
-            { name: 'WordPress', icon: '📝', status: gates.wordpressPublish, keys: ['WORDPRESS_URL', 'WORDPRESS_USER'], desc: 'Blog publishing, content sync' },
-          ].map((int, i) => (
-            <Card key={i}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span style={{ fontSize: 24 }}>{int.icon}</span>
-                  <div>
-                    <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{int.name}</div>
-                    <div style={{ fontSize: 12, color: D.muted }}>{int.desc}</div>
-                  </div>
-                </div>
-                <span style={{
-                  padding: '4px 12px', borderRadius: 20, fontSize: 11, fontWeight: 700,
-                  background: int.status ? D.green + '22' : D.red + '15',
-                  color: int.status ? D.green : D.red,
-                }}>{int.status ? 'Connected' : 'Disabled'}</span>
-              </div>
-              <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {int.keys.map(k => (
-                  <span key={k} style={{ fontSize: 10, fontFamily: MONO, padding: '2px 8px', borderRadius: 4, background: D.bg, color: D.muted }}>{k}</span>
-                ))}
-              </div>
-            </Card>
-          ))}
-        </div>
-      )}
+      {tab === 'integrations' && <IntegrationsTab gates={gates} />}
 
       {/* ── GEOFENCE TIMERS ── */}
       {tab === 'geofence' && <GeofenceSettings />}
@@ -189,8 +155,8 @@ export default function SettingsPage() {
               }}>{enabled ? 'ENABLED' : 'DISABLED'}</span>
             </div>
           ))}
-          <div style={{ marginTop: 16, fontSize: 12, color: D.muted, padding: '10px 14px', background: D.bg, borderRadius: 8 }}>
-            {'ℹ️'} Gates are controlled via Railway environment variables. To change: Railway Dashboard → Variables → set GATE_NAME=true or remove the variable.
+          <div style={{ marginTop: 16, fontSize: 12, color: D.muted, padding: '10px 14px', background: D.bg, borderRadius: 8, borderLeft: `3px solid ${D.border}` }}>
+            Gates are controlled via Railway environment variables. To change: Railway Dashboard → Variables → set GATE_NAME=true or remove the variable.
           </div>
         </Card>
       )}
@@ -230,7 +196,7 @@ export default function SettingsPage() {
           <Card>
             <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Cron Jobs</div>
             <div style={{ fontSize: 12, color: gates.cronJobs ? D.green : D.red, fontWeight: 600, marginBottom: 12 }}>
-              {gates.cronJobs ? '✅ Cron jobs ENABLED' : '🔒 Cron jobs DISABLED'}
+              Cron jobs {gates.cronJobs ? 'ENABLED' : 'DISABLED'}
             </div>
             {[
               { time: '1:30 AM Mon', job: 'Site audit', gate: 'seoIntelligence' },
@@ -238,7 +204,6 @@ export default function SettingsPage() {
               { time: '2:30 AM', job: 'AI Overview check', gate: 'seoIntelligence' },
               { time: '3:00 AM', job: 'Customer intelligence', gate: 'cronJobs' },
               { time: '3:30 AM Sun', job: 'Backlink scan', gate: 'seoIntelligence' },
-              { time: '4:00 AM', job: 'WordPress sync', gate: 'cronJobs' },
               { time: '5:00 AM', job: 'Blog auto-generate', gate: 'cronJobs' },
               { time: '5:30 AM Mon', job: 'Content decay check', gate: 'seoIntelligence' },
               { time: '6:00 AM', job: 'GSC data sync', gate: 'cronJobs' },
@@ -256,6 +221,195 @@ export default function SettingsPage() {
           </Card>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Integrations config ──────────────────────────────────────────────
+// Grouped by category. `platform` matches token_credentials.platform
+// keys when available (wires the status pill to live token-health);
+// integrations without a platform key fall back to the env-gate or a
+// static "Configured" signal.
+const INTEGRATION_GROUPS = [
+  {
+    title: 'Communication',
+    items: [
+      { name: 'Twilio', platform: 'twilio', gateKey: 'twilioSms', keys: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN'], desc: 'SMS, OTP login, voice calls' },
+      { name: 'SendGrid', platform: 'sendgrid', keys: ['SENDGRID_API_KEY', 'SENDGRID_FROM_EMAIL'], desc: 'Newsletter + transactional email (primary)' },
+      { name: 'Beehiiv', platform: 'beehiiv', keys: ['BEEHIIV_API_KEY', 'BEEHIIV_PUB_ID'], desc: 'Legacy subscriber/automation API', deprecating: true },
+    ],
+  },
+  {
+    title: 'Payments & Billing',
+    items: [
+      { name: 'Stripe', platform: 'stripe', keys: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'], desc: 'Payment Element, invoicing, Tap to Pay' },
+    ],
+  },
+  {
+    title: 'AI & Voice',
+    items: [
+      { name: 'Anthropic (Claude)', platform: 'anthropic', keys: ['ANTHROPIC_API_KEY'], desc: 'Intelligence Bar, agents, triage, voice' },
+      { name: 'ElevenLabs', platform: 'elevenlabs', keys: ['ELEVENLABS_API_KEY'], desc: 'Voice TTS for ConversationRelay' },
+      { name: 'Deepgram', platform: 'deepgram', keys: ['DEEPGRAM_API_KEY'], desc: 'Voice STT for ConversationRelay' },
+    ],
+  },
+  {
+    title: 'Data & Research',
+    items: [
+      { name: 'Google APIs', platform: 'google', keys: ['GOOGLE_API_KEY'], desc: 'Maps, GSC, PageSpeed, Places Autocomplete' },
+      { name: 'DataForSEO', platform: 'dataforseo', gateKey: 'seoIntelligence', keys: ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD'], desc: 'Rank tracking, SERP, backlinks' },
+      { name: 'RentCast', platform: 'rentcast', keys: ['RENTCAST_API_KEY'], desc: 'Property data lookup for estimates' },
+    ],
+  },
+  {
+    title: 'Social & Listings',
+    items: [
+      { name: 'Facebook', platform: 'facebook', keys: ['FACEBOOK_ACCESS_TOKEN'], desc: 'Post scheduling, lead ads ingest' },
+      { name: 'Instagram', platform: 'instagram', keys: ['INSTAGRAM_ACCOUNT_ID'], desc: 'Post scheduling via Graph API' },
+      { name: 'LinkedIn', platform: 'linkedin', keys: ['LINKEDIN_ACCESS_TOKEN'], desc: 'Post scheduling' },
+      { name: 'Google Business Profile', platform: 'gbp', keys: ['GBP_REFRESH_TOKEN_LWR', 'GBP_REFRESH_TOKEN_PARRISH', 'GBP_REFRESH_TOKEN_SARASOTA', 'GBP_REFRESH_TOKEN_VENICE'], desc: '4 locations: LWR, Parrish, Sarasota, Venice' },
+    ],
+  },
+  {
+    title: 'Fleet',
+    items: [
+      { name: 'Bouncie', platform: 'bouncie', keys: ['BOUNCIE_ACCESS_TOKEN'], desc: 'GPS + mileage tracking for tech vehicles' },
+    ],
+  },
+];
+
+// GBP aggregates 4 location-level platform rows into one card
+const GBP_LOCATIONS = ['gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
+
+function statusPillFor(int, credByPlatform, gates) {
+  // GBP aggregate
+  if (int.platform === 'gbp') {
+    const rows = GBP_LOCATIONS.map(p => credByPlatform[p]).filter(Boolean);
+    if (!rows.length) return { label: 'Unchecked', tone: 'neutral' };
+    const healthy = rows.filter(r => r.status === 'healthy').length;
+    if (healthy === rows.length) return { label: `Connected · ${healthy}/${rows.length}`, tone: 'ok' };
+    if (healthy === 0) return { label: `Disabled · 0/${rows.length}`, tone: 'bad' };
+    return { label: `Degraded · ${healthy}/${rows.length}`, tone: 'warn' };
+  }
+
+  const cred = credByPlatform[int.platform];
+  if (cred) {
+    if (cred.status === 'healthy') return { label: 'Connected', tone: 'ok' };
+    if (cred.status === 'expired') return { label: 'Expired', tone: 'bad' };
+    if (cred.status === 'error') return { label: 'Error', tone: 'bad' };
+    if (cred.status === 'not_configured') return { label: 'Not configured', tone: 'neutral' };
+    return { label: cred.status, tone: 'neutral' };
+  }
+
+  // No live-health row yet — fall back to env gate if we have one
+  if (int.gateKey) {
+    return gates[int.gateKey]
+      ? { label: 'Connected', tone: 'ok' }
+      : { label: 'Disabled', tone: 'bad' };
+  }
+
+  // No signal at all
+  return { label: 'Unchecked', tone: 'neutral' };
+}
+
+function pillStyle(tone) {
+  if (tone === 'ok')      return { background: D.green + '22', color: D.green };
+  if (tone === 'warn')    return { background: D.amber + '22', color: D.amber };
+  if (tone === 'bad')     return { background: D.red + '15',   color: D.red };
+  return { background: D.border + '44', color: D.muted };
+}
+
+function IntegrationsTab({ gates }) {
+  const [credentials, setCredentials] = useState([]);
+  const [envPresent, setEnvPresent] = useState({});
+  const [checking, setChecking] = useState(false);
+
+  const load = () => {
+    adminFetch('/admin/token-health').then(d => setCredentials(d.credentials || [])).catch(() => {});
+    adminFetch('/admin/token-health/env-presence').then(d => setEnvPresent(d.present || {})).catch(() => {});
+  };
+
+  useEffect(load, []);
+
+  const byPlatform = credentials.reduce((acc, c) => { acc[c.platform] = c; return acc; }, {});
+
+  const runCheck = async () => {
+    setChecking(true);
+    try {
+      await fetch(`${API_BASE}/admin/token-health/check`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
+      });
+      load();
+    } finally { setChecking(false); }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: 12, color: D.muted }}>
+          Live credential health + configured integrations. Status pills reflect the last token-health check.
+        </div>
+        <button onClick={runCheck} disabled={checking} style={{
+          padding: '6px 14px', border: 'none', borderRadius: 6,
+          background: D.teal, color: D.white, fontSize: 12, fontWeight: 600,
+          cursor: checking ? 'default' : 'pointer', opacity: checking ? 0.6 : 1,
+        }}>{checking ? 'Checking…' : 'Run health check'}</button>
+      </div>
+
+      {INTEGRATION_GROUPS.map(group => (
+        <div key={group.title}>
+          <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, fontWeight: 600, marginBottom: 10 }}>
+            {group.title}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {group.items.map(int => {
+              const pill = statusPillFor(int, byPlatform, gates);
+              return (
+                <Card key={int.name} style={{ padding: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{int.name}</div>
+                        {int.deprecating && (
+                          <span style={{
+                            padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                            background: D.amber + '22', color: D.amber, textTransform: 'uppercase', letterSpacing: 0.5,
+                          }}>Deprecating</span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{int.desc}</div>
+                      <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {int.keys.map(k => {
+                          const set = envPresent[k];
+                          const known = Object.prototype.hasOwnProperty.call(envPresent, k);
+                          const dotColor = !known ? D.muted : (set ? D.green : D.red);
+                          const textColor = !known ? D.muted : (set ? D.text : D.muted);
+                          return (
+                            <span key={k} title={!known ? 'unknown' : (set ? 'set in Railway' : 'missing from Railway')} style={{
+                              fontSize: 10, fontFamily: MONO, padding: '2px 8px', borderRadius: 4,
+                              background: D.bg, color: textColor,
+                              display: 'inline-flex', alignItems: 'center', gap: 5,
+                              opacity: known && !set ? 0.65 : 1,
+                            }}>
+                              <span style={{ width: 6, height: 6, borderRadius: 3, background: dotColor, flexShrink: 0 }} />
+                              {k}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <span style={{
+                      padding: '4px 12px', borderRadius: 20, fontSize: 11, fontWeight: 700,
+                      ...pillStyle(pill.tone), whiteSpace: 'nowrap', flexShrink: 0,
+                    }}>{pill.label}</span>
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
