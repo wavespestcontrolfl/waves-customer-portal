@@ -18,18 +18,30 @@ function adminFetch(path, opts = {}) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
+// V2 token pass: chrome folds to zinc ramp; `teal`/`purple` non-semantic
+// accents collapse to zinc-900. Semantic green/amber/red preserved.
+// STATUS_COLORS (Virginia's pipeline scanner) keeps 6 distinct shades —
+// see explicit hex map below, NOT derived from C, so palette folds don't
+// merge `new`/`estimate_sent`/`estimate_viewed` into the same badge.
 const C = {
-  bg: '#F1F5F9', card: '#FFFFFF', cardHover: '#F0F7FC', border: '#E2E8F0',
-  text: '#334155', muted: '#64748B', teal: '#0A7EC2', green: '#16A34A',
-  amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', white: '#FFFFFF',
-  heading: '#0F172A', input: '#FFFFFF', inputBorder: '#CBD5E1',
+  bg: '#F4F4F5', card: '#FFFFFF', cardHover: '#FAFAFA', border: '#E4E4E7',
+  text: '#27272A', muted: '#71717A', teal: '#18181B', green: '#15803D',
+  amber: '#A16207', red: '#991B1B', purple: '#18181B', white: '#FFFFFF',
+  heading: '#09090B', input: '#FFFFFF', inputBorder: '#D4D4D8',
 };
 const mono = { fontFamily: "'JetBrains Mono', monospace" };
 
 const STATUS_COLORS = {
-  new: C.teal, contacted: C.amber, estimate_sent: C.purple,
-  estimate_viewed: C.purple, negotiating: C.amber, won: C.green,
-  lost: C.red, unresponsive: C.muted, disqualified: C.red, duplicate: C.muted,
+  new: '#18181B',              // zinc-900 — neutral entry
+  contacted: '#A16207',        // amber-700
+  estimate_sent: '#3F3F46',    // zinc-700 — sent, awaiting view
+  estimate_viewed: '#52525B',  // zinc-600 — viewed, lighter than sent
+  negotiating: '#A16207',      // amber-700 (mirrors contacted = active conversation)
+  won: '#15803D',              // green-700
+  lost: '#991B1B',             // alert-fg red
+  unresponsive: '#A1A1AA',     // zinc-400 — soft, dropped
+  disqualified: '#991B1B',     // red (mirrors lost = terminal)
+  duplicate: '#A1A1AA',        // zinc-400 (mirrors unresponsive)
 };
 const STATUSES = ['new','contacted','estimate_sent','estimate_viewed','negotiating','won','lost','unresponsive','disqualified','duplicate'];
 const LEAD_TYPES = ['inbound_call','inbound_sms','form_submission','chat_widget','walk_in','referral','ai_agent','voicemail','email_inquiry'];
