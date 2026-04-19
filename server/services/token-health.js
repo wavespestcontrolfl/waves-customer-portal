@@ -295,6 +295,263 @@ async function checkDataForSEO() {
   }
 }
 
+async function checkStripe() {
+  const platform = 'stripe';
+  const envVarName = 'STRIPE_SECRET_KEY';
+  const key = process.env.STRIPE_SECRET_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'STRIPE_SECRET_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch('https://api.stripe.com/v1/account', {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const data = await res.json().catch(() => ({}));
+    const result = { platform, status, lastError: data.error?.message || `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
+async function checkTwilio() {
+  const platform = 'twilio';
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  const token = process.env.TWILIO_AUTH_TOKEN;
+
+  if (!sid || !token) {
+    const missing = [];
+    if (!sid) missing.push('TWILIO_ACCOUNT_SID');
+    if (!token) missing.push('TWILIO_AUTH_TOKEN');
+    const result = { platform, status: 'not_configured', lastError: `Missing: ${missing.join(', ')}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName: 'TWILIO_AUTH_TOKEN' });
+    return result;
+  }
+
+  try {
+    const auth = Buffer.from(`${sid}:${token}`).toString('base64');
+    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}.json`, {
+      headers: { Authorization: `Basic ${auth}` },
+    });
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName: 'TWILIO_AUTH_TOKEN' });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName: 'TWILIO_AUTH_TOKEN' });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName: 'TWILIO_AUTH_TOKEN' });
+    return result;
+  }
+}
+
+async function checkAnthropic() {
+  const platform = 'anthropic';
+  const envVarName = 'ANTHROPIC_API_KEY';
+  const key = process.env.ANTHROPIC_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'ANTHROPIC_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/models?limit=1', {
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    });
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const data = await res.json().catch(() => ({}));
+    const result = { platform, status, lastError: data.error?.message || `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
+async function checkGoogle() {
+  const platform = 'google';
+  const envVarName = 'GOOGLE_API_KEY';
+  const key = process.env.GOOGLE_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'GOOGLE_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    // Geocoding ping — free tier covers this handily.
+    const res = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=Bradenton,FL&key=${encodeURIComponent(key)}`);
+    const data = await res.json().catch(() => ({}));
+
+    if (res.ok && (data.status === 'OK' || data.status === 'ZERO_RESULTS')) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const authFailed = data.status === 'REQUEST_DENIED' || data.status === 'INVALID_REQUEST';
+    const status = authFailed ? 'expired' : 'error';
+    const result = { platform, status, lastError: data.error_message || data.status || `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
+async function checkSendGrid() {
+  const platform = 'sendgrid';
+  const envVarName = 'SENDGRID_API_KEY';
+  const key = process.env.SENDGRID_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'SENDGRID_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch('https://api.sendgrid.com/v3/user/account', {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
+async function checkElevenLabs() {
+  const platform = 'elevenlabs';
+  const envVarName = 'ELEVENLABS_API_KEY';
+  const key = process.env.ELEVENLABS_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'ELEVENLABS_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch('https://api.elevenlabs.io/v1/user', {
+      headers: { 'xi-api-key': key },
+    });
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
+async function checkDeepgram() {
+  const platform = 'deepgram';
+  const envVarName = 'DEEPGRAM_API_KEY';
+  const key = process.env.DEEPGRAM_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'DEEPGRAM_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch('https://api.deepgram.com/v1/projects', {
+      headers: { Authorization: `Token ${key}` },
+    });
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
+// RentCast has no cheap no-cost ping endpoint and every property call
+// burns a credit. We report 'healthy' when the API key is set, since
+// that's all the check can guarantee without spending credits.
+async function checkRentCast() {
+  const platform = 'rentcast';
+  const envVarName = 'RENTCAST_API_KEY';
+  const key = process.env.RENTCAST_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'RENTCAST_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+  await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+  return result;
+}
+
 // ── Public API ──
 
 const TokenHealthService = {
@@ -313,6 +570,14 @@ const TokenHealthService = {
       case 'bouncie': return checkBouncie();
       case 'beehiiv': return checkBeehiiv();
       case 'dataforseo': return checkDataForSEO();
+      case 'stripe': return checkStripe();
+      case 'twilio': return checkTwilio();
+      case 'anthropic': return checkAnthropic();
+      case 'google': return checkGoogle();
+      case 'sendgrid': return checkSendGrid();
+      case 'elevenlabs': return checkElevenLabs();
+      case 'deepgram': return checkDeepgram();
+      case 'rentcast': return checkRentCast();
       default:
         return { platform, status: 'error', lastError: `Unknown platform: ${platform}`, expiresAt: null };
     }
@@ -337,6 +602,14 @@ const TokenHealthService = {
     results.push(await checkBouncie());
     results.push(await checkBeehiiv());
     results.push(await checkDataForSEO());
+    results.push(await checkStripe());
+    results.push(await checkTwilio());
+    results.push(await checkAnthropic());
+    results.push(await checkGoogle());
+    results.push(await checkSendGrid());
+    results.push(await checkElevenLabs());
+    results.push(await checkDeepgram());
+    results.push(await checkRentCast());
 
     const healthy = results.filter(r => r.status === 'healthy').length;
     const failures = results.filter(r => r.status === 'expired' || r.status === 'error');
@@ -366,6 +639,8 @@ const TokenHealthService = {
         'facebook', 'instagram', 'linkedin',
         'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
         'bouncie', 'beehiiv', 'dataforseo',
+        'stripe', 'twilio', 'anthropic', 'google',
+        'sendgrid', 'elevenlabs', 'deepgram', 'rentcast',
       ]);
 
       await db('token_credentials').whereNotIn('platform', [...KNOWN]).del();
