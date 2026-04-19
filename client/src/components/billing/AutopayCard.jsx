@@ -1,6 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import api from '../../utils/api';
+
+function loadStripeJs(publishableKey) {
+  return new Promise((resolve) => {
+    if (window.Stripe) return resolve(window.Stripe(publishableKey));
+    const script = document.createElement('script');
+    script.src = 'https://js.stripe.com/v3/';
+    script.onload = () => resolve(window.Stripe(publishableKey));
+    document.head.appendChild(script);
+  });
+}
 
 /**
  * AutopayCard — customer-facing autopay transparency + controls.
@@ -18,6 +28,12 @@ export default function AutopayCard() {
   const [pauseReason, setPauseReason] = useState('');
   const [selectedCard, setSelectedCard] = useState('');
   const [selectedDay, setSelectedDay] = useState(1);
+  const [addingCard, setAddingCard] = useState(false);
+  const [stripeReady, setStripeReady] = useState(false);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const paymentElementRef = useRef(null);
+  const mountRef = useRef(null);
 
   const load = () =>
     api.getAutopay()
@@ -26,6 +42,10 @@ export default function AutopayCard() {
       .finally(() => setLoading(false));
 
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    if (modal !== 'card' && addingCard) resetAddCard();
+  }, [modal]);
 
   if (loading) return null;
   if (!data) return null;
@@ -75,6 +95,66 @@ export default function AutopayCard() {
   const submitResume = async () => {
     setSaving(true); setErr('');
     try { await api.resumeAutopay(); await load(); } catch (e) { setErr(e.message || 'Resume failed'); }
+    setSaving(false);
+  };
+
+  const resetAddCard = () => {
+    paymentElementRef.current = null;
+    elementsRef.current = null;
+    stripeRef.current = null;
+    setAddingCard(false);
+    setStripeReady(false);
+  };
+
+  const startAddCard = async () => {
+    setErr('');
+    setAddingCard(true);
+    setStripeReady(false);
+    try {
+      const setupData = await api.createSetupIntent('card');
+      const stripe = await loadStripeJs(setupData.publishableKey);
+      stripeRef.current = stripe;
+      const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
+      elementsRef.current = elements;
+      setTimeout(() => {
+        if (mountRef.current) {
+          const pe = elements.create('payment', {
+            layout: { type: 'tabs' },
+            paymentMethodOrder: ['apple_pay', 'google_pay', 'card', 'us_bank_account'],
+          });
+          pe.mount(mountRef.current);
+          paymentElementRef.current = pe;
+          pe.on('ready', () => setStripeReady(true));
+        }
+      }, 100);
+    } catch (e) {
+      setErr(e.message || 'Failed to initialize payment form');
+      setAddingCard(false);
+    }
+  };
+
+  const submitNewCard = async () => {
+    if (!stripeRef.current || !elementsRef.current) return;
+    setSaving(true); setErr('');
+    try {
+      const { error, setupIntent } = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        redirect: 'if_required',
+      });
+      if (error) { setErr(error.message); setSaving(false); return; }
+      if (setupIntent && setupIntent.payment_method) {
+        const saved = await api.saveStripeCard(setupIntent.payment_method);
+        const newId = saved?.card?.id;
+        resetAddCard();
+        await load();
+        if (newId) {
+          setSelectedCard(newId);
+          await api.updateAutopay({ autopay_payment_method_id: newId });
+          await load();
+          setModal(null);
+        }
+      }
+    } catch (e) { setErr(e.message || 'Failed to save card'); }
     setSaving(false);
   };
 
@@ -167,10 +247,10 @@ export default function AutopayCard() {
             </div>
           )}
 
-          {modal === 'card' && (
+          {modal === 'card' && !addingCard && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {payment_methods.length === 0 ? (
-                <div style={{ fontSize: 13, color: B.grayMid }}>No cards on file. Add one below in Payment Methods.</div>
+                <div style={{ fontSize: 13, color: B.grayMid }}>No cards on file yet — add one below.</div>
               ) : (
                 payment_methods.map((pm) => (
                   <label key={pm.id} style={{
@@ -188,11 +268,27 @@ export default function AutopayCard() {
                   </label>
                 ))
               )}
+              <button style={{ ...btn('secondary'), alignSelf: 'flex-start' }} disabled={saving} onClick={startAddCard}>
+                + Add new card
+              </button>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
-                <button style={btn('primary')} disabled={saving || !selectedCard}
+                <button style={btn('primary')} disabled={saving || !selectedCard || payment_methods.length === 0}
                   onClick={() => runUpdate({ autopay_payment_method_id: selectedCard })}>
                   {saving ? 'Saving…' : 'Use this card'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {modal === 'card' && addingCard && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div ref={mountRef} style={{ minHeight: 180 }} />
+              {!stripeReady && <div style={{ fontSize: 13, color: B.grayMid }}>Loading payment form…</div>}
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button style={btn('secondary')} disabled={saving} onClick={resetAddCard}>Back</button>
+                <button style={btn('primary')} disabled={saving || !stripeReady} onClick={submitNewCard}>
+                  {saving ? 'Saving…' : 'Save card'}
                 </button>
               </div>
             </div>
