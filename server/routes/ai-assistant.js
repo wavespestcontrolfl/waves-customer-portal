@@ -79,7 +79,7 @@ router.put('/admin/escalations/:id', adminAuthenticate, requireTechOrAdmin, asyn
 
     // If resolved, also close the conversation
     if (status === 'resolved' && esc.conversation_id) {
-      await db('ai_conversations').where('id', esc.conversation_id).update({
+      await db('agent_sessions').where('id', esc.conversation_id).update({
         status: 'resolved', resolved_by: 'human', updated_at: new Date(),
       });
     }
@@ -92,7 +92,7 @@ router.put('/admin/escalations/:id', adminAuthenticate, requireTechOrAdmin, asyn
 router.get('/admin/conversations', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
     const { status, limit = 30 } = req.query;
-    let query = db('ai_conversations as conv')
+    let query = db('agent_sessions as conv')
       .leftJoin('customers as c', 'conv.customer_id', 'c.id')
       .select('conv.*', 'c.first_name', 'c.last_name', 'c.phone')
       .orderBy('conv.last_activity_at', 'desc')
@@ -108,11 +108,11 @@ router.get('/admin/conversations', adminAuthenticate, requireTechOrAdmin, async 
 // GET /api/ai/admin/conversations/:id/messages — full message thread
 router.get('/admin/conversations/:id/messages', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
-    const messages = await db('ai_messages')
+    const messages = await db('agent_messages')
       .where('conversation_id', req.params.id)
       .orderBy('created_at', 'asc');
 
-    const conversation = await db('ai_conversations').where('id', req.params.id).first();
+    const conversation = await db('agent_sessions').where('id', req.params.id).first();
 
     res.json({ messages, conversation });
   } catch (err) { next(err); }
@@ -122,11 +122,11 @@ router.get('/admin/conversations/:id/messages', adminAuthenticate, requireTechOr
 router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
     const { message } = req.body;
-    const conv = await db('ai_conversations').where('id', req.params.id).first();
+    const conv = await db('agent_sessions').where('id', req.params.id).first();
     if (!conv) return res.status(404).json({ error: 'Conversation not found' });
 
     // Save the admin reply
-    await db('ai_messages').insert({
+    await db('agent_messages').insert({
       conversation_id: conv.id,
       role: 'assistant',
       content: message,
@@ -147,7 +147,7 @@ router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAd
       }
     }
 
-    await db('ai_conversations').where('id', conv.id).update({
+    await db('agent_sessions').where('id', conv.id).update({
       last_activity_at: new Date(),
       status: 'active',
       resolved_by: null,
@@ -226,9 +226,9 @@ router.get('/admin/stats', adminAuthenticate, requireTechOrAdmin, async (req, re
     const days = parseInt(req.query.days || 30);
     const since = new Date(Date.now() - days * 86400000);
 
-    const conversations = await db('ai_conversations').where('created_at', '>', since);
+    const conversations = await db('agent_sessions').where('created_at', '>', since);
     const escalations = await db('ai_escalations').where('created_at', '>', since);
-    const messages = await db('ai_messages').where('created_at', '>', since);
+    const messages = await db('agent_messages').where('created_at', '>', since);
 
     res.json({
       conversations: {

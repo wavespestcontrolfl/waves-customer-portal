@@ -165,3 +165,27 @@ Raw traces archived at `/tmp/waves-baseline-traces/0{1..6}-*.json`.
 **Revisit if:** Florida-sun glare on tablets forces the office team off light mode (unlikely — Virginia works indoors). Also revisit if the next Tier 1 page migration onto these tokens reveals missing semantic slots (e.g. chart colors, success/warning — intentionally omitted until a real consumer needs them).
 
 ---
+
+## 2026-04-18 — Rename `ai_conversations`/`ai_messages` → `agent_sessions`/`agent_messages`
+
+**Decision:** Rename the `ai_conversations` and `ai_messages` tables to `agent_sessions` and `agent_messages`, freeing the `conversations`/`messages` namespace for the new unified customer communications schema.
+
+**Context:** PR 1 of the comms unification (see entry below) introduces a `conversations` + `messages` pair to consolidate SMS, voice, voicemail, email, and Beehiiv touchpoints into a single channel-agnostic thread + message model. The existing `ai_conversations` table — created in migration 039 alongside `call_log` — sounds like the same thing but is actually agent execution-state: AI assistant session tracking with `tool_calls`, `tool_results`, `requires_approval`, `escalated`, `conversation_summary`. It is not a customer-facing thread.
+
+**Reasoning:** Letting both names coexist means every developer (and every future Claude Code session) has to relearn "when we say conversation we mean…" for the lifespan of the codebase. The cost is silent for years and then expensive once. Six file references via grep, ~45 string occurrences total; a one-PR rename is cheaper than the ambiguity tax. `agent_sessions` is more accurate to what the table actually stores (a session per agent run), and `agent_messages` parallels it. Migration is a straight `renameTable` — Postgres tracks FKs by OID, not name, so the existing `ai_messages.conversation_id → ai_conversations.id` constraint continues to work; only the constraint *name* is now stale (cosmetic).
+
+**Revisit if:** A future agent framework requires a different mental model (e.g., persistent agent memory that spans sessions) that doesn't fit `agent_sessions` semantics. In that case, add a new table; don't rename again.
+
+---
+
+## 2026-04-18 — Unified `conversations` + `messages` as the comms schema; PR 1 ships dual-write only
+
+**Decision:** Land a single `conversations` + `messages` schema that all channels (voice, sms, email, newsletter, voicemail, system_note) write into, alongside `blocked_numbers` + `blocked_call_attempts` for spam handling. PR 1 adds the tables and dual-writes from existing webhooks; the inbox keeps reading the legacy `sms_log`/`call_log`/`emails` tables. PR 2 cuts the read path over and backfills history.
+
+**Context:** Today the admin Communications inbox reads only `sms_log` — calls, emails, and recordings live in three other tables that the inbox never joins. Virginia experiences this as "I can't find Aaron's old texts" and will experience it as "I can't find Aaron's old emails" the moment email gets surfaced. Beehiiv newsletter sends are entirely opaque. The pain is the same pain across six channels; solving it once is the lever. The full strategy doc covers seven sequential PRs; this entry covers PR 1 only.
+
+**Reasoning:** The conversation row is keyed on `(customer_id, channel, our_endpoint_id)` — meaning a customer who's texted two of our 25 Twilio numbers gets two SMS conversation rows. That preserves the routing fidelity (reply-from must default to the number the customer most recently used per channel) without forcing Virginia to triage that customer across two threads — the inbox UI groups by `(customer, channel)` via a derived view layered over the raw rows. Dual-write in PR 1 (rather than cut-over) means a botched migration doesn't break the inbox Virginia uses 8 hours a day; old reads keep working until new tables are validated. Spam-block tables ship in the same migration so the data model is complete from day one — defining the full `block_type` enum (`hard_block`, `silent_voicemail`, `ai_screen`, `sms_silent`) now means PR 4's inbox dropdown and the later AI-screener PR don't need schema changes to introduce them.
+
+**Revisit if:** The dual-write phase reveals a column the new `messages` schema is missing (likely candidates: `email`-specific threading headers, Beehiiv campaign IDs, Twilio Voice Intelligence tags). Add as `metadata` keys first; promote to columns only if they become query targets. Also revisit if backfill volume turns out to be larger than expected — current estimate ≈ 50–100k rows total across legacy tables, well within a single in-place migration.
+
+---

@@ -18,6 +18,12 @@ router.post('/sms', async (req, res) => {
     }
 
     const { From, To, Body, MessageSid } = req.body;
+
+    // ── Spam block (must run before any other routing) ──
+    const { checkInboundBlock } = require('../middleware/spam-block');
+    const blockResult = await checkInboundBlock({ from: From, to: To, channel: 'sms', twilioSid: MessageSid });
+    if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
+
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
     if (!numberConfig) {
@@ -27,6 +33,21 @@ router.post('/sms', async (req, res) => {
 
     // Try to match sender to a customer
     const customer = await db('customers').where({ phone: From }).first();
+
+    // Dual-write to unified messages table. Wrapped in fire-and-forget
+    // because old sms_log writes still happen below; if this errors the
+    // legacy path keeps Virginia's inbox working.
+    require('../services/conversations').recordTouchpoint({
+      customerId: customer?.id,
+      channel: 'sms',
+      ourEndpointId: To,
+      contactPhone: customer ? null : From,
+      direction: 'inbound',
+      body: Body,
+      authorType: 'customer',
+      twilioSid: MessageSid,
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type },
+    }).catch(() => {});
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
     const bodyTrimmed = (Body || '').trim().toUpperCase();

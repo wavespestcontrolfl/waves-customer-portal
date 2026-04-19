@@ -461,9 +461,9 @@ async function aiResponseStream(sessionData, ws, depth = 0) {
         }],
       });
 
-      // Log tool call to ai_messages if tracking
+      // Log tool call to agent_messages if tracking
       try {
-        await db("ai_messages").insert({
+        await db("agent_messages").insert({
           conversation_id: sessionData.aiConversationId,
           role: "tool",
           content: JSON.stringify({ tool: currentToolUse.name, input: parsedInput, result: toolResult }),
@@ -495,7 +495,7 @@ async function aiResponseStream(sessionData, ws, depth = 0) {
 
     // Log assistant message
     try {
-      await db("ai_messages").insert({
+      await db("agent_messages").insert({
         conversation_id: sessionData.aiConversationId,
         role: "assistant",
         content: fullResponse,
@@ -526,7 +526,7 @@ async function handleVoiceWebSocket(ws, req) {
           // Create AI conversation record
           let aiConversationId = null;
           try {
-            const [row] = await db("ai_conversations").insert({
+            const [row] = await db("agent_sessions").insert({
               channel: "voice",
               phone: from,
               status: "active",
@@ -612,7 +612,7 @@ async function handleVoiceWebSocket(ws, req) {
 
           // Log caller message
           try {
-            await db("ai_messages").insert({
+            await db("agent_messages").insert({
               conversation_id: sessionData.aiConversationId,
               role: "user",
               content: message.voicePrompt,
@@ -648,7 +648,7 @@ async function handleVoiceWebSocket(ws, req) {
 
             // Close AI conversation
             try {
-              await db("ai_conversations")
+              await db("agent_sessions")
                 .where({ id: sessionData.aiConversationId })
                 .update({ status: "completed", ended_at: new Date() });
             } catch (_) {}

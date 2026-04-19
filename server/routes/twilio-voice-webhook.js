@@ -28,6 +28,12 @@ router.post('/voice', async (req, res) => {
     }
 
     const { From, To, CallSid, CallStatus, Direction } = req.body;
+
+    // ── Spam block (must run before any other routing) ──
+    const { checkInboundBlock } = require('../middleware/spam-block');
+    const blockResult = await checkInboundBlock({ from: From, to: To, channel: 'voice', twilioSid: CallSid });
+    if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
+
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
     // Match caller to customer
@@ -91,6 +97,23 @@ router.post('/voice', async (req, res) => {
         domain: numberConfig?.domain || null,
       }),
     });
+
+    // Dual-write to unified messages table. Recording + transcription
+    // arrive in later webhooks and update this row via twilio_sid.
+    require('../services/conversations').recordTouchpoint({
+      customerId: customer?.id,
+      channel: 'voice',
+      ourEndpointId: To,
+      contactPhone: customer ? null : From,
+      direction: 'inbound',
+      authorType: 'customer',
+      twilioSid: CallSid,
+      metadata: {
+        location: numberConfig?.label || 'unknown',
+        numberType: numberConfig?.type || 'unknown',
+        domain: numberConfig?.domain || null,
+      },
+    }).catch(() => {});
 
     logger.info(`Inbound call: ${From} → ${To} (${CallSid}) customer=${customer?.first_name || 'unknown'}`);
 

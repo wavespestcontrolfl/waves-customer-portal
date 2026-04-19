@@ -141,7 +141,7 @@ class ManagedAssistant {
     const conversation = await this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone);
 
     // 3. Save the user message
-    await db('ai_messages').insert({
+    await db('agent_messages').insert({
       conversation_id: conversation.id,
       role: 'user',
       content: message,
@@ -165,7 +165,7 @@ class ManagedAssistant {
         sessionId = session.id;
 
         // Save session ID on conversation
-        await db('ai_conversations').where('id', conversation.id).update({
+        await db('agent_sessions').where('id', conversation.id).update({
           managed_session_id: sessionId,
         });
 
@@ -186,7 +186,7 @@ class ManagedAssistant {
       const reply = await this.processSessionEvents(sessionId, conversation, customerId);
 
       // 6. Save assistant reply
-      await db('ai_messages').insert({
+      await db('agent_messages').insert({
         conversation_id: conversation.id,
         role: 'assistant',
         content: reply,
@@ -195,7 +195,7 @@ class ManagedAssistant {
       });
 
       // Update conversation activity
-      await db('ai_conversations').where('id', conversation.id).update({
+      await db('agent_sessions').where('id', conversation.id).update({
         message_count: conversation.message_count + 1,
         last_activity_at: new Date(),
         timeout_at: new Date(Date.now() + CONVERSATION_TIMEOUT_MS),
@@ -277,7 +277,7 @@ class ManagedAssistant {
         }
 
         // Log tool usage
-        await db('ai_messages').insert({
+        await db('agent_messages').insert({
           conversation_id: conversation.id,
           role: 'tool_use',
           content: toolName,
@@ -318,7 +318,7 @@ class ManagedAssistant {
     const now = new Date();
 
     // Look for an active conversation on this channel
-    const existing = await db('ai_conversations')
+    const existing = await db('agent_sessions')
       .where({ channel_identifier: channelIdentifier || customerPhone, status: 'active' })
       .where('timeout_at', '>', now)
       .orderBy('last_activity_at', 'desc')
@@ -327,7 +327,7 @@ class ManagedAssistant {
     if (existing) return existing;
 
     // Timeout any stale conversations for this identifier
-    await db('ai_conversations')
+    await db('agent_sessions')
       .where({ channel_identifier: channelIdentifier || customerPhone, status: 'active' })
       .update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
 
@@ -342,7 +342,7 @@ class ManagedAssistant {
     } catch { /* context unavailable */ }
 
     // Create new conversation
-    const [conv] = await db('ai_conversations').insert({
+    const [conv] = await db('agent_sessions').insert({
       customer_id: customerId || null,
       channel,
       channel_identifier: channelIdentifier || customerPhone,
@@ -391,7 +391,7 @@ class ManagedAssistant {
     }).returning('*');
 
     // Update conversation
-    await db('ai_conversations').where('id', conversation.id).update({
+    await db('agent_sessions').where('id', conversation.id).update({
       escalated: true,
       escalation_reason: reason,
       status: 'escalated',
@@ -403,7 +403,7 @@ class ManagedAssistant {
       ? `Thanks ${customer.first_name} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
       : "Thanks for reaching out — I'm connecting you with our team right now. Someone will follow up with you shortly.";
 
-    await db('ai_messages').insert({
+    await db('agent_messages').insert({
       conversation_id: conversation.id,
       role: 'assistant',
       content: reply,
