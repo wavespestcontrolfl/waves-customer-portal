@@ -155,6 +155,9 @@ app.use('/api/auth/verify-code', authLimiter);
 // Body parsing
 // Stripe webhook must use raw body for signature verification — mount BEFORE json parser
 app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }), require('./routes/stripe-webhook'));
+// SendGrid event webhook verifies an ECDSA signature over the raw body — same reason, mount BEFORE json parser.
+// The route attaches its own express.raw() so it only consumes the raw body for its own path.
+app.use('/api/webhooks/sendgrid', require('./routes/webhooks-sendgrid'));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
