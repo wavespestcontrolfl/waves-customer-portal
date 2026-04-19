@@ -105,6 +105,7 @@ export default function Customer360Profile({ customerId, onClose }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [timelineFilter, setTimelineFilter] = useState('all');
   const [timeline, setTimeline] = useState([]);
+  const [comms, setComms] = useState([]);
   const [smsReply, setSmsReply] = useState('');
   const [sendingSms, setSendingSms] = useState(false);
   const panelRef = useRef(null);
@@ -114,9 +115,11 @@ export default function Customer360Profile({ customerId, onClose }) {
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`),
       adminFetch(`/admin/customers/${customerId}/timeline`).catch(() => ({ timeline: [] })),
-    ]).then(([detail, tl]) => {
+      adminFetch(`/admin/customers/${customerId}/comms`).catch(() => ({ comms: [] })),
+    ]).then(([detail, tl, cm]) => {
       setData(detail);
       setTimeline(tl.timeline || []);
+      setComms(cm.comms || []);
       setLoading(false);
     }).catch(() => setLoading(false));
   }, [customerId]);
@@ -157,7 +160,6 @@ export default function Customer360Profile({ customerId, onClose }) {
   const services = data.services || [];
   const payments = data.payments || [];
   const scheduled = data.scheduled || [];
-  const smsLog = data.smsLog || [];
 
   const balanceOwed = invoices.filter(i => i.status !== 'paid').reduce((s, i) => s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0), 0);
   const lastPayment = payments[0];
@@ -204,11 +206,20 @@ export default function Customer360Profile({ customerId, onClose }) {
     try {
       await adminFetch('/admin/communications/send-sms', { method: 'POST', body: JSON.stringify({ to: c.phone, message: smsReply }) });
       setSmsReply('');
-      // Refresh sms
-      const fresh = await adminFetch(`/admin/customers/${customerId}`);
+      const [fresh, freshComms] = await Promise.all([
+        adminFetch(`/admin/customers/${customerId}`),
+        adminFetch(`/admin/customers/${customerId}/comms`).catch(() => ({ comms: [] })),
+      ]);
       setData(fresh);
+      setComms(freshComms.comms || []);
     } catch { /* ignore */ }
     setSendingSms(false);
+  };
+
+  const fmtDur = (s) => {
+    if (!s && s !== 0) return null;
+    const mins = Math.floor(s / 60), secs = s % 60;
+    return mins ? `${mins}m ${secs}s` : `${secs}s`;
   };
 
   const TABS = [
@@ -499,23 +510,52 @@ export default function Customer360Profile({ customerId, onClose }) {
           {/* ---- COMMUNICATIONS TAB ---- */}
           {activeTab === 'comms' && (
             <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-              <SectionTitle>SMS Thread ({smsLog.length})</SectionTitle>
+              <SectionTitle>Thread ({comms.length})</SectionTitle>
               <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12, maxHeight: 400 }}>
-                {[...smsLog].reverse().map((s, i) => (
-                  <div key={i} style={{
-                    maxWidth: '75%', padding: '8px 12px', borderRadius: 12, fontSize: 13, lineHeight: 1.5,
-                    alignSelf: s.direction === 'inbound' ? 'flex-start' : 'flex-end',
-                    background: s.direction === 'inbound' ? D.bg : `${D.teal}22`,
-                    color: s.direction === 'inbound' ? D.text : D.teal,
-                    border: `1px solid ${s.direction === 'inbound' ? D.border : `${D.teal}44`}`,
-                    borderBottomLeftRadius: s.direction === 'inbound' ? 4 : 12,
-                    borderBottomRightRadius: s.direction === 'inbound' ? 12 : 4,
-                  }}>
-                    <div>{s.message_body}</div>
-                    <div style={{ fontSize: 10, color: D.muted, marginTop: 4, textAlign: 'right' }}>{timeAgo(s.created_at)}</div>
-                  </div>
-                ))}
-                {smsLog.length === 0 && <div style={{ color: D.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>No SMS messages</div>}
+                {[...comms].reverse().map((m, i) => {
+                  const inbound = m.direction === 'inbound';
+                  if (m.channel === 'sms') {
+                    return (
+                      <div key={m.id || i} style={{
+                        maxWidth: '75%', padding: '8px 12px', borderRadius: 12, fontSize: 13, lineHeight: 1.5,
+                        alignSelf: inbound ? 'flex-start' : 'flex-end',
+                        background: inbound ? D.bg : `${D.teal}22`,
+                        color: inbound ? D.text : D.teal,
+                        border: `1px solid ${inbound ? D.border : `${D.teal}44`}`,
+                        borderBottomLeftRadius: inbound ? 4 : 12,
+                        borderBottomRightRadius: inbound ? 12 : 4,
+                      }}>
+                        <div>{m.body}</div>
+                        <div style={{ fontSize: 10, color: D.muted, marginTop: 4, textAlign: 'right' }}>{timeAgo(m.createdAt)}</div>
+                      </div>
+                    );
+                  }
+                  // voice
+                  const rec = (m.media || []).find(x => x.type === 'recording');
+                  const duration = fmtDur(m.durationSeconds ?? rec?.duration_seconds);
+                  const summary = m.aiSummary || m.body;
+                  return (
+                    <div key={m.id || i} style={{
+                      maxWidth: '85%', padding: '10px 12px', borderRadius: 10, fontSize: 13, lineHeight: 1.5,
+                      alignSelf: inbound ? 'flex-start' : 'flex-end',
+                      background: D.bg, border: `1px solid ${D.border}`, color: D.text,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: summary ? 4 : 0 }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, color: inbound ? D.purple : D.muted }}>
+                          {inbound ? 'CALL IN' : 'CALL OUT'}
+                        </span>
+                        {duration && <span style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}>{duration}</span>}
+                        {m.answeredBy && <span style={{ fontSize: 10, color: D.muted }}>· {m.answeredBy}</span>}
+                      </div>
+                      {summary && <div style={{ fontSize: 12, color: D.text }}>{summary}</div>}
+                      {rec?.url && (
+                        <audio controls src={rec.url} style={{ marginTop: 6, width: '100%', height: 32 }} />
+                      )}
+                      <div style={{ fontSize: 10, color: D.muted, marginTop: 4, textAlign: 'right' }}>{timeAgo(m.createdAt)}</div>
+                    </div>
+                  );
+                })}
+                {comms.length === 0 && <div style={{ color: D.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>No messages</div>}
               </div>
               {c.phone && (
                 <div style={{ display: 'flex', gap: 8, padding: '12px 0', borderTop: `1px solid ${D.border}` }}>

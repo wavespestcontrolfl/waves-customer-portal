@@ -271,6 +271,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [timelineFilter, setTimelineFilter] = useState('all');
   const [timeline, setTimeline] = useState([]);
+  const [comms, setComms] = useState([]);
   const [smsReply, setSmsReply] = useState('');
   const [sendingSms, setSendingSms] = useState(false);
   const panelRef = useRef(null);
@@ -280,9 +281,11 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`),
       adminFetch(`/admin/customers/${customerId}/timeline`).catch(() => ({ timeline: [] })),
-    ]).then(([detail, tl]) => {
+      adminFetch(`/admin/customers/${customerId}/comms`).catch(() => ({ comms: [] })),
+    ]).then(([detail, tl, cm]) => {
       setData(detail);
       setTimeline(tl.timeline || []);
+      setComms(cm.comms || []);
       setLoading(false);
     }).catch(() => setLoading(false));
   }, [customerId]);
@@ -322,7 +325,6 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
   const services = data.services || [];
   const payments = data.payments || [];
   const scheduled = data.scheduled || [];
-  const smsLog = data.smsLog || [];
 
   const balanceOwed = invoices.filter(i => i.status !== 'paid')
     .reduce((s, i) => s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0), 0);
@@ -368,10 +370,20 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
     try {
       await adminFetch('/admin/communications/send-sms', { method: 'POST', body: JSON.stringify({ to: c.phone, message: smsReply }) });
       setSmsReply('');
-      const fresh = await adminFetch(`/admin/customers/${customerId}`);
+      const [fresh, freshComms] = await Promise.all([
+        adminFetch(`/admin/customers/${customerId}`),
+        adminFetch(`/admin/customers/${customerId}/comms`).catch(() => ({ comms: [] })),
+      ]);
       setData(fresh);
+      setComms(freshComms.comms || []);
     } catch { /* ignore */ }
     setSendingSms(false);
+  };
+
+  const fmtDur = (s) => {
+    if (!s && s !== 0) return null;
+    const mins = Math.floor(s / 60), secs = s % 60;
+    return mins ? `${mins}m ${secs}s` : `${secs}s`;
   };
 
   const TABS = [
@@ -682,29 +694,56 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
           {/* COMMS */}
           {activeTab === 'comms' && (
             <div className="flex flex-col h-full">
-              <SectionTitle>SMS Thread ({smsLog.length})</SectionTitle>
+              <SectionTitle>Thread ({comms.length})</SectionTitle>
               <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]">
-                {[...smsLog].reverse().map((s, i) => {
-                  const inbound = s.direction === 'inbound';
+                {[...comms].reverse().map((m, i) => {
+                  const inbound = m.direction === 'inbound';
+                  if (m.channel === 'sms') {
+                    return (
+                      <div key={m.id || i}
+                        className={cn(
+                          'max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline',
+                          inbound
+                            ? 'self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs'
+                            : 'self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs'
+                        )}
+                      >
+                        <div>{m.body}</div>
+                        <div className={cn(
+                          'text-10 mt-1 text-right',
+                          inbound ? 'text-ink-secondary' : 'text-zinc-300'
+                        )}>{timeAgo(m.createdAt)}</div>
+                      </div>
+                    );
+                  }
+                  // voice
+                  const rec = (m.media || []).find(x => x.type === 'recording');
+                  const duration = fmtDur(m.durationSeconds ?? rec?.duration_seconds);
+                  const summary = m.aiSummary || m.body;
                   return (
-                    <div key={i}
+                    <div key={m.id || i}
                       className={cn(
-                        'max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline',
-                        inbound
-                          ? 'self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs'
-                          : 'self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs'
+                        'max-w-[85%] px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm',
+                        inbound ? 'self-start' : 'self-end'
                       )}
                     >
-                      <div>{s.message_body}</div>
-                      <div className={cn(
-                        'text-10 mt-1 text-right',
-                        inbound ? 'text-ink-secondary' : 'text-zinc-300'
-                      )}>{timeAgo(s.created_at)}</div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-10 font-medium tracking-label uppercase text-ink-secondary">
+                          {inbound ? 'Call in' : 'Call out'}
+                        </span>
+                        {duration && <span className="text-11 u-nums text-zinc-900">{duration}</span>}
+                        {m.answeredBy && <span className="text-10 text-ink-secondary">· {m.answeredBy}</span>}
+                      </div>
+                      {summary && <div className="text-12 text-zinc-900 leading-relaxed">{summary}</div>}
+                      {rec?.url && (
+                        <audio controls src={rec.url} className="mt-1.5 w-full h-8" />
+                      )}
+                      <div className="text-10 mt-1 text-right text-ink-secondary">{timeAgo(m.createdAt)}</div>
                     </div>
                   );
                 })}
-                {smsLog.length === 0 && (
-                  <div className="text-ink-secondary text-13 text-center py-5">No SMS messages</div>
+                {comms.length === 0 && (
+                  <div className="text-ink-secondary text-13 text-center py-5">No messages</div>
                 )}
               </div>
               {c.phone && (
