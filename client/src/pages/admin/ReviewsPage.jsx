@@ -4,7 +4,8 @@ import GBPManagementPanel from './GBPManagement';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
+// V2 token pass: `teal` folded to zinc-900. Semantic green/amber/red preserved.
+const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', heading: '#09090B', inputBorder: '#D4D4D8' };
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
 function adminFetch(path, options = {}) {

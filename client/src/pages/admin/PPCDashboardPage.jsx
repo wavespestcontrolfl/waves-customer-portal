@@ -8,31 +8,34 @@ function adminFetch(path) {
   }).then(r => r.json());
 }
 
+// V2 token pass: non-semantic accents (blue/purple/orange/cyan/gold) fold to
+// zinc-900; semantic green/red/yellow preserved as V2-legal variants.
+// Glows collapsed to zinc-100 pastels.
 const C = {
-  bg: "#F1F5F9",
+  bg: "#FFFFFF",
   card: "#FFFFFF",
-  border: "#E2E8F0",
-  blue: "#0A7EC2",
-  blueGlow: "rgba(10,126,194,0.10)",
-  green: "#16A34A",
-  greenGlow: "rgba(22,163,74,0.10)",
-  red: "#C0392B",
-  redGlow: "rgba(192,57,43,0.08)",
-  yellow: "#F0A500",
-  yellowGlow: "rgba(240,165,0,0.10)",
-  purple: "#7C3AED",
-  purpleGlow: "rgba(124,58,237,0.08)",
-  orange: "#F97316",
-  orangeGlow: "rgba(249,115,22,0.08)",
-  cyan: "#06B6D4",
-  cyanGlow: "rgba(6,182,212,0.08)",
-  gold: "#FBBF24",
-  text: "#334155",
-  text2: "#64748B",
-  text3: "#64748B",
-  text4: "#475569",
-  heading: "#0F172A",
-  inputBorder: "#CBD5E1",
+  border: "#E4E4E7",
+  blue: "#18181B",
+  blueGlow: "#F4F4F5",
+  green: "#15803D",
+  greenGlow: "#DCFCE7",
+  red: "#991B1B",
+  redGlow: "#FEE2E2",
+  yellow: "#A16207",
+  yellowGlow: "#FEF3C7",
+  purple: "#18181B",
+  purpleGlow: "#F4F4F5",
+  orange: "#18181B",
+  orangeGlow: "#F4F4F5",
+  cyan: "#18181B",
+  cyanGlow: "#F4F4F5",
+  gold: "#18181B",
+  text: "#27272A",
+  text2: "#71717A",
+  text3: "#71717A",
+  text4: "#52525B",
+  heading: "#09090B",
+  inputBorder: "#D4D4D8",
 };
 
 // --- HELPERS ---
