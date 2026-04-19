@@ -138,12 +138,72 @@ router.post('/blog/sync-wordpress', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/content/blog/:id/publish — publish to WordPress
+// POST /api/admin/content/blog/:id/publish — LEGACY: publish to WordPress.
+// Kept running while the Astro publish flow (/publish-astro below) proves
+// out over the next 5–10 posts. Do not call from new UI — BlogPage now
+// surfaces "Publish to WP (legacy)" behind a secondary toggle.
 router.post('/blog/:id/publish', async (req, res, next) => {
   try {
     const wpPost = await WordPressSync.publishToWordPress(req.params.id);
     res.json({ success: true, wordpressId: wpPost.id, link: wpPost.link });
   } catch (err) { next(err); }
+});
+
+// =========================================================================
+// ASTRO PUBLISH PIPELINE — portal → GitHub PR → Cloudflare preview → merge
+// =========================================================================
+
+// GET /api/admin/content/authors — dynamic list from Astro authors collection
+router.get('/authors', async (req, res, next) => {
+  try {
+    const AuthorService = require('../services/content-astro/author-service');
+    const force = req.query.refresh === '1';
+    const authors = await AuthorService.listAuthors({ force });
+    res.json({ authors });
+  } catch (err) {
+    logger.error(`[content] authors list failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/content/blog/:id/publish-astro — create branch + PR
+router.post('/blog/:id/publish-astro', async (req, res, next) => {
+  try {
+    const AstroPublisher = require('../services/content-astro/astro-publisher');
+    const result = await AstroPublisher.publishAstro(req.params.id);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    logger.error(`[content] publish-astro failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/content/blog/:id/merge-astro — approve preview → prod
+router.post('/blog/:id/merge-astro', async (req, res, next) => {
+  try {
+    const AstroPublisher = require('../services/content-astro/astro-publisher');
+    const result = await AstroPublisher.mergeAstro(req.params.id);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    logger.error(`[content] merge-astro failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/content/blog/:id/refresh-astro — ask CF Pages for the
+// latest preview-build status right now (UI button next to the state pill).
+router.post('/blog/:id/refresh-astro', async (req, res, next) => {
+  try {
+    const PagesPoll = require('../services/content-astro/pages-poll');
+    const post = await db('blog_posts').where({ id: req.params.id }).first();
+    if (!post) return res.status(404).json({ error: 'post not found' });
+    const result = await PagesPoll.pollPost(post);
+    const refreshed = await db('blog_posts').where({ id: post.id }).first();
+    res.json({ success: true, result, post: refreshed });
+  } catch (err) {
+    logger.error(`[content] refresh-astro failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/admin/content/blog/:id/share-social — share published post to all social platforms

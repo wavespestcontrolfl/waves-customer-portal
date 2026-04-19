@@ -533,6 +533,56 @@ async function checkDeepgram() {
   }
 }
 
+async function checkGitHub() {
+  const platform = 'github';
+  const envVarName = 'GITHUB_TOKEN';
+  const token = process.env.GITHUB_TOKEN;
+  const owner = process.env.GITHUB_OWNER || 'wavespestcontrolfl';
+  const repo = process.env.GITHUB_ASTRO_REPO || 'wavespestcontrol-astro';
+
+  if (!token) {
+    const result = { platform, status: 'not_configured', lastError: 'GITHUB_TOKEN not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'pat', envVarName });
+    return result;
+  }
+
+  try {
+    // /repos/:owner/:repo is auth-gated for fine-grained PATs scoped to
+    // specific repos — it's the right probe for "can this token write
+    // content?" without burning rate limit on larger endpoints.
+    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'waves-portal-token-health',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+
+    // Fine-grained PATs carry their expiration in a response header —
+    // captured when present so the Tool Health Dashboard can surface the
+    // amber <14-day / red <3-day countdown the user asked for.
+    const expiresHeader = res.headers.get('github-authentication-token-expiration');
+    const expiresAt = expiresHeader ? new Date(expiresHeader) : null;
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt };
+      await upsertResult({ ...result, tokenType: 'pat', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403 || res.status === 404) ? 'expired' : 'error';
+    const data = await res.json().catch(() => ({}));
+    const result = { platform, status, lastError: data.message || `HTTP ${res.status}`, expiresAt };
+    await upsertResult({ ...result, tokenType: 'pat', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'pat', envVarName });
+    return result;
+  }
+}
+
 // RentCast has no cheap no-cost ping endpoint and every property call
 // burns a credit. We report 'healthy' when the API key is set, since
 // that's all the check can guarantee without spending credits.
@@ -578,6 +628,7 @@ const TokenHealthService = {
       case 'elevenlabs': return checkElevenLabs();
       case 'deepgram': return checkDeepgram();
       case 'rentcast': return checkRentCast();
+      case 'github': return checkGitHub();
       default:
         return { platform, status: 'error', lastError: `Unknown platform: ${platform}`, expiresAt: null };
     }
@@ -610,6 +661,7 @@ const TokenHealthService = {
     results.push(await checkElevenLabs());
     results.push(await checkDeepgram());
     results.push(await checkRentCast());
+    results.push(await checkGitHub());
 
     const healthy = results.filter(r => r.status === 'healthy').length;
     const failures = results.filter(r => r.status === 'expired' || r.status === 'error');
@@ -641,6 +693,7 @@ const TokenHealthService = {
         'bouncie', 'beehiiv', 'dataforseo',
         'stripe', 'twilio', 'anthropic', 'google',
         'sendgrid', 'elevenlabs', 'deepgram', 'rentcast',
+        'github',
       ]);
 
       await db('token_credentials').whereNotIn('platform', [...KNOWN]).del();

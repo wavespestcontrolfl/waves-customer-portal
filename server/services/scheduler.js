@@ -92,6 +92,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
+  // Updates astro_preview_url once the preview deploy succeeds, or flips
+  // the post to build_failed if it blows up.
+  // =========================================================================
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      const PagesPoll = require('./content-astro/pages-poll');
+      await PagesPoll.pollPending();
+    } catch (err) {
+      logger.error(`Pages poll failed: ${err.message}`);
+    }
+  });
+
+  // =========================================================================
   // DAILY 10AM (weekdays) — 7-Day Late Payment SMS
   // Checks invoices 7+ days overdue, sends tiered reminder SMS
   // =========================================================================

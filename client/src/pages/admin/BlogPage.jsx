@@ -144,9 +144,38 @@ function PostEditor({ post, onBack, onUpdate }) {
   const [generating, setGenerating] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [astroPublishing, setAstroPublishing] = useState(false);
+  const [astroMerging, setAstroMerging] = useState(false);
+  const [astroRefreshing, setAstroRefreshing] = useState(false);
+  const [authors, setAuthors] = useState([]);
+  const [serviceAreas, setServiceAreas] = useState([]);
+  const [showLegacyWp, setShowLegacyWp] = useState(false);
   const [optimization, setOptimization] = useState(
     post.optimization_suggestions ? (typeof post.optimization_suggestions === 'string' ? JSON.parse(post.optimization_suggestions) : post.optimization_suggestions) : null
   );
+
+  useEffect(() => {
+    adminFetch('/admin/content/authors').then(d => setAuthors(d.authors || [])).catch(() => setAuthors([]));
+    fetch(`${API_BASE}/public/service-areas`).then(r => r.json()).then(d => setServiceAreas(d.serviceAreas || [])).catch(() => setServiceAreas([]));
+  }, []);
+
+  const toArray = (v) => {
+    if (Array.isArray(v)) return v;
+    if (!v) return [];
+    if (typeof v === 'string') {
+      try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; }
+    }
+    return [];
+  };
+  const serviceAreaTags = toArray(editing.service_areas_tag);
+  const relatedServices = toArray(editing.related_services);
+
+  const toggleServiceArea = (city) => {
+    const next = serviceAreaTags.includes(city)
+      ? serviceAreaTags.filter(c => c !== city)
+      : [...serviceAreaTags, city];
+    setEditing(prev => ({ ...prev, service_areas_tag: next }));
+  };
 
   const handleGenerate = async () => {
     setGenerating(true);
@@ -172,8 +201,17 @@ function PostEditor({ post, onBack, onUpdate }) {
       keyword: editing.keyword,
       tag: editing.tag,
       status: editing.status,
+      author_slug: editing.author_slug || null,
+      reviewer_slug: editing.reviewer_slug || null,
+      fact_checked_by: editing.fact_checked_by || null,
+      category: editing.category || null,
+      post_type: editing.post_type || null,
+      service_areas_tag: serviceAreaTags,
+      related_services: relatedServices,
+      hero_image_alt: editing.hero_image_alt || null,
     });
     if (onUpdate) onUpdate(updated.post);
+    if (updated.post) setEditing(prev => ({ ...prev, ...updated.post }));
   };
 
   const applyOptimization = () => {
@@ -195,6 +233,55 @@ function PostEditor({ post, onBack, onUpdate }) {
       alert('Publish failed — check connection');
     }
     setPublishing(false);
+  };
+
+  const handlePublishAstro = async () => {
+    await handleSave();
+    setAstroPublishing(true);
+    try {
+      const result = await adminPost(`/admin/content/blog/${post.id}/publish-astro`, {});
+      if (result.error) {
+        alert(`Astro publish failed: ${result.error}`);
+      } else {
+        setEditing(prev => ({
+          ...prev,
+          astro_status: 'pr_open',
+          astro_pr_number: result.pr_number,
+          astro_branch_name: result.branch,
+          astro_preview_url: result.preview_url,
+        }));
+      }
+    } catch (err) {
+      alert('Astro publish failed: ' + err.message);
+    }
+    setAstroPublishing(false);
+  };
+
+  const handleMergeAstro = async () => {
+    if (!window.confirm('Merge this PR and go live on the hub + spokes?')) return;
+    setAstroMerging(true);
+    try {
+      const result = await adminPost(`/admin/content/blog/${post.id}/merge-astro`, {});
+      if (result.error) {
+        alert(`Merge failed: ${result.error}`);
+      } else {
+        setEditing(prev => ({ ...prev, astro_status: 'merged', status: 'published' }));
+      }
+    } catch (err) {
+      alert('Merge failed: ' + err.message);
+    }
+    setAstroMerging(false);
+  };
+
+  const handleRefreshAstro = async () => {
+    setAstroRefreshing(true);
+    try {
+      const result = await adminPost(`/admin/content/blog/${post.id}/refresh-astro`, {});
+      if (result.post) setEditing(prev => ({ ...prev, ...result.post }));
+    } catch (err) {
+      // Silent — refresh is best-effort
+    }
+    setAstroRefreshing(false);
   };
 
   const [sharing, setSharing] = useState(false);
@@ -270,6 +357,83 @@ function PostEditor({ post, onBack, onUpdate }) {
             <div style={{ fontSize: 10, color: (editing.meta_description || '').length > 160 ? D.red : D.muted, marginTop: 2 }}>
               {(editing.meta_description || '').length}/160 chars
             </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* v2 Byline + Taxonomy — drives the Astro frontmatter */}
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>Byline & Taxonomy</div>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: 10 }}>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Author</label>
+            <select value={editing.author_slug || ''} onChange={e => setEditing(prev => ({ ...prev, author_slug: e.target.value }))} style={{
+              width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.text, fontSize: 12, cursor: 'pointer',
+            }}>
+              <option value="">Select author...</option>
+              {authors.map(a => (<option key={a.slug} value={a.slug}>{a.name}{a.fdacs_license ? ` (${a.fdacs_license})` : ''}</option>))}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Technical Reviewer</label>
+            <select value={editing.reviewer_slug || ''} onChange={e => setEditing(prev => ({ ...prev, reviewer_slug: e.target.value }))} style={{
+              width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.text, fontSize: 12, cursor: 'pointer',
+            }}>
+              <option value="">None</option>
+              {authors.filter(a => a.fdacs_license).map(a => (<option key={a.slug} value={a.slug}>{a.name}</option>))}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Fact-Checked By</label>
+            <input value={editing.fact_checked_by || ''} onChange={e => setEditing(prev => ({ ...prev, fact_checked_by: e.target.value }))} placeholder="e.g. Virginia Gelser" style={{
+              width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.text, fontSize: 12,
+            }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Category</label>
+            <select value={editing.category || ''} onChange={e => setEditing(prev => ({ ...prev, category: e.target.value }))} style={{
+              width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.text, fontSize: 12, cursor: 'pointer',
+            }}>
+              <option value="">Select...</option>
+              {['pest','lawn','termite','mosquito','rodent','commercial','bed-bug'].map(c => (<option key={c} value={c}>{c}</option>))}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Post Type</label>
+            <select value={editing.post_type || ''} onChange={e => setEditing(prev => ({ ...prev, post_type: e.target.value }))} style={{
+              width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.text, fontSize: 12, cursor: 'pointer',
+            }}>
+              <option value="">Select...</option>
+              {['article','how-to','location','comparison','checklist'].map(t => (<option key={t} value={t}>{t}</option>))}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Hero Image Alt</label>
+            <input value={editing.hero_image_alt || ''} onChange={e => setEditing(prev => ({ ...prev, hero_image_alt: e.target.value }))} style={{
+              width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.text, fontSize: 12,
+            }} />
+          </div>
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 6 }}>Service Areas (tags)</label>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {serviceAreas.map(sa => {
+              const active = serviceAreaTags.includes(sa.city);
+              return (
+                <button key={sa.slug} type="button" onClick={() => toggleServiceArea(sa.city)} style={{
+                  padding: '4px 10px', borderRadius: 999, fontSize: 11, cursor: 'pointer',
+                  border: `1px solid ${active ? D.teal : D.border}`,
+                  background: active ? D.teal : 'transparent',
+                  color: active ? D.white : D.muted,
+                }}>{sa.city}</button>
+              );
+            })}
           </div>
         </div>
       </Card>
@@ -381,28 +545,150 @@ function PostEditor({ post, onBack, onUpdate }) {
         </Card>
       )}
 
+      {/* Astro publish state + actions */}
+      {editing.content && <AstroPublishPanel
+        post={editing}
+        onPublish={handlePublishAstro}
+        onMerge={handleMergeAstro}
+        onRefresh={handleRefreshAstro}
+        publishing={astroPublishing}
+        merging={astroMerging}
+        refreshing={astroRefreshing}
+      />}
+
       {/* Actions */}
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button onClick={handleSave} style={{
           padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal,
-          color: D.heading, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer',
         }}>Save Draft</button>
-        {editing.content && (
-          <button onClick={handlePublish} disabled={publishing} style={{
-            padding: '10px 20px', borderRadius: 8, border: `1px solid ${D.green}`, background: 'transparent',
-            color: D.green, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: publishing ? 0.5 : 1,
-          }}>{publishing ? 'Publishing...' : 'Publish to Site'}</button>
-        )}
         {(editing.status === 'published' || editing.content) && (
           <button onClick={handleShareSocial} disabled={sharing} style={{
             padding: '10px 20px', borderRadius: 8, border: `1px solid ${D.purple}`, background: 'transparent',
             color: D.purple, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: sharing ? 0.5 : 1,
           }}>{sharing ? 'Sharing...' : 'Share to Social Media'}</button>
         )}
+        <div style={{ flex: 1 }} />
+        {/* Legacy WordPress — hidden by default, surface only on explicit toggle. */}
+        <button onClick={() => setShowLegacyWp(v => !v)} style={{
+          padding: '10px 14px', borderRadius: 8, border: `1px dashed ${D.border}`, background: 'transparent',
+          color: D.muted, fontSize: 11, cursor: 'pointer',
+        }}>{showLegacyWp ? 'Hide legacy' : 'Legacy (WP)'}</button>
       </div>
+      {showLegacyWp && editing.content && (
+        <div style={{
+          border: `1px dashed ${D.border}`, borderRadius: 8, padding: 10, fontSize: 11, color: D.muted,
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <span>Legacy WordPress publish — do not use for new posts. Retiring after 5–10 successful Astro publishes.</span>
+          <button onClick={handlePublish} disabled={publishing} style={{
+            padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent',
+            color: D.muted, fontSize: 11, cursor: 'pointer', opacity: publishing ? 0.5 : 1,
+          }}>{publishing ? 'Publishing...' : 'Publish to WP'}</button>
+        </div>
+      )}
     </div>
   );
 }
+
+// ─── Astro publish panel ───────────────────────────────────────────
+// Visual state machine for the blog → GitHub PR → Cloudflare preview →
+// merge → live pipeline. Reads `astro_status` on the post and surfaces
+// the next actionable step only.
+function AstroPublishPanel({ post, onPublish, onMerge, onRefresh, publishing, merging, refreshing }) {
+  const status = post.astro_status || 'draft';
+  const pill = ASTRO_PILLS[status] || ASTRO_PILLS.draft;
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: '4px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600,
+          background: pill.bg, color: pill.fg, border: `1px solid ${pill.border}`,
+        }}>
+          <span style={{ width: 6, height: 6, borderRadius: 999, background: pill.fg, display: 'inline-block' }} />
+          {pill.label}
+        </div>
+        {post.astro_pr_number && (
+          <div style={{ fontSize: 11, color: D.muted }}>PR #{post.astro_pr_number}</div>
+        )}
+        {post.astro_branch_name && (
+          <div style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}>{post.astro_branch_name}</div>
+        )}
+        <div style={{ flex: 1 }} />
+
+        {status === 'draft' && (
+          <button onClick={onPublish} disabled={publishing} style={{
+            padding: '10px 18px', borderRadius: 8, border: 'none', background: D.green,
+            color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: publishing ? 0.5 : 1,
+          }}>{publishing ? 'Opening PR…' : 'Publish to Astro (preview)'}</button>
+        )}
+        {(status === 'pr_open' || status === 'build_failed') && (
+          <>
+            {post.astro_preview_url && (
+              <a href={post.astro_preview_url} target="_blank" rel="noreferrer" style={{
+                padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.border}`,
+                color: D.text, fontSize: 12, textDecoration: 'none',
+              }}>Open Preview ↗</a>
+            )}
+            <button onClick={onRefresh} disabled={refreshing} style={{
+              padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent',
+              color: D.muted, fontSize: 12, cursor: 'pointer', opacity: refreshing ? 0.5 : 1,
+            }}>{refreshing ? 'Checking…' : 'Refresh status'}</button>
+            {status === 'pr_open' && (
+              <button onClick={onMerge} disabled={merging} style={{
+                padding: '10px 18px', borderRadius: 8, border: 'none', background: D.green,
+                color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: merging ? 0.5 : 1,
+              }}>{merging ? 'Merging…' : 'Approve & Go Live'}</button>
+            )}
+            {status === 'build_failed' && (
+              <button onClick={onPublish} disabled={publishing} style={{
+                padding: '10px 18px', borderRadius: 8, border: `1px solid ${D.red}`, background: 'transparent',
+                color: D.red, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: publishing ? 0.5 : 1,
+              }}>{publishing ? 'Retrying…' : 'Retry publish'}</button>
+            )}
+          </>
+        )}
+        {status === 'merged' && (
+          <>
+            <div style={{ fontSize: 12, color: D.muted }}>Merged. Live build in progress.</div>
+            <button onClick={onRefresh} disabled={refreshing} style={{
+              padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent',
+              color: D.muted, fontSize: 12, cursor: 'pointer', opacity: refreshing ? 0.5 : 1,
+            }}>Refresh</button>
+          </>
+        )}
+        {status === 'live' && post.astro_live_url && (
+          <a href={post.astro_live_url} target="_blank" rel="noreferrer" style={{
+            padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.green}`,
+            color: D.green, fontSize: 12, textDecoration: 'none', fontWeight: 600,
+          }}>View Live ↗</a>
+        )}
+        {status === 'publish_failed' && (
+          <button onClick={onPublish} disabled={publishing} style={{
+            padding: '10px 18px', borderRadius: 8, border: 'none', background: D.red,
+            color: D.white, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: publishing ? 0.5 : 1,
+          }}>{publishing ? 'Retrying…' : 'Retry publish'}</button>
+        )}
+      </div>
+      {post.astro_publish_error && (status === 'publish_failed' || status === 'build_failed') && (
+        <div style={{ marginTop: 10, padding: 10, borderRadius: 6, background: '#FEF2F2', color: D.red, fontSize: 11, fontFamily: MONO }}>
+          {post.astro_publish_error}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+const ASTRO_PILLS = {
+  draft:          { label: 'DRAFT',          bg: '#F4F4F5', fg: '#71717A', border: '#E4E4E7' },
+  pr_open:        { label: 'PREVIEW OPEN',   bg: '#EFF6FF', fg: '#1D4ED8', border: '#BFDBFE' },
+  build_failed:   { label: 'BUILD FAILED',   bg: '#FEF2F2', fg: '#991B1B', border: '#FECACA' },
+  merged:         { label: 'MERGED',         bg: '#ECFDF5', fg: '#065F46', border: '#A7F3D0' },
+  live:           { label: 'LIVE',           bg: '#ECFDF5', fg: '#15803D', border: '#86EFAC' },
+  publish_failed: { label: 'PUBLISH FAILED', bg: '#FEF2F2', fg: '#991B1B', border: '#FECACA' },
+};
 
 // =========================================================================
 // AUDIT TAB
