@@ -12,8 +12,13 @@ export default function InstallPrompt() {
     function handlePrompt(e) {
       e.preventDefault();
       setDeferredPrompt(e);
-      // Show after 30 seconds
-      setTimeout(() => setShow(true), 30000);
+      // Show after 30 seconds — but never on the monochrome admin/tech surfaces
+      // (the gold/navy brand styling is reserved for customer-facing pages).
+      setTimeout(() => {
+        const path = window.location.pathname;
+        if (path.startsWith('/admin') || path.startsWith('/tech')) return;
+        setShow(true);
+      }, 30000);
     }
 
     window.addEventListener('beforeinstallprompt', handlePrompt);
