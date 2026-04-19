@@ -9,25 +9,28 @@ function adminFetch(path) {
   }).then(r => r.json());
 }
 
+// Tier 2 monochrome palette — WAVES_COLORS keys preserved so the 90+
+// call sites keep their semantic roles. Dark-mode glows neutralized to
+// light pastel tints; accents fold into zinc-900 per V2 admin spec.
 const WAVES_COLORS = {
-  bg: "#0B1120",
-  cardBg: "#111827",
-  cardBorder: "#1E293B",
-  accent: "#3B82F6",
-  accentGlow: "rgba(59, 130, 246, 0.15)",
-  green: "#10B981",
-  greenGlow: "rgba(16, 185, 129, 0.2)",
-  red: "#EF4444",
-  redGlow: "rgba(239, 68, 68, 0.15)",
-  yellow: "#F59E0B",
-  yellowGlow: "rgba(245, 158, 11, 0.15)",
-  purple: "#8B5CF6",
-  orange: "#F97316",
-  cyan: "#06B6D4",
-  textPrimary: "#F1F5F9",
-  textSecondary: "#94A3B8",
-  textMuted: "#64748B",
-  gold: "#FBBF24",
+  bg: "#FFFFFF",
+  cardBg: "#FFFFFF",
+  cardBorder: "#E4E4E7",          // zinc-200
+  accent: "#18181B",               // zinc-900
+  accentGlow: "#F4F4F5",           // zinc-100
+  green: "#15803D",                // emerald-700 (semantic gain)
+  greenGlow: "#DCFCE7",            // emerald-100
+  red: "#991B1B",                  // alert-fg (semantic loss/alert)
+  redGlow: "#FEE2E2",              // red-100
+  yellow: "#A16207",               // amber-700
+  yellowGlow: "#FEF3C7",           // amber-100
+  purple: "#18181B",               // fold to accent
+  orange: "#18181B",
+  cyan: "#18181B",
+  textPrimary: "#09090B",          // ink-primary
+  textSecondary: "#52525B",        // ink-secondary
+  textMuted: "#A1A1AA",            // ink-tertiary
+  gold: "#18181B",                 // fold to accent
 };
 
 // --- COMPONENTS ---
@@ -68,11 +71,10 @@ function HBar({ label, value, maxValue, color, suffix = "%", width = "100%" }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10, width }}>
       <div style={{ width: 100, fontSize: 13, color: WAVES_COLORS.textSecondary, fontWeight: 500, flexShrink: 0, textAlign: "right" }}>{label}</div>
-      <div style={{ flex: 1, height: 22, background: "rgba(255,255,255,0.04)", borderRadius: 6, overflow: "hidden", position: "relative" }}>
+      <div style={{ flex: 1, height: 22, background: "#F4F4F5", borderRadius: 6, overflow: "hidden", position: "relative" }}>
         <div style={{
           width: `${pct}%`, height: "100%", background: color,
           borderRadius: 6, transition: "width 0.8s cubic-bezier(.4,0,.2,1)",
-          boxShadow: `0 0 12px ${color}44`,
         }} />
       </div>
       <div style={{ width: 52, fontSize: 13, fontWeight: 700, color: WAVES_COLORS.textPrimary, textAlign: "right", flexShrink: 0 }}>
@@ -87,7 +89,7 @@ function CompBar({ name, count, maxCount }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
       <div style={{ width: 90, fontSize: 12, color: WAVES_COLORS.textSecondary, fontWeight: 500, textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</div>
-      <div style={{ flex: 1, height: 18, background: "rgba(255,255,255,0.04)", borderRadius: 4, overflow: "hidden" }}>
+      <div style={{ flex: 1, height: 18, background: "#F4F4F5", borderRadius: 4, overflow: "hidden" }}>
         <div style={{ width: `${pct}%`, height: "100%", background: WAVES_COLORS.red, borderRadius: 4, minWidth: 8 }} />
       </div>
       <div style={{ width: 28, fontSize: 13, fontWeight: 700, color: WAVES_COLORS.textPrimary, textAlign: "right", flexShrink: 0 }}>{count}</div>
@@ -120,7 +122,7 @@ function StatusDot({ status }) {
   const labels = { cited: "Waves Cited", competitor: "Competitor Cited", no_aio: "No AI Overview" };
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: colors[status], fontWeight: 600 }}>
-      <span style={{ width: 8, height: 8, borderRadius: "50%", background: colors[status], display: "inline-block", boxShadow: `0 0 6px ${colors[status]}66` }} />
+      <span style={{ width: 8, height: 8, borderRadius: "50%", background: colors[status], display: "inline-block" }} />
       {labels[status]}
     </span>
   );
@@ -136,7 +138,7 @@ function DeltaArrow({ current, previous }) {
 
 function PositionBadge({ pos }) {
   if (pos == null) return <span style={{ color: WAVES_COLORS.textMuted, fontSize: 13 }}>--</span>;
-  let bg = "rgba(255,255,255,0.06)";
+  let bg = "#F4F4F5";
   let color = WAVES_COLORS.textSecondary;
   if (pos <= 3) { bg = WAVES_COLORS.greenGlow; color = WAVES_COLORS.green; }
   else if (pos <= 10) { bg = WAVES_COLORS.accentGlow; color = WAVES_COLORS.accent; }
@@ -384,7 +386,7 @@ export default function WavesSEODashboard() {
       <SEOIntelligenceBar context="seo" />
 
       {/* Tab Switcher */}
-      <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: 4, width: isMobile ? "100%" : "fit-content" }}>
+      <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "#F4F4F5", borderRadius: 10, padding: 4, width: isMobile ? "100%" : "fit-content", border: `1px solid ${WAVES_COLORS.cardBorder}` }}>
         {[
           { id: "ai", label: "AI Visibility" },
           { id: "organic", label: "Organic Rankings" },
@@ -474,7 +476,7 @@ export default function WavesSEODashboard() {
                 {aiOverview.quickWins.map((qw, i) => (
                   <div key={i} style={{
                     display: "flex", alignItems: "center", gap: 16, padding: "12px 16px",
-                    background: "rgba(255,255,255,0.02)", borderRadius: 8,
+                    background: "#FAFAFA", borderRadius: 8,
                     border: `1px solid ${WAVES_COLORS.cardBorder}`,
                   }}>
                     <div style={{ flex: 1 }}>
@@ -567,8 +569,8 @@ export default function WavesSEODashboard() {
                 <tbody>
                   {filteredKeywords.map((kw, i) => (
                     <tr key={i} style={{
-                      borderBottom: `1px solid ${WAVES_COLORS.cardBorder}22`,
-                      background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.01)",
+                      borderBottom: `1px solid ${WAVES_COLORS.cardBorder}`,
+                      background: i % 2 === 0 ? "transparent" : "#FAFAFA",
                     }}>
                       <td style={{ padding: "10px 12px", fontWeight: 600, color: WAVES_COLORS.textPrimary, whiteSpace: "nowrap" }}>{kw.keyword}</td>
                       <td style={{ padding: "10px 12px", textAlign: "center" }}>
@@ -581,7 +583,7 @@ export default function WavesSEODashboard() {
                       <td style={{ padding: "10px 12px" }}>
                         <span style={{
                           padding: "2px 8px", borderRadius: 6, fontSize: 11, fontWeight: 600,
-                          background: "rgba(255,255,255,0.05)", color: WAVES_COLORS.textSecondary,
+                          background: "#F4F4F5", color: WAVES_COLORS.textSecondary,
                         }}>{kw.category}</span>
                       </td>
                       <td style={{ padding: "10px 12px", color: WAVES_COLORS.textMuted, fontSize: 12 }}>{kw.city}</td>
