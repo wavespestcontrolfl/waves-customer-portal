@@ -8,6 +8,8 @@ const { pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
         priceWDO, priceTrenching, priceTopDressing, priceDethatching } = require('./service-pricing');
 const { calculatePropertyProfile } = require('./property-calculator');
 const { determineWaveGuardTier, getEffectiveDiscount } = require('./discount-engine');
+const { ZONES } = require('./constants');
+const { zoneMultiplier } = require('./modifiers');
 
 const fmt = (n) => typeof n === 'number' ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}` : n;
 const pct = (n) => typeof n === 'number' ? `${(n * 100).toFixed(1)}%` : n;
@@ -251,6 +253,34 @@ const achEstimate = generateEstimate({
 console.log(`    Card monthly:  ${fmt(estimate.summary.recurringMonthlyAfterDiscount)}`);
 console.log(`    ACH monthly:   ${fmt(achEstimate.summary.recurringMonthlyAfterDiscount)}`);
 console.log(`    ACH savings:   ${fmt(achEstimate.achSavings)}/yr`);
+
+// ── ZONE MULTIPLIER REGRESSION ────────────────────────────────
+// Session 6 pre-work: insurance against the Session 3 bug class where
+// constants.ZONES and modifiers.zoneMultiplier() drifted apart. The
+// startup assertion in estimate-engine.js only covers A/B/C/D — this
+// block exposes UNKNOWN and any default-case divergence.
+console.log('\n' + '═'.repeat(70));
+console.log('ZONE MULTIPLIER ALIGNMENT (constants.ZONES vs modifiers.zoneMultiplier)');
+console.log('═'.repeat(70));
+for (const z of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
+  const c = ZONES[z]?.multiplier;
+  const m = zoneMultiplier(z);
+  const aligned = typeof c === 'number' && Math.abs(c - m) < 0.0001;
+  console.log(`  ${z.padEnd(8)} | constants: ${c ?? 'MISSING'} | modifiers: ${m} ${aligned ? '✓' : '⚠ DRIFT'}`);
+}
+// Also exercise the actual engine path with zone='UNKNOWN' — ref customer,
+// v1 quarterly pest only. Output should be a stable number we can eyeball
+// across releases. When Session 6 lands, re-run and compare.
+const unknownRef = generateEstimate({
+  homeSqFt: 2000, stories: 1, lotSqFt: 10000,
+  propertyType: 'single_family', lawnSqFt: 4500, bedArea: 2000,
+  zone: 'UNKNOWN',
+  features: { poolCage: true, shrubs: 'moderate', trees: 'moderate' },
+  services: { pest: { frequency: 'quarterly', version: 'v1' } },
+});
+console.log(`\n  Ref customer, zone=UNKNOWN, v1 pest quarterly:`);
+console.log(`    engine zone.multiplier: ${unknownRef.zone.multiplier}`);
+console.log(`    recurring monthly:      ${fmt(unknownRef.summary.recurringMonthlyAfterDiscount)}`);
 
 console.log('\n' + '═'.repeat(70));
 console.log('ALL TESTS COMPLETE');
