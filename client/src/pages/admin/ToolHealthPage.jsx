@@ -227,32 +227,18 @@ export default function ToolHealthPage() {
       })}
 
       {/* Recent errors */}
-      <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10, marginTop: 8 }}>
-        Recent Errors
-      </div>
-      <div style={sCard}>
-        {recentErrors.length === 0 && (
-          <div style={{ color: D.muted, fontSize: 13 }}>No errors in the selected window. ✅</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 10, marginTop: 8 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>Recent Errors</div>
+        {recentErrors.length > 0 && (
+          <div style={{ ...sMono, fontSize: 12, color: D.muted }}>{recentErrors.length}</div>
         )}
-        {recentErrors.map(e => (
-          <div key={e.id} style={{
-            padding: '10px 0', borderBottom: `1px solid ${D.border}`,
-            display: 'grid', gridTemplateColumns: '110px 150px 1fr 110px', gap: 12, alignItems: 'start',
-          }}>
-            <div style={{ fontSize: 11, color: D.muted }}>{formatRelative(e.at)}</div>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: D.heading }}>{e.toolName}</div>
-              <div style={{ fontSize: 10, color: D.muted }}>{e.context || e.source}</div>
-            </div>
-            <div style={{ fontSize: 12, color: D.text, fontFamily: 'monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-              {e.errorMessage || '(no message)'}
-            </div>
-            <div>
-              {e.circuitOpen && (
-                <span style={{ fontSize: 10, padding: '2px 8px', background: '#FDECEA', color: D.red, borderRadius: 4, fontWeight: 600 }}>CIRCUIT OPEN</span>
-              )}
-            </div>
-          </div>
+      </div>
+      <div style={{ ...sCard, padding: 0 }}>
+        {recentErrors.length === 0 && (
+          <div style={{ color: D.muted, fontSize: 13, padding: 20 }}>No errors in the selected window.</div>
+        )}
+        {recentErrors.map((e, i) => (
+          <RecentErrorRow key={e.id} err={e} isLast={i === recentErrors.length - 1} />
         ))}
       </div>
 
@@ -268,6 +254,50 @@ function Metric({ label, value }) {
     <div>
       <div style={{ fontSize: 10, opacity: 0.85, textTransform: 'uppercase', letterSpacing: 1 }}>{label}</div>
       <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700 }}>{value}</div>
+    </div>
+  );
+}
+
+function RecentErrorRow({ err, isLast }) {
+  const [open, setOpen] = useState(false);
+  const msg = err.errorMessage || '(no message)';
+  const canExpand = msg.length > 120 || msg.includes('\n');
+
+  return (
+    <div
+      onClick={() => canExpand && setOpen(o => !o)}
+      style={{
+        padding: '7px 14px',
+        borderBottom: isLast ? 'none' : `1px solid ${D.border}`,
+        display: 'grid', gridTemplateColumns: '80px 170px 1fr', columnGap: 14, alignItems: 'start',
+        cursor: canExpand ? 'pointer' : 'default',
+      }}
+    >
+      <div style={{ fontSize: 11, color: D.muted, lineHeight: '18px' }}>{formatRelative(err.at)}</div>
+      <div style={{ lineHeight: '18px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: D.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{err.toolName}</span>
+          {err.circuitOpen && (
+            <span title="Circuit breaker is open" style={{
+              fontSize: 9, padding: '1px 5px', background: '#FDECEA', color: D.red,
+              borderRadius: 3, fontWeight: 700, letterSpacing: 0.4,
+            }}>OPEN</span>
+          )}
+        </div>
+        <div style={{ fontSize: 10, color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {err.context || err.source}
+        </div>
+      </div>
+      <div style={{
+        fontSize: 12, color: D.text, fontFamily: "'JetBrains Mono', monospace",
+        lineHeight: '18px',
+        display: '-webkit-box', WebkitBoxOrient: 'vertical',
+        WebkitLineClamp: open ? 'unset' : 2,
+        overflow: 'hidden',
+        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+      }}>
+        {msg}
+      </div>
     </div>
   );
 }
