@@ -166,6 +166,13 @@ export default function QuotePage() {
   // server/routes/public-quote.js); this controls the ongoing newsletter only.
   const [newsletterOptIn, setNewsletterOptIn] = useState(false);
 
+  // Deferred-subscribe CTA — shown on the non-priced result page (one-time /
+  // not-sure / termite / mosquito / rodent). Those flows bypass /calculate so
+  // the checkbox never rendered; this is the self-serve opt-in for users who
+  // landed on result-other and still want the newsletter. One-click because
+  // intake.email is already captured from the form they just submitted.
+  const [subscribeStatus, setSubscribeStatus] = useState('idle'); // idle | loading | success | error
+
   // Addons variant is URL-gated so the original /estimate flow stays untouched
   // for all traffic except explicit opt-ins (/estimate?addons=1). Locked at mount.
   const [showUpsell] = useState(() => {
@@ -360,6 +367,32 @@ export default function QuotePage() {
     }
   }
 
+  // Deferred newsletter subscribe from the result-other page. Email already
+  // lives in intake state, so this is a one-click POST — no re-entry, no
+  // separate page. Mirrors the SendGrid dual-write pattern in /calculate but
+  // goes through the public newsletter endpoint (no beehiiv drip here — that
+  // would double-enroll anyone who already got hit by the lead-webhook drip).
+  async function handleDeferredSubscribe() {
+    if (subscribeStatus === 'loading' || subscribeStatus === 'success') return;
+    setSubscribeStatus('loading');
+    try {
+      const { firstName, lastName } = splitName(intake.name);
+      const res = await fetch(`${API_BASE}/public/newsletter/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: intake.email.trim(),
+          firstName, lastName,
+          source: 'quote_wizard_deferred',
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setSubscribeStatus('success');
+    } catch {
+      setSubscribeStatus('error');
+    }
+  }
+
   async function generateQuote() {
     setError('');
     if (!svcPest && !svcLawn) { setError('Pick at least one service.'); return; }
@@ -418,6 +451,7 @@ export default function QuotePage() {
     setHomeSqFt(''); setLotSqFt('');
     setUpsellSelected({}); setUpsellLoading(false); setUpsellError('');
     setNewsletterOptIn(false);
+    setSubscribeStatus('idle');
   }
 
   async function submitUpsell() {
@@ -959,6 +993,50 @@ export default function QuotePage() {
                     <div style={{ fontWeight: 700, marginBottom: 4 }}>100% Satisfaction Guarantee</div>
                     <div>If the fix doesn't hold, we come back — free. Licensed &amp; Insured Florida Pest Control Operator.</div>
                   </div>
+
+                  {intake.email && (
+                    <div style={{
+                      marginTop: 12, padding: 14, borderRadius: 12,
+                      background: COLORS.blueSurface, border: `1px solid ${COLORS.slate200}`,
+                      color: COLORS.navy, fontSize: 14, lineHeight: 1.55,
+                    }}>
+                      {subscribeStatus === 'success' ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <svg width="16" height="16" fill="none" stroke={COLORS.green} strokeWidth={3} viewBox="0 0 24 24" aria-hidden>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                          <span>Subscribed — watch for the next issue in your inbox.</span>
+                        </div>
+                      ) : (
+                        <>
+                          <div style={{ fontWeight: 700, marginBottom: 4 }}>Not ready to book? Get SWFL pest &amp; lawn tips monthly.</div>
+                          <div style={{ fontSize: 13, color: COLORS.textBody, marginBottom: 10 }}>
+                            Seasonal pressure alerts, timing advice, local SWFL guidance. No sales pitches.
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleDeferredSubscribe}
+                            disabled={subscribeStatus === 'loading'}
+                            style={{
+                              padding: '6px 14px', fontSize: 13, fontWeight: 600,
+                              background: 'transparent', color: COLORS.blueDeeper,
+                              border: `1.5px solid ${COLORS.blueDeeper}`, borderRadius: 6,
+                              cursor: subscribeStatus === 'loading' ? 'default' : 'pointer',
+                              opacity: subscribeStatus === 'loading' ? 0.6 : 1,
+                              fontFamily: 'inherit',
+                            }}
+                          >
+                            {subscribeStatus === 'loading' ? 'Subscribing…' : 'Subscribe →'}
+                          </button>
+                          {subscribeStatus === 'error' && (
+                            <div style={{ fontSize: 12, color: COLORS.red, marginTop: 6 }}>
+                              Couldn't subscribe — try again or email contact@wavespestcontrol.com
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
 
                   <div style={{ marginTop: 24, display: 'grid', gap: 12 }}>
                     <Button variant="primary" as="a" href="tel:+19413187612" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', textTransform: 'none' }}>Call (941) 318-7612</Button>
