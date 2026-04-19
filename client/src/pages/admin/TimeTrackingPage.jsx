@@ -1,7 +1,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
+// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
+// STATUS_COLORS / TYPE_COLORS / DOC_CAT_COLORS pulled out of palette into
+// explicit hex maps so completed/exported, shift/drive, and sop/offer_letter
+// stay visually distinct (would all collapse to zinc-900 under naive fold).
+const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', purple: '#18181B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', input: '#FFFFFF', heading: '#09090B', inputBorder: '#D4D4D8' };
 const MONO = "'JetBrains Mono', monospace";
 const LABOR_RATE = 35;
 
@@ -22,8 +26,23 @@ const fmtHrs = (min) => min != null ? (parseFloat(min) / 60).toFixed(1) + 'h' : 
 const fmtPct = (p) => p != null ? parseFloat(p).toFixed(1) + '%' : '--';
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
-const STATUS_COLORS = { active: D.green, completed: D.teal, edited: D.amber, voided: D.red, pending: D.amber, approved: D.green, disputed: D.red, exported: D.purple };
-const TYPE_COLORS = { shift: D.teal, job: D.green, break: D.amber, drive: D.purple, admin_time: D.muted };
+const STATUS_COLORS = {
+  active: '#15803D',     // green-700
+  completed: '#3F3F46',  // zinc-700 — distinct from exported
+  edited: '#A16207',     // amber-700
+  voided: '#991B1B',     // alert-fg red
+  pending: '#A16207',    // amber (mirrors edited = needs attention)
+  approved: '#15803D',   // green (mirrors active = good state)
+  disputed: '#991B1B',   // red (mirrors voided = bad state)
+  exported: '#52525B',   // zinc-600 — distinct from completed
+};
+const TYPE_COLORS = {
+  shift: '#3F3F46',      // zinc-700
+  job: '#15803D',        // green
+  break: '#A16207',      // amber
+  drive: '#18181B',      // zinc-900 — distinct from shift
+  admin_time: '#71717A', // zinc-500
+};
 
 function getMonday(d) {
   const dt = new Date(d);
@@ -1063,7 +1082,15 @@ const DOC_CATEGORIES = [
   { value: 'general', label: 'General' },
 ];
 
-const DOC_CAT_COLORS = { sop: D.teal, onboarding: D.green, offer_letter: D.purple, policy: D.amber, training: '#3b82f6', safety: D.red, general: D.muted };
+const DOC_CAT_COLORS = {
+  sop: '#3F3F46',          // zinc-700
+  onboarding: '#15803D',   // green
+  offer_letter: '#52525B', // zinc-600 — distinct from sop
+  policy: '#A16207',       // amber
+  training: '#18181B',     // zinc-900 (was hardcoded sky-500)
+  safety: '#991B1B',       // alert-fg red
+  general: '#71717A',      // zinc-500 muted
+};
 
 const FILE_ICONS = { pdf: '\uD83D\uDCC4', docx: '\uD83D\uDDD2\uFE0F', doc: '\uD83D\uDDD2\uFE0F', xlsx: '\uD83D\uDCCA', xls: '\uD83D\uDCCA', png: '\uD83D\uDDBC\uFE0F', jpg: '\uD83D\uDDBC\uFE0F', jpeg: '\uD83D\uDDBC\uFE0F', txt: '\uD83D\uDCC3', csv: '\uD83D\uDCCA' };
 

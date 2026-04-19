@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', input: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
+// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
+// TYPE_COLORS bg/c pairs converted to V2 pastels (mirrors DiscountsPage).
+const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', purple: '#18181B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', input: '#FFFFFF', heading: '#09090B', inputBorder: '#D4D4D8' };
 
 function af(path, opts = {}) {
   return fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' }, ...opts }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
@@ -14,9 +16,9 @@ const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${
 const thS = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${D.border}` };
 const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13, color: D.text };
 
-const TYPE_COLORS = { percentage: { bg: '#0ea5e920', c: D.teal }, fixed_amount: { bg: '#f59e0b20', c: D.amber }, variable_amount: { bg: '#a855f620', c: '#a855f6' }, variable_percentage: { bg: '#10b98120', c: D.green }, free_service: { bg: '#10b98120', c: D.green } };
+const TYPE_COLORS = { percentage: { bg: '#F4F4F5', c: '#18181B' }, fixed_amount: { bg: '#FEF3C7', c: '#A16207' }, variable_amount: { bg: '#F4F4F5', c: '#3F3F46' }, variable_percentage: { bg: '#DCFCE7', c: '#15803D' }, free_service: { bg: '#DCFCE7', c: '#15803D' } };
 const TYPE_LABELS = { percentage: 'Percentage (%)', fixed_amount: 'Amount ($)', variable_amount: 'Variable ($)', variable_percentage: 'Variable (%)', free_service: 'Free Service' };
-const EMPTY = { discount_key: '', name: '', description: '', discount_type: 'percentage', amount: 0, max_discount_dollars: '', applies_to: 'all', service_category_filter: '', service_key_filter: '', requires_waveguard_tier: '', is_waveguard_tier_discount: false, requires_military: false, requires_senior: false, requires_referral: false, requires_new_customer: false, requires_multi_home: false, requires_prepayment: false, min_service_count: '', min_subtotal: '', is_stackable: true, stack_group: '', priority: 100, promo_code: '', promo_code_expiry: '', promo_code_max_uses: '', is_active: true, is_auto_apply: false, show_in_estimates: true, show_in_invoices: true, show_in_scheduling: false, sort_order: '', color: '#0A7EC2', icon: '' };
+const EMPTY = { discount_key: '', name: '', description: '', discount_type: 'percentage', amount: 0, max_discount_dollars: '', applies_to: 'all', service_category_filter: '', service_key_filter: '', requires_waveguard_tier: '', is_waveguard_tier_discount: false, requires_military: false, requires_senior: false, requires_referral: false, requires_new_customer: false, requires_multi_home: false, requires_prepayment: false, min_service_count: '', min_subtotal: '', is_stackable: true, stack_group: '', priority: 100, promo_code: '', promo_code_expiry: '', promo_code_max_uses: '', is_active: true, is_auto_apply: false, show_in_estimates: true, show_in_invoices: true, show_in_scheduling: false, sort_order: '', color: '#18181B', icon: '' };
 
 function DiscountsSection() {
   const [discounts, setDiscounts] = useState([]);
