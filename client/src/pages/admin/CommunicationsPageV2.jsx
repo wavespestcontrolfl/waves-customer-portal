@@ -20,6 +20,7 @@ import React, {
 } from 'react';
 import {
   ALL_NUMBERS,
+  NUMBER_LABEL_MAP,
   TEMPLATES,
 } from './CommunicationsPage';
 import CallLogTabV2 from './CallLogTabV2';
@@ -319,6 +320,10 @@ function SmsTab() {
     } catch { return {}; }
   });
   const [smsSearch, setSmsSearch] = useState('');
+  // PR 4 — status filter chips, reply-from lock, blocked-numbers set.
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [threadLock, setThreadLock] = useState(null);
+  const [blockedNumbers, setBlockedNumbers] = useState([]);
 
   const loadData = useCallback((search = '') => {
     const logUrl = search
@@ -340,6 +345,14 @@ function SmsTab() {
     const t = setTimeout(() => { loadData(smsSearch.trim()); }, 300);
     return () => clearTimeout(t);
   }, [smsSearch, loadData]);
+
+  // PR 4 — blocked-numbers fetch + mutations.
+  const loadBlocked = useCallback(() => {
+    adminFetch('/admin/communications/blocked-numbers')
+      .then((d) => setBlockedNumbers((d.numbers || []).map((b) => b.number)))
+      .catch(() => setBlockedNumbers([]));
+  }, []);
+  useEffect(() => { loadBlocked(); }, [loadBlocked]);
 
   useEffect(() => {
     adminFetch('/admin/communications/ai-auto-reply-status')
@@ -455,7 +468,20 @@ function SmsTab() {
     return threadList;
   }, [messages]);
 
+  const phoneLast10 = (p) => (p || '').replace(/\D/g, '').slice(-10);
+  const blockedSet = useMemo(() => new Set(blockedNumbers.map(phoneLast10)), [blockedNumbers]);
+
   const filteredThreads = threads.filter((t) => {
+    // PR 4 — status filter chips (stacked on top of message-type smsFilter).
+    if (statusFilter !== 'all') {
+      const key = phoneLast10(t.contactPhone);
+      const lastReadAt = threadReadAt[key];
+      const hasUnseen = t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
+      if (statusFilter === 'unread' && !hasUnseen) return false;
+      if (statusFilter === 'unanswered' && !t.unanswered) return false;
+      if (statusFilter === 'unknown' && t.customerName) return false;
+      if (statusFilter === 'blocked' && !blockedSet.has(key)) return false;
+    }
     if (smsFilter === 'all') return true;
     if (smsFilter === 'sent') return t.messages.some((m) => m.direction === 'outbound');
     if (smsFilter === 'received') return t.messages.some((m) => m.direction === 'inbound');
@@ -472,9 +498,41 @@ function SmsTab() {
     return true;
   });
 
+  const chipCounts = useMemo(() => {
+    let unread = 0, unanswered = 0, unknown = 0, blocked = 0;
+    threads.forEach((t) => {
+      const key = phoneLast10(t.contactPhone);
+      const lastReadAt = threadReadAt[key];
+      if (t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt))) unread++;
+      if (t.unanswered) unanswered++;
+      if (!t.customerName) unknown++;
+      if (blockedSet.has(key)) blocked++;
+    });
+    return { all: threads.length, unread, unanswered, unknown, blocked };
+  }, [threads, threadReadAt, blockedSet]);
+
+  const blockNumber = async (number, reason) => {
+    try {
+      await adminFetch('/admin/communications/blocked-numbers', {
+        method: 'POST',
+        body: JSON.stringify({ number, blockType: 'hard_block', reason: reason || 'Manual block from inbox' }),
+      });
+      loadBlocked();
+    } catch (e) { alert('Failed to block: ' + e.message); }
+  };
+  const unblockNumber = async (number) => {
+    try {
+      await adminFetch(`/admin/communications/blocked-numbers/${encodeURIComponent(number)}`, { method: 'DELETE' });
+      loadBlocked();
+    } catch (e) { alert('Failed to unblock: ' + e.message); }
+  };
+
   const handleThreadReply = (contactPhone, ourNumber) => {
     setToNumber(contactPhone);
-    if (ourNumber) setFromNumber(ourNumber);
+    if (ourNumber) {
+      setFromNumber(ourNumber);
+      setThreadLock({ contactPhone, ourNumber, label: NUMBER_LABEL_MAP[ourNumber] || ourNumber });
+    }
     setSmsView('threads');
     setActiveThread(null);
     setTimeout(() => {
@@ -582,11 +640,33 @@ function SmsTab() {
           </div>
         </div>
 
-        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">From</label>
+        {/* PR 4 — thread-reply lock banner */}
+        {threadLock && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-900 rounded-sm mb-3">
+            <Badge tone="strong">Locked</Badge>
+            <span className="text-12 text-zinc-900 flex-1">
+              Replying from <strong>{threadLock.label}</strong> to continue thread with {threadLock.contactPhone}
+            </span>
+            <button
+              type="button"
+              onClick={() => setThreadLock(null)}
+              className="text-11 text-ink-secondary underline hover:text-zinc-900 u-focus-ring"
+            >Override</button>
+          </div>
+        )}
+
+        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+          From{threadLock && ' (locked to thread)'}
+        </label>
         <select
           value={fromNumber}
           onChange={(e) => setFromNumber(e.target.value)}
-          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 mb-3 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+          disabled={!!threadLock}
+          className={cn(
+            'w-full bg-white border-hairline rounded-sm py-2 px-3 text-13 text-zinc-900 mb-3',
+            'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900',
+            threadLock ? 'border-zinc-900 opacity-60 cursor-not-allowed' : 'border-zinc-300',
+          )}
         >
           {ALL_NUMBERS.map((group) => (
             <optgroup key={group.group} label={group.group}>
@@ -788,6 +868,38 @@ function SmsTab() {
               <span className="ml-2 u-nums">({filteredThreads.length})</span>
             </div>
           </div>
+
+          {/* PR 4 — filter chip row */}
+          <div className="flex gap-1.5 mb-3 flex-wrap">
+            {[
+              { key: 'all', label: 'All', count: chipCounts.all },
+              { key: 'unread', label: 'Unread', count: chipCounts.unread },
+              { key: 'unanswered', label: 'Unanswered', count: chipCounts.unanswered },
+              { key: 'unknown', label: 'Unknown', count: chipCounts.unknown },
+              { key: 'blocked', label: 'Blocked', count: chipCounts.blocked },
+            ].map((chip) => {
+              const active = statusFilter === chip.key;
+              return (
+                <button
+                  key={chip.key}
+                  type="button"
+                  onClick={() => setStatusFilter(chip.key)}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-12 font-medium border-hairline u-focus-ring',
+                    active
+                      ? 'bg-zinc-900 text-white border-zinc-900'
+                      : 'bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900 hover:text-zinc-900',
+                  )}
+                >
+                  {chip.label}
+                  <span className={cn('u-nums text-11', active ? 'text-zinc-300' : 'text-ink-tertiary')}>
+                    {chip.count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
           <div className="max-h-[600px] overflow-y-auto">
             {filteredThreads.length === 0 ? (
               <div className="p-5 text-center text-13 text-ink-secondary">
@@ -804,15 +916,19 @@ function SmsTab() {
                 const lastReadAt = threadReadAt[threadKey];
                 const hasUnseen = t.unanswered
                   && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
+                const isUnknown = !t.customerName;
+                const isBlocked = blockedSet.has(threadKey);
                 return (
-                  <button
-                    type="button"
+                  <div
                     key={i}
                     onClick={() => {
                       setActiveThread(t);
                       setSmsView('conversation');
                       setToNumber(t.contactPhone);
-                      if (t.ourNumber) setFromNumber(t.ourNumber);
+                      if (t.ourNumber) {
+                        setFromNumber(t.ourNumber);
+                        setThreadLock({ contactPhone: t.contactPhone, ourNumber: t.ourNumber, label: NUMBER_LABEL_MAP[t.ourNumber] || t.ourNumber });
+                      }
                       setThreadReadAt((prev) => {
                         const next = { ...prev, [threadKey]: t.lastTimestamp };
                         try {
@@ -822,9 +938,10 @@ function SmsTab() {
                       });
                     }}
                     className={cn(
-                      'w-full text-left px-3.5 py-3 border-b border-hairline border-zinc-200 flex items-center gap-3',
-                      'hover:bg-zinc-50 transition-colors u-focus-ring',
+                      'w-full text-left px-3.5 py-3 border-b border-hairline border-zinc-200 flex items-center gap-3 cursor-pointer',
+                      'hover:bg-zinc-50 transition-colors',
                       hasUnseen && 'bg-alert-bg/40',
+                      isBlocked && 'opacity-60',
                     )}
                   >
                     <div className="w-2.5 flex-shrink-0">
@@ -837,9 +954,13 @@ function SmsTab() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between mb-0.5">
-                        <span className="text-14 font-medium text-zinc-900 truncate">
-                          {t.customerName || t.contactPhone}
-                        </span>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-14 font-medium text-zinc-900 truncate">
+                            {t.customerName || t.contactPhone}
+                          </span>
+                          {isUnknown && <Badge tone="neutral">Unknown</Badge>}
+                          {isBlocked && <Badge tone="muted">Blocked</Badge>}
+                        </div>
                         <span className="font-mono text-11 text-ink-tertiary flex-shrink-0 ml-2">
                           {timeAgo(t.lastTimestamp)}
                         </span>
@@ -856,10 +977,28 @@ function SmsTab() {
                         {preview}
                       </div>
                     </div>
-                    <div className="flex-shrink-0 font-mono text-11 text-ink-tertiary u-nums">
-                      {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
+                    <div className="flex-shrink-0 flex items-center gap-2.5">
+                      <span className="font-mono text-11 text-ink-tertiary u-nums">
+                        {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
+                      </span>
+                      {/* PR 4 — Block / Unblock action */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (isBlocked) {
+                            if (!confirm(`Unblock ${t.contactPhone}?`)) return;
+                            unblockNumber(t.contactPhone);
+                          } else {
+                            if (!confirm(`Block ${t.contactPhone}? Future inbound calls will be rejected.`)) return;
+                            blockNumber(t.contactPhone, `Blocked from SMS inbox${t.customerName ? ` (${t.customerName})` : ''}`);
+                          }
+                        }}
+                        className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
+                        title={isBlocked ? 'Unblock this number' : 'Block this number'}
+                      >{isBlocked ? 'Unblock' : 'Block'}</button>
                     </div>
-                  </button>
+                  </div>
                 );
               })
             )}

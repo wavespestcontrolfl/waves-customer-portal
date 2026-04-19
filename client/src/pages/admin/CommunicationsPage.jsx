@@ -1318,6 +1318,15 @@ export default function CommunicationsPage() {
   // Conversation threading state
   const [smsView, setSmsView] = useState('threads'); // 'threads' | 'log' | 'conversation'
   const [activeThread, setActiveThread] = useState(null);
+  // PR 4 — thread-status filter (independent of smsFilter which gates by stat card).
+  const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'unread' | 'unanswered' | 'unknown' | 'blocked'
+  // PR 4 — reply-from lock: when a thread is opened, the From number is pinned
+  // to the thread's our_endpoint so replies don't cross Waves numbers. Nullable
+  // so "Override" can clear it and fall back to the normal compose picker.
+  const [threadLock, setThreadLock] = useState(null); // { contactPhone, ourNumber, label } | null
+  // PR 4 — blocked-numbers set (normalized E.164). Used by the Blocked filter
+  // chip and by the Block-this-number action.
+  const [blockedNumbers, setBlockedNumbers] = useState([]);
   // Tracks when each thread was last read: { [phoneKey]: ISO timestamp of the latest
   // message at the moment the user opened the thread }. Persisted to localStorage so
   // the unread dot doesn't reappear when navigating away and back. A new inbound
@@ -1350,6 +1359,14 @@ export default function CommunicationsPage() {
     const t = setTimeout(() => { loadData(smsSearch.trim()); }, 300);
     return () => clearTimeout(t);
   }, [smsSearch, loadData]);
+
+  // PR 4 — load blocked-numbers list. Used by the filter chip + block action.
+  const loadBlocked = useCallback(() => {
+    adminFetch('/admin/communications/blocked-numbers').then(d => {
+      setBlockedNumbers((d.numbers || []).map(b => b.number));
+    }).catch(() => setBlockedNumbers([]));
+  }, []);
+  useEffect(() => { loadBlocked(); }, [loadBlocked]);
 
   // Load AI auto-reply setting
   useEffect(() => {
@@ -1463,7 +1480,21 @@ export default function CommunicationsPage() {
     return threadList;
   }, [messages]);
 
+  // Normalize a phone to the blocked-numbers set format (E.164-ish last-10 match).
+  const phoneLast10 = (p) => (p || '').replace(/\D/g, '').slice(-10);
+  const blockedSet = useMemo(() => new Set(blockedNumbers.map(phoneLast10)), [blockedNumbers]);
+
   const filteredThreads = threads.filter(t => {
+    // PR 4 — status filter (thread-level) stacks on top of smsFilter (message-level).
+    if (statusFilter !== 'all') {
+      const key = phoneLast10(t.contactPhone);
+      const lastReadAt = threadReadAt[key];
+      const hasUnseen = t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
+      if (statusFilter === 'unread' && !hasUnseen) return false;
+      if (statusFilter === 'unanswered' && !t.unanswered) return false;
+      if (statusFilter === 'unknown' && t.customerName) return false;
+      if (statusFilter === 'blocked' && !blockedSet.has(key)) return false;
+    }
     if (smsFilter === 'all') return true;
     if (smsFilter === 'sent') return t.messages.some(m => m.direction === 'outbound');
     if (smsFilter === 'received') return t.messages.some(m => m.direction === 'inbound');
@@ -1474,13 +1505,48 @@ export default function CommunicationsPage() {
     return true;
   });
 
+  // PR 4 — counts used by the filter chip row (shown next to each chip).
+  const chipCounts = useMemo(() => {
+    let unread = 0, unanswered = 0, unknown = 0, blocked = 0;
+    threads.forEach(t => {
+      const key = phoneLast10(t.contactPhone);
+      const lastReadAt = threadReadAt[key];
+      if (t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt))) unread++;
+      if (t.unanswered) unanswered++;
+      if (!t.customerName) unknown++;
+      if (blockedSet.has(key)) blocked++;
+    });
+    return { all: threads.length, unread, unanswered, unknown, blocked };
+  }, [threads, threadReadAt, blockedSet]);
+
+  // PR 4 — Block/unblock actions. Uses last-seen E.164 from the thread.
+  const blockNumber = async (number, reason) => {
+    try {
+      await adminFetch('/admin/communications/blocked-numbers', {
+        method: 'POST',
+        body: JSON.stringify({ number, blockType: 'hard_block', reason: reason || 'Manual block from inbox' }),
+      });
+      loadBlocked();
+    } catch (e) { alert('Failed to block: ' + e.message); }
+  };
+  const unblockNumber = async (number) => {
+    try {
+      await adminFetch(`/admin/communications/blocked-numbers/${encodeURIComponent(number)}`, { method: 'DELETE' });
+      loadBlocked();
+    } catch (e) { alert('Failed to unblock: ' + e.message); }
+  };
+
   // Handle reply from thread — auto-set From to the number customer texted
   const handleThreadReply = (contactPhone, ourNumber) => {
     setToNumber(contactPhone);
-    if (ourNumber) setFromNumber(ourNumber);
+    if (ourNumber) {
+      setFromNumber(ourNumber);
+      // PR 4 — engage the thread-reply lock so the From select can't drift to
+      // a different Waves number mid-compose.
+      setThreadLock({ contactPhone, ourNumber, label: NUMBER_LABEL_MAP[ourNumber] || ourNumber });
+    }
     setSmsView('threads');
     setActiveThread(null);
-    // Scroll to compose area
     setTimeout(() => {
       const el = document.getElementById('sms-compose');
       if (el) el.scrollIntoView({ behavior: 'smooth' });
@@ -1562,13 +1628,32 @@ export default function CommunicationsPage() {
         }}>
           <h2 style={{ fontSize: 14, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14, margin: '0 0 14px' }}>SMS</h2>
 
-          <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>From</label>
+          {/* PR 4 — thread-reply lock banner */}
+          {threadLock && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+              background: `${D.teal}12`, border: `1px solid ${D.teal}44`, borderRadius: 8, marginBottom: 10,
+            }}>
+              <span style={{ fontSize: 11, color: D.teal, fontWeight: 700, letterSpacing: 0.5 }}>🔒 LOCKED</span>
+              <span style={{ fontSize: 12, color: D.text, flex: 1 }}>
+                Replying from <strong style={{ color: D.heading }}>{threadLock.label}</strong> to continue thread with {threadLock.contactPhone}
+              </span>
+              <button onClick={() => setThreadLock(null)} style={{
+                background: 'none', border: `1px solid ${D.border}`, color: D.muted,
+                fontSize: 11, padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
+              }}>Override</button>
+            </div>
+          )}
+
+          <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 }}>From{threadLock && ' (locked to thread)'}</label>
           <select
             value={fromNumber}
             onChange={e => setFromNumber(e.target.value)}
+            disabled={!!threadLock}
             style={{
-              width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
+              width: '100%', padding: '10px 12px', background: D.bg, border: `1px solid ${threadLock ? D.teal : D.border}`, borderRadius: 8,
               color: D.heading, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', marginBottom: 12, boxSizing: 'border-box',
+              opacity: threadLock ? 0.75 : 1, cursor: threadLock ? 'not-allowed' : 'pointer',
               WebkitAppearance: 'none', appearance: 'none',
               backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
               backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center', paddingRight: 32,
@@ -1765,6 +1850,36 @@ export default function CommunicationsPage() {
             </h2>
           </div>
 
+          {/* PR 4 — filter chip row */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+            {[
+              { key: 'all', label: 'All', count: chipCounts.all, tone: D.muted },
+              { key: 'unread', label: 'Unread', count: chipCounts.unread, tone: D.red },
+              { key: 'unanswered', label: 'Unanswered', count: chipCounts.unanswered, tone: D.amber },
+              { key: 'unknown', label: 'Unknown', count: chipCounts.unknown, tone: D.purple },
+              { key: 'blocked', label: 'Blocked', count: chipCounts.blocked, tone: D.muted },
+            ].map(chip => {
+              const active = statusFilter === chip.key;
+              return (
+                <button key={chip.key} onClick={() => setStatusFilter(chip.key)} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '6px 12px', borderRadius: 16, cursor: 'pointer',
+                  fontSize: 12, fontWeight: 600, fontFamily: 'DM Sans, sans-serif',
+                  background: active ? chip.tone : 'transparent',
+                  color: active ? D.white : chip.tone,
+                  border: `1px solid ${active ? chip.tone : chip.tone + '44'}`,
+                  transition: 'all 0.15s',
+                }}>
+                  {chip.label}
+                  <span style={{
+                    fontSize: 10, fontFamily: "'JetBrains Mono', monospace", padding: '1px 6px', borderRadius: 8,
+                    background: active ? `${D.white}22` : `${chip.tone}22`,
+                  }}>{chip.count}</span>
+                </button>
+              );
+            })}
+          </div>
+
           <div style={{ maxHeight: 600, overflowY: 'auto' }}>
             {filteredThreads.length === 0 ? (
               <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>
@@ -1777,6 +1892,8 @@ export default function CommunicationsPage() {
                 const lastReadAt = threadReadAt[threadKey];
                 const hasUnseenInbound = t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
                 const showDot = hasUnseenInbound;
+                const isUnknown = !t.customerName;
+                const isBlocked = blockedSet.has(threadKey);
                 return (
                   <div
                     key={i}
@@ -1784,7 +1901,10 @@ export default function CommunicationsPage() {
                       setActiveThread(t);
                       setSmsView('conversation');
                       setToNumber(t.contactPhone);
-                      if (t.ourNumber) setFromNumber(t.ourNumber);
+                      if (t.ourNumber) {
+                        setFromNumber(t.ourNumber);
+                        setThreadLock({ contactPhone: t.contactPhone, ourNumber: t.ourNumber, label: NUMBER_LABEL_MAP[t.ourNumber] || t.ourNumber });
+                      }
                       setThreadReadAt(prev => {
                         const next = { ...prev, [threadKey]: t.lastTimestamp };
                         try { localStorage.setItem('waves_sms_thread_read_at', JSON.stringify(next)); } catch {}
@@ -1797,6 +1917,7 @@ export default function CommunicationsPage() {
                       background: showDot ? D.red + '08' : 'transparent',
                       borderLeft: showDot ? `3px solid ${D.red}` : '3px solid transparent',
                       transition: 'background 0.15s',
+                      opacity: isBlocked ? 0.55 : 1,
                     }}
                     onMouseEnter={e => e.currentTarget.style.background = D.bg}
                     onMouseLeave={e => e.currentTarget.style.background = showDot ? D.red + '08' : 'transparent'}
@@ -1810,9 +1931,25 @@ export default function CommunicationsPage() {
 
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
-                        <span style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
-                          {t.customerName || t.contactPhone}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          <span style={{ fontSize: 14, fontWeight: 600, color: D.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {t.customerName || t.contactPhone}
+                          </span>
+                          {isUnknown && (
+                            <span style={{
+                              fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                              padding: '2px 6px', borderRadius: 4, background: `${D.purple}22`, color: D.purple,
+                              flexShrink: 0,
+                            }}>UNKNOWN</span>
+                          )}
+                          {isBlocked && (
+                            <span style={{
+                              fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                              padding: '2px 6px', borderRadius: 4, background: `${D.muted}22`, color: D.muted,
+                              flexShrink: 0,
+                            }}>BLOCKED</span>
+                          )}
+                        </div>
                         <span style={{ fontSize: 10, color: D.muted, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>
                           {timeAgo(t.lastTimestamp)}
                         </span>
@@ -1828,8 +1965,30 @@ export default function CommunicationsPage() {
                       </div>
                     </div>
 
-                    <div style={{ flexShrink: 0, fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
-                      {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
+                    <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
+                      </span>
+                      {/* PR 4 — Block / Unblock action */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (isBlocked) {
+                            if (!confirm(`Unblock ${t.contactPhone}?`)) return;
+                            unblockNumber(t.contactPhone);
+                          } else {
+                            if (!confirm(`Block ${t.contactPhone}? Future inbound calls will be rejected.`)) return;
+                            blockNumber(t.contactPhone, `Blocked from SMS inbox${t.customerName ? ` (${t.customerName})` : ''}`);
+                          }
+                        }}
+                        style={{
+                          background: 'none', border: `1px solid ${D.border}`,
+                          color: isBlocked ? D.teal : D.muted,
+                          fontSize: 10, fontWeight: 600, padding: '4px 8px', borderRadius: 6,
+                          cursor: 'pointer', fontFamily: 'DM Sans, sans-serif',
+                        }}
+                        title={isBlocked ? 'Unblock this number' : 'Block this number'}
+                      >{isBlocked ? 'Unblock' : 'Block'}</button>
                     </div>
                   </div>
                 );

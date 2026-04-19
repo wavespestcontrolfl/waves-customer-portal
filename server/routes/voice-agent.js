@@ -262,11 +262,16 @@ function voiceAgentRoutes(app, httpServer) {
       }
     }
 
-    // Check if caller is blocked (spam/wrong number)
+    // Check if caller is blocked (spam/wrong number).
+    // PR 1 rebuilt blocked_numbers with `number` (was `phone`) + a `block_type`
+    // column that distinguishes hard_block (reject) from silent_voicemail /
+    // ai_screen / sms_silent (accept-but-handle-differently). Only hard_block
+    // rejects at the Twilio layer; the softer dispositions fall through to
+    // the normal answer flow where downstream logic can branch.
     try {
-      const blocked = await db('blocked_numbers').where({ phone: from }).first().catch(() => null);
-      if (blocked) {
-        console.log(`[VoiceAgent] Blocked number ${from} — rejecting call`);
+      const blocked = await db('blocked_numbers').where({ number: from }).first().catch(() => null);
+      if (blocked && blocked.block_type === 'hard_block') {
+        console.log(`[VoiceAgent] Blocked number ${from} (hard_block) — rejecting call`);
         return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject reason="rejected"/></Response>');
       }
     } catch { /* blocked_numbers table may not exist yet */ }

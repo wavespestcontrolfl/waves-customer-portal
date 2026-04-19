@@ -387,4 +387,55 @@ router.delete('/scheduled/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/* ── Blocked numbers (PR 4 inbox/block UX) ──
+ * These are thin wrappers over the PR-1 `blocked_numbers` schema — the voice
+ * rejection path reads from the same table, and admin-call-recordings.js owns
+ * the call-disposition-as-spam flow. Surfaced here so the SMS inbox can block
+ * without routing through the calls tab. */
+
+// GET /api/admin/communications/blocked-numbers — list + set for client-side filter
+router.get('/blocked-numbers', async (req, res, next) => {
+  try {
+    const rows = await db('blocked_numbers').orderBy('blocked_at', 'desc');
+    res.json({
+      numbers: rows.map(r => ({
+        number: r.number,
+        blockType: r.block_type,
+        reason: r.reason,
+        autoBlocked: !!r.auto_blocked,
+        blockedAt: r.blocked_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/communications/blocked-numbers — add a number
+// Body: { number, blockType?, reason? }
+router.post('/blocked-numbers', async (req, res, next) => {
+  try {
+    const { number, blockType, reason } = req.body;
+    if (!number) return res.status(400).json({ error: 'number required' });
+
+    const existing = await db('blocked_numbers').where({ number }).first();
+    if (existing) return res.json({ success: true, alreadyBlocked: true });
+
+    await db('blocked_numbers').insert({
+      number,
+      block_type: blockType || 'hard_block',
+      blocked_by: req.technicianId,
+      reason: reason || null,
+      auto_blocked: false,
+    });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/admin/communications/blocked-numbers/:number — unblock
+router.delete('/blocked-numbers/:number', async (req, res, next) => {
+  try {
+    await db('blocked_numbers').where({ number: req.params.number }).del();
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
