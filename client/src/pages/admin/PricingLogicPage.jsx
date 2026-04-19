@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
 
+// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 const D = {
-  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0',
-  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500',
-  red: '#C0392B', purple: '#7C3AED',
-  text: '#334155', muted: '#64748B', white: '#FFFFFF',
-  heading: '#0F172A', input: '#FFFFFF',
+  bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7',
+  teal: '#18181B', green: '#15803D', amber: '#A16207',
+  red: '#991B1B', purple: '#18181B',
+  text: '#27272A', muted: '#71717A', white: '#FFFFFF',
+  heading: '#09090B', input: '#FFFFFF',
 };
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';

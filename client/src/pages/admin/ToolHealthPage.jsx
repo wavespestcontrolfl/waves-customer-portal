@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+// V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
 const D = {
-  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0',
-  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B',
-  text: '#334155', muted: '#64748B', heading: '#0F172A',
+  bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7',
+  teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B',
+  text: '#27272A', muted: '#71717A', heading: '#09090B',
 };
 
 function adminFetch(path, options = {}) {

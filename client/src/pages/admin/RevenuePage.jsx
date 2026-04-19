@@ -3,7 +3,8 @@ import RevenueIntelligenceBar from '../../components/admin/RevenueIntelligenceBa
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
+// V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
+const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', heading: '#09090B', inputBorder: '#D4D4D8' };
 const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path) {
@@ -186,7 +187,7 @@ export default function RevenuePage() {
               <CartesianGrid strokeDasharray="3 3" stroke={D.border} />
               <XAxis dataKey="date" tick={{ fill: D.muted, fontSize: 11 }} tickLine={false} axisLine={{ stroke: D.border }} />
               <YAxis tick={{ fill: D.muted, fontSize: 11 }} tickLine={false} axisLine={{ stroke: D.border }} tickFormatter={v => `$${v}`} />
-              <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(14,165,233,0.08)' }} />
+              <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(24,24,27,0.06)' }} />
               <Bar dataKey="revenue" fill={D.teal} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
