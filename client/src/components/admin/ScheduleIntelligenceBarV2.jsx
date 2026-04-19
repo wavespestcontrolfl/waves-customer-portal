@@ -7,7 +7,7 @@
  * any write-tool invocation.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import IntelligenceBarShell from './IntelligenceBarShell';
 
 const FALLBACK_ACTIONS = [
@@ -74,6 +74,19 @@ export default function ScheduleIntelligenceBarV2({ date, scheduleData, onRefres
     if (didWrite && onRefresh) setTimeout(() => onRefresh(), 500);
   }, [onRefresh]);
 
+  const promotions = useMemo(() => {
+    const p = {};
+    const unassigned = scheduleData?.unassigned?.length || 0;
+    if (unassigned > 0) {
+      p.unassigned = { reason: `${unassigned} unassigned today` };
+    }
+    const rain = scheduleData?.weather?.rain_chance;
+    if (typeof rain === 'number' && rain >= 40) {
+      p.optimize = { reason: `${rain}% rain forecast — consider reshuffling` };
+    }
+    return p;
+  }, [scheduleData]);
+
   const totalServices = scheduleData?.services?.length || 0;
   const completedCount = scheduleData?.services?.filter((s) => s.status === 'completed').length || 0;
   const unassignedCount = scheduleData?.unassigned?.length || 0;
@@ -84,6 +97,7 @@ export default function ScheduleIntelligenceBarV2({ date, scheduleData, onRefres
       buildPageData={buildPageData}
       fallbackActions={FALLBACK_ACTIONS}
       onAfterSubmit={handleAfterSubmit}
+      promotions={promotions}
       placeholder="Optimize routes, assign techs, find gaps, move stops…"
       followupPlaceholder="Follow up — 'do it', 'assign to Adam', 'move to Thursday'…"
       loadingLabel="thinking…"

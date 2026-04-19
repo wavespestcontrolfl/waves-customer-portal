@@ -95,14 +95,20 @@ export function renderMarkdown(text) {
   return elements;
 }
 
-export function QuickChip({ label, onClick, title }) {
+export function QuickChip({ label, onClick, title, promoted = false }) {
   return (
     <button
       onClick={onClick}
       title={title}
       aria-label={title ? `${label} — ${title}` : label}
-      className="inline-flex items-center h-6 px-3 text-11 font-medium border-hairline border-zinc-200 bg-white text-ink-secondary rounded-sm hover:bg-zinc-50 hover:text-ink-primary u-focus-ring transition-colors whitespace-nowrap"
+      className={cn(
+        'inline-flex items-center h-6 px-3 text-11 font-medium border-hairline rounded-sm u-focus-ring transition-colors whitespace-nowrap',
+        promoted
+          ? 'bg-zinc-900 text-white border-zinc-900 hover:bg-zinc-800'
+          : 'bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-50 hover:text-ink-primary'
+      )}
     >
+      {promoted && <span className="u-dot u-dot--filled mr-1.5" />}
       {label}
     </button>
   );
@@ -137,6 +143,7 @@ export default function IntelligenceBarShell({
   recentsEnabled = false,
   skeletonBars = [92, 75, 88, 60],
   bodyClassName = '',
+  promotions = null,
 }) {
   const {
     prompt, setPrompt,
@@ -219,14 +226,21 @@ export default function IntelligenceBarShell({
                 <div className="u-label text-ink-tertiary mb-1.5">{g.group}</div>
               )}
               <div className="flex flex-wrap gap-2">
-                {g.items.map((a) => (
-                  <QuickChip
-                    key={a.id}
-                    label={a.label}
-                    title={a.prompt}
-                    onClick={() => { setPrompt(a.prompt); submit(a.prompt); }}
-                  />
-                ))}
+                {g.items.map((a) => {
+                  const promo = promotions?.[a.id];
+                  const title = promo?.reason
+                    ? `Suggested — ${promo.reason} · ${a.prompt}`
+                    : a.prompt;
+                  return (
+                    <QuickChip
+                      key={a.id}
+                      label={a.label}
+                      title={title}
+                      promoted={!!promo}
+                      onClick={() => { setPrompt(a.prompt); submit(a.prompt); }}
+                    />
+                  );
+                })}
               </div>
             </div>
           ))}

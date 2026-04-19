@@ -6,7 +6,7 @@
  * All UI + API lives in IntelligenceBarShell.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import IntelligenceBarShell from './IntelligenceBarShell';
 
 const FALLBACK_ACTIONS = [
@@ -37,11 +37,25 @@ export default function DashboardIntelligenceBarV2({ kpiData }) {
     };
   }, [kpiData]);
 
+  const promotions = useMemo(() => {
+    const p = {};
+    const k = kpiData?.kpis;
+    if (!k) return p;
+    if (typeof k.revenueChangePercent === 'number' && k.revenueChangePercent < 0) {
+      p.this_vs_last = { reason: `revenue down ${Math.abs(k.revenueChangePercent).toFixed(1)}% vs last week` };
+    }
+    if (typeof k.estimatesPending === 'number' && k.estimatesPending >= 5) {
+      p.close_rate = { reason: `${k.estimatesPending} estimates pending` };
+    }
+    return p;
+  }, [kpiData]);
+
   return (
     <IntelligenceBarShell
       context="dashboard"
       buildPageData={buildPageData}
       fallbackActions={FALLBACK_ACTIONS}
+      promotions={promotions}
       placeholder="How did we do this week? What's my MRR trend? Morning briefing…"
       followupPlaceholder="Drill deeper — 'break that down by tier', 'compare to Q1'…"
     />
