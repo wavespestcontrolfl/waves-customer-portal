@@ -143,13 +143,11 @@ function PostEditor({ post, onBack, onUpdate }) {
   const [editing, setEditing] = useState(post);
   const [generating, setGenerating] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
-  const [publishing, setPublishing] = useState(false);
   const [astroPublishing, setAstroPublishing] = useState(false);
   const [astroMerging, setAstroMerging] = useState(false);
   const [astroRefreshing, setAstroRefreshing] = useState(false);
   const [authors, setAuthors] = useState([]);
   const [serviceAreas, setServiceAreas] = useState([]);
-  const [showLegacyWp, setShowLegacyWp] = useState(false);
   const [optimization, setOptimization] = useState(
     post.optimization_suggestions ? (typeof post.optimization_suggestions === 'string' ? JSON.parse(post.optimization_suggestions) : post.optimization_suggestions) : null
   );
@@ -222,17 +220,6 @@ function PostEditor({ post, onBack, onUpdate }) {
       keyword: optimization.suggestedKeyword || prev.keyword,
     }));
     alert('Applied suggested meta + keyword. Review the SEO improvements and apply them to the content manually.');
-  };
-
-  const handlePublish = async () => {
-    setPublishing(true);
-    try {
-      await adminPost(`/admin/content/blog/${post.id}/publish`, {});
-      setEditing(prev => ({ ...prev, status: 'published' }));
-    } catch (err) {
-      alert('Publish failed — check connection');
-    }
-    setPublishing(false);
   };
 
   const handlePublishAstro = async () => {
@@ -568,25 +555,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             color: D.purple, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: sharing ? 0.5 : 1,
           }}>{sharing ? 'Sharing...' : 'Share to Social Media'}</button>
         )}
-        <div style={{ flex: 1 }} />
-        {/* Legacy WordPress — hidden by default, surface only on explicit toggle. */}
-        <button onClick={() => setShowLegacyWp(v => !v)} style={{
-          padding: '10px 14px', borderRadius: 8, border: `1px dashed ${D.border}`, background: 'transparent',
-          color: D.muted, fontSize: 11, cursor: 'pointer',
-        }}>{showLegacyWp ? 'Hide legacy' : 'Legacy (WP)'}</button>
       </div>
-      {showLegacyWp && editing.content && (
-        <div style={{
-          border: `1px dashed ${D.border}`, borderRadius: 8, padding: 10, fontSize: 11, color: D.muted,
-          display: 'flex', alignItems: 'center', gap: 10,
-        }}>
-          <span>Legacy WordPress publish — do not use for new posts. Retiring after 5–10 successful Astro publishes.</span>
-          <button onClick={handlePublish} disabled={publishing} style={{
-            padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent',
-            color: D.muted, fontSize: 11, cursor: 'pointer', opacity: publishing ? 0.5 : 1,
-          }}>{publishing ? 'Publishing...' : 'Publish to WP'}</button>
-        </div>
-      )}
     </div>
   );
 }

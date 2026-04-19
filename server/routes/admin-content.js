@@ -139,9 +139,9 @@ router.post('/blog/sync-wordpress', async (req, res, next) => {
 });
 
 // POST /api/admin/content/blog/:id/publish — LEGACY: publish to WordPress.
-// Kept running while the Astro publish flow (/publish-astro below) proves
-// out over the next 5–10 posts. Do not call from new UI — BlogPage now
-// surfaces "Publish to WP (legacy)" behind a secondary toggle.
+// Not surfaced in the admin UI (retired in favor of /publish-astro). Kept
+// mounted because content-scheduler.js and the IB `publish_to_wordpress`
+// tool still hit WordPressSync.publishToWordPress directly.
 router.post('/blog/:id/publish', async (req, res, next) => {
   try {
     const wpPost = await WordPressSync.publishToWordPress(req.params.id);
