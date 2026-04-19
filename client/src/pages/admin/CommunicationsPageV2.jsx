@@ -28,7 +28,7 @@ import { SmsTemplatesTabV2, CSRCoachTabV2 } from './CommunicationsTabsV2';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 import NewsletterTabV2 from './NewsletterTabV2';
 import PushSettingsV2 from '../../components/admin/PushSettingsV2';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
+import SEOIntelligenceBarV2 from '../../components/admin/SEOIntelligenceBarV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 
@@ -1089,7 +1089,7 @@ export default function CommunicationsPageV2() {
         </div>
       </div>
 
-      <SEOIntelligenceBar context="comms" />
+      <SEOIntelligenceBarV2 context="comms" />
 
       <div className="flex gap-1.5 mb-5 mt-4 flex-wrap">
         {tabs.map((t) => (
