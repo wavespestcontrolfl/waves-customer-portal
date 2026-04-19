@@ -1,17 +1,19 @@
 /**
- * terminal_handoff_tokens — signed-JWT handoff for Tap to Pay deep links.
+ * terminal_handoff_tokens — replay-protection store for Tap to Pay deep links.
  *
  * When a tech hits "Collect Payment" in the PWA, the server mints a 60-second
- * HMAC-JWT and embeds its jti + amount + invoice_id in a wavespay:// deep
- * link. The native iOS app receives the deep link, POSTs to /validate-handoff,
- * and only then shows the "Tap to Charge" screen. This table backs both:
+ * HMAC-JWT and embeds its jti in a wavespay:// deep link. The native iOS app
+ * POSTs to /validate-handoff; the atomic UPDATE ... WHERE used_at IS NULL
+ * flips the row in a single statement — second attempt finds used_at NOT NULL
+ * and is rejected.
  *
- *   1. Replay protection — jti is PK, used_at flipped once in a single
- *      atomic UPDATE on validate. A second attempt sees used_at NOT NULL
- *      and is rejected.
- *   2. Mint audit — one row per mint captures who minted, for what invoice,
- *      at what amount, from where. Rows stay after expiry so BI can query
- *      mint-to-charge ratios, per-tech activity, etc.
+ * Scope: ephemeral. Rows are useful for ~60 seconds. A nightly cron in
+ * scheduler.js deletes rows where expires_at < NOW() - INTERVAL '1 hour'
+ * so the table doesn't grow unbounded.
+ *
+ * Mint audit (who/what/when/from-where) lives separately in audit_log, which
+ * is permanent. The jti is written as a plain string reference in audit_log
+ * (no FK, since the row here disappears on cleanup).
  */
 
 exports.up = async function (knex) {
@@ -20,17 +22,10 @@ exports.up = async function (knex) {
 
   await knex.schema.createTable('terminal_handoff_tokens', (t) => {
     t.string('jti', 64).primary();
-    t.uuid('tech_user_id').notNullable().references('id').inTable('technicians').onDelete('CASCADE');
-    t.uuid('invoice_id').notNullable().references('id').inTable('invoices').onDelete('CASCADE');
-    t.integer('amount_cents').notNullable();
-    t.string('ip_address', 64);
-    t.text('user_agent');
     t.timestamp('expires_at').notNullable();
     t.timestamp('used_at');
-    t.timestamps(true, true);
+    t.timestamp('created_at').notNullable().defaultTo(knex.fn.now());
     t.index(['expires_at']);
-    t.index(['tech_user_id', 'created_at']);
-    t.index(['invoice_id']);
   });
 };
 

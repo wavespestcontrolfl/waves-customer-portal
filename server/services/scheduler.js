@@ -994,6 +994,20 @@ function initScheduledJobs() {
     logger.error(`GA4 crons failed to init: ${err.message}`);
   }
 
+  // DAILY 1AM — Terminal handoff tokens cleanup
+  // Rows expire after 60s of mint; we keep them ~1h post-expiry as a safety
+  // buffer, then delete. Audit trail lives permanently in audit_log.
+  cron.schedule('0 1 * * *', async () => {
+    try {
+      const deleted = await db('terminal_handoff_tokens')
+        .where('expires_at', '<', db.raw("NOW() - INTERVAL '1 hour'"))
+        .del();
+      if (deleted > 0) logger.info(`[terminal-cleanup] deleted ${deleted} expired handoff tokens`);
+    } catch (err) {
+      logger.error(`[terminal-cleanup] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
