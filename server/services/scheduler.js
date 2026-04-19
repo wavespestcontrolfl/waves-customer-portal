@@ -995,16 +995,26 @@ function initScheduledJobs() {
   }
 
   // DAILY 1AM — Terminal handoff tokens cleanup
-  // Rows expire after 60s of mint; we keep them ~1h post-expiry as a safety
-  // buffer, then delete. Audit trail lives permanently in audit_log.
+  //
+  // Rows expire after 60s of mint. The 1-hour post-expiry buffer is
+  // intentional: if a tech reports "the charge didn't go through" within the
+  // next hour, support can still inspect whether the token was minted /
+  // validated / never used. Anything beyond 1h is forensics we'd read from
+  // audit_log anyway.
+  //
+  // Multi-instance safety: DELETE is idempotent — concurrent runs on
+  // Railway replicas just race and one wins. If we ever add a non-idempotent
+  // daily job, introduce a cron_leases table with SELECT ... FOR UPDATE
+  // SKIP LOCKED first. Don't copy this pattern blindly.
   cron.schedule('0 1 * * *', async () => {
+    const started = Date.now();
     try {
       const deleted = await db('terminal_handoff_tokens')
         .where('expires_at', '<', db.raw("NOW() - INTERVAL '1 hour'"))
         .del();
-      if (deleted > 0) logger.info(`[terminal-cleanup] deleted ${deleted} expired handoff tokens`);
+      logger.info(`[terminal-cleanup] ok — deleted ${deleted} expired handoff token(s) in ${Date.now() - started}ms`);
     } catch (err) {
-      logger.error(`[terminal-cleanup] failed: ${err.message}`);
+      logger.error(`[terminal-cleanup] failed after ${Date.now() - started}ms: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
