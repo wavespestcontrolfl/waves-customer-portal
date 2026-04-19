@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBarV2';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 

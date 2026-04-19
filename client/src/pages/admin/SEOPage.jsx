@@ -39,16 +39,16 @@ function KpiCard({ label, value, sub, color }) {
 }
 
 const TABS = [
-  { key: 'dashboard', label: 'Dashboard', icon: '🔍' },
-  { key: 'advisor', label: 'SEO Advisor', icon: '🧠' },
-  { key: 'rankings', label: 'Rankings', icon: '📊' },
-  { key: 'backlinks', label: 'Backlinks & Citations', icon: '🔗' },
-  { key: 'content-qa', label: 'Content QA', icon: '✅' },
-  { key: 'ai-overview', label: 'AI Overview', icon: '🤖' },
-  { key: 'funnel', label: 'Funnel', icon: '📈' },
-  { key: 'analytics', label: 'Analytics', icon: '📉' },
-  { key: 'site-audit', label: 'Site Health', icon: '🩺' },
-  { key: 'blog', label: 'Blog Content', icon: '📝' },
+  { key: 'dashboard', label: 'Dashboard' },
+  { key: 'advisor', label: 'SEO Advisor' },
+  { key: 'rankings', label: 'Rankings' },
+  { key: 'backlinks', label: 'Backlinks & Citations' },
+  { key: 'content-qa', label: 'Content QA' },
+  { key: 'ai-overview', label: 'AI Overview' },
+  { key: 'funnel', label: 'Funnel' },
+  { key: 'analytics', label: 'Analytics' },
+  { key: 'site-audit', label: 'Site Health' },
+  { key: 'blog', label: 'Blog Content' },
 ];
 
 const PRIMARY_DOMAIN = 'wavespestcontrol.com';
@@ -997,8 +997,8 @@ export default function SEOPage() {
             padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
             background: tab === t.key ? D.teal : 'transparent',
             color: tab === t.key ? D.white : D.muted,
-            transition: 'all 0.15s', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
-          }}><span>{t.icon}</span> {t.label}</button>
+            transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0,
+          }}>{t.label}</button>
         ))}
       </div>
 

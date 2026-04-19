@@ -1,5 +1,5 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBarV2';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', orange: '#EA580C', text: '#334155', muted: '#64748B', white: '#FFFFFF', purple: '#7C3AED', heading: '#0F172A', inputBorder: '#CBD5E1' };
