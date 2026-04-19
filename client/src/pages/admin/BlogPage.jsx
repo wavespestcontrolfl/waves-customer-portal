@@ -38,12 +38,6 @@ function seoColor(score) {
   return D.red;
 }
 
-function seoEmoji(score) {
-  if (!score) return '⚪';
-  if (score >= 70) return '🟢';
-  if (score >= 50) return '🟡';
-  return '🔴';
-}
 
 // =========================================================================
 // POST LIST COMPONENT (shared between Published, Drafts, Calendar, Ideas)
@@ -111,20 +105,20 @@ function PostList({ status, onSelectPost }) {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
-                {p.seo_score != null && <span style={{ marginRight: 6 }}>{seoEmoji(p.seo_score)} {p.seo_score}/100</span>}
+                {p.seo_score != null && <span style={{ marginRight: 6, color: seoColor(p.seo_score) }}>{p.seo_score}/100</span>}
                 {p.title}
               </div>
               {p.seo_score != null && p.seo_score < 50 && (
                 <div style={{ fontSize: 11, color: D.red, fontWeight: 600, marginBottom: 4 }}>
-                  {'⚠️'} CRITICAL — needs optimization
+                  CRITICAL — needs optimization
                 </div>
               )}
               <div style={{ display: 'flex', gap: 12, fontSize: 11, color: D.muted, flexWrap: 'wrap' }}>
-                {p.tag && <span>{'🏷'} {p.tag}</span>}
-                {p.city && <span>{'📍'} {p.city}</span>}
-                {p.keyword && <span>{'🔑'} {p.keyword}</span>}
-                {p.publish_date && <span>{'📅'} {new Date(p.publish_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
-                {p.word_count > 0 && <span>{'📝'} {p.word_count} words</span>}
+                {p.tag && <span>{p.tag}</span>}
+                {p.city && <span>{p.city}</span>}
+                {p.keyword && <span>{p.keyword}</span>}
+                {p.publish_date && <span>{new Date(p.publish_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
+                {p.word_count > 0 && <span>{p.word_count} words</span>}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
@@ -289,18 +283,18 @@ function PostEditor({ post, onBack, onUpdate }) {
               <button onClick={handleGenerate} disabled={generating} style={{
                 padding: '6px 14px', borderRadius: 6, border: 'none', background: D.teal,
                 color: D.heading, fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: generating ? 0.5 : 1,
-              }}>{generating ? 'Generating...' : '✨ Generate Content'}</button>
+              }}>{generating ? 'Generating...' : 'Generate Content'}</button>
             )}
             {editing.content && (
               <>
                 <button onClick={handleGenerate} disabled={generating} style={{
                   padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent',
                   color: D.muted, fontSize: 12, cursor: 'pointer', opacity: generating ? 0.5 : 1,
-                }}>{generating ? 'Regenerating...' : '🔄 Regenerate'}</button>
+                }}>{generating ? 'Regenerating...' : 'Regenerate'}</button>
                 <button onClick={handleOptimize} disabled={optimizing} style={{
                   padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.amber}`, background: 'transparent',
                   color: D.amber, fontSize: 12, cursor: 'pointer', opacity: optimizing ? 0.5 : 1,
-                }}>{optimizing ? 'Optimizing...' : '🔧 Optimize'}</button>
+                }}>{optimizing ? 'Optimizing...' : 'Optimize'}</button>
               </>
             )}
           </div>
@@ -328,9 +322,9 @@ function PostEditor({ post, onBack, onUpdate }) {
 
         {editing.content && (
           <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 12, color: D.muted }}>
-            <span>{'📝'} {(editing.content || '').split(/\s+/).filter(Boolean).length} words</span>
-            <span>{'⏱'} {Math.ceil((editing.content || '').split(/\s+/).filter(Boolean).length / 250)} min read</span>
-            {editing.seo_score != null && <span>{seoEmoji(editing.seo_score)} SEO: {editing.seo_score}/100</span>}
+            <span>{(editing.content || '').split(/\s+/).filter(Boolean).length} words</span>
+            <span>{Math.ceil((editing.content || '').split(/\s+/).filter(Boolean).length / 250)} min read</span>
+            {editing.seo_score != null && <span style={{ color: seoColor(editing.seo_score) }}>SEO: {editing.seo_score}/100</span>}
           </div>
         )}
       </Card>
@@ -338,7 +332,7 @@ function PostEditor({ post, onBack, onUpdate }) {
       {/* Optimization Suggestions */}
       {optimization && !optimization.parse_error && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.amber, marginBottom: 12 }}>{'🔧'} Optimization Suggestions</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.amber, marginBottom: 12 }}>Optimization Suggestions</div>
           {optimization.suggested_title && (
             <div style={{ padding: '8px 12px', background: D.bg, borderRadius: 6, marginBottom: 8 }}>
               <div style={{ fontSize: 11, color: D.muted }}>Suggested Title</div>
@@ -370,7 +364,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Add Internal Links</div>
               {optimization.missing_internal_links.map((l, i) => (
                 <div key={i} style={{ fontSize: 12, color: D.text, marginBottom: 2 }}>
-                  {'🔗'} "<span style={{ color: D.teal }}>{l.anchor_text}</span>" → {l.url}
+                  "<span style={{ color: D.teal }}>{l.anchor_text}</span>" → {l.url}
                 </div>
               ))}
             </div>
@@ -403,7 +397,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           <button onClick={handleShareSocial} disabled={sharing} style={{
             padding: '10px 20px', borderRadius: 8, border: `1px solid ${D.purple}`, background: 'transparent',
             color: D.purple, fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: sharing ? 0.5 : 1,
-          }}>{sharing ? 'Sharing...' : '📲 Share to Social Media'}</button>
+          }}>{sharing ? 'Sharing...' : 'Share to Social Media'}</button>
         )}
       </div>
     </div>
@@ -437,7 +431,7 @@ function AuditTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       {/* Summary */}
       <Card>
-        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 12 }}>{'📊'} Content Health Scorecard</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Content Health Scorecard</div>
         <div style={{ fontSize: 14, color: D.text, marginBottom: 16 }}>
           Total posts: <span style={{ fontFamily: MONO, color: D.teal }}>{audit.total}</span>
           {' '}({audit.published} published + {audit.drafts} drafts + {audit.queued} queued + {audit.ideas} ideas)
@@ -446,7 +440,7 @@ function AuditTab() {
         {/* Recommendations */}
         {(audit.recommendations || []).map((rec, i) => {
           const prioColor = rec.priority === 'critical' ? D.red : rec.priority === 'high' ? D.orange : D.amber;
-          const prioLabel = rec.priority === 'critical' ? '🔴 CRITICAL' : rec.priority === 'high' ? '🟠 HIGH' : '🟡 MEDIUM';
+          const prioLabel = rec.priority === 'critical' ? 'CRITICAL' : rec.priority === 'high' ? 'HIGH' : 'MEDIUM';
           return (
             <div key={i} style={{
               padding: '12px 16px', background: D.bg, borderRadius: 8, marginBottom: 8,
@@ -472,13 +466,13 @@ function AuditTab() {
                 <div style={barStyle(count, maxTag, isLow ? D.amber : D.teal)} />
               </div>
               <div style={{ width: 30, fontSize: 12, color: D.muted, fontFamily: MONO }}>{count}</div>
-              {isLow && <span style={{ fontSize: 10, color: D.amber }}>{'⚠️'}</span>}
+              {isLow && <span style={{ fontSize: 10, color: D.amber, fontWeight: 600 }}>LOW</span>}
             </div>
           );
         })}
         {(audit.topicDistribution?.gaps || []).length > 0 && (
           <div style={{ marginTop: 12, padding: 12, background: D.bg, borderRadius: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: D.amber, marginBottom: 6 }}>{'⚠️'} Content Gaps</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: D.amber, marginBottom: 6 }}>Content Gaps</div>
             {audit.topicDistribution.gaps.map((g, i) => (
               <div key={i} style={{ fontSize: 12, color: D.text, marginBottom: 2 }}>{'•'} {g}</div>
             ))}
@@ -499,8 +493,8 @@ function AuditTab() {
                 <div style={barStyle(count, maxCity, isHigh ? D.amber : D.green)} />
               </div>
               <div style={{ width: 30, fontSize: 12, color: D.muted, fontFamily: MONO }}>{count}</div>
-              {isHigh && <span style={{ fontSize: 10, color: D.amber }}>{'⚠️'} overweight</span>}
-              {isLow && <span style={{ fontSize: 10, color: D.red }}>{'⚠️'}</span>}
+              {isHigh && <span style={{ fontSize: 10, color: D.amber, fontWeight: 600 }}>overweight</span>}
+              {isLow && <span style={{ fontSize: 10, color: D.red, fontWeight: 600 }}>LOW</span>}
             </div>
           );
         })}
@@ -523,7 +517,7 @@ function AuditTab() {
       {/* Top Performers */}
       {(audit.topPerformers || []).length > 0 && (
         <Card>
-          <div style={{ fontSize: 15, fontWeight: 600, color: D.green, marginBottom: 12 }}>{'🏆'} Top Performing Posts</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.green, marginBottom: 12 }}>Top Performing Posts</div>
           {audit.topPerformers.map((p, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: i < audit.topPerformers.length - 1 ? `1px solid ${D.border}` : 'none' }}>
               <span style={{ fontSize: 12, fontFamily: MONO, color: D.green, width: 50 }}>{p.score}/100</span>
@@ -541,11 +535,11 @@ function AuditTab() {
 // =========================================================================
 
 const CONTENT_TYPES = [
-  { id: 'blog_post', label: 'Blog Post', desc: '800–1200 words, entity-complete, FAQ schema from SERP consensus', icon: '📝' },
-  { id: 'page_refresh', label: 'Page Refresh', desc: 'Update existing page: add missing entities, expand FAQs, fix schema', icon: '🔄' },
-  { id: 'pest_pressure', label: 'Pest Pressure Report', desc: 'Weekly SWFL conditions + actionable advice', icon: '🐛' },
-  { id: 'gbp_post', label: 'GBP Post', desc: '150–300 words, Google Business Profile', icon: '📍' },
-  { id: 'service_page', label: 'Service Page', desc: '1500–2000 words, full entity coverage, semantic depth', icon: '🏠' },
+  { id: 'blog_post', label: 'Blog Post', desc: '800–1200 words, entity-complete, FAQ schema from SERP consensus' },
+  { id: 'page_refresh', label: 'Page Refresh', desc: 'Update existing page: add missing entities, expand FAQs, fix schema' },
+  { id: 'pest_pressure', label: 'Pest Pressure Report', desc: 'Weekly SWFL conditions + actionable advice' },
+  { id: 'gbp_post', label: 'GBP Post', desc: '150–300 words, Google Business Profile' },
+  { id: 'service_page', label: 'Service Page', desc: '1500–2000 words, full entity coverage, semantic depth' },
 ];
 
 const CITIES = ['Lakewood Ranch', 'Parrish', 'Bradenton', 'Sarasota', 'Venice', 'North Port', 'Port Charlotte'];
@@ -584,14 +578,14 @@ const SUGGESTIONS = {
 };
 
 const ARTICLE_CHECKLIST = [
-  { label: 'All entities competitors cover — no gaps', icon: '🧩' },
-  { label: 'FAQ section from SERP consensus (People Also Ask)', icon: '❓' },
-  { label: 'Schema markup (FAQ, HowTo, LocalBusiness)', icon: '📋' },
-  { label: 'FAWN weather data (timestamped, station-specific)', icon: '🌡' },
-  { label: 'UF/IFAS citation with EDIS publication ID', icon: '🎓' },
-  { label: 'Specific neighborhood reference for target city', icon: '🏘' },
-  { label: 'Real field observation from tech data', icon: '🔬' },
-  { label: 'WaveGuard CTA tied to the specific problem', icon: '🛡' },
+  { label: 'All entities competitors cover — no gaps' },
+  { label: 'FAQ section from SERP consensus (People Also Ask)' },
+  { label: 'Schema markup (FAQ, HowTo, LocalBusiness)' },
+  { label: 'FAWN weather data (timestamped, station-specific)' },
+  { label: 'UF/IFAS citation with EDIS publication ID' },
+  { label: 'Specific neighborhood reference for target city' },
+  { label: 'Real field observation from tech data' },
+  { label: 'WaveGuard CTA tied to the specific problem' },
 ];
 
 function GenerateTab({ onGenerated }) {
@@ -640,7 +634,6 @@ function GenerateTab({ onGenerated }) {
                 background: contentType === ct.id ? D.teal + '18' : D.bg,
                 border: `1px solid ${contentType === ct.id ? D.teal : D.border}`,
               }}>
-                <div style={{ fontSize: 18, marginBottom: 4 }}>{ct.icon}</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: contentType === ct.id ? D.teal : D.heading }}>{ct.label}</div>
                 <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>{ct.desc}</div>
               </div>
@@ -704,7 +697,7 @@ function GenerateTab({ onGenerated }) {
               Generating — pulling FAWN data, building prompt...
             </>
           ) : (
-            <>{'✨'} Generate {CONTENT_TYPES.find(c => c.id === contentType)?.label}</>
+            <>Generate {CONTENT_TYPES.find(c => c.id === contentType)?.label}</>
           )}
         </button>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -715,7 +708,7 @@ function GenerateTab({ onGenerated }) {
 
         {/* Weather snapshot */}
         <Card style={{ padding: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>{'🌡'} FAWN Weather</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>FAWN Weather</div>
           {weather ? (
             <div style={{ fontSize: 12, color: D.text, lineHeight: 1.7 }}>
               {weather.temp && <div>Temp: <span style={{ color: D.teal, fontFamily: MONO }}>{weather.temp}F</span></div>}
@@ -733,7 +726,7 @@ function GenerateTab({ onGenerated }) {
         {/* Active signals */}
         {signals.length > 0 && (
           <Card style={{ padding: 16 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: D.amber, marginBottom: 8 }}>{'⚡'} Active Signals</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: D.amber, marginBottom: 8 }}>Active Signals</div>
             {signals.map((s, i) => (
               <div key={i} style={{ fontSize: 12, color: D.text, marginBottom: 4, paddingLeft: 8, borderLeft: `2px solid ${D.amber}` }}>{s}</div>
             ))}
@@ -745,8 +738,7 @@ function GenerateTab({ onGenerated }) {
           <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 10 }}>Every article includes</div>
           {ARTICLE_CHECKLIST.map((item, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-              <span style={{ fontSize: 12 }}>{item.icon}</span>
-              <span style={{ fontSize: 11, color: D.green }}>{'✓'}</span>
+              <span style={{ fontSize: 11, color: D.green, fontWeight: 600 }}>✓</span>
               <span style={{ fontSize: 11, color: D.text }}>{item.label}</span>
             </div>
           ))}
@@ -805,7 +797,7 @@ export default function BlogPage() {
         <button onClick={handleGenerateIdeas} disabled={generatingIdeas} style={{
           padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.teal}`, background: 'transparent',
           color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: generatingIdeas ? 0.5 : 1,
-        }}>{generatingIdeas ? 'Generating...' : '💡 Generate New Ideas'}</button>
+        }}>{generatingIdeas ? 'Generating...' : 'Generate New Ideas'}</button>
       </div>
 
       {/* Intelligence Bar */}
