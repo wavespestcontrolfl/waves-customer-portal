@@ -205,23 +205,60 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }
 
-    // Beehiiv: subscribe + tag + enroll in lead automation (drives the email side).
-    try {
-      const beehiiv = require('../services/beehiiv');
-      if (beehiiv.configured && email) {
-        const sub = await beehiiv.upsertSubscriber(email.toLowerCase().trim(), {
-          firstName, lastName,
-          utmSource: attr?.landing_url || attr?.utm?.source || 'waves_portal',
-          utmMedium: 'quote_wizard',
-        });
-        if (sub?.id) {
-          await beehiiv.addTags(sub.id, ['Lead', 'quote wizard']);
-          const autoId = process.env.BEEHIIV_AUTO_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c';
-          await beehiiv.enrollInAutomation(autoId, { email: email.toLowerCase().trim(), subscriptionId: sub.id });
-          logger.info(`[public-quote] Beehiiv: subscribed ${email}, enrolled in lead automation`);
+    // Newsletter enrollment — gated on explicit opt-in checkbox from the quote
+    // wizard (QuotePage.jsx). Same consent bit drives both systems:
+    //   - beehiiv lead drip (new_lead automation — promotional, per ASM classification)
+    //   - SendGrid newsletter_subscribers table (ongoing monthly broadcast)
+    // Without the checkbox: no email enrollment of any kind. User gets the quote,
+    // the admin alert, and their customer-SMS booking link — nothing else.
+    const newsletterOptIn = req.body.newsletter_opt_in === true;
+    const emailLc = email ? email.toLowerCase().trim() : '';
+
+    if (newsletterOptIn && emailLc) {
+      try {
+        const beehiiv = require('../services/beehiiv');
+        if (beehiiv.configured) {
+          const sub = await beehiiv.upsertSubscriber(emailLc, {
+            firstName, lastName,
+            utmSource: attr?.landing_url || attr?.utm?.source || 'waves_portal',
+            utmMedium: 'quote_wizard',
+          });
+          if (sub?.id) {
+            await beehiiv.addTags(sub.id, ['Lead', 'quote wizard']);
+            const autoId = process.env.BEEHIIV_AUTO_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c';
+            await beehiiv.enrollInAutomation(autoId, { email: emailLc, subscriptionId: sub.id });
+            logger.info(`[public-quote] Beehiiv: subscribed ${emailLc}, enrolled in lead automation`);
+          }
         }
-      }
-    } catch (e) { logger.error(`[public-quote] Beehiiv enroll failed: ${e.message}`); }
+      } catch (e) { logger.error(`[public-quote] Beehiiv enroll failed: ${e.message}`); }
+
+      // SendGrid side: dual-write into newsletter_subscribers. Mirrors
+      // /api/public/newsletter/subscribe — resubscribe if previously unsubbed,
+      // no-op if already active, fresh insert otherwise.
+      try {
+        const existing = await db('newsletter_subscribers').where({ email: emailLc }).first();
+        if (existing) {
+          if (existing.status === 'unsubscribed') {
+            await db('newsletter_subscribers').where({ id: existing.id }).update({
+              status: 'active',
+              resubscribed_at: new Date(),
+              unsubscribed_at: null,
+              updated_at: new Date(),
+            });
+            logger.info(`[public-quote] SendGrid: resubscribed ${emailLc} via quote wizard`);
+          }
+        } else {
+          await db('newsletter_subscribers').insert({
+            email: emailLc,
+            first_name: firstName || null,
+            last_name: lastName || null,
+            source: 'quote_wizard',
+            status: 'active',
+          });
+          logger.info(`[public-quote] SendGrid: subscribed ${emailLc} via quote wizard`);
+        }
+      } catch (e) { logger.error(`[public-quote] newsletter_subscribers dual-write failed: ${e.message}`); }
+    }
 
     // has_setup_fee flags the $99 WaveGuard initial fee (recurring pest only).
     // UI notes this is waivable with annual prepay.

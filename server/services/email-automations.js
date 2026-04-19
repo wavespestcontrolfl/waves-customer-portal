@@ -167,6 +167,24 @@ const AUTOMATIONS = {
   },
 };
 
+// ASM (Advanced Suppression Manager) group classification for SendGrid.
+//
+// Newsletter group = promotional intent. A user who unsubs from the monthly
+// newsletter expects these to stop too (re-engagement pitches, intro emails,
+// referral asks). Map to SENDGRID_ASM_GROUP_NEWSLETTER.
+//
+// Service group = transactional. Program welcomes, treatment prep, review
+// thank-yous, renewals, billing. Stay delivered even if newsletter-unsubbed
+// because the customer relationship demands it. Map to SENDGRID_ASM_GROUP_SERVICE.
+//
+// These automations currently send via beehiiv drips; the asmGroup field is
+// forward-looking for the SendGrid migration but also tells admin surfaces
+// how to label each automation to the operator.
+const NEWSLETTER_AUTOMATION_KEYS = new Set(['cold_lead', 'new_lead', 'referral_nudge']);
+for (const [key, auto] of Object.entries(AUTOMATIONS)) {
+  auto.asmGroup = NEWSLETTER_AUTOMATION_KEYS.has(key) ? 'newsletter' : 'service';
+}
+
 const EmailAutomationService = {
   AUTOMATIONS,
 

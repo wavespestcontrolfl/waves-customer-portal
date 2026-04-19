@@ -161,6 +161,11 @@ export default function QuotePage() {
   const [upsellLoading, setUpsellLoading] = useState(false);
   const [upsellError, setUpsellError] = useState('');
 
+  // Newsletter opt-in — default unchecked. Only dual-writes to SendGrid when
+  // user explicitly consents. The beehiiv lead drip is separate (see
+  // server/routes/public-quote.js); this controls the ongoing newsletter only.
+  const [newsletterOptIn, setNewsletterOptIn] = useState(false);
+
   // Addons variant is URL-gated so the original /estimate flow stays untouched
   // for all traffic except explicit opt-ins (/estimate?addons=1). Locked at mount.
   const [showUpsell] = useState(() => {
@@ -386,6 +391,7 @@ export default function QuotePage() {
             ...(svcLawn ? { lawn: { track: grassType, tier: 'enhanced' } } : {}),
           },
           attribution: attribution || undefined,
+          newsletter_opt_in: newsletterOptIn,
         }),
       });
       const d = await r.json();
@@ -411,6 +417,7 @@ export default function QuotePage() {
     setSvcPest(false); setSvcLawn(false);
     setHomeSqFt(''); setLotSqFt('');
     setUpsellSelected({}); setUpsellLoading(false); setUpsellError('');
+    setNewsletterOptIn(false);
   }
 
   async function submitUpsell() {
@@ -719,6 +726,24 @@ export default function QuotePage() {
                   )}
                 </div>
 
+                {intakeIdx === INTAKE_STEPS.length - 1 && intake.frequency === 'ongoing' && !isOtherFlow && (
+                  <label style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 10,
+                    marginTop: 16, fontSize: 13, color: COLORS.textBody,
+                    lineHeight: 1.5, cursor: 'pointer',
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={newsletterOptIn}
+                      onChange={(e) => setNewsletterOptIn(e.target.checked)}
+                      style={{ marginTop: 3, flexShrink: 0, cursor: 'pointer' }}
+                    />
+                    <span>
+                      Send me Waves' monthly email — seasonal pest pressure alerts,
+                      lawn care reminders, local SWFL tips. Unsubscribe anytime.
+                    </span>
+                  </label>
+                )}
                 {intakeIdx === INTAKE_STEPS.length - 1 && (
                   <p style={{ fontSize: 11, color: COLORS.textCaption, marginTop: 16, lineHeight: 1.5 }}>
                     By completing this form, you agree to the Waves{' '}
