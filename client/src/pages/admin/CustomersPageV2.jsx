@@ -12,7 +12,7 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Filter, Phone, MessageSquare } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
-import IntelligenceBar from '../../components/admin/IntelligenceBar';
+import IntelligenceBarV2 from '../../components/admin/IntelligenceBarV2';
 import useIsMobile from '../../hooks/useIsMobile';
 import { CustomerHealthSection } from './CustomerHealthTabs';
 import {
@@ -628,8 +628,8 @@ export default function CustomersPageV2() {
         </div>
       </div>
 
-      {/* Intelligence Bar (V1 — reskin deferred to later PR) */}
-      <IntelligenceBar onSelectCustomer={(id) => setSelected360Id(id)} />
+      {/* Intelligence Bar (V2 monochrome) */}
+      <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
 
       {/* ======================= DIRECTORY ======================= */}
       {view === 'directory' && (
