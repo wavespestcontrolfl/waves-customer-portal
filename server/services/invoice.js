@@ -364,7 +364,19 @@ const InvoiceService = {
   async list({ status, customerId, limit = 50, offset = 0 } = {}) {
     let query = db('invoices')
       .leftJoin('customers', 'invoices.customer_id', 'customers.id')
-      .select('invoices.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.waveguard_tier');
+      .select(
+        'invoices.*',
+        'customers.first_name',
+        'customers.last_name',
+        'customers.phone',
+        'customers.waveguard_tier',
+        db.raw(`(
+          SELECT json_build_object('brand', card_brand, 'last_four', last_four)
+          FROM payment_methods
+          WHERE customer_id = invoices.customer_id AND is_default = true
+          LIMIT 1
+        ) AS card_on_file`)
+      );
     if (status) query = query.where('invoices.status', status);
     if (customerId) query = query.where('invoices.customer_id', customerId);
     query = query.orderBy('invoices.created_at', 'desc').limit(limit).offset(offset);

@@ -95,9 +95,21 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ limit: '50' });
-    if (filter) params.set('status', filter);
+    // Server-side: only forward filters that map to an exact status value
+    if (filter === 'overdue' || filter === 'draft') params.set('status', filter);
     const data = await adminFetch(`/admin/invoices?${params}`).catch(() => ({ invoices: [] }));
-    setInvoices(data.invoices || []);
+    let rows = data.invoices || [];
+    if (filter === 'unpaid') {
+      rows = rows.filter(i => i.status !== 'paid' && i.status !== 'void');
+    } else if (filter === 'paid_this_month') {
+      const now = new Date();
+      rows = rows.filter(i => {
+        if (i.status !== 'paid' || !i.paid_at) return false;
+        const d = new Date(i.paid_at);
+        return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+      });
+    }
+    setInvoices(rows);
     setSelected(new Set());
   }, [filter]);
   useEffect(() => { load(); }, [load]);
@@ -143,17 +155,29 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <select value={filter} onChange={e => setFilter(e.target.value)} style={{ ...sInput, width: 160 }}>
-          <option value="">All Status</option>
-          <option value="draft">Draft</option>
-          <option value="sent">Sent</option>
-          <option value="viewed">Viewed</option>
-          <option value="paid">Paid</option>
-          <option value="overdue">Overdue</option>
-        </select>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        {[
+          { key: '', label: 'All' },
+          { key: 'overdue', label: 'Overdue' },
+          { key: 'unpaid', label: 'Unpaid' },
+          { key: 'paid_this_month', label: 'Paid this month' },
+          { key: 'draft', label: 'Draft' },
+        ].map(f => {
+          const active = filter === f.key;
+          return (
+            <button
+              key={f.key || 'all'}
+              onClick={() => setFilter(f.key)}
+              style={{
+                padding: '6px 12px', borderRadius: 6, border: `1px solid ${active ? D.teal : D.border}`,
+                background: active ? D.teal : D.card, color: active ? D.white : D.text,
+                fontSize: 12, fontWeight: 500, cursor: 'pointer',
+              }}
+            >{f.label}</button>
+          );
+        })}
         {sendableInvoices.length > 0 && (
-          <button onClick={selectAllSendable} style={sBtn(D.border, D.text)}>
+          <button onClick={selectAllSendable} style={{ ...sBtn(D.border, D.text), padding: '6px 12px', fontSize: 12 }}>
             Select all sendable ({sendableInvoices.length})
           </button>
         )}
@@ -165,6 +189,22 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
         const lineItems = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
         const canSelect = inv.status === 'draft' || inv.status === 'sent' || inv.status === 'viewed';
         const isSelected = selected.has(inv.id);
+
+        // Aging — derived from due_date for unpaid invoices
+        let agingChip = null;
+        if (inv.due_date && inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft') {
+          const due = new Date(inv.due_date + 'T23:59:59');
+          const diffDays = Math.floor((Date.now() - due.getTime()) / 86400000);
+          if (diffDays > 0) {
+            const tone = diffDays >= 30 ? D.red : diffDays >= 15 ? D.amber : D.muted;
+            agingChip = { text: `${diffDays}d overdue`, color: tone };
+          } else if (diffDays >= -3) {
+            agingChip = { text: diffDays === 0 ? 'Due today' : `Due in ${-diffDays}d`, color: D.amber };
+          }
+        }
+
+        const cardOnFile = inv.card_on_file && inv.card_on_file.last_four ? inv.card_on_file : null;
+        const reminderCount = inv.sms_reminder_count || 0;
         return (
           <div key={inv.id} style={{ ...sCard, marginBottom: 8, borderColor: isSelected ? D.teal : D.border }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'flex-start', marginBottom: 8, flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 8 : 0 }}>
@@ -184,6 +224,7 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
                     {inv.status}
                   </span>
                   {inv.waveguard_tier && <span style={sBadge(`${D.amber}22`, D.amber)}>{inv.waveguard_tier}</span>}
+                  {agingChip && <span style={sBadge(`${agingChip.color}22`, agingChip.color)}>{agingChip.text}</span>}
                 </div>
                 <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
                   {inv.first_name} {inv.last_name} -- {inv.title || lineItems[0]?.description || 'Service'}
@@ -220,6 +261,23 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
                 </button>
               )}
               {inv.view_count > 0 && <span style={{ fontSize: 10, color: D.muted }}>{inv.view_count} views</span>}
+              {reminderCount > 0 && (
+                <span style={{ fontSize: 10, color: D.amber }} title="SMS reminders sent so far">
+                  ↩ {reminderCount} reminder{reminderCount === 1 ? '' : 's'}
+                </span>
+              )}
+              {inv.status === 'paid' && (inv.payment_method || inv.card_brand) && (
+                <span style={{ fontSize: 10, color: D.green }} title="Paid via">
+                  ✓ {inv.card_brand ? `${inv.card_brand}` : (inv.payment_method || 'paid')}
+                  {inv.card_last_four ? ` •${inv.card_last_four}` : ''}
+                  {inv.payment_method && inv.payment_method !== 'card' ? ` (${inv.payment_method.replace('_', ' ')})` : ''}
+                </span>
+              )}
+              {cardOnFile && inv.status !== 'paid' && inv.status !== 'void' && (
+                <span style={{ fontSize: 10, color: D.teal }} title="Default card on file for this customer">
+                  💳 {cardOnFile.brand || 'Card'} •{cardOnFile.last_four}
+                </span>
+              )}
               {inv.sms_sent_at && <span style={{ fontSize: 10, color: D.muted }}>SMS: {new Date(inv.sms_sent_at).toLocaleString()}</span>}
             </div>
 
