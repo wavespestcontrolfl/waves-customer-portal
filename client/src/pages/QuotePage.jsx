@@ -52,9 +52,9 @@ const FREQUENCY_OPTIONS = [
 ];
 
 const PEST_FREQS = [
-  { id: 'quarterly', label: 'Quarterly', sub: '4 visits / yr' },
-  { id: 'bimonthly', label: 'Bi-Monthly', sub: '6 visits / yr' },
-  { id: 'monthly',   label: 'Monthly',    sub: '12 visits / yr' },
+  { id: 'quarterly', label: 'Quarterly', sub: 'Most popular' },
+  { id: 'bimonthly', label: 'Bi-Monthly', sub: 'Heavy pressure areas' },
+  { id: 'monthly',   label: 'Monthly',    sub: 'Restaurants / pet-heavy' },
 ];
 
 const GRASS_TYPES = [
@@ -71,7 +71,7 @@ const TOTAL_STAGES_OTHER  = STEPS_OTHER.length  + 1; // + result-other
 
 const NEXT_STEPS = [
   { n: 1, text: <><strong>You tell us who you are</strong> — takes about 30 seconds</> },
-  { n: 2, text: <><strong>We analyze your property</strong> — RentCast records + AI satellite imagery</> },
+  { n: 2, text: <><strong>We measure your property</strong> — lot size, landscape, and complexity from satellite</> },
   { n: 3, text: <><strong>We generate your price</strong> — instant, honest, no haggling</> },
   { n: 4, text: <><strong>A Waves specialist confirms</strong> — text or call to lock it in same-day</> },
 ];
@@ -213,8 +213,8 @@ export default function QuotePage() {
     const phoneDigits = intake.phone.replace(/\D/g, '');
 
     setStage('lookup');
-    setLookupStatus('Looking up your property...');
-    setLookupSub('Pulling records + satellite imagery...');
+    setLookupStatus('Measuring your property');
+    setLookupSub('Checking lot size, landscape, and complexity...');
     try {
       const r = await fetch(`${API_BASE}/public/estimator/property-lookup`, {
         method: 'POST',
@@ -242,7 +242,7 @@ export default function QuotePage() {
       setSvcPest(intake.interest === 'pest' || intake.interest === 'both');
       setSvcLawn(intake.interest === 'lawn' || intake.interest === 'both');
       setPestFreq('quarterly');
-      setLookupStatus('Property analyzed');
+      setLookupStatus('Property measured');
       setLookupSub('');
       setStage('confirm');
     } catch (e) {
@@ -677,11 +677,11 @@ export default function QuotePage() {
 
             {stage === 'confirm' && (
               <div>
-                <h2 style={sCardH2}>Confirm Your Quote</h2>
+                <h2 style={sCardH2}>Confirm Your Property</h2>
                 <p style={sCardSub}>
                   {enriched?.homeSqFt
-                    ? <>We detected a <strong>{Number(enriched.homeSqFt).toLocaleString()} sq ft</strong> {enriched.propertyType || 'home'}{enriched.yearBuilt ? <> built in {enriched.yearBuilt}</> : null}. Confirm and pick your service below.</>
-                    : <>Confirm your details and pick your service below.</>}
+                    ? <>Looks like a <strong>{Number(enriched.homeSqFt).toLocaleString()} sq ft</strong> {enriched.propertyType || 'home'}{enriched.yearBuilt ? <> built in {enriched.yearBuilt}</> : null}. Confirm the details and pick your services — we'll quote in seconds.</>
+                    : <>Confirm your details and pick your services — we'll quote in seconds.</>}
                 </p>
 
                 {satellite?.closeUrl && (
@@ -709,11 +709,11 @@ export default function QuotePage() {
                 <div style={{ display: 'grid', gap: 12, marginBottom: 18 }}>
                   <button type="button" className="qp-chip" style={sChip(svcPest)} onClick={() => setSvcPest(!svcPest)}>
                     <div style={{ fontSize: 16 }}>Pest Control</div>
-                    <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>Interior + exterior treatment, covered pests</div>
+                    <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>Inside + outside, every visit. 30+ pests covered, money-back guarantee.</div>
                   </button>
                   <button type="button" className="qp-chip" style={sChip(svcLawn)} onClick={() => setSvcLawn(!svcLawn)}>
                     <div style={{ fontSize: 16 }}>Lawn Care</div>
-                    <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>Fertilization + weed control program</div>
+                    <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 500, marginTop: 2 }}>Fertilization, weed control, and seasonal treatments dialed in for your grass type.</div>
                   </button>
                 </div>
 
@@ -754,16 +754,16 @@ export default function QuotePage() {
             {stage === 'result' && result && (
               <div>
                 <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
-                  <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Estimated Price</div>
+                  <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
                   <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
-                    ${result.monthly_total}
+                    ${Number(result.monthly_total).toLocaleString()}
                     <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>/mo</span>
                   </div>
-                  <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${result.variance_low} – ${result.variance_high}</strong> per month</div>
+                  <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${Number(result.variance_low).toLocaleString()} – ${Number(result.variance_high).toLocaleString()}</strong> per month</div>
                   {result.confidence === 'low' && (
                     <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
                   )}
-                  <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${result.annual_total} per year · {result.service_interest}</div>
+                  <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${Number(result.annual_total).toLocaleString()}/yr · {result.service_interest}</div>
                   {result.has_setup_fee && (
                     <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
                       + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
@@ -772,7 +772,7 @@ export default function QuotePage() {
                 </div>
 
                 <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
-                  We just sent this to our team. <strong>A Waves specialist will text or call you shortly</strong> to confirm the final price and schedule your first visit.
+                  We already texted your local Waves team. <strong>They'll confirm the final number and book your first visit</strong> — usually within the hour.
                 </div>
 
                 <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 14, lineHeight: 1.55 }}>
@@ -851,7 +851,7 @@ function LookupLoading({ status, sub, satellite, aiSources, address }) {
     <div style={{ textAlign: 'center', padding: '16px 0' }}>
       <div style={{ fontSize: 13, color: COLORS.textCaption, fontWeight: 600, marginBottom: 6, fontFamily: FONTS.ui }}>Property Lookup</div>
       <h2 style={{ margin: '0 0 8px', fontFamily: FONTS.heading, fontSize: 24, fontWeight: 700, color: COLORS.blueDeeper, lineHeight: 1.2 }}>
-        {status || 'Looking up property...'}{dots}
+        {status || 'Measuring your property'}{dots}
       </h2>
       {sub && <div style={{ fontSize: 15, color: COLORS.textBody, marginBottom: 20 }}>{sub}</div>}
       <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 20 }}>{address}</div>
