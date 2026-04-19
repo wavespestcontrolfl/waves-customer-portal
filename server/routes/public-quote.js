@@ -296,7 +296,11 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     } else if (typeof lead.extracted_data === 'string') {
       try { existingData = JSON.parse(lead.extracted_data); } catch { existingData = {}; }
     }
-    const updatedData = { ...existingData, upsell_interests: valid, upsell_added_at: new Date().toISOString() };
+    // Merge with any prior upsell IDs so a second /upsell call (retry, back-nav,
+    // or double-fire) doesn't drop what the customer already added.
+    const prevUpsells = Array.isArray(existingData.upsell_interests) ? existingData.upsell_interests : [];
+    const mergedUpsells = Array.from(new Set([...prevUpsells, ...valid]));
+    const updatedData = { ...existingData, upsell_interests: mergedUpsells, upsell_added_at: new Date().toISOString() };
 
     await db('leads').where({ id: leadId }).update({
       service_interest: mergedInterest,

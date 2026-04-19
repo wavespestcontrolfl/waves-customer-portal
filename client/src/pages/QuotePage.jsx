@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
@@ -434,6 +434,11 @@ export default function QuotePage() {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Could not add to your plan.');
+      // Merge server's canonical service_interest so the result screen reflects
+      // the plan the customer just confirmed, not the pre-upsell snapshot.
+      if (d.service_interest) {
+        setResult(prev => prev ? { ...prev, service_interest: d.service_interest } : prev);
+      }
       setStage('result');
     } catch (e) {
       setUpsellError(e.message || 'Could not add to your plan.');
