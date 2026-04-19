@@ -184,6 +184,7 @@ app.use('/api/satisfaction', satisfactionRoutes);
 app.use('/api/property', propertyRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
+app.use('/l', require('./routes/public-shortlinks'));
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);

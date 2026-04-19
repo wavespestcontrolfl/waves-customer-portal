@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const TwilioService = require('../twilio');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { shortenOrPassthrough } = require('../short-url');
 
 class BalanceReminder {
 
@@ -76,7 +77,9 @@ class BalanceReminder {
   async sendReminder(service, balance, tier, daysUntil) {
     const datePretty = new Date(service.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
     const amt = balance.totalBalance.toFixed(2);
-    const link = balance.oldestInvoiceUrl;
+    const link = await shortenOrPassthrough(balance.oldestInvoiceUrl, {
+      kind: 'invoice', customerId: service.cust_id,
+    });
 
     const messages = {
       gentle: `Hello ${service.first_name}! Waves here. We're scheduled to see you on ${datePretty}.\n\nOur records show an outstanding balance of $${amt} on your account. To avoid any interruption in service, please take care of it before your appointment: ${link}`,

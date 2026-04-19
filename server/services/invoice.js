@@ -4,6 +4,7 @@ const logger = require('./logger');
 const TaxCalculator = require('./tax-calculator');
 const DiscountEngine = require('./discount-engine');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { shortenOrPassthrough } = require('./short-url');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -231,7 +232,10 @@ const InvoiceService = {
     if (!customer?.phone) throw new Error('Customer has no phone number');
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-    const payUrl = `${domain}/pay/${invoice.token}`;
+    const longPayUrl = `${domain}/pay/${invoice.token}`;
+    const payUrl = await shortenOrPassthrough(longPayUrl, {
+      kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id,
+    });
 
     const techName = invoice.tech_name || 'Our team';
     const serviceType = invoice.service_type || invoice.title || 'your service';
@@ -322,7 +326,10 @@ const InvoiceService = {
 
     const amount = Number(invoice.total).toFixed(2);
     const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
-    const receiptUrl = invoice.token ? `${domain}/pay/${invoice.token}` : '';
+    const longReceiptUrl = invoice.token ? `${domain}/pay/${invoice.token}` : '';
+    const receiptUrl = longReceiptUrl
+      ? await shortenOrPassthrough(longReceiptUrl, { kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id })
+      : '';
     const fallback = `Hello ${customer.first_name}! Thank you for your payment — we truly appreciate your business. You can view your receipt here: ${receiptUrl}.\n\nIf you have any questions or need assistance, simply reply to this message. Thanks again for choosing Waves!`;
     let body = fallback;
     try {

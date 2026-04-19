@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts, parseETDateTime, addETDays } = require('../utils/datetime-et');
+const { shortenOrPassthrough } = require('./short-url');
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -194,7 +195,10 @@ const ReviewService = {
     if (!customer?.phone) return;
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-    const reviewUrl = `${domain}/review/${request.token}`;
+    const longReviewUrl = `${domain}/review/${request.token}`;
+    const reviewUrl = await shortenOrPassthrough(longReviewUrl, {
+      kind: 'review', entityType: 'review_requests', entityId: request.id, customerId: customer.id,
+    });
     const techName = request.tech_name || 'Our team';
 
     // Pull editable body from sms_templates.review_request. Fall back to inline.
@@ -413,7 +417,10 @@ const ReviewService = {
       if (!customer?.phone) continue;
 
       const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-      const reviewUrl = `${domain}/review/${request.token}`;
+      const longReviewUrl = `${domain}/review/${request.token}`;
+      const reviewUrl = await shortenOrPassthrough(longReviewUrl, {
+        kind: 'review', entityType: 'review_requests', entityId: request.id, customerId: customer.id,
+      });
 
       const fallback = `No pressure at all, ${customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${reviewUrl} 🌊`;
       let body = fallback;

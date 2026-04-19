@@ -17,6 +17,7 @@ const TwilioService = require('./twilio');
 const EmailService = require('./email');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('./logger');
+const { shortenOrPassthrough } = require('./short-url');
 
 const RENEWAL_DAYS = 7;
 
@@ -50,7 +51,8 @@ const EstimateAutoRenew = {
           });
 
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
-          const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_auto_renewed',
             { first_name: firstName, estimate_url: url },
             `Hey ${firstName}! Your Waves estimate was about to expire so we extended it a few more days. Still good — take another look whenever you're ready:\n\n${url}\n\nQuestions? (941) 318-7612 🌊`

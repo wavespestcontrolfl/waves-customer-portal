@@ -6,6 +6,7 @@ const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { shortenOrPassthrough } = require('../services/short-url');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -223,7 +224,13 @@ router.put('/:token/accept', async (req, res, next) => {
       try {
         if (isOneTimeOnly) {
           const primarySvc = bookingServiceFor(oneTimeList[0]?.name || '');
-          bookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=estimate-accept`;
+          const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=estimate-accept`;
+          bookingUrl = await shortenOrPassthrough(longBookingUrl, {
+            kind: 'booking',
+            entityType: 'estimates',
+            entityId: estimate.id,
+            customerId,
+          });
           const customerBody = await renderTemplate(
             'estimate_accepted_onetime',
             { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
@@ -234,7 +241,15 @@ router.put('/:token/accept', async (req, res, next) => {
           );
           logger.info(`[estimate-accept] One-time booking SMS sent to ${firstName} (${estimate.customer_phone}) — ${primarySvc.label}`);
         } else {
-          const obUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
+          const longObUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
+          const obUrl = longObUrl
+            ? await shortenOrPassthrough(longObUrl, {
+                kind: 'onboarding',
+                entityType: 'estimates',
+                entityId: estimate.id,
+                customerId,
+              })
+            : '';
           const customerBody = await renderTemplate(
             'estimate_accepted_customer',
             { first_name: firstName, onboarding_url: obUrl },

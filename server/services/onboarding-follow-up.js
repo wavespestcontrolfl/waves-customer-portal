@@ -18,6 +18,7 @@ const db = require('../models/db');
 const TwilioService = require('./twilio');
 const EmailService = require('./email');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
+const { shortenOrPassthrough } = require('./short-url');
 const logger = require('./logger');
 
 async function renderTemplate(templateKey, vars, fallback) {
@@ -41,6 +42,7 @@ function baseQuery() {
     .select(
       'onboarding_sessions.id',
       'onboarding_sessions.token',
+      'onboarding_sessions.customer_id',
       'onboarding_sessions.status',
       'onboarding_sessions.started_at',
       'onboarding_sessions.expires_at',
@@ -51,7 +53,17 @@ function baseQuery() {
     );
 }
 
-const ONBOARD_URL = (token) => `https://portal.wavespestcontrol.com/onboard/${token}`;
+// Build + shorten the onboarding URL in one step — keeps every follow-up stage
+// consistently using short links and records the click-attribution metadata.
+async function onboardUrl(ob) {
+  const long = `https://portal.wavespestcontrol.com/onboard/${ob.token}`;
+  return shortenOrPassthrough(long, {
+    kind: 'onboarding',
+    entityType: 'onboarding_sessions',
+    entityId: ob.id,
+    customerId: ob.customer_id,
+  });
+}
 
 // Fire SMS (if phone) + email (if email). Returns true if at least one
 // attempt succeeded, so the caller knows whether to flip the stage flag.
@@ -97,7 +109,7 @@ const OnboardingFollowUp = {
       for (const ob of stalled) {
         try {
           const firstName = ob.first_name || 'there';
-          const url = ONBOARD_URL(ob.token);
+          const url = await onboardUrl(ob);
           const smsBody = await renderTemplate('onboarding_followup_24h',
             { first_name: firstName, onboarding_url: url, waveguard_tier: ob.waveguard_tier || 'Bronze' },
             `Hey ${firstName}! Thanks again for choosing Waves 🌊 Just need a few quick details to get you on the schedule — takes ~2 minutes:\n\n${url}\n\nQuestions? Reply here or call (941) 318-7612.`
@@ -129,7 +141,7 @@ const OnboardingFollowUp = {
       for (const ob of stillStalled) {
         try {
           const firstName = ob.first_name || 'there';
-          const url = ONBOARD_URL(ob.token);
+          const url = await onboardUrl(ob);
           const smsBody = await renderTemplate('onboarding_followup_72h',
             { first_name: firstName, onboarding_url: url, waveguard_tier: ob.waveguard_tier || 'Bronze' },
             `Hi ${firstName}! Still here whenever you're ready — wrap up your Waves setup here and we'll confirm your first service:\n\n${url}\n\n— Adam, Waves Pest Control 🌊`
@@ -164,7 +176,7 @@ const OnboardingFollowUp = {
       for (const ob of expiring) {
         try {
           const firstName = ob.first_name || 'there';
-          const url = ONBOARD_URL(ob.token);
+          const url = await onboardUrl(ob);
           const expDate = new Date(ob.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
           const tier = ob.waveguard_tier || 'Bronze';
           const smsBody = await renderTemplate('onboarding_followup_expiring',

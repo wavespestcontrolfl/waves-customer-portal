@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
+const { shortenOrPassthrough } = require('../services/short-url');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -45,7 +46,10 @@ router.post('/start', async (req, res, next) => {
       expires_at: expiresAt,
     });
 
-    const onboardingUrl = `https://portal.wavespestcontrol.com/onboard/${token}`;
+    const longOnboardingUrl = `https://portal.wavespestcontrol.com/onboard/${token}`;
+    const onboardingUrl = await shortenOrPassthrough(longOnboardingUrl, {
+      kind: 'onboarding', entityType: 'onboarding_sessions', customerId: customer.id,
+    });
 
     try {
       await TwilioService.sendSMS(customer.phone,

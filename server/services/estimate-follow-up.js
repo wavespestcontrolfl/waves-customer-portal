@@ -15,6 +15,7 @@ const TwilioService = require('./twilio');
 const EmailService = require('./email');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('./logger');
+const { shortenOrPassthrough } = require('./short-url');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -74,7 +75,8 @@ const EstimateFollowUp = {
       for (const est of unviewed) {
         try {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
-          const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_followup_unviewed',
             { first_name: firstName, estimate_url: url },
             `Hey ${firstName}! Just wanted to make sure you saw your Waves Pest Control estimate 🌊\n\n${url}\n\nTake a look when you get a chance — we're here if you have any questions! (941) 318-7612`
@@ -113,7 +115,8 @@ const EstimateFollowUp = {
       for (const est of viewedNotAccepted) {
         try {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
-          const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_followup_viewed',
             { first_name: firstName, estimate_url: url },
             `Hi ${firstName}! I noticed you checked out your Waves estimate — any questions I can answer? 🌊\n\n${url}\n\nI'm happy to walk through it with you. Just reply here or call (941) 318-7612.\n\n— Adam, Waves Pest Control`
@@ -152,7 +155,8 @@ const EstimateFollowUp = {
       for (const est of finalNudge) {
         try {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
-          const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_followup_final',
             { first_name: firstName, estimate_url: url },
             `Hey ${firstName} — last check-in from me! Your Waves estimate is still available:\n\n${url}\n\nWe'd love to earn your business. No pressure at all — just reply if you'd like to move forward or have any questions.\n\n— Adam 🌊`
@@ -193,7 +197,8 @@ const EstimateFollowUp = {
       for (const est of expiring) {
         try {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
-          const url = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+          const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const expDate = new Date(est.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
           const smsBody = await renderTemplate('estimate_followup_expiring',
             { first_name: firstName, estimate_url: url, expires_at: expDate },

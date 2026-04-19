@@ -6,6 +6,7 @@ const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { shortenOrPassthrough } = require('../services/short-url');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -76,7 +77,10 @@ router.post('/:id/send', async (req, res, next) => {
 
 // Shared send logic — used by both immediate send and scheduled cron
 async function sendEstimateNow(estimate, sendMethod) {
-  const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+  const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+  const viewUrl = await shortenOrPassthrough(longUrl, {
+    kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+  });
   const firstName = estimate.customer_name?.split(' ')[0] || 'there';
   const monthlyTotal = parseFloat(estimate.monthly_total || 0);
   const annualTotal = parseFloat(estimate.annual_total || 0);
@@ -222,7 +226,10 @@ router.post('/:id/follow-up', async (req, res, next) => {
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
     if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
 
-    const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+    const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+    const viewUrl = await shortenOrPassthrough(longUrl, {
+      kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+    });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
     const msg = req.body.message || (

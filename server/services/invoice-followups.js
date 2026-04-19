@@ -14,6 +14,7 @@ const logger = require('./logger');
 const TwilioService = require('./twilio');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const config = require('../config/invoice-followups');
+const { shortenOrPassthrough } = require('./short-url');
 
 /**
  * Try to load the SMS body from the editable sms_templates table first.
@@ -204,12 +205,15 @@ async function fireStep(row) {
     ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
     : '';
 
+  const payUrl = await shortenOrPassthrough(`${DOMAIN}/pay/${row.token}`, {
+    kind: 'invoice', entityType: 'invoices', entityId: row.invoice_id, customerId: customer.id,
+  });
   const body = await resolveBody(step, {
     name: customer.first_name || 'there',
     invoiceTitle: row.title || 'your service',
     amount,
     serviceDate,
-    payUrl: `${DOMAIN}/pay/${row.token}`,
+    payUrl,
   });
 
   await TwilioService.sendSMS(customer.phone, body, {
@@ -265,9 +269,12 @@ async function stopOnPayment(invoiceId) {
       const customer = await db('customers').where({ id: seq.customer_id }).first();
       const invoice = await db('invoices').where({ id: invoiceId }).first();
       if (customer?.phone) {
+        const payUrl = invoice?.token
+          ? await shortenOrPassthrough(`${DOMAIN}/pay/${invoice.token}`, { kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id })
+          : '';
         const body = await resolveBody(config.thankYou, {
           name: customer.first_name,
-          payUrl: invoice?.token ? `${DOMAIN}/pay/${invoice.token}` : '',
+          payUrl,
         });
         await TwilioService.sendSMS(customer.phone, body, {
           customerId: customer.id,
