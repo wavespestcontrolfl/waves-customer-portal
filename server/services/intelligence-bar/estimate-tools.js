@@ -12,6 +12,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { generateEstimate } = require('../pricing-engine');
+const { shortenOrPassthrough } = require('../short-url');
 
 const RENTCAST_KEY = process.env.RENTCAST_API_KEY || '6dfcb2eaa9f34bf285e101b74e1a3ef6';
 const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
@@ -451,12 +452,17 @@ async function createPendingEstimate(input) {
 
   logger.info(`[intelligence-bar:estimates] Agent created draft ${estimate.id} for ${customerName}`);
 
+  const customerViewUrl = await shortenOrPassthrough(
+    `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+    { kind: 'estimate', entityType: 'estimates', entityId: estimate.id }
+  );
+
   return {
     success: true,
     estimate_id: estimate.id,
     token: estimate.token,
     admin_url: `https://portal.wavespestcontrol.com/admin/estimates`,
-    customer_view_url: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+    customer_view_url: customerViewUrl,
     monthly_total: monthly,
     annual_total: annual,
     note_for_admin: 'Draft created. Open admin/estimates → 🤖 to review and send.',

@@ -5,6 +5,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { shortenOrPassthrough } = require('./short-url');
 
 async function executeLeadTool(toolName, input) {
   switch (toolName) {
@@ -128,7 +129,7 @@ async function executeLeadTool(toolName, input) {
 
       return {
         hasEstimates: true,
-        estimates: estimates.map(e => ({
+        estimates: await Promise.all(estimates.map(async e => ({
           id: e.id,
           status: e.status,
           total: e.monthly_total || e.total_amount,
@@ -136,8 +137,13 @@ async function executeLeadTool(toolName, input) {
           sentAt: e.sent_at,
           viewedAt: e.viewed_at,
           token: e.token,
-          viewUrl: e.token ? `https://portal.wavespestcontrol.com/estimate/${e.token}` : null,
-        })),
+          viewUrl: e.token
+            ? await shortenOrPassthrough(
+                `https://portal.wavespestcontrol.com/estimate/${e.token}`,
+                { kind: 'estimate', entityType: 'estimates', entityId: e.id, customerId: e.customer_id || null }
+              )
+            : null,
+        }))),
       };
     }
 

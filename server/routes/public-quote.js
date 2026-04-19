@@ -5,6 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { generateEstimate } = require('../services/pricing-engine');
 const TwilioService = require('../services/twilio');
+const { shortenOrPassthrough } = require('../services/short-url');
 const smsTemplatesRouter = require('./admin-sms-templates');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
@@ -188,7 +189,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const wantsLawn = !!services?.lawn;
         const serviceLabel = wantsPest && wantsLawn ? 'Pest Control & Lawn Care' : wantsPest ? 'Pest Control' : 'Lawn Care';
         const bookingServiceId = wantsPest ? 'pest_control' : 'lawn_care';
-        const bookingUrl = `${PORTAL_BASE_URL}/book?service=${bookingServiceId}&source=quote-wizard`;
+        const longBookingUrl = `${PORTAL_BASE_URL}/book?service=${bookingServiceId}&source=quote-wizard`;
+        const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
+          kind: 'booking', entityType: 'leads', entityId: lead.id,
+        });
         const customerBody = await renderTemplate(
           'estimate_accepted_onetime',
           { first_name: firstName, service_label: serviceLabel, booking_url: bookingUrl },
