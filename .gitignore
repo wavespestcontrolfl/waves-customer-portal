@@ -7,3 +7,4 @@ client/dist/
 *.swo
 coverage/
 .nyc_output/
+.claude/*.lock
