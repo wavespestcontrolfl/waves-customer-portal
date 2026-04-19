@@ -28,13 +28,23 @@
  *     state — those users re-opted in after leaving beehiiv
  *   - email comparisons are lowercase+trim on both sides
  *   - rows with no @ in the email are skipped (printed to `skipped_invalid_email`)
+ *   - heuristic warning + interactive y/N prompt if the customers table has
+ *     fewer than CSV_rows/10 rows (usually means DATABASE_URL is pointed at
+ *     a dev/empty DB by accident). Non-TTY stdin auto-declines, so cron/CI
+ *     runs fail closed instead of silently writing against the wrong DB.
+ *   - report filename gets `-LOCAL` suffix and JSON gets `"environment":
+ *     "local"` when DATABASE_URL points at localhost/127.0.0.1 — makes
+ *     stray report files obviously-not-prod on inspection.
+ *   - --apply against a localhost DATABASE_URL requires --apply-local too.
+ *     Speed-bump on writes only; reads (dry-run) stay frictionless.
  *
  * A JSON report (per-row buckets + action taken) is written to the repo root
- * as `tmp-beehiiv-reconcile-<timestamp>.json`.
+ * as `tmp-beehiiv-reconcile-<timestamp>[-LOCAL].json`.
  *
  * Usage:
- *   node server/scripts/migrate-beehiiv-subscribers.js path/to/beehiiv-export.csv
- *   node server/scripts/migrate-beehiiv-subscribers.js path/to/beehiiv-export.csv --apply
+ *   node server/scripts/migrate-beehiiv-subscribers.js path/to/beehiiv-export.csv                       # dry run
+ *   node server/scripts/migrate-beehiiv-subscribers.js path/to/beehiiv-export.csv --apply               # commit (prod)
+ *   node server/scripts/migrate-beehiiv-subscribers.js path/to/beehiiv-export.csv --apply --apply-local # commit (local)
  *
  * Expected CSV columns (case-insensitive, extra columns ignored):
  *   email          (required)
@@ -51,7 +61,15 @@ const { parse } = require('csv-parse/sync');
 const db = require('../models/db');
 
 const APPLY = process.argv.includes('--apply');
+const APPLY_LOCAL = process.argv.includes('--apply-local');
 const csvPath = process.argv.slice(2).find((a) => !a.startsWith('--'));
+
+// Environment detection — drives filename/JSON labeling (layer 2) and the
+// --apply-local gate (layer 3). Intentionally loose regex so any form of
+// loopback (localhost, 127.0.0.1, ::1) trips the guards.
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const IS_LOCAL_DB = /localhost|127\.0\.0\.1|\[::1\]/.test(DATABASE_URL);
+const ENV_LABEL = IS_LOCAL_DB ? 'local' : 'remote';
 
 // Source strings that mean "this row came from our own forms after the beehiiv
 // era." Active rows from these sources are protected from the CSV-driven
@@ -70,6 +88,24 @@ const POST_BEEHIIV_CONSENT_SOURCES = new Set([
 function fail(msg) {
   console.error(`\n✖ ${msg}\n`);
   process.exit(1);
+}
+
+// Interactive y/N — used by the heuristic DB-mismatch guard (layer 1).
+// Default No. Non-TTY stdin (cron, CI, piped invocations) auto-declines so
+// the script fails closed instead of silently writing against the wrong DB.
+function confirmYN(question) {
+  if (!process.stdin.isTTY) {
+    console.error('   (non-TTY stdin — auto-declining)');
+    return Promise.resolve(false);
+  }
+  const readline = require('readline');
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(/^y(es)?$/i.test((answer || '').trim()));
+    });
+  });
 }
 
 function lcTrim(v) {
@@ -195,19 +231,46 @@ async function run() {
   if (!csvPath) {
     fail(
       'Usage:\n' +
-      '  node server/scripts/migrate-beehiiv-subscribers.js <beehiiv-export.csv>           # dry run\n' +
-      '  node server/scripts/migrate-beehiiv-subscribers.js <beehiiv-export.csv> --apply   # commit\n'
+      '  node server/scripts/migrate-beehiiv-subscribers.js <beehiiv-export.csv>                        # dry run\n' +
+      '  node server/scripts/migrate-beehiiv-subscribers.js <beehiiv-export.csv> --apply                # commit (prod)\n' +
+      '  node server/scripts/migrate-beehiiv-subscribers.js <beehiiv-export.csv> --apply --apply-local  # commit (local)\n'
     );
   }
   const abs = path.resolve(csvPath);
   if (!fs.existsSync(abs)) fail(`CSV not found: ${abs}`);
 
+  // Layer 3 — speed-bump on local-DB writes. Reads (dry-run) always allowed.
+  if (APPLY && IS_LOCAL_DB && !APPLY_LOCAL) {
+    fail(
+      'Refusing to --apply against a localhost DATABASE_URL without --apply-local.\n' +
+      '  If this is intentional (writing to a dev/test DB on purpose), re-run with:\n' +
+      '    node server/scripts/migrate-beehiiv-subscribers.js <csv> --apply --apply-local'
+    );
+  }
+
   const raw = fs.readFileSync(abs, 'utf8');
   const rows = parse(raw, { columns: true, skip_empty_lines: true, trim: true });
 
   console.log(`\n[beehiiv-reconcile] Mode: ${APPLY ? 'APPLY' : 'DRY RUN'}`);
+  console.log(`[beehiiv-reconcile] Environment: ${ENV_LABEL}`);
   console.log(`[beehiiv-reconcile] Source: ${abs}`);
   console.log(`[beehiiv-reconcile] Parsed ${rows.length} row(s)\n`);
+
+  // Layer 1 — heuristic DB-mismatch warning. If the customers table is
+  // absurdly small relative to the CSV, DATABASE_URL is probably pointing
+  // at the wrong DB. Prompt before doing anything destructive. Threshold
+  // is intentionally loose (1:10 ratio) — a true prod DB has hundreds to
+  // thousands of customers; a dev DB has a handful.
+  const { count: custCountRaw } = await db('customers').count('* as count').first();
+  const customersTotal = Number(custCountRaw);
+  if (rows.length >= 10 && customersTotal < rows.length / 10) {
+    console.error(
+      `\n⚠  DB mismatch warning: CSV has ${rows.length} rows but customers table has only ${customersTotal}.\n` +
+      `   This usually means DATABASE_URL is pointing at a dev/local DB instead of prod.`
+    );
+    const ok = await confirmYN('   Proceed anyway? [y/N] ');
+    if (!ok) fail('Aborted — DB mismatch not confirmed.');
+  }
 
   const buckets = {
     matched_active: [],
@@ -232,9 +295,11 @@ async function run() {
     console.log(`${name.padEnd(24)} ${items.length}`);
   }
 
-  const reportPath = path.resolve(`tmp-beehiiv-reconcile-${Date.now()}.json`);
+  const envSuffix = IS_LOCAL_DB ? '-LOCAL' : '';
+  const reportPath = path.resolve(`tmp-beehiiv-reconcile-${Date.now()}${envSuffix}.json`);
   fs.writeFileSync(reportPath, JSON.stringify({
     mode: APPLY ? 'APPLY' : 'DRY_RUN',
+    environment: ENV_LABEL,
     source: abs,
     generatedAt: new Date().toISOString(),
     totals: Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, v.length])),
