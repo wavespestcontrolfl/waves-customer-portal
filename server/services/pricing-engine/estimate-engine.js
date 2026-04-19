@@ -26,7 +26,7 @@ const {
 // modifiers.zoneMultiplier(). Without this, future edits to one
 // source and not the other would silently misprice quotes until
 // a regression test happened to notice.
-for (const zone of ['A', 'B', 'C', 'D']) {
+for (const zone of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
   const cz = ZONES[zone];
   if (!cz) {
     throw new Error(`[pricing-engine startup] Zone ${zone} missing from constants.ZONES`);

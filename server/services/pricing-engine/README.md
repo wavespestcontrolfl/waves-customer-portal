@@ -31,7 +31,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | B | Extended service area | 1.05 |
 | C | Charlotte outskirts | 1.12 |
 | D | Far reach | 1.20 |
-| UNKNOWN | default | 1.05 |
+| UNKNOWN | default | 1.00 |
 
 **Urgency multipliers** (Routine is no-op):
 

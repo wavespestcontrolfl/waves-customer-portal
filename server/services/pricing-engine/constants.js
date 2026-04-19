@@ -27,7 +27,7 @@ const ZONES = {
   B: { name: 'Extended service area', multiplier: 1.05 },
   C: { name: 'Charlotte outskirts',   multiplier: 1.12 },
   D: { name: 'Far reach',              multiplier: 1.20 },
-  UNKNOWN: { name: 'Default',          multiplier: 1.05 },
+  UNKNOWN: { name: 'Default',          multiplier: 1.00 },  // Codifies live behavior — modifiers.zoneMultiplier() default returns 1.0.
 };
 
 // ── Urgency Multipliers ──────────────────────────────────────
