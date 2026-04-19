@@ -141,18 +141,17 @@ router.put('/calls/:id/disposition', async (req, res, next) => {
     if (!call) return res.status(404).json({ error: 'Call not found' });
 
     if (disposition === 'spam') {
-      // SPAM: block number + delete call from log
+      // SPAM: hard-block the number + delete call from log.
+      // Schema is owned by migration 20260418000006 (PR 1):
+      //   number / block_type / blocked_by(uuid FK technicians) / reason
       if (call.from_phone) {
-        await db.raw(`
-          CREATE TABLE IF NOT EXISTS blocked_numbers (
-            id serial PRIMARY KEY, phone varchar(20) NOT NULL UNIQUE,
-            reason varchar(50) DEFAULT 'spam', blocked_by varchar(100),
-            blocked_at timestamptz DEFAULT NOW()
-          )
-        `).catch(() => {});
         await db('blocked_numbers').insert({
-          phone: call.from_phone, reason: 'spam', blocked_by: 'admin',
-        }).onConflict('phone').ignore();
+          number: call.from_phone,
+          block_type: 'hard_block',
+          blocked_by: req.technicianId || null,
+          reason: 'Tagged spam from call disposition',
+          auto_blocked: false,
+        }).onConflict('number').ignore();
         logger.info(`[calls] Blocked spam number: ${call.from_phone}`);
       }
       // Delete the call log entry
@@ -191,19 +190,28 @@ router.put('/calls/:id/disposition', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /blocked — list blocked numbers
+// GET /blocked — list blocked numbers (UI expects { phone, reason, blocked_at }
+// — alias from new schema for back-compat until the inbox UI redesign in PR 4).
 router.get('/blocked', async (req, res, next) => {
   try {
-    await db.raw('CREATE TABLE IF NOT EXISTS blocked_numbers (id serial PRIMARY KEY, phone varchar(20) NOT NULL UNIQUE, reason varchar(50), blocked_by varchar(100), blocked_at timestamptz DEFAULT NOW())').catch(() => {});
-    const numbers = await db('blocked_numbers').orderBy('blocked_at', 'desc');
-    res.json({ numbers });
+    const rows = await db('blocked_numbers').orderBy('blocked_at', 'desc');
+    res.json({
+      numbers: rows.map(r => ({
+        id: r.id,
+        phone: r.number,
+        block_type: r.block_type,
+        reason: r.reason,
+        blocked_at: r.blocked_at,
+        auto_blocked: r.auto_blocked,
+      })),
+    });
   } catch (err) { next(err); }
 });
 
 // DELETE /blocked/:phone — unblock a number
 router.delete('/blocked/:phone', async (req, res, next) => {
   try {
-    await db('blocked_numbers').where({ phone: req.params.phone }).del();
+    await db('blocked_numbers').where({ number: req.params.phone }).del();
     res.json({ success: true });
   } catch (err) { next(err); }
 });

@@ -15,12 +15,6 @@ const ADMIN_PHONES = [
   `+1${ADMIN_PHONE_RAW}`, `1${ADMIN_PHONE_RAW}`, ADMIN_PHONE_RAW,
   ...(process.env.ADAM_PHONE ? [process.env.ADAM_PHONE] : []),
 ];
-const excludeAdminPhones = (query) => {
-  for (const phone of ADMIN_PHONES) {
-    query = query.whereNot('sms_log.to_phone', phone).whereNot('sms_log.from_phone', phone);
-  }
-  return query;
-};
 
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
@@ -69,7 +63,7 @@ router.post('/call', async (req, res, next) => {
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
     });
 
-    // Log the outbound call
+    // Log the outbound call (legacy + unified)
     const customer = await db('customers').where({ phone: to }).first().catch(() => null);
     await db('call_log').insert({
       customer_id: customer?.id || null,
@@ -79,27 +73,55 @@ router.post('/call', async (req, res, next) => {
       twilio_call_sid: call.sid,
       status: 'initiated',
     }).catch(() => {});
+    require('../services/conversations').recordTouchpoint({
+      customerId: customer?.id || null,
+      channel: 'voice',
+      ourEndpointId: from,
+      contactPhone: customer ? null : to,
+      direction: 'outbound',
+      authorType: 'admin',
+      adminUserId: req.technicianId,
+      twilioSid: call.sid,
+      deliveryStatus: 'initiated',
+    }).catch(() => {});
 
     res.json({ success: true, callSid: call.sid });
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/communications/log — SMS history
+// GET /api/admin/communications/log — SMS history (reads unified messages
+// table since PR 2; sms_log still gets dual-written for legacy consumers).
 router.get('/log', async (req, res, next) => {
   try {
     const { customerId, direction, messageType, page = 1, limit = 50, search } = req.query;
 
-    let query = db('sms_log')
-      .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
-      .select('sms_log.*', 'customers.first_name', 'customers.last_name')
-      .orderBy('sms_log.created_at', 'desc');
+    let query = db('messages')
+      .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+      .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+      .where('messages.channel', 'sms')
+      .select(
+        'messages.id', 'messages.direction', 'messages.body',
+        'messages.delivery_status as status', 'messages.message_type',
+        'messages.created_at',
+        'conversations.customer_id', 'conversations.our_endpoint_id',
+        'conversations.contact_phone',
+        'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
+      )
+      .orderBy('messages.created_at', 'desc');
 
-    // Exclude internal admin phone messages
-    excludeAdminPhones(query);
+    // Exclude internal admin phone messages from either side of the conversation.
+    for (const phone of ADMIN_PHONES) {
+      query = query
+        .whereNot('conversations.our_endpoint_id', phone)
+        .where(b => b.whereNot('conversations.contact_phone', phone)
+          .orWhereNull('conversations.contact_phone'))
+        .where(b => b.whereNot('customers.phone', phone)
+          .orWhereNull('customers.phone'));
+    }
 
-    if (customerId) query = query.where('sms_log.customer_id', customerId);
-    if (direction) query = query.where('sms_log.direction', direction);
-    if (messageType) query = query.where('sms_log.message_type', messageType);
+    if (customerId) query = query.where('conversations.customer_id', customerId);
+    if (direction) query = query.where('messages.direction', direction);
+    if (messageType) query = query.where('messages.message_type', messageType);
 
     const searchTerm = typeof search === 'string' ? search.trim() : '';
     if (searchTerm) {
@@ -108,43 +130,32 @@ router.get('/log', async (req, res, next) => {
         .where('customers.first_name', 'ilike', like)
         .orWhere('customers.last_name', 'ilike', like)
         .orWhereRaw("(customers.first_name || ' ' || customers.last_name) ILIKE ?", [like])
-        .orWhere('sms_log.from_phone', 'ilike', like)
-        .orWhere('sms_log.to_phone', 'ilike', like)
-        .orWhere('sms_log.message_body', 'ilike', like)
+        .orWhere('conversations.contact_phone', 'ilike', like)
+        .orWhere('conversations.our_endpoint_id', 'ilike', like)
+        .orWhere('customers.phone', 'ilike', like)
+        .orWhere('messages.body', 'ilike', like)
       );
     }
 
     const effectiveLimit = searchTerm ? Math.max(parseInt(limit), 1000) : parseInt(limit);
     const offset = searchTerm ? 0 : (parseInt(page) - 1) * parseInt(limit);
-    const messages = await query.limit(effectiveLimit).offset(offset);
+    const rows = await query.limit(effectiveLimit).offset(offset);
 
-    // Resolve customer names for messages without customer_id (match by phone)
-    const resolved = [];
-    for (const m of messages) {
-      let customerName = m.first_name ? `${m.first_name} ${m.last_name || ''}`.trim() : null;
-
-      // If no customer match, try phone lookup
-      if (!customerName && !m.customer_id) {
-        const phone = m.direction === 'inbound' ? m.from_phone : m.to_phone;
-        if (phone) {
-          const cust = await db('customers').where({ phone }).first();
-          if (cust) {
-            customerName = `${cust.first_name} ${cust.last_name || ''}`.trim();
-            // Backfill customer_id for future lookups
-            await db('sms_log').where({ id: m.id }).update({ customer_id: cust.id }).catch(() => {});
-          }
-        }
-      }
-
-      resolved.push({
-        id: m.id, direction: m.direction, from: m.from_phone, to: m.to_phone,
-        body: m.message_body, status: m.status, messageType: m.message_type,
+    const messages = rows.map(m => {
+      const customerName = m.first_name ? `${m.first_name} ${m.last_name || ''}`.trim() : null;
+      const ours = m.our_endpoint_id;
+      const contact = m.contact_phone || m.customer_phone;
+      const from = m.direction === 'inbound' ? contact : ours;
+      const to = m.direction === 'inbound' ? ours : contact;
+      return {
+        id: m.id, direction: m.direction, from, to,
+        body: m.body, status: m.status, messageType: m.message_type,
         customerId: m.customer_id, customerName,
         createdAt: m.created_at,
-      });
-    }
+      };
+    });
 
-    res.json({ messages: resolved });
+    res.json({ messages });
   } catch (err) { next(err); }
 });
 
@@ -153,41 +164,73 @@ router.get('/stats', async (req, res, next) => {
   try {
     const som = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
 
-    // Total sent/received this month (ALL types, excluding admin phone)
-    let sentQ = db('sms_log').where('direction', 'outbound').where('created_at', '>=', som);
-    let recvQ = db('sms_log').where('direction', 'inbound').where('created_at', '>=', som);
-    for (const phone of ADMIN_PHONES) { sentQ = sentQ.whereNot('to_phone', phone); recvQ = recvQ.whereNot('from_phone', phone); }
-    const [sentTotal] = await sentQ.count('* as count');
-    const [receivedTotal] = await recvQ.count('* as count');
+    // Read from unified messages joined to conversations so we can filter
+    // out internal-admin-phone traffic on either endpoint side.
+    const baseSms = () => db('messages')
+      .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+      .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+      .where('messages.channel', 'sms')
+      .where('messages.created_at', '>=', som);
 
-    const stats = await db('sms_log')
-      .where('direction', 'outbound')
-      .where('created_at', '>=', som)
+    const excludeAdmin = (q) => {
+      for (const phone of ADMIN_PHONES) {
+        q = q.whereNot('conversations.our_endpoint_id', phone)
+          .where(b => b.whereNot('conversations.contact_phone', phone).orWhereNull('conversations.contact_phone'))
+          .where(b => b.whereNot('customers.phone', phone).orWhereNull('customers.phone'));
+      }
+      return q;
+    };
+
+    const [sentTotal] = await excludeAdmin(baseSms().where('messages.direction', 'outbound')).count('* as count');
+    const [receivedTotal] = await excludeAdmin(baseSms().where('messages.direction', 'inbound')).count('* as count');
+
+    const stats = await db('messages')
+      .where('messages.channel', 'sms')
+      .where('messages.direction', 'outbound')
+      .where('messages.created_at', '>=', som)
       .select('message_type')
       .count('* as sent')
       .groupBy('message_type')
       .orderBy('sent', 'desc');
 
-    // Per-number counts (ALL Twilio numbers, not just locations)
+    // Per-Waves-number counts (channel-agnostic across sms+voice).
     const allNumbers = TWILIO_NUMBERS.allNumbers;
     const locationStats = await Promise.all(
       allNumbers.map(async (n) => {
         try {
-          const sent = await db('sms_log').where({ from_phone: n.number, direction: 'outbound' }).where('created_at', '>=', som).count('* as count').first();
-          const received = await db('sms_log').where({ to_phone: n.number, direction: 'inbound' }).where('created_at', '>=', som).count('* as count').first();
-          // Last inbound date (SMS or call)
-          const lastSms = await db('sms_log').where({ to_phone: n.number, direction: 'inbound' }).orderBy('created_at', 'desc').first();
-          const lastCall = await db('call_log').where({ to_phone: n.number, direction: 'inbound' }).orderBy('created_at', 'desc').first();
-          const lastSmsDate = lastSms?.created_at ? new Date(lastSms.created_at) : null;
-          const lastCallDate = lastCall?.created_at ? new Date(lastCall.created_at) : null;
-          const lastInbound = lastSmsDate && lastCallDate ? (lastSmsDate > lastCallDate ? lastSmsDate : lastCallDate) : (lastSmsDate || lastCallDate);
-          // Inbound this month
-          const inboundSms = await db('sms_log').where({ to_phone: n.number, direction: 'inbound' }).where('created_at', '>=', som).count('* as count').first();
-          const inboundCalls = await db('call_log').where({ to_phone: n.number, direction: 'inbound' }).where('created_at', '>=', som).count('* as count').first();
+          const sent = await db('messages')
+            .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+            .where('messages.channel', 'sms')
+            .where('messages.direction', 'outbound')
+            .where('conversations.our_endpoint_id', n.number)
+            .where('messages.created_at', '>=', som)
+            .count('* as count').first();
+          const received = await db('messages')
+            .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+            .where('messages.channel', 'sms')
+            .where('messages.direction', 'inbound')
+            .where('conversations.our_endpoint_id', n.number)
+            .where('messages.created_at', '>=', som)
+            .count('* as count').first();
+          const lastInboundRow = await db('messages')
+            .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+            .where('messages.direction', 'inbound')
+            .where('conversations.our_endpoint_id', n.number)
+            .orderBy('messages.created_at', 'desc')
+            .select('messages.created_at')
+            .first();
+          const inboundThisMonthRow = await db('messages')
+            .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+            .where('messages.direction', 'inbound')
+            .where('conversations.our_endpoint_id', n.number)
+            .where('messages.created_at', '>=', som)
+            .count('* as count').first();
           return {
-            ...n, sent: parseInt(sent?.count || 0), received: parseInt(received?.count || 0),
-            inboundThisMonth: parseInt(inboundSms?.count || 0) + parseInt(inboundCalls?.count || 0),
-            lastInboundDate: lastInbound ? lastInbound.toISOString() : null,
+            ...n,
+            sent: parseInt(sent?.count || 0),
+            received: parseInt(received?.count || 0),
+            inboundThisMonth: parseInt(inboundThisMonthRow?.count || 0),
+            lastInboundDate: lastInboundRow?.created_at ? new Date(lastInboundRow.created_at).toISOString() : null,
           };
         } catch { return { ...n, sent: 0, received: 0, inboundThisMonth: 0, lastInboundDate: null }; }
       })

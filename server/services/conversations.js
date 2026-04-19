@@ -104,6 +104,9 @@ async function appendMessage(opts) {
     delivery_status: opts.deliveryStatus || null,
     template_id: opts.templateId || null,
     coach_session_id: opts.coachSessionId || null,
+    message_type: opts.messageType || null,
+    ai_summary: opts.aiSummary || null,
+    is_read: opts.isRead === true,
     metadata: opts.metadata ? JSON.stringify(opts.metadata) : '{}',
   }).returning('*');
 

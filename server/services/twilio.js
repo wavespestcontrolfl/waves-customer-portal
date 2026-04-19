@@ -126,7 +126,9 @@ const TwilioService = {
       const message = await c.messages.create(msgPayload);
       logger.info(`SMS sent to ${to} from ${fromNumber}: ${message.sid}`);
 
-      // Log to sms_log
+      // Log to sms_log (legacy) AND dual-write to unified messages.
+      // PR 2 cuts the inbox read path over to messages; sms_log stays as
+      // long as anything still queries it (scheduled-SMS queue, BI scripts).
       try {
         await db('sms_log').insert({
           customer_id: options.customerId || null,
@@ -142,6 +144,19 @@ const TwilioService = {
       } catch (logErr) {
         logger.error(`SMS log failed: ${logErr.message}`);
       }
+      require('./conversations').recordTouchpoint({
+        customerId: options.customerId || null,
+        channel: 'sms',
+        ourEndpointId: fromNumber,
+        contactPhone: options.customerId ? null : to,
+        direction: 'outbound',
+        body,
+        authorType: options.adminUserId ? 'admin' : 'system',
+        adminUserId: options.adminUserId || null,
+        twilioSid: message.sid,
+        messageType: options.messageType || 'manual',
+        deliveryStatus: 'sent',
+      }).catch(() => {});
 
       return { success: true, sid: message.sid, fromNumber };
     } catch (err) {

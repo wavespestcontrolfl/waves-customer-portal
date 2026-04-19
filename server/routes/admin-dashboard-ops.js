@@ -6,36 +6,39 @@ const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-/* ── 1. GET /inbox — last 20 inbound SMS with customer context ── */
+/* ── 1. GET /inbox — last 20 inbound SMS with customer context ──
+ * Reads unified `messages` since PR 2. Channel filter keeps the dashboard
+ * inbox SMS-only (voice gets its own surface in the PR 4 redesign). */
 router.get('/inbox', async (req, res, next) => {
   try {
-    const messages = await db('sms_log')
-      .where({ direction: 'inbound' })
-      .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
+    const rows = await db('messages')
+      .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+      .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+      .where('messages.channel', 'sms')
+      .where('messages.direction', 'inbound')
       .select(
-        'sms_log.id', 'sms_log.from_phone', 'sms_log.to_phone',
-        'sms_log.message_body', 'sms_log.is_read', 'sms_log.created_at',
-        'sms_log.customer_id', 'sms_log.message_type',
+        'messages.id', 'messages.body', 'messages.is_read', 'messages.created_at',
+        'messages.message_type',
+        'conversations.customer_id', 'conversations.our_endpoint_id',
+        'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
       )
-      .orderBy('sms_log.created_at', 'desc')
+      .orderBy('messages.created_at', 'desc')
       .limit(20);
 
-    const unreadCount = await db('sms_log')
-      .where({ direction: 'inbound' })
-      .andWhere(function () {
-        this.where({ is_read: false }).orWhereNull('is_read');
-      })
+    const unreadCount = await db('messages')
+      .where({ channel: 'sms', direction: 'inbound' })
+      .andWhere(function () { this.where({ is_read: false }).orWhereNull('is_read'); })
       .count('* as count')
       .first();
 
     res.json({
-      messages: messages.map(m => ({
+      messages: rows.map(m => ({
         id: m.id,
-        fromPhone: m.from_phone,
-        customerName: m.first_name ? `${m.first_name} ${m.last_name}` : null,
+        fromPhone: m.contact_phone || m.customer_phone,
+        customerName: m.first_name ? `${m.first_name} ${m.last_name || ''}`.trim() : null,
         customerId: m.customer_id,
-        messageBody: m.message_body,
+        messageBody: m.body,
         messageType: m.message_type,
         isRead: !!m.is_read,
         createdAt: m.created_at,
@@ -48,29 +51,43 @@ router.get('/inbox', async (req, res, next) => {
 /* ── 2. POST /inbox/:id/read — mark message as read ── */
 router.post('/inbox/:id/read', async (req, res, next) => {
   try {
-    await db('sms_log').where({ id: req.params.id }).update({ is_read: true });
+    await db('messages').where({ id: req.params.id }).update({ is_read: true });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
 
-/* ── 3. POST /inbox/:id/reply — send quick reply SMS ── */
+/* ── 3. POST /inbox/:id/reply — send quick reply SMS ──
+ * Reply-from = the same Waves number the inbound message hit, preserved
+ * via conversations.our_endpoint_id. Required so multi-number routing
+ * (15 spoke trackers + 4 office lines) doesn't accidentally cross threads. */
 router.post('/inbox/:id/reply', async (req, res, next) => {
   try {
     const { body } = req.body;
     if (!body || !body.trim()) return res.status(400).json({ error: 'Reply body is required' });
 
-    const original = await db('sms_log').where({ id: req.params.id }).first();
+    const original = await db('messages')
+      .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+      .where('messages.id', req.params.id)
+      .select(
+        'messages.id', 'messages.conversation_id',
+        'conversations.customer_id', 'conversations.our_endpoint_id', 'conversations.contact_phone'
+      )
+      .first();
     if (!original) return res.status(404).json({ error: 'Message not found' });
 
+    const replyTo = original.contact_phone
+      || (await db('customers').where({ id: original.customer_id }).first())?.phone;
+    if (!replyTo) return res.status(400).json({ error: 'No reply destination on this thread' });
+
     const TwilioService = require('../services/twilio');
-    const result = await TwilioService.sendSMS(original.from_phone, body.trim(), {
+    const result = await TwilioService.sendSMS(replyTo, body.trim(), {
       customerId: original.customer_id,
       messageType: 'manual',
       adminUserId: req.technicianId,
+      fromNumber: original.our_endpoint_id || undefined,
     });
 
-    // Mark original as read
-    await db('sms_log').where({ id: req.params.id }).update({ is_read: true });
+    await db('messages').where({ id: req.params.id }).update({ is_read: true });
 
     res.json({ success: true, sid: result?.sid });
   } catch (err) { next(err); }

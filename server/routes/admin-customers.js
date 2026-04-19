@@ -246,27 +246,41 @@ router.get('/:id/timeline', async (req, res, next) => {
       });
     }
 
-    // sms_log
-    const smsLogs = await db('sms_log').where({ customer_id: customerId }).select('direction', 'message_body', 'created_at');
-    for (const s of smsLogs) {
-      timeline.push({
-        type: 'sms', title: `SMS ${s.direction === 'inbound' ? 'received' : 'sent'}`,
-        description: (s.message_body || '').slice(0, 200), date: s.created_at,
-        metadata: { direction: s.direction },
-      });
-    }
-
-    // call_log
+    // sms + voice via unified messages (since PR 2). Joined to conversations
+    // so we can attribute to this customer regardless of whether the
+    // historical row had customer_id set on sms_log/call_log directly.
     try {
-      const calls = await db('call_log').where({ customer_id: customerId }).select('from_phone', 'duration_seconds', 'call_summary', 'created_at');
-      for (const c of calls) {
-        timeline.push({
-          type: 'call', title: 'Phone call',
-          description: c.call_summary || `Call from ${c.from_phone}`, date: c.created_at,
-          metadata: { fromPhone: c.from_phone, durationSeconds: c.duration_seconds },
-        });
+      const comms = await db('messages')
+        .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+        .where('conversations.customer_id', customerId)
+        .whereIn('messages.channel', ['sms', 'voice'])
+        .select(
+          'messages.channel', 'messages.direction', 'messages.body',
+          'messages.ai_summary', 'messages.duration_seconds',
+          'messages.created_at',
+          'conversations.contact_phone', 'conversations.our_endpoint_id'
+        );
+      for (const m of comms) {
+        if (m.channel === 'sms') {
+          timeline.push({
+            type: 'sms',
+            title: `SMS ${m.direction === 'inbound' ? 'received' : 'sent'}`,
+            description: (m.body || '').slice(0, 200),
+            date: m.created_at,
+            metadata: { direction: m.direction },
+          });
+        } else {
+          const fromPhone = m.direction === 'inbound' ? m.contact_phone : m.our_endpoint_id;
+          timeline.push({
+            type: 'call',
+            title: 'Phone call',
+            description: m.ai_summary || (m.body ? m.body.slice(0, 200) : `Call from ${fromPhone || 'unknown'}`),
+            date: m.created_at,
+            metadata: { fromPhone, durationSeconds: m.duration_seconds },
+          });
+        }
       }
-    } catch { /* call_log table may not exist */ }
+    } catch { /* unified comms tables may not exist in older snapshots */ }
 
     // service_records
     const services = await db('service_records')
