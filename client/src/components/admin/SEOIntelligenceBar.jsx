@@ -2,8 +2,8 @@
  * SEO Intelligence Bar
  * client/src/components/admin/SEOIntelligenceBar.jsx
  *
- * Context-aware Intelligence Bar for SEO Dashboard, Blog, and WordPress Sites pages.
- * Passes the current page context (seo/blog/wordpress) and any active domain filter.
+ * Context-aware Intelligence Bar for SEO Dashboard and Blog pages.
+ * Passes the current page context (seo/blog) and any active domain filter.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -55,7 +55,7 @@ function QuickChip({ icon, label, onClick }) {
   );
 }
 
-// context: 'seo' | 'blog' | 'wordpress'
+// context: 'seo' | 'blog' | 'reviews' | 'comms' | 'tax' | 'leads' | 'banking' | 'email'
 export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRefresh }) {
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
@@ -78,10 +78,6 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
           blog: [
             { id: 'pipeline', label: 'Pipeline', prompt: "What's in the content pipeline?", icon: '📝' },
             { id: 'perf', label: 'Top Posts', prompt: 'Which blog posts perform best?', icon: '📰' },
-          ],
-          wordpress: [
-            { id: 'health', label: 'Fleet Health', prompt: 'Check all 15 sites for issues', icon: '🏥' },
-            { id: 'speed', label: 'PageSpeed', prompt: 'PageSpeed scores across the fleet', icon: '⚡' },
           ],
           reviews: [
             { id: 'stats', label: 'Review Stats', prompt: 'How are our Google reviews?', icon: '⭐' },
@@ -155,7 +151,6 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
   const placeholders = {
     seo: 'Which sites dropped in rankings? Compare pest vs lawn traffic...',
     blog: 'Top performing posts? How many need generation? Content calendar...',
-    wordpress: 'Fleet health check? PageSpeed scores? Which sites need attention?',
     reviews: 'Any reviews need replies? Draft responses, check trends...',
     comms: 'Any unanswered messages? Search conversations, draft replies...',
     tax: 'Tax overview, quarterly estimate, expense breakdown, P&L...',

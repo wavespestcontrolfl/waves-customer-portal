@@ -5,7 +5,7 @@
  * Monochrome reskin of SEOIntelligenceBar. Strict 1:1 on data/behavior:
  *   - same POST /admin/intelligence-bar/query
  *   - same GET  /admin/intelligence-bar/quick-actions?context={context}
- *   - same context routing (seo/blog/wordpress/reviews/comms/tax/leads/banking/email)
+ *   - same context routing (seo/blog/reviews/comms/tax/leads/banking/email)
  *   - same activeDomain pageData passthrough
  *   - same conversation-history threading
  * Visual changes: hairline white card, zinc-900 Ask button, dropped chip +
@@ -103,10 +103,6 @@ const FALLBACK_ACTIONS = {
     { id: 'pipeline', label: 'Pipeline', prompt: "What's in the content pipeline?" },
     { id: 'perf', label: 'Top Posts', prompt: 'Which blog posts perform best?' },
   ],
-  wordpress: [
-    { id: 'health', label: 'Fleet Health', prompt: 'Check all 15 sites for issues' },
-    { id: 'speed', label: 'PageSpeed', prompt: 'PageSpeed scores across the fleet' },
-  ],
   reviews: [
     { id: 'stats', label: 'Review Stats', prompt: 'How are our Google reviews?' },
     { id: 'unresponded', label: 'Needs Reply', prompt: 'Any reviews needing a reply?' },
@@ -141,7 +137,6 @@ const FALLBACK_ACTIONS = {
 const PLACEHOLDERS = {
   seo: 'Which sites dropped in rankings? Compare pest vs lawn traffic…',
   blog: 'Top performing posts? How many need generation? Content calendar…',
-  wordpress: 'Fleet health check? PageSpeed scores? Which sites need attention?',
   reviews: 'Any reviews need replies? Draft responses, check trends…',
   comms: 'Any unanswered messages? Search conversations, draft replies…',
   tax: 'Tax overview, quarterly estimate, expense breakdown, P&L…',
