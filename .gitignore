@@ -8,3 +8,4 @@ client/dist/
 coverage/
 .nyc_output/
 .claude/*.lock
+.claude/db-schema.txt
