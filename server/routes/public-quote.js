@@ -4,6 +4,21 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { generateEstimate } = require('../services/pricing-engine');
+const TwilioService = require('../services/twilio');
+const smsTemplatesRouter = require('./admin-sms-templates');
+
+const WAVES_ADMIN_PHONE = '+19413187612';
+const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
+
+async function renderTemplate(templateKey, vars, fallback) {
+  try {
+    if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      if (body) return body;
+    }
+  } catch { /* fall through to fallback */ }
+  return fallback;
+}
 
 const quoteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
@@ -59,6 +74,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       },
       services: {},
     };
+    // Public quote endpoint handles recurring plans only. One-time service
+    // requests divert to /api/leads (lead-webhook.js) where the time-of-day
+    // call/SMS logic lives — one-time jobs typically need a human conversation
+    // (site visit, flare-up triage) before we can quote reliably.
     if (services.pest) {
       engineInput.services.pest = { frequency: services.pest.frequency || 'quarterly' };
     }
@@ -151,12 +170,78 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);
     }
 
+    // Post-quote orchestration — customer self-serves with price + booking link,
+    // admin gets SMS notification (no call — they already saw the price on screen).
+    // The outbound-admin-call pattern is reserved for the no-price divert flow
+    // via /api/leads (lead-webhook.js), where admin follow-up is actually needed.
+    try {
+      await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+        `\u{1F514} Quote-wizard lead!\n${firstName} ${lastName}\n\u{1F4DE} ${normalizedPhone || phone}\n\u{1F4CD} ${address || 'No address'}\n\u{1F4B0} ${serviceInterest} · $${Math.round(monthly)}/mo`,
+        { messageType: 'internal_alert' }
+      );
+    } catch (e) { logger.error(`[public-quote] Admin SMS failed: ${e.message}`); }
+
+    // Customer SMS: estimate_accepted_onetime template (DB-editable).
+    if (normalizedPhone) {
+      try {
+        const wantsPest = !!services?.pest;
+        const wantsLawn = !!services?.lawn;
+        const serviceLabel = wantsPest && wantsLawn ? 'Pest Control & Lawn Care' : wantsPest ? 'Pest Control' : 'Lawn Care';
+        const bookingServiceId = wantsPest ? 'pest_control' : 'lawn_care';
+        const bookingUrl = `${PORTAL_BASE_URL}/book?service=${bookingServiceId}&source=quote-wizard`;
+        const customerBody = await renderTemplate(
+          'estimate_accepted_onetime',
+          { first_name: firstName, service_label: serviceLabel, booking_url: bookingUrl },
+          `Hey ${firstName}! Thanks for booking your ${serviceLabel} with Waves. Pick your time here — we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}\n\nQuestions? Just reply. — Waves`
+        );
+        await TwilioService.sendSMS(normalizedPhone, customerBody,
+          { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png', messageType: 'auto_reply' }
+        );
+        logger.info(`[public-quote] Customer SMS sent to ${firstName} (${normalizedPhone})`);
+      } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
+    }
+
+    // Beehiiv: subscribe + tag + enroll in lead automation (drives the email side).
+    try {
+      const beehiiv = require('../services/beehiiv');
+      if (beehiiv.configured && email) {
+        const sub = await beehiiv.upsertSubscriber(email.toLowerCase().trim(), {
+          firstName, lastName,
+          utmSource: attr?.landing_url || attr?.utm?.source || 'waves_portal',
+          utmMedium: 'quote_wizard',
+        });
+        if (sub?.id) {
+          await beehiiv.addTags(sub.id, ['Lead', 'quote wizard']);
+          const autoId = process.env.BEEHIIV_AUTO_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c';
+          await beehiiv.enrollInAutomation(autoId, { email: email.toLowerCase().trim(), subscriptionId: sub.id });
+          logger.info(`[public-quote] Beehiiv: subscribed ${email}, enrolled in lead automation`);
+        }
+      }
+    } catch (e) { logger.error(`[public-quote] Beehiiv enroll failed: ${e.message}`); }
+
+    // has_setup_fee flags the $99 WaveGuard initial fee (recurring pest only).
+    // UI notes this is waivable with annual prepay.
+    const hasSetupFee = !!services.pest;
+
+    // Confidence flag: when satellite enrichment came back empty (new construction,
+    // missing imagery, AI couldn't classify), widen the customer-facing range from
+    // ±5% to ±10% so we have headroom to true up on the site visit. Heuristic: if
+    // none of the three landscape signals (shrubs/trees/complexity) classified,
+    // we're flying blind on the modifiers that drive ~$5–$25/visit swings.
+    const hasShrubs = !!(ep.shrubDensity || ep.shrubs);
+    const hasTrees = !!(ep.treeDensity || ep.trees);
+    const hasComplexity = !!(ep.landscapeComplexity || ep.complexity);
+    const confidence = (hasShrubs || hasTrees || hasComplexity) ? 'high' : 'low';
+    const varianceBand = confidence === 'low' ? 0.10 : 0.05;
+
     res.json({
       lead_id: lead.id,
       monthly_total: Math.round(monthly),
       annual_total: Math.round(annual),
-      variance_low: Math.round(monthly * 0.95),
-      variance_high: Math.round(monthly * 1.05),
+      variance_low: Math.round(monthly * (1 - varianceBand)),
+      variance_high: Math.round(monthly * (1 + varianceBand)),
+      confidence,
+      has_setup_fee: hasSetupFee,
       service_interest: serviceInterest,
     });
   } catch (err) {

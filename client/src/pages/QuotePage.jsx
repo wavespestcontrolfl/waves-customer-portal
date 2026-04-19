@@ -205,6 +205,10 @@ export default function QuotePage() {
   async function submitIntake() {
     setError('');
     if (isOtherFlow) { return submitOther(); }
+    // Only "ongoing" gets priced. One-time and not-sure both divert to
+    // /api/leads — one-time needs site-visit triage, not-sure needs a
+    // consultation. lead-webhook handles business-hours call / after-hours SMS.
+    if (intake.frequency !== 'ongoing') { return submitOneTime(); }
     const { firstName, lastName } = splitName(intake.name);
     const phoneDigits = intake.phone.replace(/\D/g, '');
 
@@ -271,6 +275,45 @@ export default function QuotePage() {
           otherService: intake.otherService,
           service_interest: otherLabel,
           source: 'quote-page-divert',
+          attribution: attribution || undefined,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setStage('result-other');
+    } catch (e) {
+      setError(e?.message || 'Could not send your request. Please call us.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Non-ongoing quote requests (one-time OR not-sure) skip the pricing engine
+  // and route to /api/leads so lead-webhook handles the business-hours admin
+  // call / after-hours SMS. Reuses the result-other success stage.
+  async function submitOneTime() {
+    setError('');
+    setLoading(true);
+    try {
+      const { firstName, lastName } = splitName(intake.name);
+      const phoneDigits = intake.phone.replace(/\D/g, '');
+      const interestLabel = intake.interest === 'pest' ? 'Pest Control'
+        : intake.interest === 'lawn' ? 'Lawn Care'
+        : 'Pest Control & Lawn Care';
+      const freqSuffix = intake.frequency === 'one-time' ? 'One-Time' : 'Consult';
+      const res = await fetch(`${API_BASE}/leads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: intake.name,
+          firstName,
+          lastName,
+          email: intake.email.trim(),
+          phone: phoneDigits,
+          address: address.formatted || intake.address,
+          interest: intake.interest,
+          frequency: intake.frequency,
+          service_interest: `${interestLabel} (${freqSuffix})`,
+          source: `quote-page-${intake.frequency}`,
           attribution: attribution || undefined,
         }),
       });
@@ -674,7 +717,7 @@ export default function QuotePage() {
                   </button>
                 </div>
 
-                {svcPest && (
+                {svcPest && intake.frequency !== 'one-time' && (
                   <div style={{ marginBottom: 18 }}>
                     <label style={sLabel}>Pest treatment frequency</label>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
@@ -716,8 +759,16 @@ export default function QuotePage() {
                     ${result.monthly_total}
                     <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>/mo</span>
                   </div>
-                  <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>Typical range: <strong>${result.variance_low} – ${result.variance_high}</strong> per month</div>
+                  <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${result.variance_low} – ${result.variance_high}</strong> per month</div>
+                  {result.confidence === 'low' && (
+                    <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
+                  )}
                   <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${result.annual_total} per year · {result.service_interest}</div>
+                  {result.has_setup_fee && (
+                    <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
+                      + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
@@ -737,8 +788,17 @@ export default function QuotePage() {
             )}
 
             {stage === 'result-other' && (() => {
-              const otherLabel = OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || 'service';
               const firstName = (intake.name || '').trim().split(/\s+/)[0] || '';
+              const isNotSure = intake.frequency === 'not-sure';
+              const isOneTime = intake.frequency === 'one-time';
+              const otherLabel = isOneTime
+                ? (intake.interest === 'pest' ? 'One-time pest control'
+                   : intake.interest === 'lawn' ? 'One-time lawn treatment'
+                   : 'One-time service')
+                : (OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || 'service');
+              const body = isNotSure
+                ? `Thanks${firstName ? `, ${firstName}` : ''}. Every property is different — a Waves specialist will text or call you shortly to walk through your options and dial in the right plan.`
+                : `Thanks${firstName ? `, ${firstName}` : ''}. ${otherLabel} jobs need a quick site visit so we can quote you accurately — a Waves specialist will text or call you shortly to set it up.`;
               return (
                 <div>
                   <div style={{ textAlign: 'center', padding: '8px 0 20px' }}>
@@ -752,9 +812,7 @@ export default function QuotePage() {
                       </svg>
                     </div>
                     <h2 style={sCardH2}>Request Received</h2>
-                    <p style={sCardSub}>
-                      Thanks{firstName ? `, ${firstName}` : ''}. {otherLabel} jobs need a quick site visit so we can quote you accurately — a Waves specialist will text or call you shortly to set it up.
-                    </p>
+                    <p style={sCardSub}>{body}</p>
                   </div>
 
                   <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
