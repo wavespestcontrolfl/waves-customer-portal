@@ -1,8 +1,12 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
+import { GOLD_CTA } from '../theme-brand';
+
+const WAVES_PHONE_DISPLAY = '(941) 318-7612';
+const WAVES_PHONE_TEL = '+19413187612';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -13,7 +17,7 @@ const BRAND = {
   teal: '#009CDE',       // brand-blue (PMS 2925) — primary accent
   tealDark: '#065A8C',   // brand-blueDark
   tealLight: '#E3F5FD',  // brand-blueLight
-  sand: '#FEF7E0',       // brand-gold light
+  sand: '#F8FAFC',       // slate-50 — cool neutral surface (van-wrap brand)
   warmWhite: '#FFFFFF',
   coral: '#C8102E',      // brand-red (PMS 186)
   gold: '#FFD700',       // brand-gold
@@ -58,6 +62,7 @@ export default function PublicBookingPage() {
   }, [isEmbedded]);
 
   const [step, setStep] = useState(1);
+  const [navOpen, setNavOpen] = useState(false);
   const [service, setService] = useState(initialService);
   const [address, setAddress] = useState({ line1: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
@@ -180,8 +185,22 @@ export default function PublicBookingPage() {
     display: 'block', marginBottom: 6,
   };
 
+  // Step-aware sticky bottom bar primary CTA
+  const primaryCTA = (() => {
+    if (step === 1) return { label: 'Find my times', onClick: () => setStep(2), disabled: !address.line1 || !address.city || !address.zip };
+    if (step === 2) return { label: 'Continue', onClick: () => setStep(3), disabled: !selectedSlot };
+    if (step === 3) return { label: loading ? 'Booking…' : 'Confirm booking', onClick: handleConfirm, disabled: loading || !contact.firstName || !contact.lastName || !contact.phone };
+    return null;
+  })();
+
+  const phoneIcon = (
+    <svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true" style={{ flexShrink: 0 }}>
+      <path fill="currentColor" d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"/>
+    </svg>
+  );
+
   return (
-    <div style={{ minHeight: '100vh', background: BRAND.sand, fontFamily: "'Inter', system-ui, sans-serif" }}>
+    <div style={{ minHeight: '100vh', background: BRAND.sand, fontFamily: "'Inter', system-ui, sans-serif", paddingTop: 56, paddingBottom: primaryCTA ? 88 : 0 }}>
       <style>{`
         /* Inter / Anton / Montserrat load globally via client/index.html */
         @keyframes slideUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
@@ -190,35 +209,54 @@ export default function PublicBookingPage() {
         * { box-sizing: border-box; margin: 0; padding: 0; }
         input, select, button, textarea { font-family: inherit; }
         input:focus { border-color: ${BRAND.teal} !important; }
+
+        .pb-nav { position: fixed; top: 0; left: 0; right: 0; z-index: 60; background: rgba(255,255,255,.94); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid ${BRAND.gray200}; padding: 4px 16px; display: flex; align-items: center; justify-content: space-between; height: 56px; box-sizing: border-box }
+        .pb-nav .pb-brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: ${BRAND.navy}; font-family: Montserrat, sans-serif; font-weight: 700; font-size: 15px }
+        .pb-nav .pb-brand img { height: 28px; width: auto }
+        .pb-hamb { width: 48px; height: 48px; background: transparent; border: none; cursor: pointer; padding: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border-radius: 8px; transition: background .15s; -webkit-tap-highlight-color: transparent }
+        .pb-hamb:hover { background: rgba(15,23,42,.04) }
+        .pb-hamb span { display: block; width: 22px; height: 2px; background: ${BRAND.navy}; border-radius: 2px; transition: transform .22s, opacity .22s }
+        .pb-hamb.open span:nth-child(1) { transform: translateY(7px) rotate(45deg) }
+        .pb-hamb.open span:nth-child(2) { opacity: 0 }
+        .pb-hamb.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg) }
+        .pb-menu { position: fixed; top: 56px; left: 0; right: 0; z-index: 55; background: #fff; border-bottom: 1px solid ${BRAND.gray200}; box-shadow: 0 8px 20px rgba(15,23,42,.08); transform: translateY(-110%); transition: transform .22s ease-out; padding: 8px 16px 16px }
+        .pb-menu.open { transform: translateY(0) }
+        .pb-menu a { display: flex; align-items: center; gap: 12px; padding: 14px 8px; color: ${BRAND.navy}; text-decoration: none; font-weight: 600; font-size: 15px; border-bottom: 1px solid ${BRAND.gray200}; min-height: 48px }
+        .pb-menu a:last-child { border-bottom: none }
+        .pb-menu a:hover { color: ${BRAND.teal} }
+        .pb-menu svg { width: 18px; height: 18px; opacity: .6 }
+
+        .pb-sticky { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; background: rgba(255,255,255,.96); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-top: 1px solid ${BRAND.gray200}; padding: 10px 16px calc(12px + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 10px; box-shadow: 0 -4px 12px rgba(15,23,42,.06) }
+        .pb-sticky .pb-sb-cta { flex: 1 1 50%; min-height: 48px; padding: 14px 8px; font-size: 13px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; border-radius: 10px; border: 2px solid ${BRAND.navy}; cursor: pointer; box-shadow: 2px 2px 0 ${BRAND.navy}; display: inline-flex; align-items: center; justify-content: center; gap: 6px; text-decoration: none; transition: background .15s }
+        .pb-sticky .pb-sb-cta.gold { background: ${BRAND.gold}; color: ${BRAND.navy} }
+        .pb-sticky .pb-sb-cta.gold:hover:not(:disabled) { background: ${BRAND.goldHover} }
+        .pb-sticky .pb-sb-cta.gold:disabled { opacity: .55; cursor: not-allowed }
+        .pb-sticky .pb-sb-cta.white { background: #fff; color: ${BRAND.navy} }
+        .pb-sticky .pb-sb-cta.white:hover { background: ${BRAND.gray100} }
+        @media (min-width: 768px) { .pb-sticky { display: none } }
+
+        .pb-trust { list-style: none; padding: 0; margin: 24px 0 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px }
+        .pb-trust li { display: flex; align-items: center; gap: 8px; padding: 12px 10px; background: ${BRAND.sand}; border: 1px solid ${BRAND.gray200}; border-radius: 10px; font-size: 13px; font-weight: 600; color: ${BRAND.navy}; line-height: 1.25 }
+        .pb-trust svg { width: 16px; height: 16px; flex-shrink: 0; color: ${BRAND.green} }
+
+        .pb-call-inline { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 48px; padding: 14px 16px; background: #fff; color: ${BRAND.navy}; border: 2px solid ${BRAND.navy}; border-radius: 10px; font-weight: 800; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; text-decoration: none; box-shadow: 3px 3px 0 ${BRAND.navy}; margin-top: 12px }
+        .pb-call-inline:hover { background: ${BRAND.gray100} }
       `}</style>
 
-      {/* Header */}
-      <div style={{ position: 'relative', overflow: 'hidden', background: BRAND.navy, padding: '18px 24px', display: 'flex', alignItems: 'center', gap: 12 }}>
-        {/* Hero video — waves-hero-service.mp4 */}
-        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
-          aria-hidden="true">
-          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
-        </video>
-        <div style={{
-          position: 'relative', zIndex: 1,
-          width: 36, height: 36, borderRadius: '50%', background: BRAND.teal,
-          display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff',
-          fontWeight: 700, fontSize: 16,
-        }}>W</div>
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          <h1 style={{
-            color: '#fff',
-            fontFamily: "'Anton', 'Luckiest Guy', cursive",
-            fontWeight: 400, fontSize: 22,
-            letterSpacing: '0.02em', lineHeight: 1,
-            margin: 0,
-          }}>
-            Waves Pest Control
-          </h1>
-          <div style={{ color: BRAND.gray400, fontSize: 12, marginTop: 4 }}>Book your service online</div>
-        </div>
-      </div>
+      {/* Fixed top nav + hamburger */}
+      <header className="pb-nav">
+        <a className="pb-brand" href="https://wavespestcontrol.com" aria-label="Waves Pest Control">
+          <img src="/waves-logo.png" alt="" /><span>Waves</span>
+        </a>
+        <button className={`pb-hamb${navOpen ? ' open' : ''}`} aria-label="Menu" aria-expanded={navOpen} aria-controls="pb-menu" onClick={() => setNavOpen(v => !v)}>
+          <span></span><span></span><span></span>
+        </button>
+      </header>
+      <nav id="pb-menu" className={`pb-menu${navOpen ? ' open' : ''}`} aria-hidden={!navOpen} onClick={(e) => { if (e.target.tagName === 'A') setNavOpen(false); }}>
+        <a href={`tel:${WAVES_PHONE_TEL}`}>{phoneIcon}Call {WAVES_PHONE_DISPLAY}</a>
+        <a href="mailto:contact@wavespestcontrol.com"><svg viewBox="0 0 20 20"><path fill="currentColor" d="M3 4h14a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1zm.5 2l6.5 4.5L16.5 6v-.5H3.5V6z"/></svg>Email us</a>
+        <a href="https://wavespestcontrol.com" target="_blank" rel="noopener noreferrer"><svg viewBox="0 0 20 20"><path fill="currentColor" d="M10 2a8 8 0 100 16 8 8 0 000-16zm-1 3.1V9H5.2A8 8 0 019 5.1zm2 0A8 8 0 0114.8 9H11V5.1zm-6.5 6H9v3.9A8 8 0 014.5 11zm6.5 0h4.5A8 8 0 0111 14.9z"/></svg>About Waves</a>
+      </nav>
 
       {/* Progress bar — steps 1 (address) → 2 (time) → 3 (contact) → 4 (done) */}
       {step < 4 && (
@@ -231,7 +269,7 @@ export default function PublicBookingPage() {
         </div>
       )}
 
-      <div style={{ maxWidth: 480, margin: '0 auto', padding: '24px 20px 60px' }}>
+      <div style={{ maxWidth: 480, margin: '0 auto', padding: '40px 24px 60px' }}>
 
         {/* STEP 1 — Address */}
         {step === 1 && (
@@ -297,15 +335,26 @@ export default function PublicBookingPage() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
-              <Button
-                variant="primary"
+              <button
+                type="button"
                 onClick={() => setStep(2)}
                 disabled={!address.line1 || !address.city || !address.zip}
-                style={{ width: '100%' }}
+                style={{ ...GOLD_CTA, width: '100%' }}
               >
                 Find my best times →
-              </Button>
+              </button>
             </div>
+
+            <a className="pb-call-inline" href={`tel:${WAVES_PHONE_TEL}`}>
+              {phoneIcon} Call {WAVES_PHONE_DISPLAY}
+            </a>
+
+            <ul className="pb-trust" aria-label="Why Waves">
+              <li><svg viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M7.5 13.6 4.2 10.3l-1.4 1.4 4.7 4.7 10-10-1.4-1.4z"/></svg>Family-owned, local</li>
+              <li><svg viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M7.5 13.6 4.2 10.3l-1.4 1.4 4.7 4.7 10-10-1.4-1.4z"/></svg>No contracts, ever</li>
+              <li><svg viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M7.5 13.6 4.2 10.3l-1.4 1.4 4.7 4.7 10-10-1.4-1.4z"/></svg>Pet &amp; kid safe</li>
+              <li><svg viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M7.5 13.6 4.2 10.3l-1.4 1.4 4.7 4.7 10-10-1.4-1.4z"/></svg>100% guarantee</li>
+            </ul>
           </div>
         )}
 
@@ -388,14 +437,14 @@ export default function PublicBookingPage() {
 
             <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
               <Button variant="tertiary" onClick={() => setStep(1)}>← Back</Button>
-              <Button
-                variant="primary"
+              <button
+                type="button"
                 onClick={() => setStep(3)}
                 disabled={!selectedSlot}
-                style={{ flex: 1 }}
+                style={{ ...GOLD_CTA, flex: 1 }}
               >
                 Continue →
-              </Button>
+              </button>
             </div>
           </div>
         )}
@@ -493,14 +542,14 @@ export default function PublicBookingPage() {
 
             <div style={{ display: 'flex', gap: 10 }}>
               <Button variant="tertiary" onClick={() => setStep(2)}>← Back</Button>
-              <Button
-                variant="primary"
+              <button
+                type="button"
                 onClick={handleConfirm}
                 disabled={loading || !contact.firstName || !contact.lastName || !contact.phone}
-                style={{ flex: 1 }}
+                style={{ ...GOLD_CTA, flex: 1 }}
               >
                 {loading ? 'Booking…' : 'Confirm booking'}
-              </Button>
+              </button>
             </div>
           </div>
         )}
@@ -548,6 +597,22 @@ export default function PublicBookingPage() {
 
         <BrandFooter />
       </div>
+
+      {primaryCTA && (
+        <div className="pb-sticky" role="region" aria-label="Primary actions">
+          <button
+            type="button"
+            className="pb-sb-cta gold"
+            onClick={primaryCTA.onClick}
+            disabled={primaryCTA.disabled}
+          >
+            {primaryCTA.label}
+          </button>
+          <a className="pb-sb-cta white" href={`tel:${WAVES_PHONE_TEL}`} aria-label="Call Waves Pest Control">
+            {phoneIcon} Call
+          </a>
+        </div>
+      )}
     </div>
   );
 }

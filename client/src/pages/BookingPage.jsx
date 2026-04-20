@@ -2,17 +2,22 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import BrandFooter from "../components/BrandFooter";
 import { Button } from "../components/Button";
+import { GOLD_CTA } from "../theme-brand";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+const WAVES_PHONE_DISPLAY = '(941) 318-7612';
+const WAVES_PHONE_TEL = '+19413187612';
+
 // ── Brand tokens ──
-// Mirrored from wavespestcontrol.com — semantic keys preserved, values swapped to brand
+// Mirrored from wavespestcontrol.com (van-wrap spec). Page background is slate-50
+// instead of warm sand so the surface reads as the marketing brand.
 const BRAND = {
   navy: "#1B2C5B",      // brand-blueDeeper (PMS 2766)
   teal: "#009CDE",      // brand-blue (PMS 2925)
   tealDark: "#065A8C",  // brand-blueDark
   tealLight: "#E3F5FD", // brand-blueLight
-  sand: "#FEF7E0",
+  sand: "#F8FAFC",      // slate-50 — soft background
   warmWhite: "#FFFFFF",
   coral: "#C8102E",     // brand-red (PMS 186)
   green: "#16A34A",
@@ -70,6 +75,7 @@ export default function BookingPage() {
   const { estimateToken } = useParams();
   const [searchParams] = useSearchParams();
   const [step, setStep] = useState(0);
+  const [navOpen, setNavOpen] = useState(false);
   const [city, setCity] = useState(searchParams.get('city') || 'Bradenton');
   const [estimate, setEstimate] = useState(null);
   const [availability, setAvailability] = useState([]);
@@ -139,8 +145,23 @@ export default function BookingPage() {
 
   const selectedDay = availability.find((d) => d.date === selectedDate);
 
+  const primaryCTA = (() => {
+    if (step === 0) return { label: 'Show available times', onClick: () => setStep(1), disabled: false };
+    if (step === 2 && selectedDay && selectedSlot) return { label: 'Continue', onClick: () => setStep(3), disabled: false };
+    if (step === 3) return { label: loading ? 'Booking…' : 'Confirm appointment', onClick: handleConfirm, disabled: loading };
+    return null;
+  })();
+
+  const showSticky = step < 4;
+
+  const phoneIcon = (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+    </svg>
+  );
+
   return (
-    <div style={{ minHeight: "100vh", background: BRAND.sand, fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: BRAND.sand, fontFamily: "'Inter', system-ui, sans-serif", paddingTop: 56, paddingBottom: showSticky ? 88 : 0 }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap');
         @keyframes rippleOut { to { transform: scale(4); opacity: 0; } }
@@ -150,49 +171,97 @@ export default function BookingPage() {
         @keyframes pulse { 0%,100% { transform:scale(1) } 50% { transform:scale(1.04) } }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         input, select, button, textarea { font-family: inherit; }
+
+        .bp-nav { position: fixed; top: 0; left: 0; right: 0; height: 56px; z-index: 60;
+          background: #fff; border-bottom: 1px solid ${BRAND.gray200};
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 0 16px; }
+        .bp-nav__brand { display: flex; align-items: center; gap: 8px; text-decoration: none;
+          color: ${BRAND.navy}; font-weight: 700; font-size: 17px; letter-spacing: -0.2px; }
+        .bp-nav__brand img { width: 32px; height: 32px; border-radius: 8px; }
+        .bp-hamb { width: 44px; height: 44px; display: flex; align-items: center;
+          justify-content: center; border: 0; background: transparent; cursor: pointer;
+          color: ${BRAND.navy}; border-radius: 8px; }
+        .bp-hamb:active { background: ${BRAND.gray100}; }
+        .bp-menu { position: fixed; top: 56px; left: 0; right: 0; z-index: 55;
+          background: #fff; border-bottom: 1px solid ${BRAND.gray200};
+          padding: 8px 0 12px; transform: translateY(-100%); transition: transform .2s ease;
+          box-shadow: 0 6px 20px rgba(15,23,35,.08); }
+        .bp-menu.is-open { transform: translateY(0); }
+        .bp-menu a { display: flex; align-items: center; gap: 10px; padding: 14px 20px;
+          color: ${BRAND.navy}; text-decoration: none; font-size: 15px; font-weight: 500;
+          border-bottom: 1px solid ${BRAND.gray100}; min-height: 48px; }
+        .bp-menu a:last-child { border-bottom: 0; }
+
+        .bp-sticky { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+          background: #fff; border-top: 1px solid ${BRAND.gray200};
+          display: flex; gap: 10px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+        .bp-sb-cta { flex: 1 1 50%; min-height: 48px; border-radius: 12px;
+          font-weight: 700; font-size: 15px; display: inline-flex;
+          align-items: center; justify-content: center; gap: 8px;
+          text-decoration: none; cursor: pointer; letter-spacing: 0.2px;
+          border: 0; transition: opacity .15s, transform .05s; }
+        .bp-sb-cta.gold { background: ${BRAND.gold}; color: ${BRAND.navy};
+          box-shadow: 0 4px 14px rgba(255,215,0,.4); }
+        .bp-sb-cta.gold:active { transform: scale(0.98); }
+        .bp-sb-cta.gold:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+        .bp-sb-cta.white { background: #fff; color: ${BRAND.navy};
+          border: 1.5px solid ${BRAND.navy}; }
+        .bp-sb-cta.white:active { background: ${BRAND.gray100}; }
+
+        .bp-trust { list-style: none; margin: 16px 0 0; padding: 0;
+          display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .bp-trust li { display: flex; align-items: flex-start; gap: 8px;
+          padding: 10px 12px; background: ${BRAND.warmWhite};
+          border: 1px solid ${BRAND.gray200}; border-radius: 10px;
+          font-size: 13px; color: ${BRAND.navy}; font-weight: 500; line-height: 1.3; }
+        .bp-trust li svg { flex: 0 0 16px; margin-top: 1px; color: ${BRAND.green}; }
+
+        .bp-call-inline { display: inline-flex; align-items: center; justify-content: center;
+          gap: 8px; width: 100%; min-height: 48px; padding: 12px 16px;
+          margin-top: 12px; border-radius: 12px; background: #fff;
+          border: 1.5px solid ${BRAND.navy}; color: ${BRAND.navy};
+          text-decoration: none; font-size: 15px; font-weight: 700;
+          box-shadow: 0 2px 6px rgba(27,44,91,.08); }
+        .bp-call-inline:active { background: ${BRAND.gray100}; }
       `}</style>
 
-      {/* ── Header ── */}
-      <div style={{
-        position: 'relative', overflow: 'hidden',
-        background: BRAND.navy,
-        padding: "20px 24px",
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-      }}>
-        {/* Hero video — waves-hero-service.mp4 */}
-        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
-          aria-hidden="true">
-          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
-        </video>
-        <div style={{
-          position: 'relative', zIndex: 1,
-          width: 36, height: 36, borderRadius: "50%",
-          background: BRAND.teal, display: "flex",
-          alignItems: "center", justifyContent: "center",
-        }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round">
-            <path d="M3 12c3-6 6-9 9-9s6 3 9 9c-3 6-6 9-9 9s-6-3-9-9z"/>
-            <path d="M8 12c1.5-3 3-4.5 4.5-4.5S15 9 16.5 12c-1.5 3-3 4.5-4.5 4.5S9.5 15 8 12z"/>
+      <header className="bp-nav">
+        <a className="bp-nav__brand" href="/">
+          <img src="/brand/waves-mark.png" alt="" aria-hidden="true" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+          <span>Waves</span>
+        </a>
+        <button type="button" className="bp-hamb" aria-label="Menu" aria-expanded={navOpen}
+          onClick={() => setNavOpen(v => !v)}>
+          {navOpen ? (
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+              <path d="M6 6l12 12M18 6L6 18"/>
+            </svg>
+          ) : (
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+              <path d="M4 7h16M4 12h16M4 17h16"/>
+            </svg>
+          )}
+        </button>
+      </header>
+
+      <nav className={`bp-menu${navOpen ? ' is-open' : ''}`} aria-hidden={!navOpen}>
+        <a href={`tel:${WAVES_PHONE_TEL}`} onClick={() => setNavOpen(false)}>
+          {phoneIcon} Call {WAVES_PHONE_DISPLAY}
+        </a>
+        <a href="mailto:contact@wavespestcontrol.com" onClick={() => setNavOpen(false)}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+            <path d="M4 4h16v16H4zM4 8l8 5 8-5"/>
           </svg>
-        </div>
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          <h1 style={{
-            color: "#fff",
-            fontFamily: "'Anton', 'Luckiest Guy', cursive",
-            fontWeight: 400, fontSize: 22,
-            letterSpacing: "0.02em", lineHeight: 1,
-            margin: 0,
-          }}>
-            Waves Pest Control
-          </h1>
-          <div style={{ color: BRAND.gray400, fontSize: 12, marginTop: 4 }}>
-            Book your service
-          </div>
-        </div>
-      </div>
+          Email us
+        </a>
+        <a href="/" onClick={() => setNavOpen(false)}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
+          </svg>
+          About Waves
+        </a>
+      </nav>
 
       {/* ── Progress bar ── */}
       {step < 4 && (
@@ -208,7 +277,7 @@ export default function BookingPage() {
       )}
 
       {/* ── Content ── */}
-      <div style={{ maxWidth: 480, margin: "0 auto", padding: "24px 20px 40px" }}>
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "40px 24px 60px" }}>
 
         {/* ════ STEP 0: City Confirmation ════ */}
         {step === 0 && (
@@ -272,13 +341,24 @@ export default function BookingPage() {
               </div>
             </div>
 
-            <Button
-              variant="primary"
+            <button
+              type="button"
               onClick={() => setStep(1)}
-              style={{ width: "100%" }}
+              style={{ ...GOLD_CTA, width: "100%" }}
             >
               Show available times
-            </Button>
+            </button>
+
+            <a className="bp-call-inline" href={`tel:${WAVES_PHONE_TEL}`} aria-label="Call Waves Pest Control">
+              {phoneIcon} CALL {WAVES_PHONE_DISPLAY}
+            </a>
+
+            <ul className="bp-trust" aria-label="Why customers choose Waves">
+              <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7"/></svg>Family-owned, local</li>
+              <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7"/></svg>No contracts, ever</li>
+              <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7"/></svg>Pet &amp; kid safe</li>
+              <li><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7"/></svg>100% guarantee</li>
+            </ul>
           </div>
         )}
 
@@ -492,13 +572,13 @@ export default function BookingPage() {
             </div>
 
             {selectedSlot && (
-              <Button
-                variant="primary"
+              <button
+                type="button"
                 onClick={() => setStep(3)}
-                style={{ width: "100%", marginTop: 24, animation: "slideUp 0.3s ease-out" }}
+                style={{ ...GOLD_CTA, width: "100%", marginTop: 24, animation: "slideUp 0.3s ease-out" }}
               >
                 Continue
-              </Button>
+              </button>
             )}
           </div>
         )}
@@ -612,11 +692,11 @@ export default function BookingPage() {
               </span>
             </div>
 
-            <Button
-              variant="primary"
+            <button
+              type="button"
               onClick={handleConfirm}
               disabled={loading}
-              style={{ width: "100%", fontSize: 16, cursor: loading ? "wait" : "pointer" }}
+              style={{ ...GOLD_CTA, width: "100%", cursor: loading ? "wait" : "pointer" }}
             >
               {loading ? (
                 <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
@@ -632,7 +712,7 @@ export default function BookingPage() {
               ) : (
                 "Confirm appointment"
               )}
-            </Button>
+            </button>
           </div>
         )}
 
@@ -725,6 +805,24 @@ export default function BookingPage() {
 
         <BrandFooter />
       </div>
+
+      {showSticky && (
+        <div className="bp-sticky" role="region" aria-label="Primary actions">
+          {primaryCTA ? (
+            <button
+              type="button"
+              className="bp-sb-cta gold"
+              onClick={primaryCTA.onClick}
+              disabled={primaryCTA.disabled}
+            >
+              {primaryCTA.label}
+            </button>
+          ) : null}
+          <a className="bp-sb-cta white" href={`tel:${WAVES_PHONE_TEL}`} aria-label="Call Waves Pest Control">
+            {phoneIcon} Call
+          </a>
+        </div>
+      )}
     </div>
   );
 }
