@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = {
@@ -82,7 +82,6 @@ const FALLBACK_SERVICES = [
 ];
 
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
-const CATEGORY_EMOJI = { recurring: '🔄', one_time: '🎯', assessment: '📋', pest_control: '🐛', lawn_care: '🌿', mosquito: '🦟', termite: '🪵', rodent: '🐀', tree_shrub: '🌳', inspection: '🔍', specialty: '⚡', other: '📦' };
 
 
 const FREQUENCIES = [
@@ -150,7 +149,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [serviceGroups, setServiceGroups] = useState(FALLBACK_SERVICES);
   const [selectedService, setSelectedService] = useState(null);
   const [isCallback, setIsCallback] = useState(false);
-  const [expandedCategory, setExpandedCategory] = useState(null);
+  const [serviceSearch, setServiceSearch] = useState('');
+
+  // Flatten service groups into a single searchable list; attach category for the eyebrow label
+  const filteredServices = useMemo(() => {
+    const flat = serviceGroups.flatMap((g) => g.items.map((it) => ({ ...it, category: g.category })));
+    const q = serviceSearch.trim().toLowerCase();
+    if (!q) return flat;
+    return flat.filter((svc) => (svc.name || '').toLowerCase().includes(q));
+  }, [serviceGroups, serviceSearch]);
 
   // Find-a-Time state
   const [findingTimes, setFindingTimes] = useState(false);
@@ -461,32 +468,38 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Service</div>
           {!selectedService ? (
             <div>
-              {[...serviceGroups]
-                .sort((a, b) => (CATEGORY_LABELS[a.category] || a.category)
-                  .localeCompare(CATEGORY_LABELS[b.category] || b.category))
-                .map((group, gi) => {
-                const isOpen = expandedCategory === group.category;
-                return (
-                  <div key={gi} style={{ marginBottom: 6, border: `1px solid ${D.border}`, borderRadius: 8, overflow: 'hidden' }}>
-                    <button
-                      onClick={() => setExpandedCategory(isOpen ? null : group.category)}
-                      style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', background: isOpen ? `${D.teal}11` : D.input, border: 'none', color: '#0F172A', fontSize: 13, fontWeight: 600, cursor: 'pointer', minHeight: 44 }}
-                    >
-                      <span>{CATEGORY_EMOJI[group.category] || '📦'} {CATEGORY_LABELS[group.category] || group.category} <span style={{ color: D.muted, fontWeight: 400, marginLeft: 6 }}>({group.items.length})</span></span>
-                      <span style={{ color: D.muted, fontSize: 12 }}>{isOpen ? '▾' : '▸'}</span>
-                    </button>
-                    {isOpen && (
-                      <div style={{ display: 'flex', flexDirection: 'column', padding: 8, gap: 4, background: D.bg }}>
-                        {group.items.map((svc, si) => (
-                          <button key={si} onClick={() => setSelectedService(svc)} style={{ padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, cursor: 'pointer', minHeight: 40, textAlign: 'left' }}>
-                            {svc.name}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+              <input
+                type="text"
+                value={serviceSearch}
+                onChange={(e) => setServiceSearch(e.target.value)}
+                placeholder="Search services..."
+                style={{ ...inputStyle, fontSize: 16, marginBottom: 10 }}
+              />
+              <div style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, WebkitOverflowScrolling: 'touch' }}>
+                {filteredServices.map((svc, i) => (
+                  <button
+                    key={`${svc.category}-${svc.name}-${i}`}
+                    onClick={() => { setSelectedService(svc); setServiceSearch(''); }}
+                    style={{
+                      padding: '10px 12px', background: D.input,
+                      border: `1px solid ${D.border}`, borderRadius: 6,
+                      color: D.text, fontSize: 14, cursor: 'pointer',
+                      minHeight: 44, textAlign: 'left',
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
+                    }}
+                  >
+                    <span style={{ flex: 1 }}>{svc.name}</span>
+                    <span style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' }}>
+                      {CATEGORY_LABELS[svc.category] || svc.category}
+                    </span>
+                  </button>
+                ))}
+                {filteredServices.length === 0 && (
+                  <div style={{ padding: '16px 12px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
+                    No services match &ldquo;{serviceSearch}&rdquo;
                   </div>
-                );
-              })}
+                )}
+              </div>
             </div>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#F8FAFC', borderRadius: 10, padding: 12, border: `1px solid #CBD5E1` }}>
