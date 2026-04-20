@@ -142,23 +142,24 @@ function CheckboxV2({ k, label }) {
   );
 }
 
-// Section header within a Card (e.g. "Property Lookup", "Property Data")
+// H3 — section header within a Card (e.g. "Property Lookup", "Property Data").
+// UI SoR §3: DM Sans sentence case, not an eyebrow.
 function PanelTitle({ children }) {
   return (
-    <div className="text-11 font-medium uppercase tracking-label text-ink-secondary pb-2.5 mb-4 border-b border-hairline border-zinc-200">
+    <h3 className="text-18 font-medium text-zinc-900 tracking-tight mt-0 pb-2.5 mb-4 border-b border-hairline border-zinc-200">
       {children}
-    </div>
+    </h3>
   );
 }
 
-// Sub-group header inside the Services panel (Recurring / One-Time /
+// H4 — sub-group header inside the Services panel (Recurring / One-Time /
 // Lawn / Termite / Pest / Rodent). V1 used colored accents (amber/green/
-// red) — V2 collapses to zinc-900.
+// red) — V2 collapses to zinc-900. UI SoR §3: sentence case, not an eyebrow.
 function SubGroupLabel({ children, className }) {
   return (
-    <div className={cn('text-11 font-medium uppercase tracking-label text-zinc-900 mt-4 mb-2 pb-1 border-b border-hairline border-zinc-200', className)}>
+    <h4 className={cn('text-16 font-medium text-zinc-900 mt-4 mb-2 pb-1 border-b border-hairline border-zinc-200', className)}>
       {children}
-    </div>
+    </h4>
   );
 }
 
