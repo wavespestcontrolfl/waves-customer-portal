@@ -84,6 +84,46 @@ const FALLBACK_SERVICES = [
 
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
 
+// Services deliberately hidden from the New Appointment picker — covers both DB and fallback name variants.
+const HIDDEN_SERVICE_NAMES = new Set([
+  'waveguard initial setup',
+  'tick control service',
+  'mud dauber nest removal',
+  'mud dauber nest removal service',
+  'wildlife trapping service',
+  'waves pest control appointment',
+  'general pest control (semiannual)',
+  'semiannual pest control service',
+  'general pest control (bi-monthly)',
+  'bi-monthly pest control service',
+  'lawn care program',
+  'lawn care service',
+  'termite bond (10-year term)',
+  'termite bond (billed quarterly | 10-year term)',
+  'termite bond (5-year term)',
+  'termite bond (billed quarterly | 5-year term)',
+  'termite bond (1-year term)',
+  'termite bond (billed quarterly | 1-year term)',
+  'termite monitoring service',
+  'termite active annual bait station service',
+  'termite active bait station service (quarterly)',
+  'termite active bait station service',
+  'termite spot treatment service',
+  'termite installation setup',
+  'termite pretreatment service',
+  'termite trenching service',
+  'termite bait station cartridge replacement',
+  'slab pre-treat termite service',
+  'slab pre-treat termite',
+  'rodent trapping service',
+  'rodent exclusion service',
+  'rodent trapping & sanitation service',
+  'rodent trapping, exclusion & sanitation service',
+  'rodent pest control',
+  'tree & shrub care (every 6 weeks)',
+  'every 6 weeks tree & shrub care service',
+]);
+
 
 const FREQUENCIES = [
   { value: 'daily', label: 'Every day' },
@@ -154,7 +194,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Flatten service groups into a single searchable list; attach category for the eyebrow label
   const filteredServices = useMemo(() => {
-    const flat = serviceGroups.flatMap((g) => g.items.map((it) => ({ ...it, category: g.category })));
+    const flat = serviceGroups
+      .flatMap((g) => g.items.map((it) => ({ ...it, category: g.category })))
+      .filter((svc) => !HIDDEN_SERVICE_NAMES.has((svc.name || '').toLowerCase().trim()));
     const q = serviceSearch.trim().toLowerCase();
     if (!q) return flat;
     return flat.filter((svc) => (svc.name || '').toLowerCase().includes(q));
@@ -595,34 +637,33 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} style={inputStyle} />
             </div>
             <div>
-              <label style={labelStyle}>Start Time</label>
+              <label style={labelStyle}>Time</label>
               <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} style={inputStyle} />
             </div>
           </div>
-
-          {/* Tech Assignment */}
-          <div style={{ marginBottom: 10 }}>
-            <label style={labelStyle}>Tech Assignment</label>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {[{ v: 'auto', l: 'Auto' }, { v: 'choose', l: 'Choose' }, { v: 'unassigned', l: 'Unassigned' }].map(o => (
-                <button key={o.v} onClick={() => setTechMode(o.v)} style={{
-                  flex: 1, padding: '10px 8px', borderRadius: 8, border: `1px solid ${techMode === o.v ? D.teal : D.border}`,
-                  background: techMode === o.v ? `${D.teal}22` : D.input, color: techMode === o.v ? D.teal : D.text,
-                  fontSize: 13, cursor: 'pointer', minHeight: 44,
-                }}>{o.l}</button>
-              ))}
-            </div>
-            {techMode === 'choose' && (
-              <select value={techId} onChange={e => setTechId(e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
-                <option value="">Select technician...</option>
-                {techs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            )}
-          </div>
-
         </div>
 
-        {/* Section 3b: Recurring — its own section below Date */}
+        {/* Section 3b: Tech Assignment — its own section below Date */}
+        <div style={sectionStyle}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Tech assignment</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {[{ v: 'auto', l: 'Auto' }, { v: 'choose', l: 'Choose' }, { v: 'unassigned', l: 'Unassigned' }].map(o => (
+              <button key={o.v} onClick={() => setTechMode(o.v)} style={{
+                flex: 1, padding: '10px 8px', borderRadius: 8, border: `1px solid ${techMode === o.v ? D.teal : D.border}`,
+                background: techMode === o.v ? `${D.teal}22` : D.input, color: techMode === o.v ? D.teal : D.text,
+                fontSize: 13, cursor: 'pointer', minHeight: 44,
+              }}>{o.l}</button>
+            ))}
+          </div>
+          {techMode === 'choose' && (
+            <select value={techId} onChange={e => setTechId(e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
+              <option value="">Select technician...</option>
+              {techs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          )}
+        </div>
+
+        {/* Section 3c: Recurring — its own section below Tech */}
         <div style={sectionStyle}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44, marginBottom: isRecurring ? 8 : 0 }}>
             <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.teal }} />
