@@ -180,7 +180,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [internalNotes, setInternalNotes] = useState('');
   const [price, setPrice] = useState('');
   const [sendSms, setSendSms] = useState(true);
-  const [createInvoice, setCreateInvoice] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
 
@@ -340,12 +339,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         recurringIntervalDays: isRecurring && recurringFreq === 'custom' ? recurringIntervalDays : undefined,
         discountType: isRecurring && discountType ? discountType : undefined,
         discountAmount: isRecurring && discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
-        createInvoice,
+        createInvoice: true,
         sendConfirmation: sendSms,
       };
       const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
-      const invoiceMsg = createInvoice ? ' — invoice will send with service report' : '';
-      setToast(`Appointment created${r.recurringCreated > 1 ? ` (${r.recurringCreated} total)` : ''}${invoiceMsg}`);
+      setToast(`Appointment created${r.recurringCreated > 1 ? ` (${r.recurringCreated} total)` : ''} — invoice will send with service report`);
       setTimeout(() => { onCreated?.({ id: r.id, scheduledDate: apptDate }); }, 1200);
     } catch (e) { alert('Failed: ' + e.message); }
     setSaving(false);
@@ -767,15 +765,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 14 }}>
-            {[
-              { label: 'Send confirmation SMS', val: sendSms, set: setSendSms },
-              { label: 'Create invoice', val: createInvoice, set: setCreateInvoice },
-            ].map((t, i) => (
-              <label key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
-                <input type="checkbox" checked={t.val} onChange={e => t.set(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
-                <span style={{ fontSize: 13, color: D.text }}>{t.label}</span>
-              </label>
-            ))}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
+              <input type="checkbox" checked={sendSms} onChange={e => setSendSms(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
+              <span style={{ fontSize: 13, color: D.text }}>Send confirmation SMS</span>
+            </label>
           </div>
           <button disabled={!selectedCustomer || !selectedService || saving} onClick={handleSubmit} style={{
             width: '100%', padding: '14px 20px', background: D.text, color: D.white,
