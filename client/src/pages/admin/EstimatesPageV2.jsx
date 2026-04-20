@@ -643,29 +643,44 @@ export default function EstimatesPageV2() {
 
   return (
     <div>
-      <div className="flex flex-col items-start sm:flex-row sm:items-center sm:justify-between mb-5 gap-3">
+      <div className="mb-5">
         <h1 className="text-28 font-normal text-zinc-900 tracking-display">
           Pipeline
         </h1>
-        <div className="flex gap-1.5 flex-wrap w-full sm:w-auto justify-center sm:justify-end">
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => setActiveTab(t.key)}
-              className={cn(
-                'h-11 sm:h-9 px-5 sm:px-4 text-14 sm:text-12 font-medium',
-                'uppercase tracking-label',
-                'rounded-full sm:rounded-sm border-hairline u-focus-ring transition-colors',
-                activeTab === t.key
-                  ? 'bg-zinc-900 text-white border-zinc-900'
-                  : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
-              )}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 4,
+          marginBottom: 24,
+          background: '#F4F4F5',
+          borderRadius: 10,
+          padding: 4,
+          border: '1px solid #E4E4E7',
+        }}
+      >
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setActiveTab(t.key)}
+            style={{
+              padding: '10px 24px',
+              borderRadius: 8,
+              border: 'none',
+              cursor: 'pointer',
+              background: activeTab === t.key ? '#18181B' : 'transparent',
+              color: activeTab === t.key ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14,
+              fontWeight: 700,
+              transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
       {activeTab === 'leads' && <LeadsSection />}
