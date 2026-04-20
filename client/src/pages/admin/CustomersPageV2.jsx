@@ -734,24 +734,34 @@ export default function CustomersPageV2() {
             filteredSorted.map((c) => {
               return (
                 <div key={c.id} className="mb-2">
-                  {isMobile ? (
-                    <div
-                      onClick={() => setSelected360Id(c.id)}
-                      className="bg-white border-hairline border-zinc-200 rounded-sm p-3.5 flex flex-col gap-1.5 cursor-pointer hover:bg-zinc-50"
-                    >
-                      <div className="flex items-center gap-2.5">
+                  {isMobile ? (() => {
+                    const displayTier = c.tier && c.tier !== 'Bronze' ? c.tier : null;
+                    return (
+                      <div
+                        onClick={() => setSelected360Id(c.id)}
+                        className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3 cursor-pointer hover:bg-zinc-50"
+                        style={{ height: 64 }}
+                      >
                         <HealthDot score={c.healthScore} />
-                        <div className="text-14 font-medium text-ink-primary flex-1 min-w-0 truncate">
-                          {c.firstName} {c.lastName}
+                        <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                          <div className="text-14 font-medium text-ink-primary truncate">
+                            {c.firstName} {c.lastName}
+                          </div>
+                          <div className="text-11 text-ink-tertiary truncate flex items-center gap-1.5">
+                            {c.city && <span className="truncate">{c.city}</span>}
+                            {c.city && displayTier && <span className="text-zinc-300">·</span>}
+                            {displayTier && <span>{displayTier}</span>}
+                            {!c.city && !displayTier && <span>—</span>}
+                          </div>
                         </div>
                         {c.phone && (
                           <a
                             href={`tel:${c.phone}`}
                             onClick={(e) => e.stopPropagation()}
                             aria-label="Call"
-                            className="inline-flex items-center justify-center h-7 w-7 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white"
+                            className="inline-flex items-center justify-center h-9 w-9 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white"
                           >
-                            <Phone size={14} strokeWidth={1.75} />
+                            <Phone size={16} strokeWidth={1.75} />
                           </a>
                         )}
                         {c.phone && (
@@ -759,34 +769,14 @@ export default function CustomersPageV2() {
                             href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
                             onClick={(e) => e.stopPropagation()}
                             aria-label="SMS"
-                            className="inline-flex items-center justify-center h-7 w-7 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white"
+                            className="inline-flex items-center justify-center h-9 w-9 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white"
                           >
-                            <MessageSquare size={14} strokeWidth={1.75} />
+                            <MessageSquare size={16} strokeWidth={1.75} />
                           </a>
                         )}
                       </div>
-                      {c.healthScore != null && (
-                        <div className="flex items-center gap-2.5 pl-5 mt-0.5">
-                          <div className="u-label text-ink-tertiary">Health</div>
-                          <div className="flex-1 h-1.5 bg-zinc-100 rounded-full overflow-hidden">
-                            <div
-                              className={cn(
-                                'h-full',
-                                c.healthScore < 40 ? 'bg-alert-fg' : 'bg-zinc-900'
-                              )}
-                              style={{ width: `${Math.max(0, Math.min(100, c.healthScore))}%` }}
-                            />
-                          </div>
-                          <div className={cn(
-                            'u-nums text-13 font-medium min-w-[24px] text-right',
-                            c.healthScore < 40 ? 'text-alert-fg' : 'text-ink-primary'
-                          )}>
-                            {c.healthScore}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
+                    );
+                  })() : (
                     <div
                       onClick={() => setSelected360Id(c.id)}
                       className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
