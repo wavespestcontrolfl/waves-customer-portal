@@ -664,7 +664,7 @@ export default function CustomersPageV2() {
       {/* Waves Intelligent + context-specific mobile stack */}
       <div className="sm:hidden mb-3">
         <h2 className="text-12 font-medium text-ink-primary mb-1.5">Waves AI</h2>
-        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} placeholder="Questions? Ask Waves AI" />
+        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
         {view === 'directory' && (
           <>
             <h2 className="text-12 font-medium text-ink-primary mt-4 mb-1.5">Search customers</h2>

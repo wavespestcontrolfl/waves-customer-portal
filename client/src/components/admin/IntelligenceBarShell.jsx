@@ -135,7 +135,7 @@ export default function IntelligenceBarShell({
   buildPageData,
   fallbackActions,
   onAfterSubmit,
-  placeholder = 'Ask anything…',
+  placeholder = 'Questions? Ask Waves AI…',
   followupPlaceholder = 'Follow up…',
   askLabel = 'Ask ↵',
   loadingLabel = 'analyzing…',

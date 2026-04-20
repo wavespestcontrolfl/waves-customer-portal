@@ -133,7 +133,7 @@ export default function RevenueIntelligenceBar({ period, revenueData }) {
           <input
             value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
-            placeholder="Compare months, analyze margins, rank techs by RPMH, ad ROI..."
+            placeholder="Questions? Ask Waves AI…"
             style={{
               width: '100%', padding: '9px 14px', paddingRight: 80, background: D.inputBg,
               border: `1px solid ${D.border}`, borderRadius: 10, color: D.text, fontSize: 13,

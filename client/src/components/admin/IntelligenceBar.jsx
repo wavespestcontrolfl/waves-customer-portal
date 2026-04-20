@@ -287,7 +287,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
             onChange={e => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
-            placeholder="Ask anything about your customers, schedule, or revenue..."
+            placeholder="Questions? Ask Waves AI…"
             style={{
               width: '100%', padding: '10px 14px', paddingRight: 80,
               background: D.inputBg, border: `1px solid ${D.border}`,

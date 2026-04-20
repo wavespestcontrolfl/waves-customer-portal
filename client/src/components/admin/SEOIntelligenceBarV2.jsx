@@ -52,17 +52,6 @@ const FALLBACK_ACTIONS = {
   ],
 };
 
-const PLACEHOLDERS = {
-  seo: 'Which sites dropped in rankings? Compare pest vs lawn traffic…',
-  blog: 'Top performing posts? How many need generation? Content calendar…',
-  reviews: 'Any reviews need replies? Draft responses, check trends…',
-  comms: 'Any unanswered messages? Search conversations, draft replies…',
-  tax: 'Tax overview, quarterly estimate, expense breakdown, P&L…',
-  leads: 'Stale leads? Pipeline overview? Source ROI comparison…',
-  banking: 'Stripe balance, recent payouts, cash flow analysis…',
-  email: 'Inbox summary, search emails, vendor invoices…',
-};
-
 export default function SEOIntelligenceBarV2({ context = 'seo', activeDomain, onRefresh }) {
   const buildPageData = useCallback(() => ({
     page: context,
@@ -79,7 +68,6 @@ export default function SEOIntelligenceBarV2({ context = 'seo', activeDomain, on
       buildPageData={buildPageData}
       fallbackActions={FALLBACK_ACTIONS[context] || FALLBACK_ACTIONS.seo}
       onAfterSubmit={handleAfterSubmit}
-      placeholder={PLACEHOLDERS[context] || PLACEHOLDERS.seo}
       followupPlaceholder="Drill deeper — 'show me that site', 'compare to last month'…"
       responseMaxHeight="500px"
       skeletonBars={[90, 70, 85]}

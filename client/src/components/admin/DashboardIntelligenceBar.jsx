@@ -179,7 +179,7 @@ export default function DashboardIntelligenceBar({ kpiData }) {
             onChange={e => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
-            placeholder="How did we do this week? What's my MRR trend? Morning briefing..."
+            placeholder="Questions? Ask Waves AI…"
             style={{
               width: '100%', padding: '10px 14px', paddingRight: 80,
               background: D.inputBg, border: `1px solid ${D.border}`,

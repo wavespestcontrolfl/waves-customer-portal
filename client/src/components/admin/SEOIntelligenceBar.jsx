@@ -148,16 +148,7 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
 
   const clear = () => { setConversationHistory([]); setResponse(null); setExpanded(false); };
 
-  const placeholders = {
-    seo: 'Which sites dropped in rankings? Compare pest vs lawn traffic...',
-    blog: 'Top performing posts? How many need generation? Content calendar...',
-    reviews: 'Any reviews need replies? Draft responses, check trends...',
-    comms: 'Any unanswered messages? Search conversations, draft replies...',
-    tax: 'Tax overview, quarterly estimate, expense breakdown, P&L...',
-    leads: 'Stale leads? Pipeline overview? Source ROI comparison...',
-    banking: 'Stripe balance, recent payouts, cash flow analysis...',
-    email: 'Inbox summary, search emails, vendor invoices...',
-  };
+  const ASK_PLACEHOLDER = 'Questions? Ask Waves AI…';
 
   return (
     <div style={{
@@ -174,7 +165,7 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
           <input
             value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
-            placeholder={placeholders[context] || placeholders.seo}
+            placeholder={ASK_PLACEHOLDER}
             style={{
               width: '100%', padding: '9px 14px', paddingRight: 80,
               background: D.inputBg, border: `1px solid ${D.border}`, borderRadius: 10,

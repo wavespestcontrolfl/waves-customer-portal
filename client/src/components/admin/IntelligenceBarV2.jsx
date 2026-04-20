@@ -66,7 +66,7 @@ export default function IntelligenceBarV2({ onSelectCustomer, placeholder }) {
   return (
     <IntelligenceBarShell
       fallbackActions={FALLBACK_ACTIONS}
-      placeholder={placeholder ?? 'Ask anything about your customers, schedule, or revenue…'}
+      placeholder={placeholder ?? 'Questions? Ask Waves AI…'}
       responseSlot={(data) => {
         const list = data?.customers || data?.overdue_customers;
         if (!list?.length) return null;

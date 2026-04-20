@@ -219,7 +219,7 @@ export default function ScheduleIntelligenceBar({ date, scheduleData, onRefresh 
             onChange={e => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
-            placeholder="Optimize routes, assign techs, find gaps, move stops..."
+            placeholder="Questions? Ask Waves AI…"
             style={{
               width: '100%', padding: '9px 14px', paddingRight: 80,
               background: D.inputBg, border: `1px solid ${D.border}`,

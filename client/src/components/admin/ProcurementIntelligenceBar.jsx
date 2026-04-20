@@ -146,7 +146,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
           <input
             value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
-            placeholder="Compare vendor prices, run lookups, check margins, manage approvals..."
+            placeholder="Questions? Ask Waves AI…"
             style={{
               width: '100%', padding: '9px 14px', paddingRight: 80,
               background: D.inputBg, border: `1px solid ${D.border}`, borderRadius: 10,

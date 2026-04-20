@@ -56,7 +56,6 @@ export default function DashboardIntelligenceBarV2({ kpiData }) {
       buildPageData={buildPageData}
       fallbackActions={FALLBACK_ACTIONS}
       promotions={promotions}
-      placeholder="How did we do this week? What's my MRR trend? Morning briefing…"
       followupPlaceholder="Drill deeper — 'break that down by tier', 'compare to Q1'…"
     />
   );
