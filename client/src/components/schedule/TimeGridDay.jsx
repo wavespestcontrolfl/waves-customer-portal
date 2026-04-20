@@ -151,7 +151,7 @@ function computeLanes(services) {
   return result;
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize }) {
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, isSelected, onToggleSelect }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -200,12 +200,17 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       onClick={(e) => {
         if (isDragging) return;
         e.stopPropagation();
+        if ((e.shiftKey || e.metaKey || e.ctrlKey) && onToggleSelect) {
+          onToggleSelect(service.id);
+          return;
+        }
         onEdit?.(service);
       }}
       className={cn(
         'absolute px-2 py-1 rounded-sm cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
+        isSelected && !isDragging && 'ring-2 ring-zinc-900 ring-offset-1 ring-offset-white z-30',
       )}
       style={{
         top,
@@ -215,7 +220,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         border: `1px solid ${statusBorderColor(service.status)}`,
         ...dragStyle,
       }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || ''}`}
+      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || ''}\nShift+click to select for bulk actions`}
     >
       <div className="font-medium truncate">{service.customerName}</div>
       <div className="opacity-80 truncate">
@@ -256,7 +261,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onCreateSlot, onResize }) {
+function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection, onToggleSelect }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -349,6 +354,8 @@ function TechColumn({ tech, services, onEdit, onCreateSlot, onResize }) {
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
                 onResize={onResize}
+                isSelected={selection?.has(svc.id)}
+                onToggleSelect={onToggleSelect}
               />
             );
           });
@@ -413,7 +420,7 @@ function AllDayStrip({ services, onEdit }) {
   );
 }
 
-function RailItem({ service, onEdit }) {
+function RailItem({ service, onEdit, isSelected, onToggleSelect }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -431,14 +438,19 @@ function RailItem({ service, onEdit }) {
       onClick={(e) => {
         if (isDragging) return;
         e.stopPropagation();
+        if ((e.shiftKey || e.metaKey || e.ctrlKey) && onToggleSelect) {
+          onToggleSelect(service.id);
+          return;
+        }
         onEdit?.(service);
       }}
       className={cn(
         'px-2 py-2 rounded-sm bg-white cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
+        isSelected && !isDragging && 'ring-2 ring-zinc-900',
       )}
       style={{ border: '1px solid #D4D4D8', ...dragStyle }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || timeLabel}`}
+      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
     >
       <div className="u-nums text-10 text-zinc-500 mb-0.5">{timeLabel}</div>
       <div className="font-medium truncate text-zinc-900">{service.customerName}</div>
@@ -449,7 +461,7 @@ function RailItem({ service, onEdit }) {
   );
 }
 
-function UnassignedRail({ services, onEdit }) {
+function UnassignedRail({ services, onEdit, selection, onToggleSelect }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
     data: { techId: '__unassigned__' },
@@ -482,10 +494,68 @@ function UnassignedRail({ services, onEdit }) {
       ) : (
         <div className="px-2 py-2 flex flex-col gap-1.5">
           {sorted.map((svc) => (
-            <RailItem key={svc.id} service={svc} onEdit={onEdit} />
+            <RailItem
+              key={svc.id}
+              service={svc}
+              onEdit={onEdit}
+              isSelected={selection?.has(svc.id)}
+              onToggleSelect={onToggleSelect}
+            />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function BulkActionBar({ count, defaultDate, onMove, onUnassign, onClear, busy }) {
+  const [targetDate, setTargetDate] = useState(defaultDate);
+  useEffect(() => { setTargetDate(defaultDate); }, [defaultDate]);
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 text-white text-12"
+      style={{ borderBottom: '1px solid #E4E4E7' }}
+    >
+      <span className="u-nums font-medium">{count} selected</span>
+      <span className="mx-1 text-zinc-500">·</span>
+      <label className="flex items-center gap-1.5 text-11 text-zinc-300">
+        Move to
+        <input
+          type="date"
+          value={targetDate}
+          onChange={(e) => setTargetDate(e.target.value)}
+          disabled={busy}
+          className="u-nums text-12 text-zinc-900 bg-white px-2 py-1 rounded-sm"
+          style={{ border: '1px solid #3F3F46' }}
+        />
+      </label>
+      <button
+        type="button"
+        onClick={() => onMove(targetDate)}
+        disabled={busy || !targetDate || targetDate === defaultDate}
+        className="px-3 py-1 rounded-sm bg-white text-zinc-900 text-11 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Apply
+      </button>
+      <span className="mx-1 text-zinc-500">·</span>
+      <button
+        type="button"
+        onClick={onUnassign}
+        disabled={busy}
+        className="px-3 py-1 rounded-sm text-11 text-white disabled:opacity-40"
+        style={{ border: '1px solid #52525B' }}
+      >
+        Unassign all
+      </button>
+      <div className="flex-1" />
+      <button
+        type="button"
+        onClick={onClear}
+        disabled={busy}
+        className="px-3 py-1 rounded-sm text-11 text-zinc-300 hover:text-white disabled:opacity-40"
+      >
+        Clear
+      </button>
     </div>
   );
 }
@@ -504,8 +574,30 @@ export default function TimeGridDay({
   const [optimistic, setOptimistic] = useState(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(null);
+  const [selection, setSelection] = useState(() => new Set());
 
   const allServices = optimistic || services;
+
+  const toggleSelection = useCallback((id) => {
+    setSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelection(new Set()), []);
+
+  // Drop ids that are no longer present in the current day's services.
+  useEffect(() => {
+    setSelection((prev) => {
+      if (prev.size === 0) return prev;
+      const ids = new Set(allServices.map((s) => s.id));
+      const filtered = new Set(Array.from(prev).filter((id) => ids.has(id)));
+      return filtered.size === prev.size ? prev : filtered;
+    });
+  }, [allServices]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
@@ -686,6 +778,68 @@ export default function TimeGridDay({
     }
   }, [allServices, date, onChange]);
 
+  const handleBulkMove = useCallback(async (newDate) => {
+    if (selection.size === 0 || !newDate || newDate === date) return;
+    const ids = Array.from(selection);
+    const toMove = allServices.filter((s) => ids.includes(s.id));
+    if (toMove.length === 0) return;
+    setOptimistic(allServices.filter((s) => !ids.includes(s.id)));
+    setBusy(true);
+    try {
+      await Promise.all(
+        toMove.map((svc) => {
+          const startMin = parseHHMM(svc.windowStart) ?? DAY_START_HOUR * 60;
+          const dur = effectiveDuration(svc);
+          const endMin = parseHHMM(svc.windowEnd) ?? (startMin + dur);
+          const newWindow = `${minutesToHHMM(startMin)}-${minutesToHHMM(endMin)}`;
+          return adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+            method: 'POST',
+            body: JSON.stringify({
+              newDate,
+              newWindow,
+              reasonCode: 'dispatch_bulk',
+              reasonText: `Bulk reschedule (${toMove.length} items) via Day grid`,
+              notifyCustomer: false,
+            }),
+          });
+        }),
+      );
+      clearSelection();
+      setOptimistic(null);
+      onChange?.();
+    } catch (err) {
+      alert('Bulk reschedule failed: ' + err.message);
+      setOptimistic(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [selection, allServices, date, onChange, clearSelection]);
+
+  const handleBulkUnassign = useCallback(async () => {
+    if (selection.size === 0) return;
+    const ids = Array.from(selection);
+    setOptimistic(allServices.map((s) =>
+      ids.includes(s.id) ? { ...s, technicianId: null, technicianName: null } : s,
+    ));
+    setBusy(true);
+    try {
+      await Promise.all(
+        ids.map((id) => adminFetch(`/admin/schedule/${id}/assign`, {
+          method: 'PUT',
+          body: JSON.stringify({ technicianId: null }),
+        })),
+      );
+      clearSelection();
+      setOptimistic(null);
+      onChange?.();
+    } catch (err) {
+      alert('Bulk unassign failed: ' + err.message);
+      setOptimistic(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [selection, allServices, onChange, clearSelection]);
+
   if (techList.length === 0 && unassignedInRail.length === 0) {
     return (
       <div className="text-ink-secondary text-center py-16 text-13">
@@ -700,9 +854,24 @@ export default function TimeGridDay({
       style={{ border: '1px solid #E4E4E7' }}
     >
       <AllDayStrip services={allDay} onEdit={onEdit} />
+      {selection.size > 0 && (
+        <BulkActionBar
+          count={selection.size}
+          defaultDate={date}
+          busy={busy}
+          onMove={handleBulkMove}
+          onUnassign={handleBulkUnassign}
+          onClear={clearSelection}
+        />
+      )}
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
         <div className="flex" style={{ maxHeight: '70vh' }}>
-          <UnassignedRail services={unassignedInRail} onEdit={onEdit} />
+          <UnassignedRail
+            services={unassignedInRail}
+            onEdit={onEdit}
+            selection={selection}
+            onToggleSelect={toggleSelection}
+          />
           {techList.length === 0 ? (
             <div className="flex-1 text-ink-secondary text-center py-16 text-13">
               No technicians scheduled for this day.
@@ -719,6 +888,8 @@ export default function TimeGridDay({
                     onEdit={onEdit}
                     onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
                     onResize={handleResize}
+                    selection={selection}
+                    onToggleSelect={toggleSelection}
                   />
                 ))}
               </div>
