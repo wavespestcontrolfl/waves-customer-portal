@@ -1,0 +1,77 @@
+# XcodeGen spec — run `./bootstrap.sh` (or `xcodegen generate`) to produce
+# WavesPay.xcodeproj from this file. Single source of truth for bundle id,
+# entitlements, Info.plist keys, deployment target, and the Stripe Terminal
+# SPM dependency.
+#
+# https://github.com/yonaskolb/XcodeGen
+
+name: WavesPay
+
+options:
+  bundleIdPrefix: com.wavespestcontrol
+  deploymentTarget:
+    iOS: "16.7"
+  developmentLanguage: en
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: BMNXJ4Q89M
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.7"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    CLANG_ENABLE_MODULES: YES
+
+packages:
+  StripeTerminal:
+    url: https://github.com/stripe/stripe-terminal-ios
+    from: "3.8.0"
+
+targets:
+  WavesPay:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.7"
+    sources:
+      - path: Sources
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: WavesPay
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen:
+          UIColorName: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIRequiredDeviceCapabilities:
+          - armv7
+        CFBundleURLTypes:
+          - CFBundleURLName: com.wavespestcontrol.wavespay
+            CFBundleURLSchemes:
+              - wavespay
+        NSLocationWhenInUseUsageDescription: "Tap to Pay on iPhone requires location access to authenticate card-present transactions."
+        # Override per environment if needed. Leave empty to use the default
+        # baked into API.swift (https://portal.wavespestcontrol.com/api).
+        WAVESPAY_API_BASE: "https://portal.wavespestcontrol.com/api"
+        # Paste the tml_… id from Stripe Dashboard → Terminal → Locations.
+        STRIPE_TERMINAL_LOCATION_ID: ""
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wavespestcontrol.wavespay
+        PRODUCT_NAME: WavesPay
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_ENTITLEMENTS: Resources/WavesPay.entitlements
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: "1.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
+    dependencies:
+      - package: StripeTerminal
+        product: StripeTerminal
