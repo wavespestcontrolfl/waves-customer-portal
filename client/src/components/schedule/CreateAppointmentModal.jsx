@@ -182,7 +182,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [customerResults, setCustomerResults] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
-  const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', address: '', city: '', zip: '' });
+  const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', zip: '' });
 
   // Service state
   const [serviceGroups, setServiceGroups] = useState(FALLBACK_SERVICES);
@@ -361,7 +361,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (r.customer) {
         selectCustomer(r.customer);
         setShowQuickAdd(false);
-        setQuickAdd({ firstName: '', lastName: '', phone: '', address: '', city: '', zip: '' });
+        setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', zip: '' });
       }
     } catch (e) { alert('Failed to add customer: ' + e.message); }
   };
@@ -538,6 +538,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div><label style={labelStyle}>Last Name</label><input value={quickAdd.lastName} onChange={e => setQuickAdd(q => ({ ...q, lastName: e.target.value }))} style={inputStyle} /></div>
                   </div>
                   <div style={{ marginBottom: 8 }}><label style={labelStyle}>Phone</label><input value={quickAdd.phone} onChange={e => setQuickAdd(q => ({ ...q, phone: e.target.value }))} style={inputStyle} /></div>
+                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>Email</label><input type="email" value={quickAdd.email} onChange={e => setQuickAdd(q => ({ ...q, email: e.target.value }))} style={inputStyle} /></div>
                   <div style={{ marginBottom: 8 }}>
                     <label style={labelStyle}>Address</label>
                     <AddressAutocomplete

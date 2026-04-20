@@ -49,7 +49,7 @@ router.post('/fix-tiers', async (req, res, next) => {
 // POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
 router.post('/quick-add', async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, address, city, zip } = req.body;
+    const { firstName, lastName, phone, email, address, city, zip } = req.body;
     if (!firstName || !lastName || !phone) {
       return res.status(400).json({ error: 'firstName, lastName, phone required' });
     }
@@ -73,6 +73,7 @@ router.post('/quick-add', async (req, res, next) => {
       first_name: firstName,
       last_name: lastName,
       phone,
+      email: email ? String(email).trim().toLowerCase() : null,
       address_line1: address || null,
       city: city || null,
       state: 'FL',
