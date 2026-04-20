@@ -1107,25 +1107,6 @@ export default function CustomersPage() {
           <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14, color: D.muted }}>{totalCount}</span>
         </div>
         <div className="customers-header-actions" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          {/* View toggle */}
-          <div className="customers-view-toggle" style={{
-            display: 'flex', flexWrap: 'wrap', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7',
-          }}>
-            {[
-              { key: 'directory', label: 'Directory' },
-              { key: 'map', label: 'Map' },
-              { key: 'pipeline', label: 'Pipeline' },
-              { key: 'health', label: 'Health' },
-            ].map(v => (
-              <button key={v.key} onClick={() => setView(v.key)} style={{
-                padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                background: view === v.key ? '#18181B' : 'transparent',
-                color: view === v.key ? '#FFFFFF' : '#A1A1AA',
-                fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-                fontFamily: "'DM Sans', sans-serif",
-              }}>{v.label}</button>
-            ))}
-          </div>
           {/* Search */}
           <input
             type="text"
@@ -1148,6 +1129,26 @@ export default function CustomersPage() {
 
       {/* Intelligence Bar */}
       <IntelligenceBar onSelectCustomer={(id) => setSelected360Id(id)} />
+
+      {/* View toggle */}
+      <div className="customers-view-toggle" style={{
+        display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 16, marginBottom: 20, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7', width: 'fit-content', maxWidth: '100%',
+      }}>
+        {[
+          { key: 'directory', label: 'Directory' },
+          { key: 'map', label: 'Map' },
+          { key: 'pipeline', label: 'Pipeline' },
+          { key: 'health', label: 'Health' },
+        ].map(v => (
+          <button key={v.key} onClick={() => setView(v.key)} style={{
+            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: view === v.key ? '#18181B' : 'transparent',
+            color: view === v.key ? '#FFFFFF' : '#A1A1AA',
+            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+            fontFamily: "'DM Sans', sans-serif",
+          }}>{v.label}</button>
+        ))}
+      </div>
 
       {/* ====================== DIRECTORY VIEW ====================== */}
       {view === 'directory' && (
