@@ -843,7 +843,7 @@ export function calculateEstimate(inputs) {
   if (R.tmBait) { ac++; ra += 35 * 12; lineItems.push({ name: 'Termite Bait', ann: 420 }); }
 
   let wt = 'Bronze', wd = 0;
-  if (ac >= 4) { wt = 'Platinum'; wd = 0.18; }
+  if (ac >= 4) { wt = 'Platinum'; wd = 0.20; }
   else if (ac === 3) { wt = 'Gold'; wd = 0.15; }
   else if (ac === 2) { wt = 'Silver'; wd = 0.10; }
   else if (ac === 1) { wt = 'Bronze'; wd = 0; }

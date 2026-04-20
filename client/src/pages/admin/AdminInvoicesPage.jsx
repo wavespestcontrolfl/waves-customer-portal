@@ -381,7 +381,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   };
 
   const subtotal = lineItems.reduce((sum, i) => sum + (i.quantity * i.unit_price), 0);
-  const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 }[selectedCustomer?.waveguard_tier] || 0;
+  const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 }[selectedCustomer?.waveguard_tier] || 0;
   const discountAmt = subtotal * tierDiscount;
   const afterDiscount = subtotal - discountAmt;
   const isCommercial = selectedCustomer?.property_type === 'commercial' || selectedCustomer?.property_type === 'business';

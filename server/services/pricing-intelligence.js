@@ -12,7 +12,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 // WaveGuard tier discounts
-const TIER_DISCOUNT = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
+const TIER_DISCOUNT = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 // Case-insensitive tier lookup — DB may store 'platinum' or 'Platinum'
 function tierDiscount(t) {
   if (!t) return 0;

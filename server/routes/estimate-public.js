@@ -90,7 +90,7 @@ router.get('/:token', async (req, res, next) => {
 
     // Anchor price = sum of individual service prices before WaveGuard bundle discount
     const monthlyTotal = parseFloat(estimate.monthly_total || 0);
-    const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
+    const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
     const discount = tierDiscount[estimate.waveguard_tier] || 0;
     const anchorPrice = discount > 0
       ? Math.round((monthlyTotal / (1 - discount)) * 100) / 100
@@ -301,7 +301,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
     const previousTier = estimate.waveguard_tier || 'Bronze';
 
     // Server-side pricing — never trust client totals
-    const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
+    const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
     let parsedData = {};
     try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
     catch { parsedData = {}; }
