@@ -893,15 +893,7 @@ export default function DispatchPageV2() {
         </div>
       </div>
 
-      {/* Intelligence Bar — directly below h1 (day-view only) */}
-      {viewMode === 'day' && (
-        <>
-          <h2 className="md:hidden text-14 font-medium text-ink-primary mb-1.5">Waves AI</h2>
-          <ScheduleIntelligenceBarV2 date={date} scheduleData={data} onRefresh={() => fetchSchedule(date)} />
-        </>
-      )}
-
-      {syncMsg && <div className="text-11 text-ink-secondary mt-2 mb-2">{syncMsg}</div>}
+      {syncMsg && <div className="text-11 text-ink-secondary mb-2">{syncMsg}</div>}
 
       {/* Mobile week strip — 7 rolling days centered on selected date */}
       {viewMode === 'day' && (
@@ -1062,6 +1054,13 @@ export default function DispatchPageV2() {
       )}
 
       {viewMode === 'day' && <RecurringAlertsBannerV2 />}
+
+      {viewMode === 'day' && (
+        <>
+          <h2 className="md:hidden text-14 font-medium text-ink-primary mt-4 mb-1.5">Waves AI</h2>
+          <ScheduleIntelligenceBarV2 date={date} scheduleData={data} onRefresh={() => fetchSchedule(date)} />
+        </>
+      )}
 
       {/* Non-board tabs — V2 monochrome panels (Match/CSR/Revenue/Insights/Protocols). */}
       {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTabV2 />}
