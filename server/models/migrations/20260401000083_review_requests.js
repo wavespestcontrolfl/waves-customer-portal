@@ -69,6 +69,7 @@ exports.up = async function (knex) {
   } else {
     // If table exists (from old review-gate system), add missing columns
     const cols = [
+      { name: 'service_record_id', add: t => t.uuid('service_record_id').references('id').inTable('service_records').onDelete('SET NULL') },
       { name: 'technician_id', add: t => t.uuid('technician_id').references('id').inTable('technicians').onDelete('SET NULL') },
       { name: 'tech_name', add: t => t.string('tech_name', 100) },
       { name: 'service_type', add: t => t.string('service_type', 100) },
