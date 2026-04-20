@@ -1706,6 +1706,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       if (charge && r?.invoiceId && r?.invoiceTotal != null) {
         const cents = Math.round(Number(r.invoiceTotal) * 100);
         window.location.href = `waves-tap://charge?invoice_id=${r.invoiceId}&amount=${cents}`;
+      } else if (charge && service.waveguardTier) {
+        // Covered by WaveGuard monthly autopay — no invoice to charge against.
+        // Silent success; the completion toast is enough.
       } else if (charge) {
         alert('Service completed, but no invoice was generated — cannot start Tap to Pay. Check the invoice list.');
       }

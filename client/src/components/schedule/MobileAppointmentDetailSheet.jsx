@@ -65,10 +65,16 @@ export default function MobileAppointmentDetailSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const pct = tier && TIER_DISCOUNT[tier] != null ? TIER_DISCOUNT[tier] : 0;
-  const price = Number(service.estimatedPrice || service.monthlyRate || 0);
+  const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
   const discount = Math.round(price * pct * 100) / 100;
   const total = Math.max(0, price - discount);
   const window = formatWindow(service);
+
+  // WaveGuard monthly autopay customers have estimated_price = 0 on each visit
+  // (already paid via the monthly cycle). Surface this so the tech doesn't try
+  // to charge them again at the door.
+  const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null);
 
   return (
     <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
@@ -104,8 +110,16 @@ export default function MobileAppointmentDetailSheet({
           className="w-full rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
           style={{ padding: '14px 20px', fontSize: 16 }}
         >
-          Review &amp; checkout
+          {coveredByMembership ? 'Complete visit' : 'Review & checkout'}
         </button>
+        {coveredByMembership && (
+          <div
+            className="text-ink-secondary"
+            style={{ fontSize: 12, marginTop: 8, textAlign: 'center' }}
+          >
+            Covered by WaveGuard {tierLabel(tier)} — no charge needed
+          </div>
+        )}
 
         {/* Customer */}
         <section className="mt-8">
