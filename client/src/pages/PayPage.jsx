@@ -51,11 +51,9 @@ function getStripe(publishableKey) {
 // ─── Stripe Payment Element wrapper ─────────────────────────────
 function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError }) {
   const mountRef = useRef(null);
-  const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
   const [ready, setReady] = useState(false);
-  const [expressReady, setExpressReady] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [elementError, setElementError] = useState(null);
   // 'card' by default (surcharged) so we never undercharge — flips to 'us_bank_account' when ACH is selected.
@@ -148,57 +146,6 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
         });
 
         paymentElement.mount(mountRef.current);
-
-        // Express Checkout Element — Apple Pay / Google Pay / Link at the top.
-        // One-tap wallet flow; still routes through the same PaymentIntent +
-        // confirmPayment call as the regular Payment Element, so confirm/webhook
-        // handling stays identical.
-        const expressElement = elements.create('expressCheckout', {
-          buttonType: { applePay: 'pay', googlePay: 'pay' },
-          paymentMethods: { applePay: 'always', googlePay: 'always', link: 'auto' },
-          buttonHeight: 48,
-        });
-        expressElement.on('ready', (e) => {
-          if (cancelled) return;
-          // `e.availablePaymentMethods` is undefined if no wallet is available
-          // on this browser/device — keep the express row hidden in that case.
-          setExpressReady(!!e.availablePaymentMethods);
-        });
-        expressElement.on('confirm', async () => {
-          if (cancelled) return;
-          // Apple Pay / Google Pay are card family — make sure the PI reflects
-          // the surcharged amount before confirming.
-          if (selectedMethod !== 'card') {
-            setSelectedMethod('card');
-            await syncAmountForMethod('card');
-          }
-          setProcessing(true);
-          setElementError(null);
-          try {
-            const { error, paymentIntent } = await stripe.confirmPayment({
-              elements,
-              clientSecret,
-              confirmParams: { return_url: window.location.href },
-              redirect: 'if_required',
-            });
-            if (error) {
-              setElementError(error.message);
-              setProcessing(false);
-              return;
-            }
-            if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-              onSuccess?.(paymentIntent);
-            } else {
-              onSuccess?.(paymentIntent);
-            }
-          } catch (err) {
-            setElementError(err.message || 'Payment failed');
-            setProcessing(false);
-          }
-        });
-        if (expressMountRef.current) {
-          expressElement.mount(expressMountRef.current);
-        }
       } catch (err) {
         if (!cancelled) onError?.(err.message || 'Failed to initialize payment form');
       }
@@ -284,26 +231,6 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
           A {pct}% processing fee is added to credit/debit card and wallet payments. Bank transfers (ACH) pay the quoted amount with no added fee.
         </span>
       </div>
-      {/* Express Checkout — Apple Pay / Google Pay / Link row. Hidden until
-          Stripe confirms at least one wallet is available on this device. */}
-      <div
-        ref={expressMountRef}
-        style={{
-          minHeight: expressReady ? 48 : 0,
-          marginBottom: expressReady ? 12 : 0,
-        }}
-      />
-      {expressReady && (
-        <div style={{
-          textAlign: 'center', marginBottom: 12,
-          fontSize: 12, color: W.textCaption,
-          display: 'flex', alignItems: 'center', gap: 10,
-        }}>
-          <span style={{ flex: 1, height: 1, background: W.border }} />
-          <span>or pay with card or bank</span>
-          <span style={{ flex: 1, height: 1, background: W.border }} />
-        </div>
-      )}
       <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
 
       {/* Live total breakdown */}
