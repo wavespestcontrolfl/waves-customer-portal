@@ -663,17 +663,15 @@ export default function CustomersPageV2() {
 
       {/* Waves Intelligent + context-specific mobile stack */}
       <div className="sm:hidden mb-3">
-        <h2 className="text-14 font-medium text-ink-primary mb-1.5">Waves AI</h2>
-        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} placeholder="" />
+        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} placeholder="Waves AI" />
         {view === 'directory' && (
           <>
-            <h2 className="text-14 font-medium text-ink-primary mt-4 mb-1.5">Search customers</h2>
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder=""
-              className="block w-full bg-white text-16 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
+              placeholder="Search customers"
+              className="mt-3 block w-full bg-white text-16 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
             />
             <div className="mt-3 flex items-center gap-2">
               <button
