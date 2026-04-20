@@ -494,9 +494,24 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
               </div>
             </div>
 
-            <div className="text-26 font-medium tracking-tight text-zinc-900 leading-tight mb-2">
+            <div className="text-26 font-medium tracking-tight text-zinc-900 leading-tight mb-1">
               {c.firstName} {c.lastName}
             </div>
+            {(c.address?.line1 || c.address?.city) && (() => {
+              const parts = [c.address?.line1, c.address?.city, c.address?.state, c.address?.zip].filter(Boolean);
+              const label = parts.join(', ');
+              const query = encodeURIComponent(label);
+              return (
+                <a
+                  href={`https://www.google.com/maps/search/?api=1&query=${query}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block text-13 text-ink-secondary no-underline hover:text-zinc-900 mb-2 truncate"
+                >
+                  {label}
+                </a>
+              );
+            })()}
             <div className="flex items-center gap-2 flex-wrap mb-3">
               <TierBadgeV2 tier={c.tier} />
               <StageBadgeV2 stage={c.pipelineStage} />
