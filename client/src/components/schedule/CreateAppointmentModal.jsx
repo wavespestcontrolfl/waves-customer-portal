@@ -189,16 +189,44 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [selectedService, setSelectedService] = useState(null);
   const [isCallback, setIsCallback] = useState(false);
   const [serviceSearch, setServiceSearch] = useState('');
+  const [libraryResults, setLibraryResults] = useState(null); // null = no live hit yet
 
-  // Flatten service groups into a single searchable list; attach category for the eyebrow label
+  // Debounced Service Library lookup — falls back to the grouped fallback list on error.
+  useEffect(() => {
+    const q = serviceSearch.trim();
+    if (!q) { setLibraryResults(null); return; }
+    const handle = setTimeout(async () => {
+      try {
+        const r = await adminFetch(`/admin/services?search=${encodeURIComponent(q)}&is_active=true&limit=20`);
+        const mapped = (r.services || []).map((s) => ({
+          id: s.id,
+          name: s.name,
+          category: s.category,
+          duration: s.default_duration_minutes,
+          priceMin: s.price_range_min ?? s.base_price,
+          priceMax: s.price_range_max ?? s.base_price,
+          base_price: s.base_price,
+          default_duration_minutes: s.default_duration_minutes,
+        }));
+        setLibraryResults(mapped);
+      } catch {
+        setLibraryResults(null);
+      }
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [serviceSearch]);
+
+  // Results shown in the service picker: live Service Library hits first, falling back to the grouped dropdown list.
   const filteredServices = useMemo(() => {
+    const q = serviceSearch.trim().toLowerCase();
+    const denied = (svc) => HIDDEN_SERVICE_NAMES.has((svc.name || '').toLowerCase().trim());
+    if (libraryResults) return libraryResults.filter((svc) => !denied(svc));
     const flat = serviceGroups
       .flatMap((g) => g.items.map((it) => ({ ...it, category: g.category })))
-      .filter((svc) => !HIDDEN_SERVICE_NAMES.has((svc.name || '').toLowerCase().trim()));
-    const q = serviceSearch.trim().toLowerCase();
+      .filter((svc) => !denied(svc));
     if (!q) return flat;
     return flat.filter((svc) => (svc.name || '').toLowerCase().includes(q));
-  }, [serviceGroups, serviceSearch]);
+  }, [libraryResults, serviceGroups, serviceSearch]);
 
   // Find-a-Time state
   const [findingTimes, setFindingTimes] = useState(false);
@@ -606,7 +634,86 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           </div>
         </div>
 
-        {/* Section 2c: Recurring — its own section below Price */}
+        {/* Section 3: Date */}
+        <div style={sectionStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date</div>
+            {selectedCustomer && selectedService && (
+              <button
+                onClick={handleFindTimes}
+                disabled={findingTimes}
+                style={{
+                  padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
+                  color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
+                  fontSize: 12, fontWeight: 600, cursor: findingTimes ? 'default' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
+                title="Rank the best slots by drive-time detour"
+              >
+                ✨ {findingTimes ? 'Finding...' : 'Find best times'}
+              </button>
+            )}
+          </div>
+
+          {slotError && (
+            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
+              {slotError}
+            </div>
+          )}
+
+          {timeSlots !== null && (
+            <div style={{ marginBottom: 12, background: '#FAFAFA', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : 'No feasible slots in next 7 days'}
+                </div>
+                <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
+              </div>
+              {timeSlots.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
+                  {timeSlots.map((slot) => (
+                    <button
+                      key={`${slot.date}-${slot.technician.id}-${slot.start_time}`}
+                      onClick={() => applySlot(slot)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                        background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
+                        cursor: 'pointer', textAlign: 'left', minHeight: 52,
+                      }}
+                    >
+                      <div style={{
+                        fontSize: 11, fontWeight: 700, color: D.teal, background: `${D.teal}15`,
+                        borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
+                      }}>#{slot.rank}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B' }}>
+                          {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
+                        </div>
+                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: D.teal, fontWeight: 600 }}>Use →</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
+            <div>
+              <label style={labelStyle}>Date</label>
+              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} className="waves-sq-date" style={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Time</label>
+              <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} className="waves-sq-date" style={inputStyle} />
+            </div>
+          </div>
+        </div>
+
+        {/* Section 3a: Recurring — its own section below Date */}
         <div style={sectionStyle}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44, marginBottom: isRecurring ? 8 : 0 }}>
             <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.teal }} />
@@ -741,86 +848,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
         </div>
 
-        {/* Section 3: Date */}
-        <div style={sectionStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date</div>
-            {selectedCustomer && selectedService && (
-              <button
-                onClick={handleFindTimes}
-                disabled={findingTimes}
-                style={{
-                  padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
-                  color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
-                  fontSize: 12, fontWeight: 600, cursor: findingTimes ? 'default' : 'pointer',
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                }}
-                title="Rank the best slots by drive-time detour"
-              >
-                ✨ {findingTimes ? 'Finding...' : 'Find best times'}
-              </button>
-            )}
-          </div>
-
-          {slotError && (
-            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
-              {slotError}
-            </div>
-          )}
-
-          {timeSlots !== null && (
-            <div style={{ marginBottom: 12, background: '#FAFAFA', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : 'No feasible slots in next 7 days'}
-                </div>
-                <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
-              </div>
-              {timeSlots.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
-                  {timeSlots.map((slot) => (
-                    <button
-                      key={`${slot.date}-${slot.technician.id}-${slot.start_time}`}
-                      onClick={() => applySlot(slot)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                        background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
-                        cursor: 'pointer', textAlign: 'left', minHeight: 52,
-                      }}
-                    >
-                      <div style={{
-                        fontSize: 11, fontWeight: 700, color: D.teal, background: `${D.teal}15`,
-                        borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
-                      }}>#{slot.rank}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B' }}>
-                          {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
-                        </div>
-                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
-                        </div>
-                      </div>
-                      <div style={{ fontSize: 11, color: D.teal, fontWeight: 600 }}>Use →</div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
-            <div>
-              <label style={labelStyle}>Date</label>
-              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} className="waves-sq-date" style={inputStyle} />
-            </div>
-            <div>
-              <label style={labelStyle}>Time</label>
-              <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} className="waves-sq-date" style={inputStyle} />
-            </div>
-          </div>
-        </div>
-
-        {/* Section 3b: Technician — its own section below Date */}
+        {/* Section 3b: Technician — its own section below Recurring */}
         <div style={sectionStyle}>
           <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Technician</div>
           <div style={{ display: 'flex', gap: 6 }}>
