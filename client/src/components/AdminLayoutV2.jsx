@@ -42,7 +42,10 @@ import {
   Activity,
   Settings,
   LogOut,
+  Menu,
+  X,
 } from 'lucide-react';
+import useIsMobile from '../hooks/useIsMobile';
 import NotificationBell from './NotificationBell';
 import GlobalCommandPalette from './admin/GlobalCommandPalette';
 
@@ -108,7 +111,9 @@ function roleLabel(role) {
 export default function AdminLayoutV2() {
   const navigate = useNavigate();
   const location = useLocation();
+  const isMobile = useIsMobile();
   const [user, setUser] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const paletteRef = useRef(null);
 
   useEffect(() => {
@@ -127,6 +132,11 @@ export default function AdminLayoutV2() {
       .catch(() => {});
   }, [navigate]);
 
+  // Auto-close sidebar on route change (mobile) + when viewport grows to desktop.
+  useEffect(() => {
+    if (isMobile) setSidebarOpen(false);
+  }, [location.pathname, isMobile]);
+
   const handleLogout = () => {
     localStorage.removeItem('waves_admin_token');
     localStorage.removeItem('waves_admin_user');
@@ -134,6 +144,8 @@ export default function AdminLayoutV2() {
   };
 
   const openPalette = () => paletteRef.current?.open();
+
+  const sidebarVisible = !isMobile || sidebarOpen;
 
   return (
     <div
@@ -146,6 +158,62 @@ export default function AdminLayoutV2() {
         color: 'var(--text-primary)',
       }}
     >
+      {/* Mobile top bar — only visible below breakpoint */}
+      {isMobile && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 52,
+            background: 'var(--surface-primary)',
+            borderBottom: '1px solid var(--border-default)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '0 12px',
+            zIndex: 90,
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(true)}
+            aria-label="Open menu"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-primary)',
+              padding: 8,
+              borderRadius: 6,
+              display: 'flex',
+              alignItems: 'center',
+              cursor: 'pointer',
+            }}
+          >
+            <Menu size={20} strokeWidth={1.75} />
+          </button>
+          <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', flex: 1 }}>
+            Waves Admin
+          </div>
+          <NotificationBell type="admin" />
+        </div>
+      )}
+
+      {/* Backdrop — only when mobile sidebar is open */}
+      {isMobile && sidebarOpen && (
+        <div
+          onClick={() => setSidebarOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.4)',
+            zIndex: 99,
+          }}
+        />
+      )}
+
       {/* Sidebar */}
       <aside
         style={{
@@ -161,6 +229,9 @@ export default function AdminLayoutV2() {
           bottom: 0,
           zIndex: 100,
           overflowY: 'auto',
+          transform: sidebarVisible ? 'translateX(0)' : 'translateX(-100%)',
+          transition: 'transform 0.2s ease',
+          boxShadow: isMobile && sidebarOpen ? '2px 0 16px rgba(0,0,0,0.12)' : 'none',
         }}
       >
         {/* Logo + title + notification bell */}
@@ -186,7 +257,27 @@ export default function AdminLayoutV2() {
           >
             Waves Admin
           </div>
-          <NotificationBell type="admin" />
+          {isMobile ? (
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Close menu"
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-secondary)',
+                padding: 6,
+                borderRadius: 4,
+                display: 'flex',
+                alignItems: 'center',
+                cursor: 'pointer',
+              }}
+            >
+              <X size={18} strokeWidth={1.75} />
+            </button>
+          ) : (
+            <NotificationBell type="admin" />
+          )}
         </div>
 
         {/* Search trigger → opens ⌘K palette */}
@@ -358,8 +449,11 @@ export default function AdminLayoutV2() {
       <div
         style={{
           flex: 1,
-          marginLeft: 220,
-          padding: '24px 28px',
+          marginLeft: isMobile ? 0 : 220,
+          paddingTop: isMobile ? 52 + 16 : 24,
+          paddingBottom: 24,
+          paddingLeft: isMobile ? 16 : 28,
+          paddingRight: isMobile ? 16 : 28,
           minHeight: '100vh',
           background: 'var(--surface-page)',
         }}
