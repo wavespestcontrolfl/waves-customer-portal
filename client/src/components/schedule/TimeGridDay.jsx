@@ -151,15 +151,46 @@ function computeLanes(services) {
   return result;
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit }) {
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
   });
 
+  const [resizeHeight, setResizeHeight] = useState(null);
+  const effectiveHeight = resizeHeight != null ? resizeHeight : Math.max(height, SLOT_HEIGHT - 2);
+
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : {};
+
+  const handleResizeStart = useCallback((e) => {
+    if (!onResize) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startY = e.clientY;
+    const startHeight = Math.max(height, SLOT_HEIGHT - 2);
+    let finalHeight = startHeight;
+
+    const onMove = (ev) => {
+      const dy = ev.clientY - startY;
+      const raw = startHeight + dy;
+      const snapped = Math.max(SLOT_HEIGHT, Math.round(raw / SLOT_HEIGHT) * SLOT_HEIGHT);
+      finalHeight = snapped;
+      setResizeHeight(snapped);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      setResizeHeight(null);
+      if (finalHeight !== startHeight) {
+        const newDurationMin = (finalHeight / SLOT_HEIGHT) * SLOT_MIN;
+        onResize(service, newDurationMin);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [onResize, service, height]);
 
   return (
     <div
@@ -178,7 +209,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       )}
       style={{
         top,
-        height: Math.max(height, SLOT_HEIGHT - 2),
+        height: effectiveHeight,
         left: `calc(${laneIdx * (100 / laneCount)}% + 2px)`,
         width: `calc(${100 / laneCount}% - 4px)`,
         border: `1px solid ${statusBorderColor(service.status)}`,
@@ -190,8 +221,16 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       <div className="opacity-80 truncate">
         {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)} · {service.serviceType || ''}
       </div>
-      {service.address && height > SLOT_HEIGHT * 1.5 && (
+      {service.address && effectiveHeight > SLOT_HEIGHT * 1.5 && (
         <div className="opacity-60 truncate">{service.address}</div>
+      )}
+      {onResize && (
+        <div
+          onPointerDown={handleResizeStart}
+          className="absolute left-0 right-0 bottom-0 h-1.5 cursor-ns-resize opacity-0 hover:opacity-100 transition-opacity"
+          style={{ background: 'linear-gradient(to bottom, transparent, rgba(0,0,0,0.2))' }}
+          title="Drag to resize"
+        />
       )}
     </div>
   );
@@ -217,7 +256,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onCreateSlot }) {
+function TechColumn({ tech, services, onEdit, onCreateSlot, onResize }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -309,6 +348,7 @@ function TechColumn({ tech, services, onEdit, onCreateSlot }) {
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
+                onResize={onResize}
               />
             );
           });
@@ -607,6 +647,45 @@ export default function TimeGridDay({
     setPending(null);
   }, []);
 
+  const handleResize = useCallback(async (svc, newDurationMin) => {
+    const startMin = parseHHMM(svc.windowStart);
+    if (startMin == null) return;
+    const newEndMin = startMin + newDurationMin;
+    const newWindow = `${minutesToHHMM(startMin)}-${minutesToHHMM(newEndMin)}`;
+    const newWindowDisplay = `${minutesToLabel(startMin)} – ${minutesToLabel(newEndMin)}`;
+    const optimisticNext = allServices.map((s) =>
+      s.id === svc.id
+        ? {
+            ...s,
+            windowEnd: minutesToHHMM(newEndMin),
+            windowDisplay: newWindowDisplay,
+            estimatedDuration: newDurationMin,
+          }
+        : s,
+    );
+    setOptimistic(optimisticNext);
+    setBusy(true);
+    try {
+      await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+        method: 'POST',
+        body: JSON.stringify({
+          newDate: date,
+          newWindow,
+          reasonCode: 'dispatch_resize',
+          reasonText: 'Duration changed via drag-resize on Day grid',
+          notifyCustomer: false,
+        }),
+      });
+      setOptimistic(null);
+      onChange?.();
+    } catch (err) {
+      alert('Resize failed: ' + err.message);
+      setOptimistic(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [allServices, date, onChange]);
+
   if (techList.length === 0 && unassignedInRail.length === 0) {
     return (
       <div className="text-ink-secondary text-center py-16 text-13">
@@ -639,6 +718,7 @@ export default function TimeGridDay({
                     services={byTech[tech.id] || []}
                     onEdit={onEdit}
                     onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
+                    onResize={handleResize}
                   />
                 ))}
               </div>
