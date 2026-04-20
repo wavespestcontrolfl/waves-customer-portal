@@ -10,12 +10,14 @@ import { ViewModeSelectorV2, MonthViewV2 } from '../../components/schedule/Calen
 import TimeGridDay from '../../components/schedule/TimeGridDay';
 import TimeGridDays from '../../components/schedule/TimeGridDays';
 import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
+import MobileDispatchList from '../../components/schedule/MobileDispatchList';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import ScheduleIntelligenceBarV2 from '../../components/admin/ScheduleIntelligenceBarV2';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { Button, Badge, Card, CardBody, cn } from '../../components/ui';
+import { etDateString, isETToday as isETTodayStr } from '../../lib/timezone';
 
 const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPanelV2'));
 const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanelV2'));
@@ -61,28 +63,14 @@ function detectServiceCategory(serviceType) {
   return 'pest';
 }
 
-// ET-aware date formatter. toISOString() is UTC — after 8 PM ET the UTC
-// date rolls forward, so a user loading the page at night used to send
-// tomorrow's date to the server and see "0 jobs today" even when today
-// had scheduled work. The business is in SW Florida; all scheduling is
-// done against the ET calendar day.
-function formatDateISO(d) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/New_York',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(d);
-  const get = (t) => parts.find((p) => p.type === t).value;
-  return `${get('year')}-${get('month')}-${get('day')}`;
-}
+const formatDateISO = (d) => etDateString(d);
 
 function formatDateDisplay(dateStr) {
   const d = new Date(dateStr + 'T12:00:00');
   return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 }
 
-function isToday(dateStr) {
-  return dateStr === formatDateISO(new Date());
-}
+const isToday = (dateStr) => isETTodayStr(dateStr);
 
 function sanitizeServiceTypeClient(serviceType) {
   if (!serviceType) return 'General Service';
@@ -986,11 +974,10 @@ export default function DispatchPageV2() {
 
       {/* Week / 5-Day = Square-style time grid (drag to reschedule). Month = summary grid. */}
       {viewMode === 'week' && isMobile && (
-        <MobileWeekGrid
+        <MobileDispatchList
+          mode="week"
           date={date}
           onEdit={(svc) => setEditingService(svc)}
-          onChange={() => fetchSchedule(date)}
-          onNavigate={(iso) => setDate(iso)}
         />
       )}
       {viewMode === 'week' && !isMobile && (
@@ -1166,23 +1153,15 @@ export default function DispatchPageV2() {
             />
           </div>
 
-          {/* Mobile: 120px spacer so Peek sheet doesn't cover page content */}
-          <div className="md:hidden" style={{ height: 'calc(120px + 56px + env(safe-area-inset-bottom))' }} aria-hidden="true" />
-
-          <MobileScheduleSheet serviceCount={totalCount} completedCount={completedCount}>
-            <TimeGridDay
+          {/* Mobile: inline scrollable day list (replaces Square-style calendar) */}
+          <div className="md:hidden">
+            <MobileDispatchList
+              mode="day"
               date={date}
               services={services}
-              technicians={technicians}
-              hideUnassignedRail
               onEdit={(svc) => setEditingService(svc)}
-              onChange={() => fetchSchedule(date)}
-              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
-                setNewApptDefaults({ date: slotDate, windowStart, techId });
-                setShowNewAppt(true);
-              }}
             />
-          </MobileScheduleSheet>
+          </div>
         </>
       )}
 
