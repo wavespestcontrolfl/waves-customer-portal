@@ -171,7 +171,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   return isNaN(d.getTime()) ? base : d;
 }
 
-const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
+const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 
@@ -510,39 +510,35 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         <div style={sectionStyle}>
           <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Service</div>
           {!selectedService ? (
-            <div>
+            <div style={{ position: 'relative' }}>
               <input
                 type="text"
                 value={serviceSearch}
                 onChange={(e) => setServiceSearch(e.target.value)}
-                placeholder="Search services..."
-                style={{ ...inputStyle, fontSize: 16, marginBottom: 10 }}
+                placeholder="Search by service name..."
+                style={inputStyle}
               />
-              <div style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, WebkitOverflowScrolling: 'touch' }}>
-                {filteredServices.map((svc, i) => (
-                  <button
-                    key={`${svc.category}-${svc.name}-${i}`}
-                    onClick={() => { setSelectedService(svc); setServiceSearch(''); }}
-                    style={{
-                      padding: '10px 12px', background: D.input,
-                      border: `1px solid ${D.border}`, borderRadius: 6,
-                      color: D.text, fontSize: 14, cursor: 'pointer',
-                      minHeight: 44, textAlign: 'left',
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
-                    }}
-                  >
-                    <span style={{ flex: 1 }}>{svc.name}</span>
-                    <span style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' }}>
-                      {CATEGORY_LABELS[svc.category] || svc.category}
-                    </span>
-                  </button>
-                ))}
-                {filteredServices.length === 0 && (
-                  <div style={{ padding: '16px 12px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
-                    No services match &ldquo;{serviceSearch}&rdquo;
-                  </div>
-                )}
-              </div>
+              {serviceSearch.trim().length > 0 && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 280, overflowY: 'auto', zIndex: 20 }}>
+                  {filteredServices.map((svc, i) => (
+                    <div
+                      key={`${svc.category}-${svc.name}-${i}`}
+                      onClick={() => { setSelectedService(svc); setServiceSearch(''); }}
+                      style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
+                    >
+                      <span style={{ flex: 1, fontWeight: 500 }}>{svc.name}</span>
+                      <span style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' }}>
+                        {CATEGORY_LABELS[svc.category] || svc.category}
+                      </span>
+                    </div>
+                  ))}
+                  {filteredServices.length === 0 && (
+                    <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
+                      No services match &ldquo;{serviceSearch}&rdquo;
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FAFAFA', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
@@ -564,7 +560,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
         </div>
 
-        {/* Section 3: Date, Time & Tech */}
+        {/* Section 2b: Price — its own section below Service */}
+        <div style={sectionStyle}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Price</div>
+          <div style={{ position: 'relative' }}>
+            <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 14 }}>$</span>
+            <input type="number" value={price} onChange={e => setPrice(e.target.value)} style={{ ...inputStyle, paddingLeft: 28 }} />
+          </div>
+        </div>
+
+        {/* Section 3: Date */}
         <div style={sectionStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date</div>
@@ -772,16 +777,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <label style={labelStyle}>Customer Notes</label>
             <textarea value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
-          <div style={{ marginBottom: 10 }}>
+          <div style={{ marginBottom: 12 }}>
             <label style={{ ...labelStyle, color: D.amber }}>Internal Notes (Admin only)</label>
             <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <label style={labelStyle}>Price</label>
-            <div style={{ position: 'relative' }}>
-              <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 14 }}>$</span>
-              <input type="number" value={price} onChange={e => setPrice(e.target.value)} style={{ ...inputStyle, paddingLeft: 28 }} />
-            </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 14 }}>
             {[
