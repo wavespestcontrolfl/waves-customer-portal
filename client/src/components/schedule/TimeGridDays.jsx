@@ -396,6 +396,7 @@ export default function TimeGridDays({
   onEdit,
   onChange,
   onDateClick,
+  hideUnassignedRail = false,
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -579,7 +580,7 @@ export default function TimeGridDays({
     >
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
         <div className="flex" style={{ maxHeight: '70vh' }}>
-          <UnassignedRail items={unassignedList} onEdit={onEdit} />
+          {!hideUnassignedRail && <UnassignedRail items={unassignedList} onEdit={onEdit} />}
           <div className="overflow-auto flex-1">
             <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + days.length * COL_MIN_WIDTH }}>
               <TimeAxis headerHeight={36} />

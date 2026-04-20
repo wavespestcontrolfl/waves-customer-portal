@@ -281,7 +281,7 @@ function MonthDayCell({ day, di, onDateClick }) {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onDateClick(day.date); }
       }}
       className={cn(
-        'text-left min-h-[90px] p-2 transition-colors u-focus-ring cursor-pointer',
+        'text-left min-h-[56px] md:min-h-[90px] p-1 md:p-2 transition-colors u-focus-ring cursor-pointer',
         day.isToday ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
         !day.isCurrentMonth && 'opacity-40',
         isOver && 'bg-zinc-100 ring-1 ring-zinc-400 ring-inset'
@@ -320,14 +320,14 @@ function MonthDayCell({ day, di, onDateClick }) {
         </div>
       )}
 
-      {/* Draggable service list (first 3) */}
-      <div className="space-y-0.5">
+      {/* Draggable service list (first 3) — desktop only; mobile cells keep just dots + count */}
+      <div className="hidden md:block space-y-0.5">
         {day.services.slice(0, 3).map((s) => (
           <MonthServiceChip key={s.id} service={s} />
         ))}
       </div>
       {day.count > 3 && (
-        <div className="text-11 text-ink-tertiary mt-0.5">
+        <div className="hidden md:block text-11 text-ink-tertiary mt-0.5">
           +{day.count - 3}
         </div>
       )}
@@ -454,8 +454,8 @@ export function MonthViewV2({ date, onDateClick }) {
 
   return (
     <div>
-      {/* Month summary stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      {/* Month summary stats — desktop only; mobile goes straight to the grid */}
+      <div className="hidden md:grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         {SUMMARY_STATS.map((stat) => (
           <Card key={stat.label}>
             <CardBody className="p-4 text-center">
@@ -468,9 +468,9 @@ export function MonthViewV2({ date, onDateClick }) {
         ))}
       </div>
 
-      {/* Category breakdown (monochrome chips) */}
+      {/* Category breakdown (monochrome chips) — desktop only */}
       {Object.keys(summary.byCategory || {}).length > 0 && (
-        <div className="flex gap-2 mb-4 flex-wrap">
+        <div className="hidden md:flex gap-2 mb-4 flex-wrap">
           {Object.entries(summary.byCategory)
             .sort(([, a], [, b]) => b - a)
             .map(([cat, count]) => (
@@ -489,8 +489,8 @@ export function MonthViewV2({ date, onDateClick }) {
 
       {/* Calendar grid — drag blocks to reschedule across days */}
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
-        <div className="-mx-4 md:mx-0 overflow-x-auto">
-        <Card className="overflow-hidden min-w-[700px] md:min-w-0 md:mx-0 mx-4">
+        <div className="-mx-4 md:mx-0 md:overflow-visible overflow-x-auto">
+        <Card className="overflow-hidden md:min-w-0">
           {/* Day of week headers */}
           <div
             className="grid grid-cols-7 bg-zinc-50"
@@ -531,9 +531,9 @@ export function MonthViewV2({ date, onDateClick }) {
         onCancel={cancelReschedule}
       />
 
-      {/* Tech workload for the month */}
+      {/* Tech workload for the month — desktop only */}
       {Object.keys(summary.byTech || {}).length > 0 && (
-        <Card className="mt-4">
+        <Card className="hidden md:block mt-4">
           <CardBody className="p-4">
             <div className="u-label text-ink-secondary mb-3">
               Tech Workload — {viewData.monthName}

@@ -635,10 +635,10 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
             )}
           </div>
           <button
-            onClick={() => setSnap(snap === 'full' ? 'half' : 'full')}
+            onClick={() => setSnap(snap === 'peek' ? 'full' : 'peek')}
             className="text-11 u-label text-ink-secondary h-8 px-2 u-focus-ring"
           >
-            {snap === 'full' ? 'Collapse' : 'Expand'}
+            {snap === 'peek' ? 'Expand' : 'Collapse'}
           </button>
         </div>
       </div>
@@ -807,7 +807,32 @@ export default function DispatchPageV2() {
       {/* Header */}
       <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
         <div>
-          <h1 className="text-28 font-medium tracking-h1 text-zinc-900">Schedule &amp; Dispatch</h1>
+          <h1 className="text-28 font-medium tracking-h1 text-zinc-900">Schedule</h1>
+
+          {/* Mobile: Schedule + More pills — above the date nav so users can switch tools first */}
+          {viewMode === 'day' && (
+            <div className="md:hidden mt-3 flex items-center gap-2">
+              <button
+                onClick={() => setActiveTab('board')}
+                className={cn(
+                  'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
+                  activeTab === 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
+                )}
+              >
+                Schedule
+              </button>
+              <button
+                onClick={() => setShowMoreSheet(true)}
+                className={cn(
+                  'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
+                  activeTab !== 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
+                )}
+              >
+                {activeTab === 'board' ? 'More' : SCHEDULE_TABS.find((t) => t.id === activeTab)?.label || 'More'}
+              </button>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 mt-2 justify-between flex-wrap">
             <div className="inline-flex items-center gap-1.5">
               <button
@@ -940,6 +965,7 @@ export default function DispatchPageV2() {
           date={date}
           dayCount={7}
           selectedDate={date}
+          hideUnassignedRail={isMobile}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
         />
@@ -949,37 +975,16 @@ export default function DispatchPageV2() {
           date={date}
           dayCount={5}
           selectedDate={date}
+          hideUnassignedRail={isMobile}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
         />
       )}
       {viewMode === 'month' && <MonthViewV2 date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
 
-      {/* Tabs bar — day view only */}
+      {/* Tabs bar — day view only. Mobile pills live above the date nav; desktop strip stays here. */}
       {viewMode === 'day' && (
         <>
-          {/* Mobile: Schedule + More */}
-          <div className="md:hidden mb-4 flex items-center gap-2">
-            <button
-              onClick={() => setActiveTab('board')}
-              className={cn(
-                'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
-                activeTab === 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
-              )}
-            >
-              Schedule
-            </button>
-            <button
-              onClick={() => setShowMoreSheet(true)}
-              className={cn(
-                'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
-                activeTab !== 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
-              )}
-            >
-              {activeTab === 'board' ? 'More' : SCHEDULE_TABS.find((t) => t.id === activeTab)?.label || 'More'}
-            </button>
-          </div>
-
           {/* Desktop: full tab strip */}
           <div className="hidden md:block mb-5 bg-white rounded-md p-1 border-hairline border-zinc-200">
             <HorizontalScroll gap={4} edgeBleed={4} style={{ paddingBottom: 0 }}>
