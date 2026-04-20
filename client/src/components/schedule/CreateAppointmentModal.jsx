@@ -215,16 +215,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return () => clearTimeout(handle);
   }, [serviceSearch]);
 
-  // Results shown in the service picker: live Service Library hits first, falling back to the grouped dropdown list.
+  // Results shown in the service picker: union of live Service Library hits + local
+  // fallback matches (deduped by name). Union avoids "No services match" whenever
+  // either source has a hit — the previous prefer-live logic broke if the live
+  // query returned an empty array even when a local match existed.
   const filteredServices = useMemo(() => {
     const q = serviceSearch.trim().toLowerCase();
     const denied = (svc) => HIDDEN_SERVICE_NAMES.has((svc.name || '').toLowerCase().trim());
-    if (libraryResults) return libraryResults.filter((svc) => !denied(svc));
+
     const flat = serviceGroups
       .flatMap((g) => g.items.map((it) => ({ ...it, category: g.category })))
       .filter((svc) => !denied(svc));
-    if (!q) return flat;
-    return flat.filter((svc) => (svc.name || '').toLowerCase().includes(q));
+    const localMatches = !q ? flat : flat.filter((svc) => (svc.name || '').toLowerCase().includes(q));
+    const liveMatches = libraryResults ? libraryResults.filter((svc) => !denied(svc)) : [];
+
+    if (liveMatches.length === 0) return localMatches;
+    const seen = new Set(liveMatches.map((s) => (s.name || '').toLowerCase().trim()));
+    const extras = localMatches.filter((s) => !seen.has((s.name || '').toLowerCase().trim()));
+    return [...liveMatches, ...extras];
   }, [libraryResults, serviceGroups, serviceSearch]);
 
   // Find-a-Time state
@@ -283,7 +291,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [internalNotes, setInternalNotes] = useState('');
   const [price, setPrice] = useState('');
   const [sendSms, setSendSms] = useState(true);
-  const [notifyTech, setNotifyTech] = useState(false);
   const [createInvoice, setCreateInvoice] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
@@ -440,7 +447,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         notes: customerNotes || undefined,
         internalNotes: internalNotes || undefined,
         sendConfirmationSms: sendSms,
-        sendTechNotification: notifyTech,
         isRecurring,
         recurringPattern: isRecurring ? recurringFreq : undefined,
         recurringCount: isRecurring ? (recurringOngoing ? 4 : recurringCount) : undefined,
@@ -503,7 +509,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         `}</style>
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 18, fontWeight: 600, color: '#18181B', letterSpacing: '-0.01em' }}>New appointment</div>
+          <div style={{ fontSize: 28, fontWeight: 500, color: '#18181B', letterSpacing: '-0.015em' }}>New Appointment</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
         </div>
 
@@ -874,7 +880,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 14 }}>
             {[
               { label: 'Send confirmation SMS', val: sendSms, set: setSendSms },
-              { label: 'Notify technician', val: notifyTech, set: setNotifyTech },
               { label: 'Create invoice', val: createInvoice, set: setCreateInvoice },
             ].map((t, i) => (
               <label key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
