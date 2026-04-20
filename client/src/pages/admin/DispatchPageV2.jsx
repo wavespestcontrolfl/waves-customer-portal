@@ -556,6 +556,99 @@ const SCHEDULE_TABS = [
   { id: 'insights', label: 'Insights' },
 ];
 
+function MobileScheduleSheet({ children, serviceCount, completedCount }) {
+  const [snap, setSnap] = useState('half');
+  const sheetRef = useRef(null);
+  const dragRef = useRef(null);
+
+  const getHeight = (s) => {
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+    if (s === 'peek') return 120;
+    if (s === 'half') return Math.round(vh * 0.5);
+    return Math.round(vh * 0.9);
+  };
+
+  useEffect(() => {
+    if (!sheetRef.current) return;
+    sheetRef.current.style.transition = 'height 300ms cubic-bezier(0.34, 1.56, 0.64, 1)';
+    sheetRef.current.style.height = `${getHeight(snap)}px`;
+  }, [snap]);
+
+  const onTouchStart = (e) => {
+    dragRef.current = {
+      y: e.touches[0].clientY,
+      h: sheetRef.current ? sheetRef.current.offsetHeight : getHeight(snap),
+    };
+  };
+
+  const onTouchMove = (e) => {
+    if (!dragRef.current || !sheetRef.current) return;
+    const dy = dragRef.current.y - e.touches[0].clientY;
+    const vh = window.innerHeight;
+    const newH = Math.max(120, Math.min(vh * 0.9, dragRef.current.h + dy));
+    sheetRef.current.style.transition = 'none';
+    sheetRef.current.style.height = `${newH}px`;
+  };
+
+  const onTouchEnd = () => {
+    if (!dragRef.current || !sheetRef.current) return;
+    const currentH = sheetRef.current.offsetHeight;
+    const vh = window.innerHeight;
+    const targets = [
+      ['peek', 120],
+      ['half', Math.round(vh * 0.5)],
+      ['full', Math.round(vh * 0.9)],
+    ];
+    targets.sort((a, b) => Math.abs(currentH - a[1]) - Math.abs(currentH - b[1]));
+    setSnap(targets[0][0]);
+    dragRef.current = null;
+  };
+
+  return (
+    <div
+      ref={sheetRef}
+      className="fixed left-0 right-0 z-40 bg-white border-t border-hairline border-zinc-200 rounded-t-md shadow-lg flex flex-col md:hidden"
+      style={{
+        bottom: 'calc(56px + env(safe-area-inset-bottom))',
+        height: `${getHeight(snap)}px`,
+      }}
+    >
+      <div
+        className="flex-shrink-0 select-none"
+        style={{ touchAction: 'none' }}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+      >
+        <div className="pt-2 pb-1">
+          <div className="w-9 h-[5px] bg-zinc-400 rounded-full mx-auto" />
+        </div>
+        <div className="px-4 pt-1 pb-3 flex items-center justify-between border-b border-hairline border-zinc-100">
+          <div className="flex items-baseline gap-1.5">
+            <span className="u-nums text-16 font-medium text-ink-primary">{serviceCount}</span>
+            <span className="text-13 text-ink-secondary">job{serviceCount === 1 ? '' : 's'} today</span>
+            {completedCount > 0 && (
+              <>
+                <span className="text-zinc-300 mx-1">·</span>
+                <span className="u-nums text-13 text-ink-secondary">{completedCount} done</span>
+              </>
+            )}
+          </div>
+          <button
+            onClick={() => setSnap(snap === 'full' ? 'half' : 'full')}
+            className="text-11 u-label text-ink-secondary h-8 px-2 u-focus-ring"
+          >
+            {snap === 'full' ? 'Collapse' : 'Expand'}
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function DispatchPageV2() {
   const isMobile = useIsMobile();
   const [activeTab, setActiveTab] = useState('board');
@@ -703,7 +796,7 @@ export default function DispatchPageV2() {
   const windSpeed = weatherData.windSpeed ?? weatherData.wind_speed ?? null;
   const weatherTemp = weatherData.temp ?? weatherData.temperature ?? null;
   const hasRainAlert = rainProbability != null && rainProbability > 40;
-  const hasFocusAlerts = unassignedCount > 0 || newCustomers.length > 0 || hasRainAlert;
+  const hasFocusAlerts = (!isMobile && unassignedCount > 0) || newCustomers.length > 0 || hasRainAlert;
   const sprayHold = (rainProbability != null && rainProbability > 50) || (windSpeed != null && windSpeed > 15);
 
   const dateHeader = viewMode === 'day'
@@ -756,7 +849,7 @@ export default function DispatchPageV2() {
           </div>
         </div>
 
-        <div className="flex gap-2 items-center flex-wrap">
+        <div className="hidden md:flex gap-2 items-center flex-wrap">
           {viewMode === 'day' && activeTab === 'board' && (
             <>
               <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
@@ -798,15 +891,18 @@ export default function DispatchPageV2() {
                   key={iso}
                   onClick={() => setDate(iso)}
                   className={cn(
-                    'flex-1 inline-flex flex-col items-center justify-center h-14 min-w-[44px] rounded-sm border-hairline u-focus-ring transition-colors',
-                    selected ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white border-zinc-300',
-                    !selected && today && 'border-zinc-900'
+                    'flex-1 inline-flex flex-col items-center justify-center h-14 min-w-[44px] rounded-sm u-focus-ring transition-colors',
+                    selected
+                      ? 'bg-zinc-100 border-2 border-zinc-900'
+                      : today
+                        ? 'bg-white border border-zinc-900'
+                        : 'bg-white border-hairline border-zinc-300'
                   )}
                 >
-                  <span className={cn('text-10 uppercase tracking-label font-medium', selected ? 'text-white/80' : 'text-ink-tertiary')}>
+                  <span className="text-10 uppercase tracking-label font-medium text-ink-tertiary">
                     {d.toLocaleDateString('en-US', { weekday: 'short' })}
                   </span>
-                  <span className={cn('u-nums text-14 font-medium', selected ? 'text-white' : 'text-ink-primary')}>
+                  <span className="u-nums text-14 font-medium text-ink-primary">
                     {d.getDate()}
                   </span>
                 </button>
@@ -935,7 +1031,10 @@ export default function DispatchPageV2() {
       {viewMode === 'day' && <RecurringAlertsBannerV2 />}
 
       {viewMode === 'day' && (
-        <ScheduleIntelligenceBarV2 date={date} scheduleData={data} onRefresh={() => fetchSchedule(date)} />
+        <>
+          <h2 className="md:hidden text-14 font-medium text-ink-primary mt-4 mb-1.5">Waves AI</h2>
+          <ScheduleIntelligenceBarV2 date={date} scheduleData={data} onRefresh={() => fetchSchedule(date)} />
+        </>
       )}
 
       {/* Non-board tabs — V2 monochrome panels (Match/CSR/Revenue/Insights/Protocols). */}
@@ -960,7 +1059,7 @@ export default function DispatchPageV2() {
             <Card className="mb-3">
               <CardBody className="py-3">
                 <div className="u-label text-ink-secondary mb-1">Today's Focus</div>
-                {unassignedCount > 0 && (
+                {!isMobile && unassignedCount > 0 && (
                   <div className="text-13 font-medium text-alert-fg">
                     {unassignedCount} service{unassignedCount > 1 ? 's' : ''} unassigned — assign techs
                   </div>
@@ -979,29 +1078,72 @@ export default function DispatchPageV2() {
             </Card>
           )}
 
-          {/* Weather bar */}
-          <div className="bg-white border-hairline border-zinc-200 rounded-sm px-4 py-2.5 mb-5 flex items-center gap-4 flex-wrap text-12 text-zinc-700">
-            <span className="u-nums">{weatherTemp ?? 82}°F</span>
-            {windSpeed != null && <span className="u-nums">{windSpeed} mph</span>}
-            {rainProbability != null && <span className="u-nums">{rainProbability}% rain</span>}
-            <span className={cn('font-medium uppercase tracking-label', sprayHold ? 'text-alert-fg' : 'text-zinc-900')}>
-              SPRAY: {sprayHold ? 'HOLD' : 'GO'}
-            </span>
+          {/* Weather bar — compact, single row */}
+          {(() => {
+            const rp = rainProbability ?? 0;
+            const weatherIcon = rp > 40 ? '🌧️' : rp > 15 ? '⛅' : '☀️';
+            return (
+              <div className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2 mb-3 md:mb-5 flex items-center gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
+                <span className="text-16" aria-hidden="true">{weatherIcon}</span>
+                <span className="u-nums font-medium text-zinc-900">{weatherTemp ?? 82}°F</span>
+                {windSpeed != null && (
+                  <>
+                    <span className="text-zinc-300" aria-hidden="true">·</span>
+                    <span className="u-nums">{windSpeed} mph</span>
+                  </>
+                )}
+                {rainProbability != null && (
+                  <>
+                    <span className="text-zinc-300" aria-hidden="true">·</span>
+                    <span className="u-nums">{rainProbability}% rain</span>
+                  </>
+                )}
+                <span className="text-zinc-300" aria-hidden="true">·</span>
+                <span className={cn('font-medium uppercase tracking-label', sprayHold ? 'text-alert-fg' : 'text-zinc-900')}>
+                  SPRAY: {sprayHold ? 'HOLD' : 'GO'}
+                </span>
+              </div>
+            );
+          })()}
+
+          {/* Mobile-only full-width New Appointment CTA */}
+          <div className="md:hidden mb-3">
+            <Button onClick={() => setShowNewAppt(true)} className="w-full">+ New Appointment</Button>
           </div>
 
-          {/* Calendar-style time grid */}
-          <TimeGridDay
-            date={date}
-            services={services}
-            technicians={technicians}
-            onEdit={(svc) => setEditingService(svc)}
-            onChange={() => fetchSchedule(date)}
-            onDateChange={setDate}
-            onCreateSlot={({ date: slotDate, windowStart, techId }) => {
-              setNewApptDefaults({ date: slotDate, windowStart, techId });
-              setShowNewAppt(true);
-            }}
-          />
+          {/* Calendar-style time grid — desktop inline, mobile bottom sheet */}
+          <div className="hidden md:block">
+            <TimeGridDay
+              date={date}
+              services={services}
+              technicians={technicians}
+              onEdit={(svc) => setEditingService(svc)}
+              onChange={() => fetchSchedule(date)}
+              onDateChange={setDate}
+              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, techId });
+                setShowNewAppt(true);
+              }}
+            />
+          </div>
+
+          {/* Mobile: 120px spacer so Peek sheet doesn't cover page content */}
+          <div className="md:hidden" style={{ height: 'calc(120px + 56px + env(safe-area-inset-bottom))' }} aria-hidden="true" />
+
+          <MobileScheduleSheet serviceCount={totalCount} completedCount={completedCount}>
+            <TimeGridDay
+              date={date}
+              services={services}
+              technicians={technicians}
+              hideUnassignedRail
+              onEdit={(svc) => setEditingService(svc)}
+              onChange={() => fetchSchedule(date)}
+              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, techId });
+                setShowNewAppt(true);
+              }}
+            />
+          </MobileScheduleSheet>
         </>
       )}
 

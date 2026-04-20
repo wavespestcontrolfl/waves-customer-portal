@@ -698,6 +698,7 @@ export default function TimeGridDay({
   onChange,
   onCreateSlot,
   onDateChange,
+  hideUnassignedRail = false,
 }) {
   const todayIso = toISODate(new Date());
   const handleCreateSlot = useCallback((slot) => {
@@ -1005,12 +1006,14 @@ export default function TimeGridDay({
       )}
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
         <div className="flex" style={{ maxHeight: '70vh' }}>
-          <UnassignedRail
-            services={unassignedInRail}
-            onEdit={onEdit}
-            selection={selection}
-            onToggleSelect={toggleSelection}
-          />
+          {!hideUnassignedRail && (
+            <UnassignedRail
+              services={unassignedInRail}
+              onEdit={onEdit}
+              selection={selection}
+              onToggleSelect={toggleSelection}
+            />
+          )}
           {techList.length === 0 ? (
             <div className="flex-1 text-ink-secondary text-center py-16 text-13">
               No technicians scheduled for this day.
