@@ -1727,6 +1727,576 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const chipGroupStyle = { marginBottom: 8 };
   const chipLabelStyle = { fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4, display: 'block' };
 
+  // ────────────────────────────────────────────────────────────────────
+  // Mobile admin render — follows reference_waves_admin_ui_system.md
+  // Light mode only. DM Sans (body) + JetBrains Mono (numerics). No D.palette.
+  // ────────────────────────────────────────────────────────────────────
+  if (isMobile) {
+    const M = {
+      page: '#FAFAFA', card: '#FFFFFF', pressed: '#F5F5F5', muted: '#F5F5F5',
+      hairline: '#E5E5E5', subtle: '#EEEEEE',
+      ink: '#111111', ink2: '#333333', ink3: '#737373', ink4: '#A3A3A3',
+      success: '#16A34A', warn: '#EA580C', err: '#C2410C', info: '#2563EB',
+      actionBg: '#111111', actionBgActive: '#000000', actionFg: '#FFFFFF',
+      destructive: '#C2410C',
+    };
+    const font = "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif";
+    const mono = "'JetBrains Mono', ui-monospace, Menlo, monospace";
+
+    const eyebrowStyle = {
+      display: 'block', fontFamily: font, fontSize: 11, fontWeight: 600,
+      color: M.ink4, textTransform: 'uppercase', letterSpacing: '0.3px',
+      marginBottom: 8,
+    };
+    const mInput = {
+      width: '100%', boxSizing: 'border-box', height: 48, padding: '0 16px',
+      background: M.card, color: M.ink, border: `1px solid ${M.hairline}`,
+      borderRadius: 12, fontFamily: font, fontSize: 16, fontWeight: 400,
+      lineHeight: 1.5, outline: 'none', WebkitAppearance: 'none',
+    };
+    const mTextarea = {
+      ...mInput, height: 'auto', padding: 14, resize: 'vertical',
+    };
+    const primaryPill = {
+      width: '100%', height: 48, border: 'none', borderRadius: 999,
+      background: M.actionBg, color: M.actionFg,
+      fontFamily: font, fontSize: 14, fontWeight: 600,
+      textTransform: 'uppercase', letterSpacing: '0.3px',
+      cursor: 'pointer', display: 'inline-flex',
+      alignItems: 'center', justifyContent: 'center', gap: 8,
+    };
+    const secondaryPill = {
+      ...primaryPill, background: 'transparent', color: M.ink,
+      border: `1px solid ${M.ink}`,
+    };
+    const tertiaryPill = {
+      ...primaryPill, background: 'transparent', color: M.ink,
+      height: 44,
+    };
+
+    function Field({ label, children }) {
+      return (
+        <div style={{ marginBottom: 20 }}>
+          <label style={eyebrowStyle}>{label}</label>
+          {children}
+        </div>
+      );
+    }
+
+    function Chip({ selected, onClick, children, dot }) {
+      return (
+        <button type="button" onClick={onClick} style={{
+          height: 36, padding: '0 14px', borderRadius: 999,
+          background: selected ? M.ink : M.card,
+          color: selected ? M.actionFg : M.ink,
+          border: `1px solid ${selected ? M.ink : M.hairline}`,
+          fontFamily: font, fontSize: 13, fontWeight: 500,
+          cursor: 'pointer', display: 'inline-flex',
+          alignItems: 'center', gap: 8, whiteSpace: 'nowrap',
+        }}>
+          {dot && <span style={{
+            width: 8, height: 8, borderRadius: '50%', background: dot, flexShrink: 0,
+          }}/>}
+          {children}
+        </button>
+      );
+    }
+
+    function ChipGroup({ label, dot, chips, onPick }) {
+      return (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: dot }}/>
+            <span style={eyebrowStyle}>{label}</span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {chips.map(c => (
+              <Chip key={c} onClick={() => onPick(c)}>{c}</Chip>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <>
+        <div
+          role="presentation"
+          onClick={() => onClose(false)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 999 }}
+        />
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          background: M.page, color: M.ink, fontFamily: font,
+          overflowY: 'auto', WebkitOverflowScrolling: 'touch',
+          paddingTop: 'env(safe-area-inset-top)',
+          paddingBottom: 'calc(160px + env(safe-area-inset-bottom))',
+          animation: 'slideIn 0.25s ease',
+        }}>
+          {success && (
+            <div style={{
+              position: 'absolute', inset: 0, background: 'rgba(250,250,250,0.96)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              zIndex: 10, flexDirection: 'column', padding: 24,
+            }}>
+              <div style={{
+                width: 64, height: 64, borderRadius: '50%', background: M.success,
+                color: '#fff', display: 'flex', alignItems: 'center',
+                justifyContent: 'center', fontSize: 32, marginBottom: 16,
+              }}>✓</div>
+              <div style={{ fontFamily: font, fontSize: 20, fontWeight: 600, color: M.ink }}>
+                Service completed
+              </div>
+              <div style={{ fontFamily: font, fontSize: 13, color: M.ink3, marginTop: 6, textAlign: 'center' }}>
+                {sendSms ? 'SMS + report sent' : 'Report saved'} for {service.customerName}
+              </div>
+            </div>
+          )}
+
+          {/* Sticky top bar */}
+          <div style={{
+            position: 'sticky', top: 0, zIndex: 2, background: M.page,
+            borderBottom: `0.5px solid ${M.hairline}`,
+            padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12,
+          }}>
+            <button
+              type="button"
+              onClick={() => onClose(false)}
+              aria-label="Close"
+              style={{
+                width: 36, height: 36, minWidth: 36, borderRadius: '50%',
+                background: M.muted, border: 'none', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: 0, fontSize: 20, lineHeight: 1, color: M.ink,
+              }}
+            >×</button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: font, fontSize: 11, fontWeight: 600, color: M.ink4,
+                            textTransform: 'uppercase', letterSpacing: '0.3px' }}>
+                Complete service
+              </div>
+              <div style={{ fontFamily: font, fontSize: 15, fontWeight: 600, color: M.ink,
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {service.customerName}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ padding: 20, maxWidth: 560, margin: '0 auto' }}>
+            {/* Service meta */}
+            <div style={{ fontFamily: font, fontSize: 13, color: M.ink3, marginBottom: 20, lineHeight: 1.4 }}>
+              {service.serviceType}
+              {service.address ? <><br/>{service.address}</> : null}
+            </div>
+
+            {/* Time on-site */}
+            {onSiteTime && (
+              <div style={{
+                background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 16,
+                padding: 16, marginBottom: 20,
+              }}>
+                <div style={eyebrowStyle}>Time on-site</div>
+                <div style={{
+                  fontFamily: mono, fontSize: 28, fontWeight: 700, color: M.ink,
+                  fontVariantNumeric: 'tabular-nums', lineHeight: 1.15,
+                }}>{elapsed}</div>
+              </div>
+            )}
+
+            {/* Quick complete */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+              <button type="button" onClick={() => setQuickComplete(!quickComplete)} style={{
+                height: 36, padding: '0 16px', borderRadius: 999,
+                background: quickComplete ? M.ink : 'transparent',
+                color: quickComplete ? M.actionFg : M.ink,
+                border: quickComplete ? 'none' : `1px solid ${M.ink}`,
+                fontFamily: font, fontSize: 12, fontWeight: 600,
+                textTransform: 'uppercase', letterSpacing: '0.3px', cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}>
+                Quick complete {quickComplete ? 'on' : 'off'}
+              </button>
+              <div style={{ fontFamily: font, fontSize: 13, color: M.ink3 }}>
+                {quickComplete ? 'Minimal fields' : 'Full report'}
+              </div>
+            </div>
+
+            {/* Callback banner */}
+            {isCallback && (
+              <div style={{
+                background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                padding: '12px 16px', marginBottom: 20,
+                display: 'flex', alignItems: 'flex-start', gap: 10,
+              }}>
+                <span style={{
+                  width: 8, height: 8, borderRadius: '50%', background: M.success,
+                  marginTop: 7, flexShrink: 0,
+                }}/>
+                <div style={{ fontFamily: font, fontSize: 13, color: M.ink, lineHeight: 1.4 }}>
+                  Callback visit — will be noted as included with WaveGuard membership on the customer's report.
+                </div>
+              </div>
+            )}
+
+            {/* Technician notes */}
+            <Field label="Technician notes">
+              <textarea
+                value={notes}
+                onChange={e => setNotes(e.target.value)}
+                rows={quickComplete ? 3 : 5}
+                placeholder="What did you do on this visit?"
+                style={{ ...mTextarea, minHeight: quickComplete ? 90 : 140 }}
+              />
+            </Field>
+
+            {/* Chip groups */}
+            <div style={{ marginBottom: 8 }}>
+              <ChipGroup label="Actions" dot={M.info}
+                         chips={CHIP_ACTIONS} onPick={c => addChipNote('Action', c)} />
+              <ChipGroup label="Observations" dot={M.warn}
+                         chips={CHIP_OBSERVATIONS} onPick={c => addChipNote('Found', c)} />
+              <ChipGroup label="Recommendations" dot={M.success}
+                         chips={CHIP_RECOMMENDATIONS} onPick={c => addChipNote('Next', c)} />
+            </div>
+
+            {/* AI report */}
+            {!quickComplete && (
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!notes.trim()) { alert('Add service notes first.'); return; }
+                  setGenerating(true);
+                  try {
+                    const productNames = selectedProducts.map(p => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : '')).join(', ');
+                    const r = await adminFetch('/admin/schedule/generate-report', {
+                      method: 'POST',
+                      body: JSON.stringify({
+                        customerName: service.customerName,
+                        serviceType: service.serviceType,
+                        technicianName: service.technicianName || 'Waves Tech',
+                        serviceDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+                        arrivalTime: service.checkInTime ? new Date(service.checkInTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '',
+                        serviceNotes: notes,
+                        productsApplied: productNames,
+                      }),
+                    });
+                    if (r.report) setNotes(r.report);
+                  } catch (e) { alert('AI report failed: ' + e.message); }
+                  setGenerating(false);
+                }}
+                disabled={generating}
+                style={{ ...secondaryPill, marginTop: 4, marginBottom: 20, opacity: generating ? 0.5 : 1 }}
+              >
+                {generating ? 'Generating…' : 'Generate AI report'}
+              </button>
+            )}
+
+            {/* Service photos */}
+            {!quickComplete && (
+              <Field label={`Service photos (${servicePhotos.length}/5)`}>
+                <input ref={photoInputRef} type="file" accept="image/*" capture="environment" multiple
+                       onChange={handlePhotoSelect} style={{ display: 'none' }} />
+                <button
+                  type="button"
+                  onClick={() => photoInputRef.current?.click()}
+                  disabled={servicePhotos.length >= 5}
+                  style={{ ...secondaryPill, opacity: servicePhotos.length >= 5 ? 0.5 : 1 }}
+                >
+                  Add photos
+                </button>
+                {servicePhotos.length > 0 && (
+                  <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                    {servicePhotos.map((photo, i) => (
+                      <div key={i} style={{ position: 'relative', width: 80, height: 80 }}>
+                        <img src={photo.data} alt={photo.name} style={{
+                          width: 80, height: 80, objectFit: 'cover', borderRadius: 8,
+                          border: `0.5px solid ${M.hairline}`,
+                        }} />
+                        <button
+                          type="button"
+                          onClick={() => removePhoto(i)}
+                          aria-label="Remove photo"
+                          style={{
+                            position: 'absolute', top: -6, right: -6, width: 22, height: 22,
+                            borderRadius: '50%', background: M.ink, color: M.actionFg,
+                            border: 'none', fontSize: 14, lineHeight: 1, cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          }}
+                        >×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Field>
+            )}
+
+            {/* Products applied */}
+            <Field label="Products applied">
+              {quickComplete ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {(products || []).slice(0, 8).map(p => {
+                    const selected = !!selectedProducts.find(sp => sp.productId === p.id);
+                    return (
+                      <Chip key={p.id} selected={selected}
+                            onClick={() => selected ? removeProduct(p.id) : addProduct(p)}>
+                        {selected ? '✓ ' : ''}{p.name}
+                      </Chip>
+                    );
+                  })}
+                </div>
+              ) : (
+                <>
+                  <input
+                    type="text" value={productSearch}
+                    onChange={e => setProductSearch(e.target.value)}
+                    placeholder="Search products…"
+                    style={mInput}
+                  />
+                  {productSearch && filteredProducts.length > 0 && (
+                    <div style={{
+                      background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                      maxHeight: 180, overflowY: 'auto', marginTop: 8,
+                    }}>
+                      {filteredProducts.slice(0, 8).map((p, idx, arr) => (
+                        <div
+                          key={p.id}
+                          onClick={() => addProduct(p)}
+                          style={{
+                            padding: '12px 16px', fontFamily: font, fontSize: 15,
+                            color: M.ink, cursor: 'pointer',
+                            borderBottom: idx === arr.length - 1 ? 'none' : `0.5px solid ${M.hairline}`,
+                          }}
+                        >{p.name}</div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+              {selectedProducts.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
+                  {selectedProducts.map(sp => (
+                    <div key={sp.productId} style={{
+                      background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                      padding: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                    }}>
+                      <span style={{
+                        fontFamily: font, fontSize: 15, fontWeight: 600, color: M.ink,
+                        flex: 1, minWidth: 120,
+                      }}>{sp.name}</span>
+                      <input
+                        type="number" placeholder="Rate" value={sp.rate}
+                        onChange={e => updateProduct(sp.productId, 'rate', e.target.value)}
+                        style={{ ...mInput, width: 84, height: 40, padding: '0 12px' }}
+                      />
+                      <select
+                        value={sp.rateUnit}
+                        onChange={e => updateProduct(sp.productId, 'rateUnit', e.target.value)}
+                        style={{ ...mInput, width: 78, height: 40, padding: '0 12px' }}
+                      >
+                        <option value="oz">oz</option>
+                        <option value="ml">ml</option>
+                        <option value="g">g</option>
+                        <option value="lb">lb</option>
+                        <option value="gal">gal</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => removeProduct(sp.productId)}
+                        aria-label="Remove product"
+                        style={{
+                          width: 36, height: 36, borderRadius: '50%', background: M.muted,
+                          border: 'none', cursor: 'pointer', fontSize: 18, lineHeight: 1,
+                          color: M.ink, padding: 0,
+                        }}
+                      >×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Field>
+
+            {/* Areas serviced */}
+            {!quickComplete && (
+              <Field label="Areas serviced">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {AREAS_SERVICED_OPTIONS.map(area => {
+                    const selected = areasServiced.includes(area);
+                    return (
+                      <Chip key={area} selected={selected} onClick={() => toggleArea(area)}>
+                        {selected ? '✓ ' : ''}{area}
+                      </Chip>
+                    );
+                  })}
+                </div>
+              </Field>
+            )}
+
+            {/* Customer interaction */}
+            {!quickComplete && (
+              <Field label="Customer interaction">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {CUSTOMER_INTERACTION_OPTIONS.map(opt => {
+                    const selected = customerInteraction === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setCustomerInteraction(opt.value)}
+                        style={{
+                          textAlign: 'left', padding: '12px 16px', borderRadius: 12,
+                          background: selected ? M.ink : M.card,
+                          color: selected ? M.actionFg : M.ink,
+                          border: `1px solid ${selected ? M.ink : M.hairline}`,
+                          fontFamily: font, fontSize: 15, fontWeight: 500,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {selected ? '✓ ' : ''}{opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {customerInteraction === 'concern' && (
+                  <input
+                    type="text"
+                    value={customerConcern}
+                    onChange={e => setCustomerConcern(e.target.value)}
+                    placeholder="Describe the customer's concern…"
+                    style={{ ...mInput, marginTop: 8 }}
+                  />
+                )}
+              </Field>
+            )}
+
+            {/* Lawn measurements */}
+            {isLawn && !quickComplete && (
+              <Field label="Lawn measurements">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>Soil temp (°F)</label>
+                    <input type="number" value={soilTemp}
+                           onChange={e => setSoilTemp(e.target.value)}
+                           placeholder="—" style={mInput} />
+                  </div>
+                  <div>
+                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>Thatch (in)</label>
+                    <input type="number" step="0.1" value={thatchMeasurement}
+                           onChange={e => setThatchMeasurement(e.target.value)}
+                           placeholder="—" style={mInput} />
+                  </div>
+                  <div>
+                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>Soil pH</label>
+                    <input type="number" step="0.1" value={soilPh}
+                           onChange={e => setSoilPh(e.target.value)}
+                           placeholder="—" style={mInput} />
+                  </div>
+                  <div>
+                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>Moisture (%)</label>
+                    <input type="number" value={soilMoisture}
+                           onChange={e => setSoilMoisture(e.target.value)}
+                           placeholder="—" style={mInput} />
+                  </div>
+                </div>
+              </Field>
+            )}
+
+            {/* Options */}
+            <Field label="Options">
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
+                background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                marginBottom: 8, cursor: 'pointer',
+              }}>
+                <input type="checkbox" checked={sendSms}
+                       onChange={e => setSendSms(e.target.checked)}
+                       style={{ width: 18, height: 18, accentColor: M.ink }} />
+                <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
+                  Send completion SMS to customer
+                </span>
+              </label>
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
+                background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                cursor: 'pointer',
+              }}>
+                <input type="checkbox" checked={requestReview}
+                       onChange={e => setRequestReview(e.target.checked)}
+                       style={{ width: 18, height: 18, accentColor: M.ink }} />
+                <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
+                  Send review request (2hr delay)
+                </span>
+              </label>
+            </Field>
+
+            {/* Next visit */}
+            {nextVisit && (
+              <div style={{
+                background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                padding: 16, marginBottom: 24,
+              }}>
+                <div style={eyebrowStyle}>Next scheduled visit</div>
+                <div style={{ fontFamily: font, fontSize: 15, fontWeight: 600, color: M.ink }}>
+                  {nextVisit.date ? new Date(nextVisit.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : 'N/A'}
+                </div>
+                <div style={{ fontFamily: font, fontSize: 13, color: M.ink3, marginTop: 2 }}>
+                  {nextVisit.serviceType || 'Standard service'}
+                </div>
+                {!showNextVisitNote ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowNextVisitNote(true)}
+                    style={{
+                      ...tertiaryPill, height: 36, padding: '0 14px',
+                      marginTop: 10, width: 'auto',
+                      border: `1px solid ${M.hairline}`, fontSize: 12,
+                    }}
+                  >
+                    Needs adjustment?
+                  </button>
+                ) : (
+                  <input
+                    type="text" value={nextVisitNote}
+                    onChange={e => setNextVisitNote(e.target.value)}
+                    placeholder="Note about next visit adjustment…"
+                    style={{ ...mInput, marginTop: 10 }}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Sticky footer */}
+          <div style={{
+            position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 3,
+            background: M.card, borderTop: `0.5px solid ${M.hairline}`,
+            padding: '12px 16px calc(12px + env(safe-area-inset-bottom))',
+            display: 'flex', flexDirection: 'column', gap: 8,
+          }}>
+            <button
+              type="button"
+              onClick={() => handleSubmit({ charge: true })}
+              disabled={submitting}
+              style={{ ...primaryPill, opacity: submitting ? 0.5 : 1 }}
+            >
+              {submitting ? 'Completing…' : 'Complete & charge'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSubmit()}
+              disabled={submitting}
+              style={{ ...secondaryPill, opacity: submitting ? 0.5 : 1 }}
+            >
+              {submitting ? 'Completing…' : 'Complete service'}
+            </button>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // ────────────────────────────────────────────────────────────────────
+  // Desktop render (legacy D dark palette) — unchanged
+  // ────────────────────────────────────────────────────────────────────
   return (
     <>
       <div onClick={() => onClose(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 999 }} />
