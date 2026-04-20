@@ -43,7 +43,6 @@ export default {
           hover: '#F4F4F5',
           sunken: '#F4F4F5',
         },
-        hairline: '#E4E4E7',
         ink: {
           primary: '#18181B',
           secondary: '#52525B',

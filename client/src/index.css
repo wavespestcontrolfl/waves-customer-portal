@@ -9,6 +9,10 @@
 @tailwind components;
 @tailwind utilities;
 
+/* preflight is disabled, so border-width utilities have no effect without
+   an explicit border-style. Force solid on hairline so it actually renders. */
+.border-hairline { border-style: solid; }
+
 /* Hide scrollbar on HorizontalScroll component */
 .horizontal-scroll::-webkit-scrollbar { display: none; }
 .horizontal-scroll > * { flex-shrink: 0; white-space: nowrap; }
