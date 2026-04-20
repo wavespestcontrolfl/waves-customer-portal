@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const rateLimit = require('express-rate-limit');
 const Stripe = require('stripe');
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -18,6 +17,11 @@ const HANDOFF_TTL_SECONDS = 60;
 const HANDOFF_ISS = 'waves-portal';
 const HANDOFF_AUD = 'waves-pay-ios';
 
+// Per-tech mint ceiling. The limiter is a security control (handoff tokens
+// authorize real-money charges) — it MUST survive deploys and be accurate
+// across replicas. Enforced in Postgres, not in-memory.
+const HANDOFF_MINTS_PER_HOUR = 20;
+
 function getStripe() {
   return new Stripe(stripeConfig.secretKey);
 }
@@ -28,22 +32,6 @@ function getHandoffSecret() {
   return s;
 }
 
-// Rate limiter for handoff mints. Keyed on tech_user_id (NOT IP) so a tech
-// switching networks doesn't reset their bucket and a shared NAT'd network
-// (office wifi) doesn't share buckets across techs. adminAuthenticate runs
-// first and populates req.technicianId; falling back to req.ip is a safety
-// net for the (impossible) case where this limiter is mounted without auth.
-// In-memory store matches every other rate-limited route in the portal —
-// the real replay protection is the DB-backed jti burn at validate-handoff.
-const handoffMintLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => `tech:${req.technicianId || req.ip}`,
-  message: { error: 'Too many handoff mints. Try again in an hour.' },
-});
-
 // POST /api/stripe/terminal/handoff
 // Mints a 60-second HMAC-JWT that the PWA embeds in a wavespay:// deep link.
 // The native iOS app POSTs the token to /validate-handoff, which atomically
@@ -51,7 +39,15 @@ const handoffMintLimiter = rateLimit({
 //
 // Body: { invoice_id }
 // Returns: { token, deep_link, jti, expires_at }
-router.post('/handoff', adminAuthenticate, handoffMintLimiter, async (req, res) => {
+//
+// Rate limit: HANDOFF_MINTS_PER_HOUR per tech_user_id, enforced by counting
+// rows in terminal_handoff_tokens inside the same transaction that reserves
+// the jti. An advisory lock keyed on tech_user_id serializes concurrent
+// mints for the same tech so two near-simultaneous requests can't both
+// pass the count check (READ COMMITTED isolation otherwise allows it).
+// adminAuthenticate guarantees req.technicianId is set — if that ever
+// changes the transaction aborts (advisory lock call throws on NULL).
+router.post('/handoff', adminAuthenticate, async (req, res) => {
   try {
     const secret = getHandoffSecret();
     if (!secret) {
@@ -71,26 +67,59 @@ router.post('/handoff', adminAuthenticate, handoffMintLimiter, async (req, res) 
       return res.status(400).json({ error: 'Invalid invoice amount' });
     }
 
-    // 16 random bytes = 128 bits of entropy, encoded as 32 hex chars. Avoids
-    // the UUID v4 dependency and gives us a primary-key-safe string we can
-    // atomically burn on /validate-handoff.
-    const jti = crypto.randomBytes(16).toString('hex');
-    const now = Math.floor(Date.now() / 1000);
-    const exp = now + HANDOFF_TTL_SECONDS;
-    const expires_at = new Date(exp * 1000);
+    let rateLimited = false;
+    let mintedJti = null;
+    let mintedExpiresAt = null;
 
-    // Insert the replay-tracking row BEFORE signing, so the PK is reserved.
-    // A jti collision is astronomically unlikely (~1 in 2^128), but if it
-    // happens the unique-violation surfaces here and the signed token is
-    // never returned.
-    await db('terminal_handoff_tokens').insert({ jti, expires_at });
+    await db.transaction(async (trx) => {
+      // Serialize concurrent mints for this tech. Two int4 args give us a
+      // namespace + key pair; the lock is held until the transaction ends.
+      // Different techs get different keys and proceed in parallel.
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))',
+        ['terminal.handoff.mint', String(req.technicianId)],
+      );
+
+      const [{ count }] = await trx('terminal_handoff_tokens')
+        .where('tech_user_id', req.technicianId)
+        .where('created_at', '>', trx.raw("NOW() - INTERVAL '1 hour'"))
+        .count('* as count');
+
+      if (Number(count) >= HANDOFF_MINTS_PER_HOUR) {
+        rateLimited = true;
+        return; // commit with no writes — lock releases, count is unchanged
+      }
+
+      // 16 random bytes = 128 bits of entropy, 32 hex chars. Avoids the
+      // UUID v4 dependency and gives us a primary-key-safe string we can
+      // atomically burn on /validate-handoff.
+      const jti = crypto.randomBytes(16).toString('hex');
+      const expires_at = new Date(Date.now() + HANDOFF_TTL_SECONDS * 1000);
+
+      // Insert the replay-tracking row BEFORE signing, so the PK is
+      // reserved and the row is visible to the next rate-limit count. A
+      // jti collision is ~1 in 2^128 — if it ever happens, the unique
+      // violation surfaces here and no token is returned.
+      await trx('terminal_handoff_tokens').insert({
+        jti,
+        tech_user_id: req.technicianId,
+        expires_at,
+      });
+
+      mintedJti = jti;
+      mintedExpiresAt = expires_at;
+    });
+
+    if (rateLimited) {
+      return res.status(429).json({ error: 'Too many handoff mints. Try again in an hour.' });
+    }
 
     const token = jwt.sign(
       {
         invoice_id: String(invoice.id),
         amount_cents,
         tech_user_id: req.technicianId,
-        jti,
+        jti: mintedJti,
       },
       secret,
       {
@@ -107,7 +136,7 @@ router.post('/handoff', adminAuthenticate, handoffMintLimiter, async (req, res) 
       tech_user_id: req.technicianId,
       invoice_id: invoice.id,
       amount_cents,
-      jti,
+      jti: mintedJti,
       ip_address: ipFromReq(req),
       user_agent: uaFromReq(req),
     });
@@ -115,8 +144,8 @@ router.post('/handoff', adminAuthenticate, handoffMintLimiter, async (req, res) 
     res.json({
       token,
       deep_link: `wavespay://collect?t=${encodeURIComponent(token)}`,
-      jti,
-      expires_at: expires_at.toISOString(),
+      jti: mintedJti,
+      expires_at: mintedExpiresAt.toISOString(),
     });
   } catch (err) {
     logger.error(`[stripe-terminal] handoff mint failed: ${err.message}`);
