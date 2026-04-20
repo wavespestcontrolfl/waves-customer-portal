@@ -548,7 +548,7 @@ function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplet
 }
 
 const SCHEDULE_TABS = [
-  { id: 'board', label: 'Board' },
+  { id: 'board', label: 'Schedule' },
   { id: 'protocols', label: 'Protocols' },
   { id: 'match', label: 'Tech Match' },
   { id: 'csr', label: 'CSR Booking' },
@@ -685,13 +685,6 @@ export default function DispatchPageV2() {
 
   useEffect(() => { fetchSchedule(date); }, [date, fetchSchedule]);
 
-  useEffect(() => {
-    if (isMobile && viewMode !== 'day') {
-      setViewMode('day');
-      setActiveTab('board');
-    }
-  }, [isMobile, viewMode]);
-
   const syncDispatchAI = async () => {
     setSyncing(true); setSyncMsg('');
     try {
@@ -816,7 +809,7 @@ export default function DispatchPageV2() {
         <div>
           <h1 className="text-28 font-medium tracking-h1 text-zinc-900">Schedule &amp; Dispatch</h1>
           <div className="flex items-center gap-2 mt-2 justify-between flex-wrap">
-            <div className="flex items-center gap-2 min-w-0 w-full md:w-auto">
+            <div className="inline-flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => shiftDate(-1)}
@@ -825,10 +818,7 @@ export default function DispatchPageV2() {
               >
                 ◀
               </button>
-              <span
-                className="u-nums text-14 md:text-13 font-medium text-zinc-900 text-center"
-                style={{ minWidth: isMobile ? 0 : 220, flex: isMobile ? 1 : undefined }}
-              >
+              <span className="u-nums text-14 md:text-13 font-medium text-zinc-900 text-center px-1 md:min-w-[220px]">
                 {dateHeader}
               </span>
               <button
@@ -851,21 +841,18 @@ export default function DispatchPageV2() {
 
         <div className="hidden md:flex gap-2 items-center flex-wrap">
           {viewMode === 'day' && activeTab === 'board' && (
-            <>
-              <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
-                <span><span className="u-nums font-medium text-zinc-900">{totalCount}</span> services</span>
-                <span><span className="u-nums font-medium text-zinc-900">{completedCount}</span> done</span>
-                <span><span className={cn('u-nums font-medium', remainingCount > 0 ? 'text-zinc-900' : 'text-ink-secondary')}>{remainingCount}</span> left</span>
-                <span className="pl-3 border-l-hairline border-zinc-200">
-                  ~{estTotalHrs}h{estTotalMinRemainder > 0 ? `${estTotalMinRemainder}m` : ''} total
-                </span>
-                <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
-                <span className="pl-3 border-l-hairline border-zinc-200">
-                  <span className="u-nums font-medium text-zinc-900">${estRevenue.toLocaleString()}</span> revenue
-                </span>
-              </div>
-              <Button onClick={() => setShowNewAppt(true)}>+ New Appointment</Button>
-            </>
+            <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
+              <span><span className="u-nums font-medium text-zinc-900">{totalCount}</span> services</span>
+              <span><span className="u-nums font-medium text-zinc-900">{completedCount}</span> done</span>
+              <span><span className={cn('u-nums font-medium', remainingCount > 0 ? 'text-zinc-900' : 'text-ink-secondary')}>{remainingCount}</span> left</span>
+              <span className="pl-3 border-l-hairline border-zinc-200">
+                ~{estTotalHrs}h{estTotalMinRemainder > 0 ? `${estTotalMinRemainder}m` : ''} total
+              </span>
+              <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
+              <span className="pl-3 border-l-hairline border-zinc-200">
+                <span className="u-nums font-medium text-zinc-900">${estRevenue.toLocaleString()}</span> revenue
+              </span>
+            </div>
           )}
           {viewMode === 'day' && activeTab !== 'board' && (
             <Button variant="secondary" onClick={syncDispatchAI} disabled={syncing}>
@@ -912,6 +899,27 @@ export default function DispatchPageV2() {
         </div>
       )}
 
+      {/* Mobile-only ViewMode selector — always visible so user can switch from week/month back to day */}
+      <div className="md:hidden mb-3 grid grid-cols-4 gap-1.5">
+        {[
+          { id: 'day', label: 'Day' },
+          { id: '5day', label: '5-Day' },
+          { id: 'week', label: 'Week' },
+          { id: 'month', label: 'Month' },
+        ].map((m) => (
+          <button
+            key={m.id}
+            onClick={() => { setViewMode(m.id); if (m.id === 'day') setActiveTab('board'); }}
+            className={cn(
+              'inline-flex items-center justify-center u-label px-2 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
+              viewMode === m.id ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
+            )}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
       {showNewAppt && (
         <CreateAppointmentModal
           defaultDate={newApptDefaults?.date || date}
@@ -950,7 +958,7 @@ export default function DispatchPageV2() {
       {/* Tabs bar — day view only */}
       {viewMode === 'day' && (
         <>
-          {/* Mobile: Board + More */}
+          {/* Mobile: Schedule + More */}
           <div className="md:hidden mb-4 flex items-center gap-2">
             <button
               onClick={() => setActiveTab('board')}
@@ -959,7 +967,7 @@ export default function DispatchPageV2() {
                 activeTab === 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
               )}
             >
-              Board
+              Schedule
             </button>
             <button
               onClick={() => setShowMoreSheet(true)}
@@ -1078,12 +1086,12 @@ export default function DispatchPageV2() {
             </Card>
           )}
 
-          {/* Weather bar — compact, single row */}
+          {/* Weather bar — full-bleed, single row */}
           {(() => {
             const rp = rainProbability ?? 0;
             const weatherIcon = rp > 40 ? '🌧️' : rp > 15 ? '⛅' : '☀️';
             return (
-              <div className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2 mb-3 md:mb-5 flex items-center gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
+              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
                 <span className="text-16" aria-hidden="true">{weatherIcon}</span>
                 <span className="u-nums font-medium text-zinc-900">{weatherTemp ?? 82}°F</span>
                 {windSpeed != null && (
@@ -1106,9 +1114,9 @@ export default function DispatchPageV2() {
             );
           })()}
 
-          {/* Mobile-only full-width New Appointment CTA */}
-          <div className="md:hidden mb-3">
-            <Button onClick={() => setShowNewAppt(true)} className="w-full">+ New Appointment</Button>
+          {/* New Appointment CTA — both mobile and desktop, below weather */}
+          <div className="mb-3 md:mb-5">
+            <Button onClick={() => setShowNewAppt(true)} className="w-full md:w-auto">+ New Appointment</Button>
           </div>
 
           {/* Calendar-style time grid — desktop inline, mobile bottom sheet */}

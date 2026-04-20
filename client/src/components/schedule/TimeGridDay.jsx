@@ -513,8 +513,8 @@ function TimeAxis() {
             <div
               key={idx}
               className={cn(
-                'absolute right-0 pr-2 text-10 text-ink-tertiary u-nums',
-                isHour ? 'text-zinc-700 font-medium' : 'text-ink-tertiary',
+                'absolute right-0 pr-2 u-nums',
+                isHour ? 'text-13 md:text-10 text-zinc-700 font-medium' : 'text-10 text-ink-tertiary',
               )}
               style={{ top: idx * SLOT_HEIGHT - 6, height: SLOT_HEIGHT }}
             >

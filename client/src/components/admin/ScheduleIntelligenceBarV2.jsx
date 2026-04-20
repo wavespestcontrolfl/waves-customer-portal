@@ -98,7 +98,7 @@ export default function ScheduleIntelligenceBarV2({ date, scheduleData, onRefres
       fallbackActions={FALLBACK_ACTIONS}
       onAfterSubmit={handleAfterSubmit}
       promotions={promotions}
-      placeholder="Optimize routes, assign techs, find gaps, move stops…"
+      placeholder=""
       followupPlaceholder="Follow up — 'do it', 'assign to Adam', 'move to Thursday'…"
       loadingLabel="thinking…"
       responseMaxHeight="420px"
