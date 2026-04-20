@@ -163,15 +163,17 @@ export default function GBPManagement() {
       </div>
 
       {/* Sub-tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 20, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
         {subTabs.map(t => (
           <button key={t.key} onClick={() => setSubTab(t.key)} style={{
-            padding: '10px 16px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 500,
-            background: subTab === t.key ? D.teal : 'transparent', color: subTab === t.key ? D.white : D.muted,
-            transition: 'all 0.15s', fontFamily: "'DM Sans', sans-serif", display: 'flex', alignItems: 'center', gap: 6,
+            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: subTab === t.key ? '#18181B' : 'transparent',
+            color: subTab === t.key ? '#FFFFFF' : '#A1A1AA',
+            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+            fontFamily: "'DM Sans', sans-serif", display: 'flex', alignItems: 'center', gap: 6,
           }}>
             {t.label}
-            {t.badge > 0 && <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 10, background: subTab === t.key ? 'rgba(255,255,255,0.2)' : `${D.amber}33`, color: subTab === t.key ? D.white : D.amber, fontWeight: 700 }}>{t.badge}</span>}
+            {t.badge > 0 && <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 10, background: subTab === t.key ? 'rgba(255,255,255,0.2)' : '#E4E4E7', color: subTab === t.key ? '#FFFFFF' : '#A1A1AA', fontWeight: 700 }}>{t.badge}</span>}
           </button>
         ))}
       </div>

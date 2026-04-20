@@ -358,19 +358,21 @@ export default function ReviewVelocityEngine() {
   return (
     <div style={{ fontFamily: C.sans, color: C.t1 }}>
       {/* Nav tabs */}
-      <div style={{ display: 'flex', gap: 4, background: C.surface, borderRadius: 10, padding: 4, border: `1px solid ${C.bdr}`, marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7', marginBottom: 20 }}>
         {tabs.map(t => (
           <button key={t.key} onClick={() => setPage(t.key)} style={{
-            padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 500,
-            color: page === t.key ? '#fff' : C.t2, background: page === t.key ? C.acc : 'transparent',
-            border: 'none', cursor: 'pointer', transition: 'all .15s', whiteSpace: 'nowrap', flexShrink: 0,
+            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: page === t.key ? '#18181B' : 'transparent',
+            color: page === t.key ? '#FFFFFF' : '#A1A1AA',
+            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+            fontFamily: "'DM Sans', sans-serif",
           }}>
             {t.label}
             {t.count !== undefined && (
               <span style={{
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 18, height: 18,
                 borderRadius: 9, fontSize: 10, fontWeight: 700, padding: '0 5px', marginLeft: 6,
-                background: page === t.key ? 'rgba(255,255,255,0.2)' : C.bdr, color: page === t.key ? '#fff' : C.t3,
+                background: page === t.key ? 'rgba(255,255,255,0.2)' : '#E4E4E7', color: page === t.key ? '#FFFFFF' : '#A1A1AA',
               }}>{t.count}</span>
             )}
           </button>

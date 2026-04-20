@@ -1298,7 +1298,7 @@ export default function ReviewsPage() {
       <SEOIntelligenceBar context="reviews" />
 
       {/* ====================== TAB TOGGLE ====================== */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
         {[
           { key: 'reviews', label: 'Reviews' },
           { key: 'gbp', label: 'GBP Management' },
@@ -1308,10 +1308,11 @@ export default function ReviewsPage() {
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
             style={{
-              padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
-              background: activeTab === tab.key ? D.teal : 'transparent',
-              color: activeTab === tab.key ? D.white : D.muted,
-              transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
+              padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: activeTab === tab.key ? '#18181B' : 'transparent',
+              color: activeTab === tab.key ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
             }}
           >{tab.label}</button>
         ))}

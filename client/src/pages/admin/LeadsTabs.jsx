@@ -61,11 +61,13 @@ function MetricCard({ label, value, sub, color }) {
 }
 
 function TabBar({ tabs, active, onChange }) {
-  return <div style={{ display:'flex', gap:4, marginBottom:24, borderBottom:`1px solid ${C.border}`, flexWrap:'wrap' }}>
+  return <div style={{ display:'flex', flexWrap:'wrap', gap:4, marginBottom:24, background:'#F4F4F5', borderRadius:10, padding:4, border:'1px solid #E4E4E7' }}>
     {tabs.map(t => <button key={t.key} onClick={()=>onChange(t.key)} style={{
-      padding:'10px 20px', background:'none', border:'none', color:active===t.key?C.teal:C.muted,
-      fontSize:14, fontWeight:600, cursor:'pointer', borderBottom:active===t.key?`2px solid ${C.teal}`:'2px solid transparent',
-      marginBottom:-1, transition:'all 0.2s',
+      padding:'10px 24px', borderRadius:8, border:'none', cursor:'pointer',
+      background: active===t.key ? '#18181B' : 'transparent',
+      color: active===t.key ? '#FFFFFF' : '#A1A1AA',
+      fontSize:14, fontWeight:700, transition:'all 0.2s',
+      fontFamily:"'DM Sans', sans-serif",
     }}>{t.label}</button>)}
   </div>;
 }

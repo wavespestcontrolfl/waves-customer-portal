@@ -25,11 +25,11 @@ function fmtDec(n) { return '$' + Number(n || 0).toLocaleString(undefined, { min
 function pct(n) { return (Number(n) || 0).toFixed(1) + '%'; }
 
 const TABS = [
-  { key: 'ppc-dashboard', label: 'PPC Dashboard', icon: '📊' },
-  { key: 'overview', label: 'Overview', icon: '📈' },
-  { key: 'service-lines', label: 'Service Lines', icon: '🎯' },
-  { key: 'advisor', label: 'AI Advisor', icon: '🤖' },
-  { key: 'capacity', label: 'Capacity', icon: '📊' },
+  { key: 'ppc-dashboard', label: 'PPC Dashboard' },
+  { key: 'overview', label: 'Overview' },
+  { key: 'service-lines', label: 'Service Lines' },
+  { key: 'advisor', label: 'AI Advisor' },
+  { key: 'capacity', label: 'Capacity' },
 ];
 
 const thStyle = { padding: '10px 14px', textAlign: 'left', fontSize: 12, fontWeight: 600, color: D.muted, borderBottom: `1px solid ${D.border}`, textTransform: 'uppercase', letterSpacing: '0.5px' };
@@ -1528,16 +1528,15 @@ export default function AdsPage() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
-            background: tab === t.key ? D.teal : 'transparent',
-            color: tab === t.key ? D.white : D.muted,
-            transition: 'all 0.15s', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6,
-          }}>
-            <span>{t.icon}</span> {t.label}
-          </button>
+            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: tab === t.key ? '#18181B' : 'transparent',
+            color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+            fontFamily: "'DM Sans', sans-serif",
+          }}>{t.label}</button>
         ))}
       </div>
 

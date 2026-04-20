@@ -2307,27 +2307,25 @@ export default function EstimatePage() {
   const [activeTab, setActiveTab] = useState('leads');
 
   const tabs = [
-    { key: 'leads', label: '📈 Leads' },
-    { key: 'estimates', label: '📋 Estimates' },
-    { key: 'new', label: '⚡ Create Estimate' },
-    { key: 'pricing', label: '💰 Pricing Logic' },
+    { key: 'leads', label: 'Leads' },
+    { key: 'estimates', label: 'Estimates' },
+    { key: 'new', label: 'Create Estimate' },
+    { key: 'pricing', label: 'Pricing Logic' },
   ];
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 400, color: C.heading, margin: 0 }}>Pipeline</h1>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {tabs.map(t => (
-            <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
-              padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer',
-              fontSize: 13, fontWeight: 600,
-              background: activeTab === t.key ? (t.key === 'pricing' ? C.amber : C.teal) : C.card,
-              color: activeTab === t.key ? '#fff' : C.gray,
-              transition: 'all 0.15s',
-            }}>{t.label}</button>
-          ))}
-        </div>
+      <h1 style={{ fontSize: 28, fontWeight: 400, color: C.heading, margin: '0 0 20px' }}>Pipeline</h1>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
+            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: activeTab === t.key ? '#18181B' : 'transparent',
+            color: activeTab === t.key ? '#FFFFFF' : '#A1A1AA',
+            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+            fontFamily: "'DM Sans', sans-serif",
+          }}>{t.label}</button>
+        ))}
       </div>
 
       {activeTab === 'leads' && <LeadsSection />}

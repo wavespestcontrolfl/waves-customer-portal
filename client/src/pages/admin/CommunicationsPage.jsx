@@ -1595,13 +1595,14 @@ export default function CommunicationsPage() {
       <SEOIntelligenceBar context="comms" />
 
       {/* --- Tabs --- */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
-        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Calls' }, { key: 'templates', label: 'SMS Templates' }, { key: 'email', label: 'Email Automations' }, { key: 'csr', label: 'CSR Coach' }, { key: 'notifications', label: 'Notifications' }].map(t => (
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Calls' }, { key: 'templates', label: 'Templates' }, { key: 'email', label: 'Email' }, { key: 'csr', label: 'CSR Coach' }, { key: 'notifications', label: 'Notifications' }].map(t => (
           <button key={t.key} onClick={() => { setCommsTab(t.key); if (t.key === 'sms') { setSmsView('threads'); setActiveThread(null); } }} style={{
-            padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
-            background: commsTab === t.key ? D.teal : 'transparent',
-            color: commsTab === t.key ? D.white : D.muted,
-            transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
+            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: commsTab === t.key ? '#18181B' : 'transparent',
+            color: commsTab === t.key ? '#FFFFFF' : '#A1A1AA',
+            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+            fontFamily: "'DM Sans', sans-serif",
           }}>{t.label}</button>
         ))}
       </div>

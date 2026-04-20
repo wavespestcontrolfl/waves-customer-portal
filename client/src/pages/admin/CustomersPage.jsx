@@ -1094,8 +1094,6 @@ export default function CustomersPage() {
           .customers-pipeline-wrap { -webkit-overflow-scrolling: touch; }
           .intel-health-grid { grid-template-columns: repeat(2, 1fr) !important; }
           .intel-metrics-grid { grid-template-columns: repeat(2, 1fr) !important; }
-          .customers-view-toggle { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; }
-          .customers-view-toggle button { white-space: nowrap !important; font-size: 12px !important; padding: 6px 10px !important; }
           .modal-grid-2col { grid-template-columns: 1fr !important; }
         }
       `}</style>
@@ -1111,19 +1109,21 @@ export default function CustomersPage() {
         <div className="customers-header-actions" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           {/* View toggle */}
           <div className="customers-view-toggle" style={{
-            display: 'flex', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: 'hidden',
+            display: 'flex', flexWrap: 'wrap', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7',
           }}>
             {[
-              { key: 'directory', label: '\ud83d\udccb Directory' },
-              { key: 'map', label: '\ud83d\uddfa Map' },
-              { key: 'pipeline', label: '\ud83d\udd00 Pipeline' },
-              { key: 'health', label: '\u2764\ufe0f Health' },
-              { key: 'intelligence', label: '\ud83e\udd16 AI Advisor' },
+              { key: 'directory', label: 'Directory' },
+              { key: 'map', label: 'Map' },
+              { key: 'pipeline', label: 'Pipeline' },
+              { key: 'health', label: 'Health' },
+              { key: 'intelligence', label: 'AI Advisor' },
             ].map(v => (
               <button key={v.key} onClick={() => setView(v.key)} style={{
-                padding: '8px 14px', background: view === v.key ? D.teal : 'transparent',
-                color: view === v.key ? D.white : D.muted, border: 'none', fontSize: 13,
-                fontFamily: 'DM Sans, sans-serif', fontWeight: 600, cursor: 'pointer',
+                padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                background: view === v.key ? '#18181B' : 'transparent',
+                color: view === v.key ? '#FFFFFF' : '#A1A1AA',
+                fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+                fontFamily: "'DM Sans', sans-serif",
               }}>{v.label}</button>
             ))}
           </div>

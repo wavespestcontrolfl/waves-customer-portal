@@ -292,12 +292,15 @@ export default function ServiceLibraryPage() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
         {tabs.map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)}
-            style={{ padding: '8px 18px', background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted, border: `1px solid ${tab === t.key ? D.teal : D.border}`, borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
-            {t.label}
-          </button>
+          <button key={t.key} onClick={() => setTab(t.key)} style={{
+            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: tab === t.key ? '#18181B' : 'transparent',
+            color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+            fontFamily: "'DM Sans', sans-serif",
+          }}>{t.label}</button>
         ))}
       </div>
 
