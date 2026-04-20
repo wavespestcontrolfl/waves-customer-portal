@@ -12,6 +12,7 @@
 //            primitive, danger variant on Mark-as-Lost)
 // Leads / Pricing Logic tabs still render V1 panels.
 import React, { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
@@ -28,7 +29,7 @@ import {
   DeclineModalV2,
 } from '../../components/admin/EstimateModalsV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
-import { Flag, Globe, Mic, Users, Bot } from 'lucide-react';
+import { Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, SlidersHorizontal, Check, X } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -69,34 +70,138 @@ function UrgencyBadge({ urgency }) {
   );
 }
 
-// Filter pill — active pill uses filled zinc-900, inactive is outline.
-// Pipeline filter keys never trigger alert tone on their own — the counts
-// are informational, not action items.
-function FilterPillV2({ active, label, count, onClick }) {
+// Filter — 7 pipeline filters exceed the 4-item pill cap. Per UI SoR §6.1
+// "over 4" rule + §6.6, we collapse to a single FILTER pill that opens a
+// bottom-anchored sheet on mobile (centered modal on desktop) listing every
+// option with its live count. Active option marked with a trailing check.
+function FilterSheetV2({ value, onChange, options, counts }) {
+  const [open, setOpen] = useState(false);
+  const active = options.find((o) => o.key === value) || options[0];
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open]);
+
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        'h-11 sm:h-7 px-4 sm:px-3 text-13 sm:text-11 rounded-full sm:rounded-xs font-medium',
-        'sm:uppercase sm:tracking-label',
-        'border-hairline u-focus-ring transition-colors',
-        active
-          ? 'bg-zinc-900 text-white border-zinc-900'
-          : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`Filter estimates. Current filter: ${active.label} (${counts[active.key] ?? 0})`}
+        className={cn(
+          'inline-flex items-center gap-2 h-11 sm:h-9 pl-4 pr-5 rounded-full',
+          'text-12 font-medium uppercase tracking-label',
+          'bg-zinc-900 text-white border-hairline border-zinc-900',
+          'u-focus-ring hover:bg-zinc-800 transition-colors',
+        )}
+      >
+        <SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden />
+        <span>Filter: {active.label} ({counts[active.key] ?? 0})</span>
+      </button>
+
+      {open && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Filter estimates"
+        >
+          <div
+            className="absolute inset-0 bg-zinc-900/40"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            className={cn(
+              'relative w-full bg-white outline-none',
+              'rounded-t-md sm:rounded-md sm:max-w-md',
+              'border-hairline border-zinc-200',
+              'flex flex-col max-h-[85vh]',
+            )}
+            style={{ paddingBottom: 'env(safe-area-inset-bottom, 0)' }}
+          >
+            {/* Drag handle (mobile only) */}
+            <div className="pt-2 pb-1 sm:hidden">
+              <div className="mx-auto w-10 h-1 rounded-full bg-zinc-300" />
+            </div>
+
+            <div className="px-5 py-3 flex items-center justify-between border-b border-hairline border-zinc-200">
+              <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary">
+                Filter estimates
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                aria-label="Close"
+                className="h-9 w-9 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring"
+              >
+                <X size={16} strokeWidth={1.75} aria-hidden />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto">
+              {options.map((o) => {
+                const isActive = o.key === value;
+                return (
+                  <button
+                    key={o.key}
+                    type="button"
+                    onClick={() => {
+                      onChange(o.key);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      'w-full flex items-center justify-between gap-3',
+                      'px-5 py-4 text-left u-focus-ring',
+                      'border-b border-hairline border-zinc-100 last:border-b-0',
+                      isActive ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'text-14 tracking-tight',
+                        isActive ? 'font-medium text-zinc-900' : 'text-zinc-700',
+                      )}
+                    >
+                      {o.label}
+                    </span>
+                    <span className="flex items-center gap-3">
+                      <span className="text-12 u-nums text-ink-tertiary">
+                        {counts[o.key] ?? 0}
+                      </span>
+                      {isActive && (
+                        <Check size={16} strokeWidth={2} className="text-zinc-900" aria-hidden />
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
-    >
-      {label} <span className="u-nums opacity-70">({count})</span>
-    </button>
+    </>
   );
 }
 
 // Stat card — label, big value, sub. Single alert accent reserved for
 // Follow-Up Overdue when > 0. Conversion% no longer color-codes; the
-// number alone tells the story.
+// number alone tells the story. Centered both axes per spec.
 function StatCard({ label, value, sub, alert }) {
   return (
-    <Card className="flex-1 min-w-[140px] p-4 text-center">
+    <Card className="flex-1 min-w-[140px] p-4 min-h-[104px] flex flex-col items-center justify-center text-center">
       <div className="text-11 uppercase tracking-label text-ink-tertiary mb-1">
         {label}
       </div>
@@ -303,17 +408,15 @@ function EstimatePipelineViewV2() {
         />
       </div>
 
-      {/* Filter pills */}
-      <div className="flex gap-1.5 mb-4 flex-wrap">
-        {PIPELINE_FILTERS.map((f) => (
-          <FilterPillV2
-            key={f.key}
-            active={filter === f.key}
-            label={f.label}
-            count={filterCounts[f.key]}
-            onClick={() => setFilter(f.key)}
-          />
-        ))}
+      {/* Filter — 7 options exceeds the 4-item pill cap, so FILTER button
+          opens a bottom sheet on mobile / centered modal on desktop */}
+      <div className="mb-4 flex justify-center sm:justify-start">
+        <FilterSheetV2
+          value={filter}
+          onChange={setFilter}
+          options={PIPELINE_FILTERS}
+          counts={filterCounts}
+        />
       </div>
 
       {/* Estimates list */}
@@ -375,6 +478,30 @@ function EstimatePipelineViewV2() {
                   </div>
                 </div>
 
+                {/* Call + text trailing buttons — match CustomersPageV2 list row */}
+                {e.customerPhone && (
+                  <div className="flex gap-1.5">
+                    <a
+                      href={`tel:${e.customerPhone}`}
+                      onClick={(evt) => evt.stopPropagation()}
+                      aria-label={`Call ${e.customerName || 'customer'}`}
+                      title={`Call ${e.customerPhone}`}
+                      className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                    >
+                      <Phone size={16} strokeWidth={1.75} />
+                    </a>
+                    <a
+                      href={`/admin/communications?phone=${encodeURIComponent(e.customerPhone)}`}
+                      onClick={(evt) => evt.stopPropagation()}
+                      aria-label={`Message ${e.customerName || 'customer'}`}
+                      title={`Message ${e.customerPhone}`}
+                      className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                    >
+                      <MessageSquare size={16} strokeWidth={1.75} />
+                    </a>
+                  </div>
+                )}
+
                 {e.tier && <Badge tone="neutral">{e.tier}</Badge>}
 
                 {/* Monthly total */}
@@ -404,15 +531,17 @@ function EstimatePipelineViewV2() {
                   )}
                 </div>
 
-                {/* Actions */}
-                <div className="flex gap-1.5 flex-wrap items-center">
+                {/* Actions — flag is its own icon button; primary actions
+                    render as an equal-width pill group (flex-1) to remove
+                    dead space between pills. */}
+                <div className="flex items-center gap-1.5 w-full sm:w-auto">
                   <button
                     type="button"
                     onClick={() => togglePriority(e)}
                     title={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
                     aria-label={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
                     className={cn(
-                      'h-11 w-11 sm:h-7 sm:w-7 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors',
+                      'h-11 w-11 sm:h-7 sm:w-7 flex-shrink-0 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors',
                       e.isPriority
                         ? 'bg-alert-bg text-alert-fg border-alert-fg'
                         : 'bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50',
@@ -421,70 +550,77 @@ function EstimatePipelineViewV2() {
                     <Flag size={16} strokeWidth={1.75} aria-hidden />
                   </button>
 
-                  {e.status === 'draft' && e.monthlyTotal > 0 && (
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      onClick={async () => {
-                        await adminFetch(`/admin/estimates/${e.id}/send`, {
-                          method: 'POST',
-                        }).catch(() => {});
-                        refreshEstimates();
-                      }}
-                    >
-                      Send
-                    </Button>
-                  )}
+                  <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1">
+                    {e.status === 'draft' && e.monthlyTotal > 0 && (
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={async () => {
+                          await adminFetch(`/admin/estimates/${e.id}/send`, {
+                            method: 'POST',
+                          }).catch(() => {});
+                          refreshEstimates();
+                        }}
+                      >
+                        Send
+                      </Button>
+                    )}
 
-                  {(e.status === 'sent' || e.status === 'viewed') && (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => setFollowUpTarget(e)}
-                    >
-                      Follow Up
-                    </Button>
-                  )}
+                    {(e.status === 'sent' || e.status === 'viewed') && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={() => setFollowUpTarget(e)}
+                      >
+                        Follow Up
+                      </Button>
+                    )}
 
-                  {(e.status === 'sent' || e.status === 'viewed') && (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={async () => {
-                        if (!confirm(`Resend estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
-                        await adminFetch(`/admin/estimates/${e.id}/send`, {
-                          method: 'POST',
-                          body: JSON.stringify({ sendMethod: 'both' }),
-                        }).catch(() => {});
-                        refreshEstimates();
-                      }}
-                    >
-                      Resend
-                    </Button>
-                  )}
+                    {(e.status === 'sent' || e.status === 'viewed') && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={async () => {
+                          if (!confirm(`Resend estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
+                          await adminFetch(`/admin/estimates/${e.id}/send`, {
+                            method: 'POST',
+                            body: JSON.stringify({ sendMethod: 'both' }),
+                          }).catch(() => {});
+                          refreshEstimates();
+                        }}
+                      >
+                        Resend
+                      </Button>
+                    )}
 
-                  {(e.status === 'sent' || e.status === 'viewed') && (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => setDeclineTarget(e)}
-                    >
-                      Mark Lost
-                    </Button>
-                  )}
+                    {(e.status === 'sent' || e.status === 'viewed') && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={() => setDeclineTarget(e)}
+                      >
+                        Mark Lost
+                      </Button>
+                    )}
 
-                  {(e.status === 'sent' || e.status === 'viewed') && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        const link = `${window.location.origin}/estimate/${e.token || e.id}`;
-                        navigator.clipboard?.writeText(link);
-                      }}
-                    >
-                      Copy Link
-                    </Button>
-                  )}
+                    {(e.status === 'sent' || e.status === 'viewed') && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={() => {
+                          const link = `${window.location.origin}/estimate/${e.token || e.id}`;
+                          navigator.clipboard?.writeText(link);
+                        }}
+                      >
+                        Copy Link
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </Card>
             );
@@ -507,11 +643,11 @@ export default function EstimatesPageV2() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
+      <div className="flex flex-col items-start sm:flex-row sm:items-center sm:justify-between mb-5 gap-3">
         <h1 className="text-28 font-normal text-zinc-900 tracking-display">
           Pipeline
         </h1>
-        <div className="flex gap-1.5 flex-wrap">
+        <div className="flex gap-1.5 flex-wrap w-full sm:w-auto justify-center sm:justify-end">
           {TABS.map((t) => (
             <button
               key={t.key}
@@ -519,7 +655,7 @@ export default function EstimatesPageV2() {
               onClick={() => setActiveTab(t.key)}
               className={cn(
                 'h-11 sm:h-9 px-5 sm:px-4 text-14 sm:text-12 font-medium',
-                'sm:uppercase sm:tracking-label',
+                'uppercase tracking-label',
                 'rounded-full sm:rounded-sm border-hairline u-focus-ring transition-colors',
                 activeTab === t.key
                   ? 'bg-zinc-900 text-white border-zinc-900'

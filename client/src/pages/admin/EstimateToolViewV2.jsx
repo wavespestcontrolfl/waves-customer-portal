@@ -892,14 +892,6 @@ export default function EstimateToolViewV2() {
   return (
     <FormCtx.Provider value={formCtx}>
       <div className="max-w-[1440px] mx-auto px-4 md:px-7 pb-7">
-        {/* HEADER */}
-        <div className="flex items-center justify-between mb-6 pb-4 border-b border-hairline border-zinc-300 flex-wrap gap-2">
-          <h1 className="text-22 font-medium text-zinc-900 tracking-tight m-0">Estimating Engine</h1>
-          <span className="font-mono text-11 text-ink-tertiary bg-zinc-50 px-3 py-1 rounded-xs uppercase tracking-label">
-            v1.3 · Internal
-          </span>
-        </div>
-
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-4">
