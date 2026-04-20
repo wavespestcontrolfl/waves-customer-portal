@@ -2944,7 +2944,17 @@ export default function SchedulePage() {
           )}
         </div>
       </div>
-      {syncMsg && <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>{syncMsg}</div>}
+
+      {/* Intelligence Bar — directly below h1 (day-view only) */}
+      {viewMode === 'day' && (
+        <ScheduleIntelligenceBar
+          date={date}
+          scheduleData={data}
+          onRefresh={() => fetchSchedule(date)}
+        />
+      )}
+
+      {syncMsg && <div style={{ fontSize: 12, color: D.muted, marginBottom: 8, marginTop: 8 }}>{syncMsg}</div>}
 
       {/* New Appointment Modal */}
       {showNewAppt && <CreateAppointmentModal defaultDate={date} onClose={() => setShowNewAppt(false)} onCreated={(appt) => { setShowNewAppt(false); fetchSchedule(appt.scheduledDate || date); }} />}
@@ -2954,7 +2964,7 @@ export default function SchedulePage() {
       {viewMode === 'month' && <MonthView date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
 
       {/* Tabs — day view only */}
-      {viewMode === 'day' && <div style={{ marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+      {viewMode === 'day' && <div style={{ marginTop: 16, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
         <HorizontalScroll gap={4} edgeBleed={4} style={{ paddingBottom: 0 }}>
           {SCHEDULE_TABS.map(t => (
             <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
@@ -2972,15 +2982,6 @@ export default function SchedulePage() {
 
       {/* Recurring plan alerts */}
       {viewMode === 'day' && <RecurringAlertsBanner />}
-
-      {/* Intelligence Bar — schedule context */}
-      {viewMode === 'day' && (
-        <ScheduleIntelligenceBar
-          date={date}
-          scheduleData={data}
-          onRefresh={() => fetchSchedule(date)}
-        />
-      )}
 
       {/* ── Protocol Reference ── */}
       {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTab />}

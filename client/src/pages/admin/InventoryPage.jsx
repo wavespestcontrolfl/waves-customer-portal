@@ -46,8 +46,10 @@ export default function InventoryPage() {
         </div>
       </div>
 
+      <ProcurementIntelligenceBar stats={stats} onRefresh={loadStats} />
+
       {stats && (
-        <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, marginTop: 20, marginBottom: 20, flexWrap: 'wrap' }}>
           {[
             { label: 'Products', value: stats.products?.total, color: D.heading, filter: 'all' },
             { label: 'Priced', value: stats.products?.priced, color: D.green, filter: 'priced' },
@@ -63,8 +65,6 @@ export default function InventoryPage() {
           ))}
         </div>
       )}
-
-      <ProcurementIntelligenceBar stats={stats} onRefresh={loadStats} />
 
       <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
         {tabs.map(t => (
