@@ -326,7 +326,7 @@ function RailItem({ service, onEdit }) {
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : {};
   const startMin = parseHHMM(service.windowStart);
-  const timeLabel = startMin != null ? minutesToLabel(startMin) : '';
+  const timeLabel = startMin != null ? minutesToLabel(startMin) : 'Any time';
   return (
     <div
       ref={setNodeRef}
@@ -342,11 +342,9 @@ function RailItem({ service, onEdit }) {
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
       style={{ border: '1px solid #D4D4D8', ...dragStyle }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || ''}`}
+      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || timeLabel}`}
     >
-      {timeLabel && (
-        <div className="u-nums text-10 text-zinc-500 mb-0.5">{timeLabel}</div>
-      )}
+      <div className="u-nums text-10 text-zinc-500 mb-0.5">{timeLabel}</div>
       <div className="font-medium truncate text-zinc-900">{service.customerName}</div>
       {service.serviceType && (
         <div className="truncate text-zinc-700">{service.serviceType}</div>
@@ -427,7 +425,7 @@ export default function TimeGridDay({
   }, [technicians, allServices]);
 
   const unassignedInRail = useMemo(
-    () => allServices.filter((s) => !s.technicianId && parseHHMM(s.windowStart) != null),
+    () => allServices.filter((s) => !s.technicianId),
     [allServices],
   );
 
@@ -442,8 +440,12 @@ export default function TimeGridDay({
     return map;
   }, [allServices, techList]);
 
+  // Any-time + unassigned items live in the rail now; AllDayStrip only shows
+  // tech-assigned services that don't have a parseable time window.
   const allDay = useMemo(
-    () => allServices.filter((s) => parseHHMM(s.windowStart) == null),
+    () => allServices.filter(
+      (s) => !!s.technicianId && parseHHMM(s.windowStart) == null,
+    ),
     [allServices],
   );
 
