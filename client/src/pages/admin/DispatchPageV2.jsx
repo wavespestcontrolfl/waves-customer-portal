@@ -840,7 +840,7 @@ export default function DispatchPageV2() {
           )}
 
           <div className="flex items-center gap-2 mt-2 justify-between flex-wrap">
-            <div className="inline-flex items-center gap-1.5">
+            <div className="flex md:inline-flex w-full md:w-auto items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => shiftDate(-1)}
@@ -849,7 +849,7 @@ export default function DispatchPageV2() {
               >
                 ◀
               </button>
-              <span className="u-nums text-14 md:text-13 font-medium text-zinc-900 text-center px-1 md:min-w-[220px]">
+              <span className="flex-1 md:flex-none u-nums text-14 md:text-13 font-medium text-zinc-900 text-center px-1 md:min-w-[220px]">
                 {dateHeader}
               </span>
               <button
@@ -1108,7 +1108,7 @@ export default function DispatchPageV2() {
             const rp = rainProbability ?? 0;
             const weatherIcon = rp > 40 ? '🌧️' : rp > 15 ? '⛅' : '☀️';
             return (
-              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
+              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center md:justify-start gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
                 <span className="text-16" aria-hidden="true">{weatherIcon}</span>
                 <span className="u-nums font-medium text-zinc-900">{weatherTemp ?? 82}°F</span>
                 {windSpeed != null && (
