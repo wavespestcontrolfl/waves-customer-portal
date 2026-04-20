@@ -255,6 +255,29 @@ router.post('/transcription', async (req, res) => {
 });
 
 // =========================================================================
+// POST /api/webhooks/twilio/lead-alert-announce — One-way voice alert on new lead
+// Reads the lead name + phone aloud (twice) and hangs up. Never dials the lead.
+// =========================================================================
+router.post('/lead-alert-announce', async (req, res) => {
+  try {
+    const leadName = req.query.leadName || req.body.leadName || 'a new caller';
+    const leadPhoneRaw = req.query.leadPhone || req.body.leadPhone || '';
+    const spokenPhone = leadPhoneRaw.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1. $2. $3.');
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Pause length="1"/>
+  <Say voice="alice">New Waves lead. ${leadName}. Phone ${spokenPhone}</Say>
+  <Pause length="1"/>
+  <Say voice="alice">Again. ${leadName}. Phone ${spokenPhone}</Say>
+</Response>`;
+    res.type('text/xml').send(twiml);
+  } catch (err) {
+    logger.error(`Lead alert announce error: ${err.message}`);
+    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>New lead received. Check admin portal.</Say></Response>');
+  }
+});
+
+// =========================================================================
 // POST /api/webhooks/twilio/outbound-admin-prompt — Step 1: Admin picks up, press 1 to connect
 // =========================================================================
 router.post('/outbound-admin-prompt', async (req, res) => {

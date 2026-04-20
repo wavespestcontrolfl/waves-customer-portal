@@ -20,6 +20,9 @@ function capitalizeName(name) {
 const leadAttribution = require('../services/lead-attribution');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
+// Adam's personal cell for new-lead alerts. WAVES_ADMIN_PHONE is the HQ Pest
+// line used elsewhere for notifications; new leads should ring Adam directly.
+const ADAM_CELL = '+19415993489';
 
 // POST /api/webhooks/lead — Elementor form submission webhook
 router.post('/', async (req, res) => {
@@ -183,20 +186,22 @@ router.post('/', async (req, res) => {
     try {
       const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
       if (isDuringHours && twilioClient) {
-        // During business hours: initiate call to admin connecting to the lead
+        // During business hours: ring Adam's cell with a voice announcement of
+        // the lead (no Press-1-to-connect, no auto-dialing the lead). Adam calls
+        // back manually from the admin portal or directly.
         try {
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
-          logger.info(`[lead-webhook] Attempting outbound call to admin. Domain: ${domain}, Lead: ${firstName} ${phoneFormatted}`);
+          logger.info(`[lead-webhook] Attempting outbound lead alert to Adam. Domain: ${domain}, Lead: ${firstName} ${phoneFormatted}`);
           const call = await twilioClient.calls.create({
-            to: WAVES_ADMIN_PHONE,
+            to: ADAM_CELL,
             from: '+19412972606',
-            url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(phoneFormatted)}&callerIdNumber=${encodeURIComponent('+19412972606')}&leadName=${encodeURIComponent(firstName)}`,
+            url: `https://${domain}/api/webhooks/twilio/lead-alert-announce?leadName=${encodeURIComponent(firstName)}&leadPhone=${encodeURIComponent(phoneFormatted)}`,
             statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
             statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-            record: true,
+            record: false,
           });
           callConnected = true;
-          logger.info(`[lead-webhook] Business hours — calling admin to connect with ${firstName}. CallSid: ${call.sid}`);
+          logger.info(`[lead-webhook] Business hours — announcing lead ${firstName} to Adam. CallSid: ${call.sid}`);
 
           // Log outbound call so it shows up in call log
           try {
@@ -204,11 +209,11 @@ router.post('/', async (req, res) => {
               customer_id: customer.id,
               direction: 'outbound',
               from_phone: '+19412972606',
-              to_phone: WAVES_ADMIN_PHONE,
+              to_phone: ADAM_CELL,
               twilio_call_sid: call.sid,
               status: 'initiated',
               metadata: JSON.stringify({
-                type: 'lead_callback',
+                type: 'lead_alert_announce',
                 leadName: `${firstName} ${lastName}`,
                 leadPhone: phoneFormatted,
               }),
@@ -217,15 +222,15 @@ router.post('/', async (req, res) => {
             logger.warn(`[lead-webhook] Could not log outbound call: ${logErr.message}`);
           }
         } catch (callErr) {
-          logger.error(`[lead-webhook] Admin call failed, falling back to SMS: ${callErr.message}`);
-          await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+          logger.error(`[lead-webhook] Lead alert call failed, falling back to SMS: ${callErr.message}`);
+          await TwilioService.sendSMS(ADAM_CELL,
             `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${address || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
             { messageType: 'internal_alert' }
           );
         }
       } else {
         // After hours: SMS alert only
-        await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
+        await TwilioService.sendSMS(ADAM_CELL,
           `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${address || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
           { messageType: 'internal_alert' }
         );
