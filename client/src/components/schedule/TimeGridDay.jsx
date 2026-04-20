@@ -333,7 +333,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         borderLeft: accent ? `3px solid ${accent}` : `1px solid ${statusBorderColor(service.status)}`,
         ...dragStyle,
       }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || ''}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowDisplay || ''}\nShift+click to select for bulk actions`}
     >
       {routeOrder != null && (
         <div
@@ -343,7 +343,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
           {routeOrder}
         </div>
       )}
-      <div className="font-medium truncate">{service.customerName}</div>
+      <div className="font-medium truncate">{service.customerName || 'Unassigned'}</div>
       <div className="opacity-80 truncate">
         {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)} · {service.serviceType || ''}
       </div>
@@ -543,7 +543,7 @@ function AllDayStrip({ services, onEdit }) {
           className="px-2 py-1 rounded-sm bg-white text-11 text-zinc-900 truncate max-w-[200px]"
           style={{ border: '1px solid #D4D4D8' }}
         >
-          {svc.customerName} · {svc.serviceType || ''}
+          {svc.customerName || 'Unassigned'} · {svc.serviceType || ''}
         </button>
       ))}
     </div>
@@ -580,10 +580,10 @@ function RailItem({ service, onEdit, isSelected, onToggleSelect }) {
         isSelected && !isDragging && 'ring-2 ring-zinc-900',
       )}
       style={{ border: '1px solid #D4D4D8', ...dragStyle }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
     >
       <div className="u-nums text-10 text-zinc-500 mb-0.5">{timeLabel}</div>
-      <div className="font-medium truncate text-zinc-900">{service.customerName}</div>
+      <div className="font-medium truncate text-zinc-900">{service.customerName || 'Unassigned'}</div>
       {service.serviceType && (
         <div className="truncate text-zinc-700">{service.serviceType}</div>
       )}

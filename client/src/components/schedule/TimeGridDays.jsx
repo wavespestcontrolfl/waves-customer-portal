@@ -183,9 +183,9 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         border: `1px solid ${statusBorderColor(service.status)}`,
         ...dragStyle,
       }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.technicianName ? ' · ' + service.technicianName : ''}`}
+      title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.technicianName ? ' · ' + service.technicianName : ''}`}
     >
-      <div className="font-medium truncate">{service.customerName}</div>
+      <div className="font-medium truncate">{service.customerName || 'Unassigned'}</div>
       {height > SLOT_HEIGHT && (
         <div className="opacity-70 truncate text-10">
           {service.technicianName || '—'} · {service.serviceType || ''}
@@ -327,12 +327,12 @@ function RailItem({ service, dayLabel, onEdit }) {
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
       style={{ border: '1px solid #D4D4D8', ...dragStyle }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${dayLabel} ${timeLabel}`}
+      title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${dayLabel} ${timeLabel}`}
     >
       <div className="u-nums text-10 text-zinc-500 mb-0.5">
         {dayLabel}{timeLabel && ` · ${timeLabel}`}
       </div>
-      <div className="font-medium truncate text-zinc-900">{service.customerName}</div>
+      <div className="font-medium truncate text-zinc-900">{service.customerName || 'Unassigned'}</div>
       {service.serviceType && (
         <div className="truncate text-zinc-700">{service.serviceType}</div>
       )}

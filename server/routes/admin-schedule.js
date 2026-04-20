@@ -135,7 +135,7 @@ router.get('/', async (req, res, next) => {
 
       return {
         id: s.id, routeOrder: s.route_order,
-        customerName: `${s.first_name} ${s.last_name}`,
+        customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
         city: s.city,
@@ -264,7 +264,8 @@ router.get('/week', async (req, res, next) => {
         services: services.map(s => {
           const svcType = normalizeServiceType(s.service_type);
           return {
-            id: s.id, customerName: `${s.first_name} ${s.last_name}`,
+            id: s.id,
+            customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
             serviceType: svcType,
             serviceCategory: detectServiceCategory(svcType),
             status: s.status,

@@ -149,9 +149,13 @@ function MobileBlock({ service, top, height, laneIdx, laneCount, onEdit }) {
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : {};
 
-  // Alert states take precedence over service-line color.
+  // Alert states take precedence over service-line color. Missing customer
+  // data is itself an alert state (action required) — show red, same as an
+  // unassigned or skipped job.
+  const name = String(service.customerName || '').trim();
+  const customerMissing = !name;
   let bg, fg;
-  if (service.status === 'skipped' || !service.technicianId) {
+  if (service.status === 'skipped' || !service.technicianId || customerMissing) {
     bg = '#C0392B'; fg = '#FFFFFF';
   } else if (service.status === 'completed') {
     bg = '#E4E4E7'; fg = '#52525B';
@@ -160,7 +164,7 @@ function MobileBlock({ service, top, height, laneIdx, laneCount, onEdit }) {
     bg = c.bg; fg = c.fg;
   }
 
-  const firstName = String(service.customerName || '').split(' ')[0] || service.customerName || '—';
+  const firstName = customerMissing ? 'Unassigned' : (name.split(' ')[0] || name);
   const tooSmall = height < 28;
 
   return (
