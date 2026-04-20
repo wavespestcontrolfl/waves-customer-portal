@@ -185,7 +185,7 @@ export default function IntelligenceBarShell({
             onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
             placeholder={placeholder}
-            className="w-full h-11 sm:h-9 pl-3 pr-20 bg-white border-hairline border-zinc-200 rounded-sm text-16 sm:text-13 text-ink-primary placeholder-ink-tertiary focus:outline-none focus:border-zinc-900 u-focus-ring"
+            className="w-full h-11 sm:h-9 pl-3 pr-20 bg-white border-hairline border-zinc-200 rounded-sm text-14 sm:text-13 text-ink-primary placeholder-ink-tertiary focus:outline-none focus:border-zinc-900 u-focus-ring"
           />
           <div className="absolute right-1.5 top-1/2 -translate-y-1/2">
             {loading ? (

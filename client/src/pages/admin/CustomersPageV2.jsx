@@ -673,7 +673,7 @@ export default function CustomersPageV2() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search customer by name, phone number"
-              className="block w-full bg-white text-16 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
+              className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
             />
             <div className="mt-3 flex items-center gap-2">
               <button
