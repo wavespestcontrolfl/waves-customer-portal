@@ -356,7 +356,10 @@ function RailItem({ service, onEdit }) {
 }
 
 function UnassignedRail({ services, onEdit }) {
-  if (!services.length) return null;
+  const { setNodeRef, isOver } = useDroppable({
+    id: 'rail-unassigned',
+    data: { techId: '__unassigned__' },
+  });
   const sorted = [...services].sort((a, b) => {
     const aMin = parseHHMM(a.windowStart) ?? Infinity;
     const bMin = parseHHMM(b.windowStart) ?? Infinity;
@@ -364,7 +367,11 @@ function UnassignedRail({ services, onEdit }) {
   });
   return (
     <div
-      className="bg-zinc-50 flex-shrink-0 overflow-auto"
+      ref={setNodeRef}
+      className={cn(
+        'bg-zinc-50 flex-shrink-0 overflow-auto transition-colors',
+        isOver && 'bg-zinc-100',
+      )}
       style={{ width: 180, borderRight: '1px solid #E4E4E7' }}
     >
       <div
@@ -374,11 +381,17 @@ function UnassignedRail({ services, onEdit }) {
         <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
         <span className="u-nums text-11 text-zinc-700">{sorted.length}</span>
       </div>
-      <div className="px-2 py-2 flex flex-col gap-1.5">
-        {sorted.map((svc) => (
-          <RailItem key={svc.id} service={svc} onEdit={onEdit} />
-        ))}
-      </div>
+      {sorted.length === 0 ? (
+        <div className="px-3 py-6 text-11 text-ink-tertiary text-center">
+          Drop here to unassign
+        </div>
+      ) : (
+        <div className="px-2 py-2 flex flex-col gap-1.5">
+          {sorted.map((svc) => (
+            <RailItem key={svc.id} service={svc} onEdit={onEdit} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -444,7 +457,8 @@ export default function TimeGridDay({
     const fromTech = svc.technicianId || '__unassigned__';
     const toTech = drop.techId;
     const fromMin = parseHHMM(svc.windowStart);
-    const toMin = drop.slotMin;
+    // Rail droppable has no slotMin — keep the original time when unassigning.
+    const toMin = drop.slotMin != null ? drop.slotMin : fromMin;
     if (fromTech === toTech && fromMin === toMin) return;
 
     const dur = effectiveDuration(svc);
