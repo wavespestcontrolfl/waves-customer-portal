@@ -68,7 +68,7 @@ export default function TimeTrackingPage() {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Time Tracking</div>
+        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Time Tracking</h1>
       </div>
 
       <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>

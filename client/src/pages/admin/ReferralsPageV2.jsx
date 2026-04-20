@@ -184,7 +184,7 @@ export default function ReferralsPageV2() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Referral Program</div>
+        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Referral Program</h1>
         {msg && <div style={{ padding: '6px 16px', borderRadius: 8, background: msg.includes('Error') ? `${D.red}33` : `${D.green}33`, color: msg.includes('Error') ? D.red : D.green, fontSize: 13 }}>{msg}</div>}
       </div>
 

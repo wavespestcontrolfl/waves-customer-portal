@@ -866,7 +866,7 @@ export default function DispatchPage() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Dispatch</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 4px' }}>Dispatch</h1>
           <div style={{ fontSize: 13, color: D.muted }}>{today}</div>
         </div>
         <div style={{

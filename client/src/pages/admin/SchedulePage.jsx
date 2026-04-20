@@ -2883,7 +2883,7 @@ export default function SchedulePage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 26, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Schedule & Dispatch</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 4px' }}>Schedule & Dispatch</h1>
           {/* Date nav */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, justifyContent: 'space-between', flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>

@@ -2316,7 +2316,7 @@ export default function EstimatePage() {
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: C.heading }}>Pipeline</div>
+        <h1 style={{ fontSize: 28, fontWeight: 400, color: C.heading, margin: 0 }}>Pipeline</h1>
         <div style={{ display: 'flex', gap: 8 }}>
           {tabs.map(t => (
             <button key={t.key} onClick={() => setActiveTab(t.key)} style={{

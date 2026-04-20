@@ -95,7 +95,7 @@ export default function DiscountsPage() {
     <div style={{ maxWidth: 1300, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Discount Engine</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Discount Engine</h1>
           <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>Manage discounts, promo codes, and pricing rules</div>
         </div>
         <button style={sBtn(D.teal, D.white)} onClick={() => { setEditing(null); setForm({ ...EMPTY }); setTab('form'); }}>+ New Discount</button>

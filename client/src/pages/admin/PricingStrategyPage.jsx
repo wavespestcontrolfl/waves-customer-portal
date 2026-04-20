@@ -43,7 +43,7 @@ export default function PricingStrategyPage() {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Pricing Strategy</div>
+        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Pricing Strategy</h1>
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Hormozi-style value engineering, offer architecture, and money model</div>
       </div>
 

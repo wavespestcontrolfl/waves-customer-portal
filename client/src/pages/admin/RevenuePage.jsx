@@ -150,7 +150,7 @@ export default function RevenuePage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>Revenue</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Revenue</h1>
           {data.period?.label && <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>{data.period.label}</div>}
         </div>
         <div style={{ display: 'flex', gap: 6, background: D.card, borderRadius: 8, padding: 4, border: `1px solid ${D.border}` }}>
