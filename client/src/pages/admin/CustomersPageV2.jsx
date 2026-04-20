@@ -514,13 +514,19 @@ export default function CustomersPageV2() {
       .catch(() => {});
   };
 
-  useEffect(() => { setPage(1); loadCustomers(1); /* eslint-disable-next-line */ }, [filterStage, filterTier]);
-  useEffect(() => { if (view === 'pipeline') loadPipeline(); /* eslint-disable-next-line */ }, [view]);
+  // Single debounced effect — one fetch per filter/search/view change.
+  // StrictMode's mount→cleanup→mount double-fire is absorbed by the
+  // setTimeout cleanup, so dev-mode mount no longer stacks duplicate
+  // `/admin/customers` requests.
   useEffect(() => {
+    if (view === 'pipeline') {
+      loadPipeline();
+      return undefined;
+    }
     const t = setTimeout(() => { setPage(1); loadCustomers(1); }, 300);
     return () => clearTimeout(t);
-    // eslint-disable-next-line
-  }, [search]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, filterStage, filterTier, view]);
 
   const handleSort = (key) => {
     if (sortBy === key) setSortDir((d) => d === 'asc' ? 'desc' : 'asc');

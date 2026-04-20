@@ -1,11 +1,12 @@
 import React, { lazy, Suspense } from 'react';
 import AdminLayout from './AdminLayout';
-import { useFeatureFlag } from '../hooks/useFeatureFlag';
+import { useFeatureFlagReady } from '../hooks/useFeatureFlag';
 
 const AdminLayoutV2 = lazy(() => import('./AdminLayoutV2'));
 
 export default function AdminLayoutGate() {
-  const v2 = useFeatureFlag('admin-shell-v2');
+  const { enabled: v2, ready } = useFeatureFlagReady('admin-shell-v2');
+  if (!ready) return <div />;
   if (!v2) return <AdminLayout />;
   return (
     <Suspense fallback={<div />}>

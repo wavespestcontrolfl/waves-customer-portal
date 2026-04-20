@@ -55,6 +55,34 @@ export function useFeatureFlag(key, defaultValue = false) {
   return enabled;
 }
 
+// Same as useFeatureFlag but also exposes `ready` — `false` until the flag
+// fetch has resolved, `true` after. Gates use this to defer rendering
+// until the flag is known, avoiding a V1→V2 remount flash (which double-
+// fires any fetches the V1 component does on mount).
+export function useFeatureFlagReady(key, defaultValue = false) {
+  const [state, setState] = useState(() => ({
+    enabled: cache
+      ? (Object.prototype.hasOwnProperty.call(cache, key) ? !!cache[key] : defaultValue)
+      : defaultValue,
+    ready: cache !== null,
+  }));
+  useEffect(() => {
+    if (cache !== null) return undefined;
+    let mounted = true;
+    loadFlags().then((flags) => {
+      if (!mounted) return;
+      setState({
+        enabled: Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue,
+        ready: true,
+      });
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [key, defaultValue]);
+  return state;
+}
+
 // Call after a toggle UI mutation so the operator's own view reflects
 // the change on next render without a full page reload.
 export function refetchFlags() {
