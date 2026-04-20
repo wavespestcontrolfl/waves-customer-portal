@@ -225,7 +225,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const prepaidCovered = svc.prepaid_amount != null
       && Number(svc.prepaid_amount) > 0
       && Number(svc.prepaid_amount) >= invoiceAmount;
-    const shouldInvoice = !alreadyPaid && !prepaidCovered && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
+    // If the tech already minted an invoice for this visit pre-completion
+    // (Charge now → Tap-to-Pay flow), reuse it instead of cutting a second one.
+    let preMintedInvoice = null;
+    try {
+      preMintedInvoice = await db('invoices')
+        .where({ scheduled_service_id: svc.id })
+        .whereNot('status', 'void')
+        .orderBy('created_at', 'desc')
+        .first();
+    } catch (e) { /* column may not exist pre-migration — non-blocking */ }
+    const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice
+      && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     const portalUrl = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
 
     let invoiceCreated = false;
@@ -244,6 +255,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (invErr) {
         logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
       }
+    } else if (preMintedInvoice) {
+      // Back-link the pre-minted invoice to the freshly created service_record
+      // so receipts, /pay enrichment, and reports all resolve correctly.
+      try {
+        await db('invoices').where({ id: preMintedInvoice.id }).update({
+          service_record_id: record.id,
+          technician_id: svc.technician_id || preMintedInvoice.technician_id || null,
+          updated_at: new Date(),
+        });
+      } catch (e) { logger.warn(`[dispatch] Could not back-link invoice to service_record: ${e.message}`); }
+      invoice = preMintedInvoice;
+      payUrl = `${portalUrl}/pay/${preMintedInvoice.token}`;
+      // Treat already-paid pre-mint as the same SMS branch as prepaid.
+      if (preMintedInvoice.status === 'paid') alreadyPaid = true;
+      else invoiceCreated = true;
     }
 
     if (sendCompletionSms && svc.cust_phone) {
@@ -257,7 +283,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             pay_url: payUrl,
           }, fallback);
           await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
-        } else if (prepaidCovered) {
+        } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${svc.service_type} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_prepaid', {
             first_name: svc.first_name || '',

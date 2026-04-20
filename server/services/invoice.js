@@ -39,7 +39,7 @@ const InvoiceService = {
    * Create an invoice — optionally linked to a service record.
    * If serviceRecordId is provided, pulls products, photos, tech info automatically.
    */
-  async create({ customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate }) {
+  async create({ customerId, serviceRecordId, scheduledServiceId, title, lineItems, notes, dueDate, taxRate }) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
@@ -136,6 +136,7 @@ const InvoiceService = {
       notes: notes || null,
       due_date: dueDate || etDateString(addETDays(new Date(), 30)),
       status: 'draft',
+      ...(scheduledServiceId ? { scheduled_service_id: scheduledServiceId } : {}),
       ...serviceData,
     }).returning('*');
 

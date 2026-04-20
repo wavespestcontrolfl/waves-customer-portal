@@ -770,6 +770,74 @@ router.delete('/:id/prepaid', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/schedule/:id/invoice — mint an invoice BEFORE the visit is
+// marked complete. Used by "Charge now" so the tech can run Tap-to-Pay at the
+// door before finishing the service report. The completion handler later
+// detects this existing invoice (via scheduled_service_id) and skips re-minting.
+// Idempotent: returns the existing open invoice if one already exists for this
+// scheduled_service.
+router.post('/:id/invoice', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select('scheduled_services.*',
+        'customers.monthly_rate as cust_monthly_rate',
+        'customers.property_type as cust_property_type')
+      .first();
+    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+
+    // Reuse the existing invoice for this visit if one already exists and isn't
+    // void — avoids dupes if the tech taps "Charge now" twice.
+    const existing = await db('invoices')
+      .where({ scheduled_service_id: svc.id })
+      .whereNot('status', 'void')
+      .orderBy('created_at', 'desc')
+      .first();
+    if (existing) {
+      return res.json({
+        success: true,
+        reused: true,
+        invoiceId: existing.id,
+        total: Number(existing.total),
+        token: existing.token,
+        status: existing.status,
+      });
+    }
+
+    const amount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
+      ? Number(svc.estimated_price)
+      : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    if (!(amount > 0)) {
+      return res.status(400).json({ error: 'No chargeable amount — estimated price is 0' });
+    }
+
+    const InvoiceService = require('../services/invoice');
+    const invoice = await InvoiceService.create({
+      customerId: svc.customer_id,
+      scheduledServiceId: svc.id,
+      title: svc.service_type || 'Service visit',
+      lineItems: [{
+        description: svc.service_type || 'Service visit',
+        quantity: 1,
+        unit_price: amount,
+        amount,
+        category: svc.service_type || null,
+      }],
+      taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
+    });
+
+    logger.info(`[schedule] Pre-completion invoice ${invoice.invoice_number} minted for service ${svc.id}: $${invoice.total}`);
+    res.json({
+      success: true,
+      reused: false,
+      invoiceId: invoice.id,
+      total: Number(invoice.total),
+      token: invoice.token,
+      status: invoice.status,
+    });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/schedule/:id/status — change status with automations
 router.put('/:id/status', async (req, res, next) => {
   try {

@@ -5,7 +5,10 @@
 // Review & checkout → opens CompletionPanel (tech notes + AI recap live there).
 // Edit (top-right) → opens EditServiceModal (existing V1).
 
+import { useState } from 'react';
 import { TIMEZONE } from '../../lib/timezone';
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // WaveGuard tier → discount fraction. Source: server/services/estimate-converter.js.
 // Kept in sync with that file. Used only for display here; the authoritative
@@ -62,6 +65,9 @@ export default function MobileAppointmentDetailSheet({
   onReviewCheckout,
   onMarkPrepaid,
 }) {
+  const [charging, setCharging] = useState(false);
+  const [chargeError, setChargeError] = useState(null);
+
   if (!service) return null;
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
@@ -70,7 +76,7 @@ export default function MobileAppointmentDetailSheet({
   const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
   const discount = Math.round(price * pct * 100) / 100;
   const total = Math.max(0, price - discount);
-  const window = formatWindow(service);
+  const timeWindow = formatWindow(service);
 
   // WaveGuard monthly autopay customers have estimated_price = 0 on each visit
   // (already paid via the monthly cycle). Surface this so the tech doesn't try
@@ -78,6 +84,33 @@ export default function MobileAppointmentDetailSheet({
   const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null);
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
+
+  // Mints an invoice for this visit pre-completion, then deep-links to the
+  // Stripe Terminal / Tap-to-Pay iOS shell so the tech can charge the card at
+  // the door before finishing the service report. The completion handler will
+  // later reuse this invoice rather than cutting a second one.
+  async function handleChargeNow() {
+    if (charging) return;
+    setCharging(true);
+    setChargeError(null);
+    try {
+      const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/invoice`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+        },
+      });
+      if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
+      const data = await r.json();
+      if (!data.invoiceId) throw new Error('No invoice returned');
+      const cents = Math.round(Number(data.total) * 100);
+      window.location.href = `waves-tap://charge?invoice_id=${data.invoiceId}&amount=${cents}`;
+    } catch (e) {
+      setChargeError(e.message || 'Failed to start charge');
+      setCharging(false);
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
@@ -130,6 +163,28 @@ export default function MobileAppointmentDetailSheet({
           >
             Prepaid ${prepaidAmt.toFixed(2)}
             {service.prepaidMethod ? ` via ${service.prepaidMethod.replace(/_/g, ' ')}` : ''} — no charge needed
+          </div>
+        )}
+
+        {/* Charge now — mint invoice + launch Tap-to-Pay BEFORE completion.
+            Lets the tech take payment at the door, then finish the report later. */}
+        {!coveredByMembership && !isPrepaid && (
+          <button
+            type="button"
+            onClick={handleChargeNow}
+            disabled={charging}
+            className="w-full rounded-full bg-zinc-100 text-zinc-900 font-medium u-focus-ring"
+            style={{ padding: '12px 20px', fontSize: 14, marginTop: 10, opacity: charging ? 0.6 : 1 }}
+          >
+            {charging ? 'Opening Tap to Pay…' : `Charge now (${total > 0 ? `$${total.toFixed(2)}` : 'Tap to Pay'})`}
+          </button>
+        )}
+        {chargeError && (
+          <div
+            className="text-alert-fg"
+            style={{ fontSize: 12, marginTop: 6, textAlign: 'center' }}
+          >
+            {chargeError}
           </div>
         )}
 
@@ -193,8 +248,8 @@ export default function MobileAppointmentDetailSheet({
                 className="text-ink-secondary"
                 style={{ fontSize: 13, marginTop: 2 }}
               >
-                {window}
-                {service.estimatedDuration ? (window ? ' · ' : '') + `${service.estimatedDuration} mins` : ''}
+                {timeWindow}
+                {service.estimatedDuration ? (timeWindow ? ' · ' : '') + `${service.estimatedDuration} mins` : ''}
               </div>
             </div>
             <div
@@ -237,12 +292,12 @@ export default function MobileAppointmentDetailSheet({
           <div className="text-zinc-900" style={{ fontSize: 14 }}>
             {formatDateLong(service.scheduledDate)}
           </div>
-          {window && (
+          {timeWindow && (
             <div
               className="text-ink-secondary"
               style={{ fontSize: 14, marginTop: 2 }}
             >
-              {window}
+              {timeWindow}
             </div>
           )}
         </section>
