@@ -128,10 +128,13 @@ const AppointmentReminders = {
 
   /**
    * Register an appointment for reminders.
-   * Sources: 'booking_new', 'admin_manual' => insert + send confirmation
+   * Sources: 'booking_new', 'admin_manual' => insert + send confirmation (default)
    *          'gcal_sync'                   => insert only (no confirmation)
+   *
+   * Pass `options.sendConfirmation` (boolean) to override the source-based default —
+   * e.g. admin_manual with the "Send confirmation SMS" checkbox unchecked passes false.
    */
-  async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source) {
+  async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
       // Check if already registered
       const existing = await db('appointment_reminders')
@@ -149,7 +152,9 @@ const AppointmentReminders = {
         return null;
       }
 
-      const sendConfirmation = source === 'booking_new' || source === 'admin_manual';
+      const sendConfirmation = typeof options.sendConfirmation === 'boolean'
+        ? options.sendConfirmation
+        : (source === 'booking_new' || source === 'admin_manual');
 
       const [record] = await db('appointment_reminders').insert({
         scheduled_service_id: scheduledServiceId,

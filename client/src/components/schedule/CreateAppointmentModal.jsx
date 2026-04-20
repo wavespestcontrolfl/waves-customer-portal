@@ -187,7 +187,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Service state
   const [serviceGroups, setServiceGroups] = useState(FALLBACK_SERVICES);
   const [selectedService, setSelectedService] = useState(null);
-  const [isCallback, setIsCallback] = useState(false);
   const [serviceSearch, setServiceSearch] = useState('');
   const [libraryResults, setLibraryResults] = useState(null); // null = no live hit yet
 
@@ -284,7 +283,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [internalNotes, setInternalNotes] = useState('');
   const [price, setPrice] = useState('');
   const [sendSms, setSendSms] = useState(true);
-  const [notifyTech, setNotifyTech] = useState(true);
+  const [notifyTech, setNotifyTech] = useState(false);
   const [createInvoice, setCreateInvoice] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
@@ -328,10 +327,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Set price when service changes
   useEffect(() => {
     if (!selectedService) return;
-    if (isCallback && selectedCustomer?.tier) { setPrice('0'); return; }
     const p = selectedService.priceMin || selectedService.base_price || '';
     setPrice(p ? String(p) : '');
-  }, [selectedService, isCallback, selectedCustomer?.tier]);
+  }, [selectedService]);
 
   // Customer search
   const doSearch = async (val) => {
@@ -441,7 +439,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         urgency: 'routine',
         notes: customerNotes || undefined,
         internalNotes: internalNotes || undefined,
-        isCallback,
         sendConfirmationSms: sendSms,
         sendTechNotification: notifyTech,
         isRecurring,
@@ -617,12 +614,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </div>
               <button onClick={() => setSelectedService(null)} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
             </div>
-          )}
-          {selectedService && (
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, cursor: 'pointer', minHeight: 44 }}>
-              <input type="checkbox" checked={isCallback} onChange={e => setIsCallback(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.teal }} />
-              <span style={{ fontSize: 13, color: D.text }}>WaveGuard Callback (free for members)</span>
-            </label>
           )}
         </div>
 

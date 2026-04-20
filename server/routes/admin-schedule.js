@@ -556,15 +556,35 @@ router.post('/', async (req, res, next) => {
      } catch (e) { logger.error(`[schedule] Recurring spawn failed (non-blocking): ${e.message}`); }
     }
 
-    // Register for appointment reminders (handles confirmation SMS for admin_manual)
+    // Register for appointment reminders.
+    //  - Honors the "Send confirmation SMS" checkbox: admin_manual defaults to true,
+    //    but sendConfirmationSms === false skips the confirmation SMS (reminder row
+    //    is still inserted so 72h/24h reminders fire).
     try {
       const AppointmentReminders = require('../services/appointment-reminders');
+      const wantConfirmation = sendConfirmationSms === undefined ? true : !!sendConfirmationSms;
       await AppointmentReminders.registerAppointment(
         svc.id, customerId,
         scheduledDate + 'T' + (windowStart || '08:00'),
-        serviceType, 'admin_manual'
+        serviceType, 'admin_manual',
+        { sendConfirmation: wantConfirmation }
       );
     } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
+
+    // Optional: push an in-app notification to the assigned tech's PWA queue
+    // (honors the "Notify technician" checkbox — unchecked by default).
+    if (sendTechNotification && resolvedTechId) {
+      try {
+        const { sendTechNotification: pushTechNote } = require('../services/geofence-handler');
+        const custName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : 'Customer';
+        const when = `${scheduledDate}${windowStart ? ' @ ' + windowStart : ''}`;
+        await pushTechNote(resolvedTechId, {
+          type: 'new_appointment',
+          message: `New appointment: ${custName} — ${serviceType} on ${when}`,
+          payload: { scheduled_service_id: svc.id, customer_id: customerId, scheduled_date: scheduledDate, window_start: windowStart },
+        });
+      } catch (e) { logger.error(`[schedule] tech notification failed (non-blocking): ${e.message}`); }
+    }
 
     // Trigger appointment type automations
     try {
