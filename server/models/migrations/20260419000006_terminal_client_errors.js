@@ -27,6 +27,8 @@
  *     FROM tool_health_events
  *    WHERE created_at > NOW() - INTERVAL '24 hours'
  *   UNION ALL
+ *   -- terminal_client_errors only stores failures, so success is hardcoded
+ *   -- to false in the projection — the table has no success rows to read.
  *   SELECT 'ios' AS origin, 'terminal-client' AS source, stage AS context,
  *          error_code AS signature, false AS success, duration_ms,
  *          error_message, created_at
@@ -50,9 +52,13 @@ exports.up = async function (knex) {
     t.uuid('tech_user_id').references('id').inTable('technicians').onDelete('SET NULL');
     // Resource: invoice being charged, if known at time of error.
     t.uuid('invoice_id').references('id').inTable('invoices').onDelete('SET NULL');
-    // Where in the flow: 'discover' (reader discovery/connect), 'handoff'
-    // (validate-handoff call), 'collect' (collectPaymentMethod), 'confirm'
-    // (confirmPaymentIntent), 'receipt' (post-charge send), 'other'.
+    // Where in the flow: 'discover' (no reader found / scan timeout),
+    // 'reader_connect' (reader present but session refused or dropped),
+    // 'handoff' (validate-handoff call), 'collect' (collectPaymentMethod),
+    // 'confirm' (confirmPaymentIntent), 'receipt' (post-charge send),
+    // 'other'. Stripe's iOS Terminal SDK distinguishes "no reader" from
+    // "reader present but couldn't connect" — keep them split so dashboard
+    // tiles can tell hardware availability from NFC session reliability.
     t.string('stage', 48).notNullable();
     // Stable machine-readable code — iOS SDK error code, a business code we
     // define ('handoff_expired', 'amount_mismatch'), or 'unknown'. Used for
