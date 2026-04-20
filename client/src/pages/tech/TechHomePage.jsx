@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
+import { etDateString } from '../../lib/timezone';
 
 const DARK = {
   bg: '#0f1923',
@@ -44,7 +45,7 @@ export default function TechHomePage() {
   async function fetchSchedule() {
     try {
       const token = localStorage.getItem('adminToken');
-      const today = new Date().toISOString().split('T')[0];
+      const today = etDateString();
       const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` },
       });

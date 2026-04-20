@@ -5,11 +5,12 @@ import { COLORS as B, TIER, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE 
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import BrandFooter from '../components/BrandFooter';
+import { etDateString } from '../lib/timezone';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
   if (!d) return new Date(NaN);
-  const str = typeof d === 'string' ? d.split('T')[0] : new Date(d).toISOString().split('T')[0];
+  const str = typeof d === 'string' ? d.split('T')[0] : etDateString(new Date(d));
   return new Date(str + 'T12:00:00');
 }
 

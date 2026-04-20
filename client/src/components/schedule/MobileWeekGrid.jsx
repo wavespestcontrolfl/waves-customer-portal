@@ -17,6 +17,7 @@ import {
 import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 import { serviceColor } from '../../lib/service-colors';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -83,14 +84,13 @@ function minutesToLabel(min) {
   return `${h12} ${ap}`;
 }
 
-function formatDateISO(d) { return d.toISOString().split('T')[0]; }
 
 function startOfWeek(dateStr) {
   const d = new Date(dateStr + 'T12:00:00');
   const day = d.getDay();
   const sunday = new Date(d);
   sunday.setDate(d.getDate() - day);
-  return formatDateISO(sunday);
+  return etDateString(sunday);
 }
 
 function effectiveDuration(svc) {
@@ -423,7 +423,7 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
 
   const days = useMemo(() => (optimistic || data?.days || []), [data, optimistic]);
 
-  const todayIso = formatDateISO(new Date());
+  const todayIso = etDateString(new Date());
 
   // ── Zoom: Ctrl/Cmd + wheel (desktop) and 2-finger pinch (touch) ──
   //
@@ -633,7 +633,7 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
             const pick = (today.getFullYear() === y && today.getMonth() + 1 === m)
               ? today
               : new Date(y, m - 1, 1);
-            onNavigate(formatDateISO(pick));
+            onNavigate(etDateString(pick));
           }}
           aria-hidden
           tabIndex={-1}

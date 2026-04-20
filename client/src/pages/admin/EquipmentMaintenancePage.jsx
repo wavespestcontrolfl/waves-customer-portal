@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { etDateString } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -625,7 +626,7 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
 // LOG MILEAGE FORM
 // ═══════════════════════════════════════════════════════════════════
 function MileageForm({ vehicleId, currentMiles, onDone }) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = etDateString();
   const [form, setForm] = useState({
     logDate: today, odometerStart: currentMiles || '', odometerEnd: '',
     businessMiles: '', personalMiles: '0', fuelGallons: '', fuelCost: '',

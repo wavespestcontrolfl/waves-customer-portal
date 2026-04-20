@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import AddressAutocomplete from '../AddressAutocomplete';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -47,7 +48,7 @@ const WEEKDAY_OPTIONS = [
 
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { nth, weekday, intervalDays } = opts;
-  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : new Date().toISOString().split('T')[0];
+  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
   const base = new Date(safe + 'T12:00:00');
   if (isNaN(base.getTime())) return new Date();
   const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;

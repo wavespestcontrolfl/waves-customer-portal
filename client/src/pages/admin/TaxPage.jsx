@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/blue/purple/orange fold to zinc-900. Semantic accents preserved.
@@ -33,11 +34,11 @@ const inputStyle = { background: '#FFFFFF', border: `1px solid ${D.border}`, bor
 const fmtD = (d) => d ? new Date(d).toLocaleDateString() : '—';
 const fmtM = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
 const fmtPct = (n) => n != null ? (n * 100).toFixed(2) + '%' : '—';
-// Calendar-day diff (due date - today) with both anchored at UTC midnight so same-day = 0.
+// Calendar-day diff (due date - today in ET) with both anchored at UTC midnight so same-day = 0.
 const daysUntil = (due) => {
   if (!due) return 0;
   const dueStr = String(due).slice(0, 10);
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = etDateString();
   return Math.floor((new Date(dueStr + 'T00:00:00Z') - new Date(todayStr + 'T00:00:00Z')) / 86400000);
 };
 
@@ -312,8 +313,8 @@ function FilingCalendarTab() {
   const handleStatusChange = async (id, status) => {
     try {
       const update = { status };
-      if (status === 'filed') update.filedDate = new Date().toISOString().split('T')[0];
-      if (status === 'paid') update.paidDate = new Date().toISOString().split('T')[0];
+      if (status === 'filed') update.filedDate = etDateString();
+      if (status === 'paid') update.paidDate = etDateString();
       await adminFetch(`/admin/tax/filings/${id}`, { method: 'PUT', body: JSON.stringify(update) });
       load();
     } catch (e) { alert('Failed: ' + e.message); }
@@ -599,7 +600,7 @@ function MileageTab() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const [form, setForm] = useState({ trip_date: new Date().toISOString().split('T')[0], start_address: '', end_address: '', distance_miles: '', purpose: 'business', notes: '' });
+  const [form, setForm] = useState({ trip_date: etDateString(), start_address: '', end_address: '', distance_miles: '', purpose: 'business', notes: '' });
 
   const load = () => {
     Promise.all([
@@ -785,7 +786,7 @@ function PnlTab() {
       const resp = await fetch(url, { headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` } });
       const blob = await resp.blob();
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-      a.download = `waves-pnl-${period}-${new Date().toISOString().split('T')[0]}.csv`; a.click();
+      a.download = `waves-pnl-${period}-${etDateString()}.csv`; a.click();
     } catch (e) { alert('Download failed: ' + e.message); }
   };
 
@@ -884,7 +885,7 @@ function PnlTab() {
 function ExportsTab() {
   const [year, setYear] = useState(String(new Date().getFullYear()));
   const [startDate, setStartDate] = useState(`${new Date().getFullYear()}-01-01`);
-  const [endDate, setEndDate] = useState(new Date().toISOString().split('T')[0]);
+  const [endDate, setEndDate] = useState(etDateString());
   const [downloading, setDownloading] = useState('');
 
   const download = async (type, filename) => {

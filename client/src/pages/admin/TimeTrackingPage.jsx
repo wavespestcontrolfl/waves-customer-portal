@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -49,13 +50,13 @@ function getMonday(d) {
   const day = dt.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   dt.setDate(dt.getDate() + diff);
-  return dt.toISOString().split('T')[0];
+  return etDateString(dt);
 }
 
 function addDays(dateStr, n) {
   const d = new Date(dateStr);
   d.setDate(d.getDate() + n);
-  return d.toISOString().split('T')[0];
+  return etDateString(d);
 }
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -672,7 +673,7 @@ function AnalyticsTab() {
   const [data, setData] = useState(null);
   const [comparison, setComparison] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [range, setRange] = useState({ start: addDays(new Date().toISOString().split('T')[0], -30), end: new Date().toISOString().split('T')[0] });
+  const [range, setRange] = useState({ start: addDays(etDateString(), -30), end: etDateString() });
 
   useEffect(() => {
     setLoading(true);

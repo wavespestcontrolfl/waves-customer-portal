@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import api from '../../utils/api';
+import { etDateString, addETDays } from '../../lib/timezone';
 
 function loadStripeJs(publishableKey) {
   return new Promise((resolve) => {
@@ -232,7 +233,7 @@ export default function AutopayCard() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <label style={{ fontSize: 13, color: B.grayDark, fontWeight: 600 }}>Pause until</label>
               <input type="date" value={pauseUntil} onChange={(e) => setPauseUntil(e.target.value)}
-                min={new Date(Date.now() + 86400000).toISOString().split('T')[0]}
+                min={etDateString(addETDays(new Date(), 1))}
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${B.grayLight}`, borderRadius: 8 }} />
               <label style={{ fontSize: 13, color: B.grayDark, fontWeight: 600 }}>Reason (optional)</label>
               <textarea value={pauseReason} onChange={(e) => setPauseReason(e.target.value)} rows={2}

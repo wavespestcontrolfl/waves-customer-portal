@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -27,8 +28,8 @@ export default function ContentCalendar() {
   const [toast, setToast] = useState('');
 
   const loadCalendar = useCallback(async () => {
-    const start = new Date(month.year, month.month, 1).toISOString().split('T')[0];
-    const end = new Date(month.year, month.month + 1, 0).toISOString().split('T')[0];
+    const start = etDateString(new Date(month.year, month.month, 1, 12));
+    const end = etDateString(new Date(month.year, month.month + 1, 0, 12));
     try {
       const data = await adminFetch(`/admin/content/calendar?start=${start}&end=${end}`);
       setItems(data.items || []);

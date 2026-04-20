@@ -10,6 +10,7 @@ import ScheduleIntelligenceBar from '../../components/admin/ScheduleIntelligence
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { launchTapToPay } from '../../lib/tapToPay';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -152,17 +153,13 @@ function elapsedSince(isoTime) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-function formatDateISO(d) {
-  return d.toISOString().split('T')[0];
-}
-
 function formatDateDisplay(dateStr) {
   const d = new Date(dateStr + 'T00:00:00');
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function isToday(dateStr) {
-  return dateStr === formatDateISO(new Date());
+  return dateStr === etDateString(new Date());
 }
 
 /* ── Status Badge ─────────────────────────────────────── */
@@ -821,7 +818,7 @@ const EDIT_WEEKDAY_OPTIONS = [
 
 function editNextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { nth, weekday, intervalDays } = opts;
-  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : new Date().toISOString().split('T')[0];
+  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
   const base = new Date(safe + 'T12:00:00');
   if (isNaN(base.getTime())) return new Date();
   const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
@@ -3267,7 +3264,7 @@ export default function SchedulePage() {
   const isMobile = useIsMobile();
   const [activeTab, setActiveTab] = useState('board');
   const [viewMode, setViewMode] = useState('day');
-  const [date, setDate] = useState(formatDateISO(new Date()));
+  const [date, setDate] = useState(etDateString(new Date()));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -3416,7 +3413,7 @@ export default function SchedulePage() {
     if (viewMode === 'day') d.setDate(d.getDate() + dir);
     else if (viewMode === 'week') d.setDate(d.getDate() + dir * 7);
     else d.setMonth(d.getMonth() + dir);
-    setDate(formatDateISO(d));
+    setDate(etDateString(d));
   }
 
   if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center', fontSize: 15 }}>Loading schedule...</div>;
@@ -3503,7 +3500,7 @@ export default function SchedulePage() {
               </span>
               <button onClick={() => shiftDate(1)} style={navBtnStyle} title="Next">&#9654;</button>
               {!isToday(date) && (
-                <button onClick={() => setDate(formatDateISO(new Date()))} style={{
+                <button onClick={() => setDate(etDateString(new Date()))} style={{
                   ...navBtnStyle, fontSize: 12, padding: '4px 12px', width: 'auto',
                 }}>Today</button>
               )}

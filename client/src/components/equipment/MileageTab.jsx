@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#fff', input: '#FFFFFF' };
@@ -24,7 +25,7 @@ const fmt = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { minim
 const fmtMi = (n) => n != null ? Number(n).toFixed(1) : '0.0';
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
-function toDateStr(d) { return typeof d === 'string' ? d.slice(0, 10) : d ? new Date(d).toISOString().slice(0, 10) : ''; }
+function toDateStr(d) { return typeof d === 'string' ? d.slice(0, 10) : d ? etDateString(new Date(d)) : ''; }
 function monthLabel(d) { const dt = new Date(d + 'T12:00:00'); return dt.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }); }
 function truncAddr(a, max) { if (!a) return '--'; return a.length > max ? a.slice(0, max) + '...' : a; }
 function minToHM(m) { if (!m) return '0m'; const h = Math.floor(m / 60); const min = m % 60; return h > 0 ? `${h}h ${min}m` : `${min}m`; }
@@ -82,7 +83,7 @@ export default function MileageTab() {
       setLoading(true);
       const [y, m] = monthDate.split('-');
       const start = `${y}-${m}-01`;
-      const end = new Date(parseInt(y), parseInt(m), 0).toISOString().slice(0, 10);
+      const end = etDateString(new Date(parseInt(y), parseInt(m), 0, 12));
       const data = await adminFetch(`/admin/mileage/daily?start_date=${start}&end_date=${end}`);
       setDailySummaries(data || []);
     } catch (e) { showToast('Failed to load daily summaries'); } finally { setLoading(false); }

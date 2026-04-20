@@ -1,5 +1,6 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { etDateString } from '../../lib/timezone';
 const PPCDashboardPage = lazy(() => import('./PPCDashboardPage'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -319,7 +320,7 @@ function AdvisorTab() {
   const handleGenerate = async () => {
     setGenerating(true);
     const r = await adminPost('/admin/ads/advisor/generate', {});
-    setReport({ report_data: r.report, date: new Date().toISOString().split('T')[0], grade: r.report?.grade });
+    setReport({ report_data: r.report, date: etDateString(), grade: r.report?.grade });
     setGenerating(false);
   };
 
@@ -907,7 +908,7 @@ function SEOAdvisorTab() {
   const handleGenerate = async () => {
     setGenerating(true);
     const r = await adminPost('/admin/seo/advisor/generate', {});
-    setReport({ report_data: r.report, date: new Date().toISOString().split('T')[0], grade: r.report?.grade });
+    setReport({ report_data: r.report, date: etDateString(), grade: r.report?.grade });
     setGenerating(false);
   };
 

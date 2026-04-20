@@ -5,6 +5,7 @@ import TechMatchPanel from '../components/dispatch/TechMatchPanel';
 import CSRPanel from '../components/dispatch/CSRPanel';
 import RevenuePanel from '../components/dispatch/RevenuePanel';
 import InsightsPanel from '../components/dispatch/InsightsPanel';
+import { etDateString } from '../lib/timezone';
 
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
 
@@ -18,7 +19,7 @@ const TABS = [
 
 export default function DispatchPage() {
   const [tab, setTab] = useState('routes');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(etDateString());
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
 

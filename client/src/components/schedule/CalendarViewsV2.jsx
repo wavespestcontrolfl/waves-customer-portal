@@ -29,6 +29,7 @@ import {
   pointerWithin,
 } from '@dnd-kit/core';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import { etDateString } from '../../lib/timezone';
 
 function formatDayLabel(isoDate) {
   if (!isoDate) return '';
@@ -77,7 +78,6 @@ function minutesToHHMM(min) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-function formatDateISO(d) { return d.toISOString().split('T')[0]; }
 
 // ─── VIEW MODE SELECTOR ──────────────────────────────────────────
 
@@ -126,7 +126,7 @@ export function WeekViewV2({ startDate, onDateClick }) {
     const day = d.getDay();
     const monday = new Date(d);
     monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
-    const mondayStr = formatDateISO(monday);
+    const mondayStr = etDateString(monday);
 
     adminFetch(`/admin/schedule/week?start=${mondayStr}`)
       .then((res) => { setData(res); setLoading(false); })
@@ -136,7 +136,7 @@ export function WeekViewV2({ startDate, onDateClick }) {
   if (loading) return <div className="py-10 text-center text-13 text-ink-secondary">Loading week…</div>;
   if (!data?.days) return null;
 
-  const today = formatDateISO(new Date());
+  const today = etDateString(new Date());
   const totalServices = data.days.reduce((sum, d) => sum + d.count, 0);
   const completedServices = data.days.reduce(
     (sum, d) => sum + d.services.filter((s) => s.status === 'completed').length,

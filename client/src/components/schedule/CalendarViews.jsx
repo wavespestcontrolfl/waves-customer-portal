@@ -16,6 +16,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -45,7 +46,6 @@ function adminFetch(path) {
   }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-function formatDateISO(d) { return d.toISOString().split('T')[0]; }
 
 // ─── VIEW MODE SELECTOR ──────────────────────────────────────────
 
@@ -85,14 +85,14 @@ export function ViewModeSelector({ viewMode, onViewModeChange }) {
 
 export function DateNavigator({ viewMode, date, onDateChange }) {
   const d = new Date(date + 'T12:00:00');
-  const today = formatDateISO(new Date());
+  const today = etDateString(new Date());
 
   function shift(direction) {
     const next = new Date(d);
     if (viewMode === 'day') next.setDate(next.getDate() + direction);
     else if (viewMode === 'week') next.setDate(next.getDate() + (direction * 7));
     else if (viewMode === 'month') next.setMonth(next.getMonth() + direction);
-    onDateChange(formatDateISO(next));
+    onDateChange(etDateString(next));
   }
 
   // Format display based on view mode
@@ -140,7 +140,7 @@ export function WeekView({ startDate, onDateClick }) {
     const day = d.getDay();
     const monday = new Date(d);
     monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
-    const mondayStr = formatDateISO(monday);
+    const mondayStr = etDateString(monday);
 
     adminFetch(`/admin/schedule/week?start=${mondayStr}`)
       .then(d => { setData(d); setLoading(false); })
@@ -150,7 +150,7 @@ export function WeekView({ startDate, onDateClick }) {
   if (loading) return <div style={{ color: D.muted, textAlign: 'center', padding: 40 }}>Loading week...</div>;
   if (!data?.days) return null;
 
-  const today = formatDateISO(new Date());
+  const today = etDateString(new Date());
   const maxCount = Math.max(1, ...data.days.map(d => d.count));
 
   return (

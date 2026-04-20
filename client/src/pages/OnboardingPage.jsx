@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
+import { etDateString } from '../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -301,7 +302,7 @@ export default function OnboardingPage() {
     if (!data?.scheduledService) return;
     const s = data.scheduledService;
     const d = new Date(s.date + 'T12:00:00');
-    const dateStr = d.toISOString().split('T')[0].replace(/-/g, '');
+    const dateStr = etDateString(d).replace(/-/g, '');
     const start = s.windowStart ? `${dateStr}T${s.windowStart.replace(/:/g, '').slice(0, 4)}00` : `${dateStr}T080000`;
     const end = s.windowEnd ? `${dateStr}T${s.windowEnd.replace(/:/g, '').slice(0, 4)}00` : `${dateStr}T100000`;
     const ics = `BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTART:${start}\nDTEND:${end}\nSUMMARY:Waves Pest Control — ${s.serviceType}\nLOCATION:${data.customer.address}\nDESCRIPTION:Tech: ${s.techName || 'TBD'}. Please ensure gates are unlocked and pets secured.\nBEGIN:VALARM\nTRIGGER:-PT60M\nACTION:DISPLAY\nDESCRIPTION:Waves service in 1 hour\nEND:VALARM\nEND:VEVENT\nEND:VCALENDAR`;

@@ -17,6 +17,7 @@ import {
 } from '@dnd-kit/core';
 import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -386,7 +387,7 @@ function startOfWeek(dateStr) {
   const day = d.getDay();
   const monday = new Date(d);
   monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
-  return monday.toISOString().split('T')[0];
+  return etDateString(monday);
 }
 
 export default function TimeGridDays({
@@ -441,7 +442,7 @@ export default function TimeGridDays({
     return items;
   }, [days]);
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = etDateString();
 
   const onDragEnd = useCallback((event) => {
     const { active, over } = event;

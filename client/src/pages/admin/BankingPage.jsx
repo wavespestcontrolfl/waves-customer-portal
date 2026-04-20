@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { etDateString } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -180,8 +181,8 @@ function CashFlowTab() {
   const threeMonthsAgo = new Date(today);
   threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
 
-  const [startDate, setStartDate] = useState(threeMonthsAgo.toISOString().split('T')[0]);
-  const [endDate, setEndDate] = useState(today.toISOString().split('T')[0]);
+  const [startDate, setStartDate] = useState(etDateString(threeMonthsAgo));
+  const [endDate, setEndDate] = useState(etDateString(today));
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -376,8 +377,8 @@ function ExportsTab() {
   const today = new Date();
   const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
 
-  const [startDate, setStartDate] = useState(startOfMonth.toISOString().split('T')[0]);
-  const [endDate, setEndDate] = useState(today.toISOString().split('T')[0]);
+  const [startDate, setStartDate] = useState(etDateString(startOfMonth));
+  const [endDate, setEndDate] = useState(etDateString(today));
   const [format, setFormat] = useState('csv');
   const [preview, setPreview] = useState([]);
   const [downloading, setDownloading] = useState(false);
@@ -406,8 +407,8 @@ function ExportsTab() {
         break;
       default: return;
     }
-    setStartDate(s.toISOString().split('T')[0]);
-    setEndDate(e.toISOString().split('T')[0]);
+    setStartDate(etDateString(s));
+    setEndDate(etDateString(e));
   };
 
   useEffect(() => {
