@@ -23,107 +23,7 @@ function adminFetch(path, options = {}) {
 
 const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0A7EC2' };
 
-// All services default 1hr / $0 unless noted. WaveGuard Membership = 0hr.
-const S = (name, dur = 60, pMin = 0, pMax = 0) => ({ name, duration: dur, priceMin: pMin, priceMax: pMax });
-const FALLBACK_SERVICES = [
-  { category: 'pest_control', items: [
-    S('Pest Control Service'),
-    S('Mite Control Service'),
-    S('Mold Remediation Service'),
-    S('Mosquito Control Service'),
-    S('Mud Dauber Nest Removal Service'),
-    S('Tick Control Service'),
-    S('Yellow Jacket Control Service'),
-    S('Wasp Control Service'),
-    S('Wildlife Trapping Service'),
-    S('Semiannual Pest Control Service'),
-    S('Quarterly Pest Control Service'),
-    S('Bi-Monthly Pest Control Service'),
-    S('Monthly Pest Control Service'),
-  ]},
-  { category: 'rodent', items: [
-    S('Rodent Control Service'),
-    S('Rodent Trapping Service'),
-    S('Rodent Exclusion Service'),
-    S('Rodent Trapping & Exclusion Service'),
-    S('Rodent Trapping & Sanitation Service'),
-    S('Rodent Trapping, Exclusion & Sanitation Service'),
-    S('Rodent Pest Control'),
-    S('Rodent Bait Station Service'),
-  ]},
-  { category: 'termite', items: [
-    S('Termite Bond (Billed Quarterly | 10-Year Term)', 60, 45, 45),
-    S('Termite Bond (Billed Quarterly | 5-Year Term)', 60, 54, 54),
-    S('Termite Bond (Billed Quarterly | 1-Year Term)', 60, 60, 60),
-    S('Termite Monitoring Service', 60, 99, 99),
-    S('Termite Active Annual Bait Station Service', 60, 199, 199),
-    S('Termite Active Bait Station Service'),
-    S('Termite Installation Setup'),
-    S('Termite Spot Treatment Service'),
-    S('Termite Pretreatment Service'),
-    S('Termite Trenching Service'),
-    S('Termite Bait Station Cartridge Replacement', 60, 20, 20),
-    S('Slab Pre-Treat Termite'),
-  ]},
-  { category: 'lawn_care', items: [
-    S('Lawn Care Service'),
-    S('Lawn Fertilization Service'),
-    S('Lawn Fungicide Treatment Service'),
-    S('Lawn Insect Control Service'),
-    S('Lawn Aeration Service'),
-  ]},
-  { category: 'tree_shrub', items: [
-    S('Every 6 Weeks Tree & Shrub Care Service'),
-    S('Bi-Monthly Tree & Shrub Care Service'),
-  ]},
-  { category: 'specialty', items: [
-    S('WaveGuard Membership', 0),
-    S('WaveGuard Initial Setup'),
-    S('Waves Pest Control Appointment'),
-  ]},
-];
-
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
-
-// Services deliberately hidden from the New Appointment picker — covers both DB and fallback name variants.
-const HIDDEN_SERVICE_NAMES = new Set([
-  'waveguard initial setup',
-  'tick control service',
-  'mud dauber nest removal',
-  'mud dauber nest removal service',
-  'wildlife trapping service',
-  'waves pest control appointment',
-  'general pest control (semiannual)',
-  'semiannual pest control service',
-  'general pest control (bi-monthly)',
-  'bi-monthly pest control service',
-  'lawn care program',
-  'lawn care service',
-  'termite bond (10-year term)',
-  'termite bond (billed quarterly | 10-year term)',
-  'termite bond (5-year term)',
-  'termite bond (billed quarterly | 5-year term)',
-  'termite bond (1-year term)',
-  'termite bond (billed quarterly | 1-year term)',
-  'termite monitoring service',
-  'termite active annual bait station service',
-  'termite active bait station service (quarterly)',
-  'termite active bait station service',
-  'termite spot treatment service',
-  'termite installation setup',
-  'termite pretreatment service',
-  'termite trenching service',
-  'termite bait station cartridge replacement',
-  'slab pre-treat termite service',
-  'slab pre-treat termite',
-  'rodent trapping service',
-  'rodent exclusion service',
-  'rodent trapping & sanitation service',
-  'rodent trapping, exclusion & sanitation service',
-  'rodent pest control',
-  'tree & shrub care (every 6 weeks)',
-  'every 6 weeks tree & shrub care service',
-]);
 
 
 const FREQUENCIES = [
@@ -184,20 +84,28 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', zip: '' });
 
-  // Service state
-  const [serviceGroups, setServiceGroups] = useState(FALLBACK_SERVICES);
+  // Service state — mirrors ServiceLibraryPage's approach: ask the Service
+  // Library endpoint directly, render what it returns. No local fallback
+  // list, no client-side denylist. If the operator can see it in Service
+  // Library, they can book it here.
   const [selectedService, setSelectedService] = useState(null);
   const [serviceSearch, setServiceSearch] = useState('');
-  const [libraryResults, setLibraryResults] = useState(null); // null = no live hit yet
+  const [serviceResults, setServiceResults] = useState([]);
+  const [serviceLoading, setServiceLoading] = useState(false);
 
-  // Debounced Service Library lookup — falls back to the grouped fallback list on error.
+  // Debounced Service Library search (same endpoint + filters as /admin/services catalog).
   useEffect(() => {
     const q = serviceSearch.trim();
-    if (!q) { setLibraryResults(null); return; }
+    if (!q) { setServiceResults([]); setServiceLoading(false); return; }
+    setServiceLoading(true);
     const handle = setTimeout(async () => {
       try {
-        const r = await adminFetch(`/admin/services?search=${encodeURIComponent(q)}&is_active=true&limit=20`);
-        const mapped = (r.services || []).map((s) => ({
+        const params = new URLSearchParams();
+        params.set('search', q);
+        params.set('is_active', 'true');
+        params.set('limit', '50');
+        const r = await adminFetch(`/admin/services?${params}`);
+        setServiceResults((r.services || []).map((s) => ({
           id: s.id,
           name: s.name,
           category: s.category,
@@ -206,34 +114,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           priceMax: s.price_range_max ?? s.base_price,
           base_price: s.base_price,
           default_duration_minutes: s.default_duration_minutes,
-        }));
-        setLibraryResults(mapped);
+        })));
       } catch {
-        setLibraryResults(null);
+        setServiceResults([]);
+      } finally {
+        setServiceLoading(false);
       }
     }, 200);
     return () => clearTimeout(handle);
   }, [serviceSearch]);
-
-  // Results shown in the service picker: union of live Service Library hits + local
-  // fallback matches (deduped by name). Union avoids "No services match" whenever
-  // either source has a hit — the previous prefer-live logic broke if the live
-  // query returned an empty array even when a local match existed.
-  const filteredServices = useMemo(() => {
-    const q = serviceSearch.trim().toLowerCase();
-    const denied = (svc) => HIDDEN_SERVICE_NAMES.has((svc.name || '').toLowerCase().trim());
-
-    const flat = serviceGroups
-      .flatMap((g) => g.items.map((it) => ({ ...it, category: g.category })))
-      .filter((svc) => !denied(svc));
-    const localMatches = !q ? flat : flat.filter((svc) => (svc.name || '').toLowerCase().includes(q));
-    const liveMatches = libraryResults ? libraryResults.filter((svc) => !denied(svc)) : [];
-
-    if (liveMatches.length === 0) return localMatches;
-    const seen = new Set(liveMatches.map((s) => (s.name || '').toLowerCase().trim()));
-    const extras = localMatches.filter((s) => !seen.has((s.name || '').toLowerCase().trim()));
-    return [...liveMatches, ...extras];
-  }, [libraryResults, serviceGroups, serviceSearch]);
 
   // Find-a-Time state
   const [findingTimes, setFindingTimes] = useState(false);
@@ -295,14 +184,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
 
-  // Fetch services dropdown on mount
+  // Fetch technicians + discounts on mount. Services are fetched on-demand
+  // via the search effect above (Service Library query).
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await adminFetch('/admin/schedule/services-dropdown');
-        if (r.groups?.length) setServiceGroups(r.groups);
-      } catch { /* fallback already set */ }
-    })();
     (async () => {
       try {
         const r = await adminFetch('/admin/technicians');
@@ -588,9 +472,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               />
               {serviceSearch.trim().length > 0 && (
                 <div style={{ marginTop: 8, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 280, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-                  {filteredServices.map((svc, i) => (
+                  {serviceResults.map((svc, i) => (
                     <div
-                      key={`${svc.category}-${svc.name}-${i}`}
+                      key={`${svc.id || svc.name}-${i}`}
                       onClick={() => { setSelectedService(svc); setServiceSearch(''); }}
                       className="waves-sq-row"
                       style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
@@ -601,9 +485,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       </span>
                     </div>
                   ))}
-                  {filteredServices.length === 0 && (
+                  {!serviceLoading && serviceResults.length === 0 && (
                     <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
                       No services match &ldquo;{serviceSearch}&rdquo;
+                    </div>
+                  )}
+                  {serviceLoading && serviceResults.length === 0 && (
+                    <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
+                      Searching…
                     </div>
                   )}
                 </div>
