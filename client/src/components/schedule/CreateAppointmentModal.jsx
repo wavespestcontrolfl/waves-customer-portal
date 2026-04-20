@@ -171,7 +171,7 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   return isNaN(d.getTime()) ? base : d;
 }
 
-const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
+const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44, colorScheme: 'light' };
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 
@@ -450,6 +450,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   return (
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={modalStyle}>
+        <style>{`
+          .waves-sq-date::-webkit-calendar-picker-indicator { opacity: 0.5; cursor: pointer; filter: grayscale(1); transition: opacity 0.15s; }
+          .waves-sq-date::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+          .waves-sq-date::-webkit-datetime-edit { color: #18181B; font-family: inherit; font-weight: 400; }
+          .waves-sq-date::-webkit-datetime-edit-fields-wrapper { padding: 0; }
+          .waves-sq-row { transition: background-color 0.12s ease; }
+          .waves-sq-row:hover { background: #F4F4F5; }
+          .waves-sq-row:active { background: #E4E4E7; }
+          .waves-sq-row:last-child { border-bottom: none !important; }
+        `}</style>
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <div style={{ fontSize: 18, fontWeight: 600, color: '#18181B', letterSpacing: '-0.01em' }}>New appointment</div>
@@ -468,7 +478,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               {customerResults.length > 0 && (
                 <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', zIndex: 20 }}>
                   {customerResults.map(c => (
-                    <div key={c.id} onClick={() => selectCustomer(c)} style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row" style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
                       <strong>{c.firstName} {c.lastName}</strong>
                       <span style={{ color: D.muted, fontSize: 12 }}>{c.phone || ''}</span>
                       {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
@@ -524,6 +534,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div
                       key={`${svc.category}-${svc.name}-${i}`}
                       onClick={() => { setSelectedService(svc); setServiceSearch(''); }}
+                      className="waves-sq-row"
                       style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
                     >
                       <span style={{ flex: 1, fontWeight: 500 }}>{svc.name}</span>
@@ -569,106 +580,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           </div>
         </div>
 
-        {/* Section 3: Date */}
-        <div style={sectionStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date</div>
-            {selectedCustomer && selectedService && (
-              <button
-                onClick={handleFindTimes}
-                disabled={findingTimes}
-                style={{
-                  padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
-                  color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
-                  fontSize: 12, fontWeight: 600, cursor: findingTimes ? 'default' : 'pointer',
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                }}
-                title="Rank the best slots by drive-time detour"
-              >
-                ✨ {findingTimes ? 'Finding...' : 'Find best times'}
-              </button>
-            )}
-          </div>
-
-          {slotError && (
-            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
-              {slotError}
-            </div>
-          )}
-
-          {timeSlots !== null && (
-            <div style={{ marginBottom: 12, background: '#FAFAFA', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : 'No feasible slots in next 7 days'}
-                </div>
-                <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
-              </div>
-              {timeSlots.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
-                  {timeSlots.map((slot) => (
-                    <button
-                      key={`${slot.date}-${slot.technician.id}-${slot.start_time}`}
-                      onClick={() => applySlot(slot)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                        background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
-                        cursor: 'pointer', textAlign: 'left', minHeight: 52,
-                      }}
-                    >
-                      <div style={{
-                        fontSize: 11, fontWeight: 700, color: D.teal, background: `${D.teal}15`,
-                        borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
-                      }}>#{slot.rank}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B' }}>
-                          {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
-                        </div>
-                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
-                        </div>
-                      </div>
-                      <div style={{ fontSize: 11, color: D.teal, fontWeight: 600 }}>Use →</div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
-            <div>
-              <label style={labelStyle}>Date</label>
-              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} style={inputStyle} />
-            </div>
-            <div>
-              <label style={labelStyle}>Time</label>
-              <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} style={inputStyle} />
-            </div>
-          </div>
-        </div>
-
-        {/* Section 3b: Tech Assignment — its own section below Date */}
-        <div style={sectionStyle}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Tech assignment</div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            {[{ v: 'auto', l: 'Auto' }, { v: 'choose', l: 'Choose' }, { v: 'unassigned', l: 'Unassigned' }].map(o => (
-              <button key={o.v} onClick={() => setTechMode(o.v)} style={{
-                flex: 1, padding: '10px 8px', borderRadius: 8, border: `1px solid ${techMode === o.v ? D.teal : D.border}`,
-                background: techMode === o.v ? `${D.teal}22` : D.input, color: techMode === o.v ? D.teal : D.text,
-                fontSize: 13, cursor: 'pointer', minHeight: 44,
-              }}>{o.l}</button>
-            ))}
-          </div>
-          {techMode === 'choose' && (
-            <select value={techId} onChange={e => setTechId(e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
-              <option value="">Select technician...</option>
-              {techs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-          )}
-        </div>
-
-        {/* Section 3c: Recurring — its own section below Tech */}
+        {/* Section 2c: Recurring — its own section below Price */}
         <div style={sectionStyle}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44, marginBottom: isRecurring ? 8 : 0 }}>
             <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.teal }} />
@@ -767,6 +679,105 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 </div>
               )}
             </div>
+          )}
+        </div>
+
+        {/* Section 3: Date */}
+        <div style={sectionStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date</div>
+            {selectedCustomer && selectedService && (
+              <button
+                onClick={handleFindTimes}
+                disabled={findingTimes}
+                style={{
+                  padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
+                  color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
+                  fontSize: 12, fontWeight: 600, cursor: findingTimes ? 'default' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
+                title="Rank the best slots by drive-time detour"
+              >
+                ✨ {findingTimes ? 'Finding...' : 'Find best times'}
+              </button>
+            )}
+          </div>
+
+          {slotError && (
+            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
+              {slotError}
+            </div>
+          )}
+
+          {timeSlots !== null && (
+            <div style={{ marginBottom: 12, background: '#FAFAFA', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : 'No feasible slots in next 7 days'}
+                </div>
+                <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
+              </div>
+              {timeSlots.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
+                  {timeSlots.map((slot) => (
+                    <button
+                      key={`${slot.date}-${slot.technician.id}-${slot.start_time}`}
+                      onClick={() => applySlot(slot)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                        background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
+                        cursor: 'pointer', textAlign: 'left', minHeight: 52,
+                      }}
+                    >
+                      <div style={{
+                        fontSize: 11, fontWeight: 700, color: D.teal, background: `${D.teal}15`,
+                        borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
+                      }}>#{slot.rank}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B' }}>
+                          {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
+                        </div>
+                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: D.teal, fontWeight: 600 }}>Use →</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
+            <div>
+              <label style={labelStyle}>Date</label>
+              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} className="waves-sq-date" style={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Time</label>
+              <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} className="waves-sq-date" style={inputStyle} />
+            </div>
+          </div>
+        </div>
+
+        {/* Section 3b: Tech Assignment — its own section below Date */}
+        <div style={sectionStyle}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Tech assignment</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {[{ v: 'auto', l: 'Auto' }, { v: 'choose', l: 'Choose' }, { v: 'unassigned', l: 'Unassigned' }].map(o => (
+              <button key={o.v} onClick={() => setTechMode(o.v)} style={{
+                flex: 1, padding: '10px 8px', borderRadius: 8, border: `1px solid ${techMode === o.v ? D.teal : D.border}`,
+                background: techMode === o.v ? `${D.teal}22` : D.input, color: techMode === o.v ? D.teal : D.text,
+                fontSize: 13, cursor: 'pointer', minHeight: 44,
+              }}>{o.l}</button>
+            ))}
+          </div>
+          {techMode === 'choose' && (
+            <select value={techId} onChange={e => setTechId(e.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
+              <option value="">Select technician...</option>
+              {techs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
           )}
         </div>
 
