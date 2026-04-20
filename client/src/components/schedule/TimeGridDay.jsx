@@ -317,6 +317,72 @@ function AllDayStrip({ services, onEdit }) {
   );
 }
 
+function RailItem({ service, onEdit }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `svc-${service.id}`,
+    data: { service },
+  });
+  const dragStyle = transform
+    ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
+    : {};
+  const startMin = parseHHMM(service.windowStart);
+  const timeLabel = startMin != null ? minutesToLabel(startMin) : '';
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      onClick={(e) => {
+        if (isDragging) return;
+        e.stopPropagation();
+        onEdit?.(service);
+      }}
+      className={cn(
+        'px-2 py-2 rounded-sm bg-white cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
+        isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
+      )}
+      style={{ border: '1px solid #D4D4D8', ...dragStyle }}
+      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || ''}`}
+    >
+      {timeLabel && (
+        <div className="u-nums text-10 text-zinc-500 mb-0.5">{timeLabel}</div>
+      )}
+      <div className="font-medium truncate text-zinc-900">{service.customerName}</div>
+      {service.serviceType && (
+        <div className="truncate text-zinc-700">{service.serviceType}</div>
+      )}
+    </div>
+  );
+}
+
+function UnassignedRail({ services, onEdit }) {
+  if (!services.length) return null;
+  const sorted = [...services].sort((a, b) => {
+    const aMin = parseHHMM(a.windowStart) ?? Infinity;
+    const bMin = parseHHMM(b.windowStart) ?? Infinity;
+    return aMin - bMin;
+  });
+  return (
+    <div
+      className="bg-zinc-50 flex-shrink-0 overflow-auto"
+      style={{ width: 180, borderRight: '1px solid #E4E4E7' }}
+    >
+      <div
+        className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 flex items-center justify-between"
+        style={{ borderBottom: '1px solid #E4E4E7' }}
+      >
+        <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
+        <span className="u-nums text-11 text-zinc-700">{sorted.length}</span>
+      </div>
+      <div className="px-2 py-2 flex flex-col gap-1.5">
+        {sorted.map((svc) => (
+          <RailItem key={svc.id} service={svc} onEdit={onEdit} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function TimeGridDay({
   date,
   services,
@@ -344,11 +410,13 @@ export default function TimeGridDay({
         list.push({ id: s.technicianId, name: s.technicianName || 'Tech' });
       }
     });
-    if (allServices.some((s) => !s.technicianId)) {
-      list.push({ id: '__unassigned__', name: 'Unassigned' });
-    }
     return list;
   }, [technicians, allServices]);
+
+  const unassignedInRail = useMemo(
+    () => allServices.filter((s) => !s.technicianId && parseHHMM(s.windowStart) != null),
+    [allServices],
+  );
 
   const byTech = useMemo(() => {
     const map = {};
@@ -463,7 +531,7 @@ export default function TimeGridDay({
     setPending(null);
   }, []);
 
-  if (techList.length === 0) {
+  if (techList.length === 0 && unassignedInRail.length === 0) {
     return (
       <div className="text-ink-secondary text-center py-16 text-13">
         No technicians scheduled for this day.
@@ -478,18 +546,27 @@ export default function TimeGridDay({
     >
       <AllDayStrip services={allDay} onEdit={onEdit} />
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
-        <div className="overflow-auto" style={{ maxHeight: '70vh' }}>
-          <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + techList.length * COL_MIN_WIDTH }}>
-            <TimeAxis />
-            {techList.map((tech) => (
-              <TechColumn
-                key={tech.id}
-                tech={tech}
-                services={byTech[tech.id] || []}
-                onEdit={onEdit}
-              />
-            ))}
-          </div>
+        <div className="flex" style={{ maxHeight: '70vh' }}>
+          <UnassignedRail services={unassignedInRail} onEdit={onEdit} />
+          {techList.length === 0 ? (
+            <div className="flex-1 text-ink-secondary text-center py-16 text-13">
+              No technicians scheduled for this day.
+            </div>
+          ) : (
+            <div className="overflow-auto flex-1">
+              <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + techList.length * COL_MIN_WIDTH }}>
+                <TimeAxis />
+                {techList.map((tech) => (
+                  <TechColumn
+                    key={tech.id}
+                    tech={tech}
+                    services={byTech[tech.id] || []}
+                    onEdit={onEdit}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </DndContext>
       {busy && (
