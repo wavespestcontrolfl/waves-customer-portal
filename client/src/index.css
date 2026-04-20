@@ -4,6 +4,8 @@
 @import './styles/buttons.css';
 @import './styles/tokens.css';
 @import './styles/theme-square.css';
+@import './styles/customer-tokens.css';
+@import './styles/customer-portal.css';
 
 @tailwind base;
 @tailwind components;

@@ -1,0 +1,94 @@
+/*
+ * Customer portal design tokens.
+ *
+ * Scoped to the customer-facing surfaces (LoginPage, PortalPage, token flows).
+ * Admin portal has its own Tailwind-based token system and is untouched.
+ *
+ * Palette sourced verbatim from wavespestcontrol.com brand kit
+ * (mirrored in client/src/theme-brand.js). Names are role-based so pages can
+ * consume them without knowing the underlying hex:
+ *
+ *   --ink    → deep navy (PMS 2766, #1B2C5B) — headers, body-strong, borders
+ *   --tide   → brand blue (PMS 2925, #009CDE) — display headlines, active/live, links
+ *   --gold   → brand gold (#FFD700)           — primary CTA fill, gamification
+ *   --coral  → brand red (PMS 186, #C8102E)   — urgent/attention, used sparingly
+ *
+ * Fonts (Anton / Montserrat / Inter / JetBrains Mono) are loaded in
+ * client/index.html, so this file only references them, it does not import.
+ */
+
+:root {
+  /* ── Surfaces ── */
+  --wp-cream:         #FBF8EE;   /* page ground — warm coastal off-white */
+  --wp-cream-soft:    #F6F2E4;   /* sunken / row alt */
+  --wp-surface:       #FFFFFF;   /* card / sheet */
+  --wp-surface-mute:  #F1F5F9;   /* disabled fills, input idle bg */
+
+  /* ── Ink (text + structural) ── */
+  --wp-ink:           #1B2C5B;   /* blueDeeper — strongest, headings, primary border */
+  --wp-ink-body:      #334155;   /* slate-700 — body copy */
+  --wp-ink-muted:     #64748B;   /* slate-500 — captions, meta */
+  --wp-ink-faint:     #94A3B8;   /* slate-400 — dividers, placeholders */
+
+  /* ── Brand accents (4 roles) ── */
+  --wp-tide:          #009CDE;   /* wavesBlue — display headlines, links, live state */
+  --wp-tide-ink:      #065A8C;   /* blueDark — tide-on-light alt, hover text */
+  --wp-tide-wash:     #E3F5FD;   /* blueLight — hover fills, soft wash */
+  --wp-tide-surface:  #F0F7FC;   /* blueSurface — inset panel bg */
+
+  --wp-gold:          #FFD700;   /* primary CTA fill, tier gold */
+  --wp-gold-hover:    #FFF176;
+  --wp-gold-wash:     #FFFBE6;   /* banner tint */
+
+  --wp-coral:         #C8102E;   /* urgent / attention */
+  --wp-coral-wash:    #FFEBEE;   /* error panel bg */
+
+  /* ── Status (semantic, distinct from brand) ── */
+  --wp-success:       #16A34A;
+  --wp-success-wash:  #DCFCE7;
+  --wp-warn:          #F59E0B;
+  --wp-warn-wash:     #FEF3C7;
+
+  /* ── Radius ── */
+  --wp-r-sm:   6px;
+  --wp-r-md:   10px;
+  --wp-r-lg:   14px;
+  --wp-r-xl:   20px;     /* card default */
+  --wp-r-2xl:  28px;     /* hero card */
+  --wp-r-pill: 9999px;
+
+  /* ── Shadows ── */
+  --wp-shadow-1:   0 1px 2px rgba(27,44,91,0.04), 0 1px 3px rgba(27,44,91,0.06);
+  --wp-shadow-2:   0 6px 16px -4px rgba(27,44,91,0.08), 0 2px 6px -2px rgba(27,44,91,0.05);
+  --wp-shadow-3:   0 20px 40px -12px rgba(27,44,91,0.18);
+  --wp-shadow-focus: 0 0 0 3px rgba(0,156,222,0.20);
+
+  /* ── Primary-CTA brand shadow (Astro .btn 3D offset identity — restricted to
+        the primary CTA, flat everywhere else) ── */
+  --wp-shadow-cta-rest:   4px 4px 0 var(--wp-ink);
+  --wp-shadow-cta-hover:  6px 6px 0 var(--wp-ink);
+  --wp-shadow-cta-active: 1px 1px 0 var(--wp-ink);
+
+  /* ── Typography stacks (loaded in client/index.html) ── */
+  --wp-font-display: 'Anton', 'Luckiest Guy', cursive;
+  --wp-font-heading: 'Montserrat', 'Inter', system-ui, sans-serif;
+  --wp-font-body:    'Inter', system-ui, sans-serif;
+  --wp-font-mono:    'JetBrains Mono', ui-monospace, monospace;
+
+  /* ── Type scale (px, mobile-first) ── */
+  --wp-fs-caption: 11px;   /* uppercase labels */
+  --wp-fs-meta:    12px;   /* meta rows */
+  --wp-fs-sm:      13px;
+  --wp-fs-base:    15px;   /* body default — lifted from 14 for readability */
+  --wp-fs-md:      17px;
+  --wp-fs-lg:      20px;
+  --wp-fs-xl:      24px;
+  --wp-fs-2xl:     32px;   /* big numeric / date */
+  --wp-fs-display: 40px;   /* Anton wordmark on auth / hero */
+
+  /* ── Motion ── */
+  --wp-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --wp-dur-fast:  120ms;
+  --wp-dur:       180ms;
+  --wp-dur-slow:  320ms;
+}
