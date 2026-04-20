@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import AddressAutocomplete from '../AddressAutocomplete';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -126,9 +127,6 @@ const HIDDEN_SERVICE_NAMES = new Set([
 
 
 const FREQUENCIES = [
-  { value: 'daily', label: 'Every day' },
-  { value: 'weekly', label: 'Every week' },
-  { value: 'biweekly', label: 'Every 2 weeks' },
   { value: 'monthly', label: 'Monthly' },
   { value: 'bimonthly', label: 'Every 2 months' },
   { value: 'quarterly', label: 'Quarterly' },
@@ -234,6 +232,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [discountAmount, setDiscountAmount] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
   const [discountPresetId, setDiscountPresetId] = useState('');
+  const [discountSearch, setDiscountSearch] = useState('');
+
+  const filteredDiscounts = useMemo(() => {
+    const q = discountSearch.trim().toLowerCase();
+    if (!q) return discountPresets;
+    return discountPresets.filter((d) => (d.name || '').toLowerCase().includes(q));
+  }, [discountPresets, discountSearch]);
+
+  const selectedDiscountLabel = useMemo(() => {
+    if (!discountPresetId) return '';
+    if (discountPresetId === 'custom') return 'Custom amount';
+    const d = discountPresets.find((x) => String(x.id) === String(discountPresetId));
+    if (!d) return '';
+    const amt = d.discount_type === 'percentage'
+      ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
+      : `$${Number(d.amount).toFixed(2)}`;
+    return `${d.icon ? d.icon + ' ' : ''}${d.name} — ${amt}`;
+  }, [discountPresetId, discountPresets]);
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
@@ -493,11 +509,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div><label style={labelStyle}>First Name</label><input value={quickAdd.firstName} onChange={e => setQuickAdd(q => ({ ...q, firstName: e.target.value }))} style={inputStyle} /></div>
                     <div><label style={labelStyle}>Last Name</label><input value={quickAdd.lastName} onChange={e => setQuickAdd(q => ({ ...q, lastName: e.target.value }))} style={inputStyle} /></div>
                   </div>
-                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>Phone</label><input value={quickAdd.phone} onChange={e => setQuickAdd(q => ({ ...q, phone: e.target.value }))} style={inputStyle} placeholder="(941) 555-1234" /></div>
-                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>Address</label><input value={quickAdd.address} onChange={e => setQuickAdd(q => ({ ...q, address: e.target.value }))} style={inputStyle} /></div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 8, marginBottom: 8 }}>
-                    <div><label style={labelStyle}>City</label><input value={quickAdd.city} onChange={e => setQuickAdd(q => ({ ...q, city: e.target.value }))} style={inputStyle} /></div>
-                    <div><label style={labelStyle}>ZIP</label><input value={quickAdd.zip} onChange={e => setQuickAdd(q => ({ ...q, zip: e.target.value }))} style={inputStyle} /></div>
+                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>Phone</label><input value={quickAdd.phone} onChange={e => setQuickAdd(q => ({ ...q, phone: e.target.value }))} style={inputStyle} /></div>
+                  <div style={{ marginBottom: 8 }}>
+                    <label style={labelStyle}>Address</label>
+                    <AddressAutocomplete
+                      value={quickAdd.address}
+                      onChange={(val) => setQuickAdd(q => ({ ...q, address: val }))}
+                      onSelect={(parts) => setQuickAdd(q => ({
+                        ...q,
+                        address: parts.line1 || parts.formatted || '',
+                        city: parts.city || q.city,
+                        zip: parts.zip || q.zip,
+                      }))}
+                      style={inputStyle}
+                      placeholder=""
+                    />
                   </div>
                   <button onClick={handleQuickAdd} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%' }}>Add customer</button>
                 </div>
@@ -640,15 +666,48 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               )}
               <div style={{ marginBottom: 8 }}>
                 <label style={labelStyle}>Manual Discount (optional)</label>
-                <select value={discountPresetId} onChange={e => applyDiscountPreset(e.target.value)} style={inputStyle}>
-                  <option value="">None</option>
-                  {discountPresets.map(d => (
-                    <option key={d.id} value={d.id}>
-                      {d.icon ? `${d.icon} ` : ''}{d.name} — {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
-                    </option>
-                  ))}
-                  <option value="custom">Custom…</option>
-                </select>
+                {discountPresetId ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 10, background: D.card, borderRadius: 8, border: `1px solid ${D.border}` }}>
+                    <span style={{ flex: 1, fontSize: 14, color: '#18181B', fontWeight: 500 }}>{selectedDiscountLabel}</span>
+                    <button
+                      type="button"
+                      onClick={() => { applyDiscountPreset(''); setDiscountSearch(''); }}
+                      style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 32, minHeight: 32 }}
+                    >✕</button>
+                  </div>
+                ) : (
+                  <div>
+                    <input
+                      type="text"
+                      value={discountSearch}
+                      onChange={(e) => setDiscountSearch(e.target.value)}
+                      placeholder="Search discounts…"
+                      style={inputStyle}
+                    />
+                    {discountSearch.trim().length > 0 && (
+                      <div style={{ marginTop: 8, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                        {filteredDiscounts.map((d) => (
+                          <div
+                            key={d.id}
+                            onClick={() => { applyDiscountPreset(d.id); setDiscountSearch(''); }}
+                            className="waves-sq-row"
+                            style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
+                          >
+                            <span style={{ flex: 1, fontWeight: 500 }}>{d.icon ? `${d.icon} ` : ''}{d.name}</span>
+                            <span style={{ fontSize: 12, color: D.muted, whiteSpace: 'nowrap' }}>
+                              {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
+                            </span>
+                          </div>
+                        ))}
+                        <div
+                          onClick={() => { applyDiscountPreset('custom'); setDiscountSearch(''); }}
+                          className="waves-sq-row"
+                          style={{ padding: '12px 14px', cursor: 'pointer', fontSize: 14, color: D.text, minHeight: 48, display: 'flex', alignItems: 'center', fontWeight: 500 }}
+                        >Custom amount…</div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               {discountPresetId === 'custom' && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
