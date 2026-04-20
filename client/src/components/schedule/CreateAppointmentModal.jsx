@@ -525,7 +525,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         {/* Section 3: Date, Time & Tech */}
         <div style={sectionStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date, time & tech</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date</div>
             {selectedCustomer && selectedService && (
               <button
                 onClick={handleFindTimes}
@@ -620,10 +620,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             )}
           </div>
 
-          {/* Recurring */}
+        </div>
+
+        {/* Section 3b: Recurring — its own section below Date */}
+        <div style={sectionStyle}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44, marginBottom: isRecurring ? 8 : 0 }}>
             <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.teal }} />
-            <span style={{ fontSize: 13, color: D.text }}>Recurring</span>
+            <span style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Recurring</span>
           </label>
           {isRecurring && (
             <div>
@@ -723,20 +726,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
         {/* Section 4: Notes & Confirm */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Notes & confirm</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Notes</div>
           <div style={{ marginBottom: 10 }}>
             <label style={labelStyle}>Customer Notes</label>
-            <textarea value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} placeholder="Notes visible to customer..." style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
+            <textarea value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
           <div style={{ marginBottom: 10 }}>
             <label style={{ ...labelStyle, color: D.amber }}>Internal Notes (Admin only)</label>
-            <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} placeholder="Internal notes..." style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
+            <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
           <div style={{ marginBottom: 12 }}>
             <label style={labelStyle}>Price</label>
             <div style={{ position: 'relative' }}>
               <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 14 }}>$</span>
-              <input type="number" value={price} onChange={e => setPrice(e.target.value)} style={{ ...inputStyle, paddingLeft: 28 }} placeholder="0.00" />
+              <input type="number" value={price} onChange={e => setPrice(e.target.value)} style={{ ...inputStyle, paddingLeft: 28 }} />
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 14 }}>
