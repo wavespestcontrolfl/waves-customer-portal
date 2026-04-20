@@ -5,7 +5,7 @@
 // Endpoints used (already exist):
 //   PUT  /admin/schedule/:id/assign         { technicianId }
 //   POST /admin/dispatch/:id/reschedule     { newDate, newWindow, reasonCode, reasonText, notifyCustomer }
-import { useMemo, useState, useCallback } from 'react';
+import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import {
   DndContext,
   PointerSensor,
@@ -197,7 +197,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
   );
 }
 
-function SlotDroppable({ techId, slotIdx }) {
+function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   const slotMin = DAY_START_HOUR * 60 + slotIdx * SLOT_MIN;
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${techId}-${slotIdx}`,
@@ -207,7 +207,8 @@ function SlotDroppable({ techId, slotIdx }) {
   return (
     <div
       ref={setNodeRef}
-      className={cn('transition-colors', isOver && 'bg-zinc-100')}
+      onPointerDown={onCreateStart ? (e) => onCreateStart(e, slotIdx) : undefined}
+      className={cn('transition-colors', isOver && 'bg-zinc-100', onCreateStart && 'cursor-crosshair')}
       style={{
         height: SLOT_HEIGHT,
         borderTop: `1px solid ${isHour ? '#E4E4E7' : '#F4F4F5'}`,
@@ -216,7 +217,51 @@ function SlotDroppable({ techId, slotIdx }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit }) {
+function TechColumn({ tech, services, onEdit, onCreateSlot }) {
+  const gridRef = useRef(null);
+  const [sel, setSel] = useState(null); // { startIdx, endIdx }
+  const selRef = useRef(sel);
+  useEffect(() => { selRef.current = sel; }, [sel]);
+
+  const handleCreateStart = useCallback((e, slotIdx) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const startIdx = slotIdx;
+    setSel({ startIdx, endIdx: startIdx });
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+
+    const onMove = (ev) => {
+      const rect = gridEl.getBoundingClientRect();
+      const y = Math.max(0, Math.min(rect.height - 1, ev.clientY - rect.top));
+      const idx = Math.min(SLOT_COUNT - 1, Math.max(0, Math.floor(y / SLOT_HEIGHT)));
+      setSel((prev) => (prev ? { ...prev, endIdx: idx } : prev));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      const cur = selRef.current;
+      setSel(null);
+      if (!cur) return;
+      const lo = Math.min(cur.startIdx, cur.endIdx);
+      const hi = Math.max(cur.startIdx, cur.endIdx);
+      const startMin = DAY_START_HOUR * 60 + lo * SLOT_MIN;
+      const endMin = DAY_START_HOUR * 60 + (hi + 1) * SLOT_MIN;
+      onCreateSlot?.({
+        techId: tech.id,
+        windowStart: minutesToHHMM(startMin),
+        windowEnd: minutesToHHMM(endMin),
+      });
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [onCreateSlot, tech.id]);
+
+  const selTop = sel ? Math.min(sel.startIdx, sel.endIdx) * SLOT_HEIGHT : 0;
+  const selHeight = sel
+    ? (Math.max(sel.startIdx, sel.endIdx) - Math.min(sel.startIdx, sel.endIdx) + 1) * SLOT_HEIGHT
+    : 0;
+
   return (
     <div
       className="flex-1 relative"
@@ -231,10 +276,21 @@ function TechColumn({ tech, services, onEdit }) {
           {services.length}
         </span>
       </div>
-      <div className="relative" style={{ height: GRID_HEIGHT }}>
+      <div ref={gridRef} className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => (
-          <SlotDroppable key={idx} techId={tech.id} slotIdx={idx} />
+          <SlotDroppable
+            key={idx}
+            techId={tech.id}
+            slotIdx={idx}
+            onCreateStart={onCreateSlot ? handleCreateStart : undefined}
+          />
         ))}
+        {sel && (
+          <div
+            className="absolute left-0 right-0 bg-zinc-900/10 border border-zinc-900 rounded-sm pointer-events-none z-20"
+            style={{ top: selTop, height: selHeight }}
+          />
+        )}
         {(() => {
           const lanes = computeLanes(services);
           return services.map((svc) => {
@@ -400,7 +456,11 @@ export default function TimeGridDay({
   technicians,
   onEdit,
   onChange,
+  onCreateSlot,
 }) {
+  const handleCreateSlot = useCallback((slot) => {
+    onCreateSlot?.({ date, ...slot });
+  }, [onCreateSlot, date]);
   const [optimistic, setOptimistic] = useState(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(null);
@@ -578,6 +638,7 @@ export default function TimeGridDay({
                     tech={tech}
                     services={byTech[tech.id] || []}
                     onEdit={onEdit}
+                    onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
                   />
                 ))}
               </div>

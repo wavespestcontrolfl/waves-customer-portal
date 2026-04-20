@@ -135,7 +135,7 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 12, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 
-export default function CreateAppointmentModal({ defaultDate, onClose, onCreated }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultTechId, onClose, onCreated }) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
 
@@ -169,9 +169,9 @@ export default function CreateAppointmentModal({ defaultDate, onClose, onCreated
     ? `${_rounded.getFullYear()}-${String(_rounded.getMonth() + 1).padStart(2, '0')}-${String(_rounded.getDate()).padStart(2, '0')}`
     : _ymd;
   const [apptDate, setApptDate] = useState(defaultDate || _defaultDate);
-  const [windowStart, setWindowStart] = useState(_hhmm);
-  const [techMode, setTechMode] = useState('auto');
-  const [techId, setTechId] = useState('');
+  const [windowStart, setWindowStart] = useState(defaultWindowStart || _hhmm);
+  const [techMode, setTechMode] = useState(defaultTechId ? 'choose' : 'auto');
+  const [techId, setTechId] = useState(defaultTechId || '');
   const [techs, setTechs] = useState([]);
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurringFreq, setRecurringFreq] = useState('quarterly');

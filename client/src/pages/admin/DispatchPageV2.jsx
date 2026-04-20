@@ -570,6 +570,7 @@ export default function DispatchPageV2() {
   const [editingService, setEditingService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
+  const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
 
@@ -774,9 +775,15 @@ export default function DispatchPageV2() {
 
       {showNewAppt && (
         <CreateAppointmentModal
-          defaultDate={date}
-          onClose={() => setShowNewAppt(false)}
-          onCreated={(appt) => { setShowNewAppt(false); fetchSchedule(appt.scheduledDate || date); }}
+          defaultDate={newApptDefaults?.date || date}
+          defaultWindowStart={newApptDefaults?.windowStart}
+          defaultTechId={newApptDefaults?.techId}
+          onClose={() => { setShowNewAppt(false); setNewApptDefaults(null); }}
+          onCreated={(appt) => {
+            setShowNewAppt(false);
+            setNewApptDefaults(null);
+            fetchSchedule(appt.scheduledDate || date);
+          }}
         />
       )}
 
@@ -890,6 +897,10 @@ export default function DispatchPageV2() {
               technicians={technicians}
               onEdit={(svc) => setEditingService(svc)}
               onChange={() => fetchSchedule(date)}
+              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, techId });
+                setShowNewAppt(true);
+              }}
             />
           )}
         </>
