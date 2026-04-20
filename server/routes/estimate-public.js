@@ -121,11 +121,14 @@ function renderPage(token, estimate, estData) {
   const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
 
   const inputs = estData?.inputs || {};
-  const homeSqFt = Number(inputs.homeSqFt) || null;
-  const lotSqFt = Number(inputs.lotSqFt) || null;
+  const homeSqFt = Number(inputs.homeSqFt) || Number(estResult?.property?.footprint * (Number(inputs.stories) || 1)) || null;
+  const lotSqFt = Number(inputs.lotSqFt) || Number(estResult?.property?.lotSqFt) || null;
+  const hasLawn = recurring.some((s) => String(s.name || '').toLowerCase().includes('lawn'));
+  const lawnSqFt = hasLawn ? (Number(inputs.lawnSqFt) || Number(estResult?.property?.lawnSqFt) || null) : null;
   const propertyLine = [
-    homeSqFt ? `${homeSqFt.toLocaleString()} sq ft home` : null,
-    lotSqFt ? `${lotSqFt.toLocaleString()} sq ft lot` : null,
+    homeSqFt ? `${Math.round(homeSqFt).toLocaleString()} sq ft home` : null,
+    lotSqFt ? `${Math.round(lotSqFt).toLocaleString()} sq ft lot` : null,
+    lawnSqFt ? `${Math.round(lawnSqFt).toLocaleString()} sq ft treatable lawn` : null,
   ].filter(Boolean).join(' \u00B7 ');
 
   const showUpsell = recurring.length === 1;
