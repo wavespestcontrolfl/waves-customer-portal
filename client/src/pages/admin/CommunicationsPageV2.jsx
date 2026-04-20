@@ -620,17 +620,19 @@ function SmsTab() {
           <div className="text-11 uppercase tracking-label text-ink-secondary">
             Send SMS
           </div>
-          <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={toggleAiAutoReply}
+            disabled={togglingAi}
+            aria-pressed={aiAutoReply}
+            className="flex items-center gap-2 min-h-[44px] md:min-h-0 px-1 md:px-0 u-focus-ring"
+          >
             <span className="text-11 text-ink-secondary">AI Auto-Reply</span>
-            <button
-              type="button"
-              onClick={toggleAiAutoReply}
-              disabled={togglingAi}
+            <span
               className={cn(
-                'h-6 w-10 rounded-full border-hairline transition-colors relative u-focus-ring',
+                'h-6 w-10 rounded-full border-hairline transition-colors relative',
                 aiAutoReply ? 'bg-zinc-900 border-zinc-900' : 'bg-white border-zinc-300',
               )}
-              aria-pressed={aiAutoReply}
             >
               <span
                 className={cn(
@@ -638,8 +640,8 @@ function SmsTab() {
                   aiAutoReply ? 'left-5 bg-white' : 'left-0.5 bg-zinc-400',
                 )}
               />
-            </button>
-          </div>
+            </span>
+          </button>
         </div>
 
         {/* PR 4 — thread-reply lock banner */}
@@ -652,7 +654,7 @@ function SmsTab() {
             <button
               type="button"
               onClick={() => setThreadLock(null)}
-              className="text-11 text-ink-secondary underline hover:text-zinc-900 u-focus-ring"
+              className="text-13 md:text-11 min-h-[44px] md:min-h-0 inline-flex items-center px-2 text-ink-secondary underline hover:text-zinc-900 u-focus-ring"
             >Override</button>
           </div>
         )}
@@ -665,7 +667,7 @@ function SmsTab() {
           onChange={(e) => setFromNumber(e.target.value)}
           disabled={!!threadLock}
           className={cn(
-            'w-full bg-white border-hairline rounded-sm py-2 px-3 text-13 text-zinc-900 mb-3',
+            'w-full bg-white border-hairline rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 mb-3 min-h-[44px] md:min-h-0',
             'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900',
             threadLock ? 'border-zinc-900 opacity-60 cursor-not-allowed' : 'border-zinc-300',
           )}
@@ -712,7 +714,7 @@ function SmsTab() {
             }
           }}
           className={cn(
-            'w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900',
+            'w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0',
             'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900',
             toResults.length ? 'mb-0' : 'mb-3',
           )}
@@ -762,7 +764,7 @@ function SmsTab() {
           value={msgBody}
           onChange={(e) => setMsgBody(e.target.value)}
           rows={3}
-          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
         />
         <div className="text-right text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
           {msgBody.length} chars
@@ -774,7 +776,7 @@ function SmsTab() {
               key={t.label}
               type="button"
               onClick={() => setMsgBody(t.body.slice(0, 160))}
-              className="bg-white border-hairline border-zinc-300 rounded-xs text-11 px-2.5 py-1 text-ink-secondary hover:bg-zinc-50 u-focus-ring"
+              className="bg-white border-hairline border-zinc-300 rounded-xs text-13 md:text-11 px-3 md:px-2.5 py-2 md:py-1 min-h-[44px] md:min-h-0 inline-flex items-center text-ink-secondary hover:bg-zinc-50 u-focus-ring"
             >
               {t.label}
             </button>
@@ -818,7 +820,7 @@ function SmsTab() {
             type="button"
             onClick={() => { setSmsView('threads'); setActiveThread(null); }}
             className={cn(
-              'px-3.5 py-1 text-12 uppercase tracking-label rounded-xs u-focus-ring transition-colors',
+              'px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors',
               (smsView === 'threads' || smsView === 'conversation')
                 ? 'bg-zinc-900 text-white'
                 : 'text-ink-secondary hover:bg-zinc-50',
@@ -830,7 +832,7 @@ function SmsTab() {
             type="button"
             onClick={() => { setSmsView('log'); setActiveThread(null); }}
             className={cn(
-              'px-3.5 py-1 text-12 uppercase tracking-label rounded-xs u-focus-ring transition-colors',
+              'px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors',
               smsView === 'log'
                 ? 'bg-zinc-900 text-white'
                 : 'text-ink-secondary hover:bg-zinc-50',
@@ -848,7 +850,7 @@ function SmsTab() {
           placeholder="Search all SMS by name, phone, or message text…"
           value={smsSearch}
           onChange={(e) => setSmsSearch(e.target.value)}
-          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
         />
       </div>
 
@@ -887,7 +889,7 @@ function SmsTab() {
                   type="button"
                   onClick={() => setStatusFilter(chip.key)}
                   className={cn(
-                    'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-12 font-medium border-hairline u-focus-ring',
+                    'inline-flex items-center gap-1.5 px-3 py-2.5 md:py-1 min-h-[44px] md:min-h-0 rounded-full text-14 md:text-12 font-medium border-hairline u-focus-ring',
                     active
                       ? 'bg-zinc-900 text-white border-zinc-900'
                       : 'bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900 hover:text-zinc-900',
@@ -996,7 +998,7 @@ function SmsTab() {
                             blockNumber(t.contactPhone, `Blocked from SMS inbox${t.customerName ? ` (${t.customerName})` : ''}`);
                           }
                         }}
-                        className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
+                        className="text-13 md:text-11 px-3 md:px-2 py-2 md:py-1 min-h-[44px] md:min-h-0 inline-flex items-center border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
                         title={isBlocked ? 'Unblock this number' : 'Block this number'}
                       >{isBlocked ? 'Unblock' : 'Block'}</button>
                     </div>
@@ -1016,7 +1018,7 @@ function SmsTab() {
               <select
                 value={dirFilter}
                 onChange={(e) => setDirFilter(e.target.value)}
-                className="bg-white border-hairline border-zinc-300 rounded-xs py-1 px-2 text-12 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                className="bg-white border-hairline border-zinc-300 rounded-xs py-2 md:py-1 px-2 text-16 md:text-12 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900"
               >
                 <option value="all">All directions</option>
                 <option value="inbound">Inbound</option>
@@ -1025,7 +1027,7 @@ function SmsTab() {
               <select
                 value={typeFilter}
                 onChange={(e) => setTypeFilter(e.target.value)}
-                className="bg-white border-hairline border-zinc-300 rounded-xs py-1 px-2 text-12 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                className="bg-white border-hairline border-zinc-300 rounded-xs py-2 md:py-1 px-2 text-16 md:text-12 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900"
               >
                 <option value="all">All types</option>
                 {messageTypes.map((t) => (
@@ -1077,7 +1079,7 @@ export default function CommunicationsPageV2() {
   }, [newsletterEnabled]);
 
   return (
-    <div className="bg-surface-page min-h-full p-6 font-sans text-zinc-900 max-w-[1200px]">
+    <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900 max-w-[1200px]">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
           <div className="text-11 uppercase tracking-label text-ink-secondary">
@@ -1098,7 +1100,7 @@ export default function CommunicationsPageV2() {
             type="button"
             onClick={() => setTab(t.key)}
             className={cn(
-              'h-9 px-4 text-12 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
+              'h-11 md:h-9 px-4 text-14 md:text-12 normal-case md:uppercase font-medium tracking-normal md:tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
               tab === t.key
                 ? 'bg-zinc-900 text-white border-zinc-900'
                 : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
