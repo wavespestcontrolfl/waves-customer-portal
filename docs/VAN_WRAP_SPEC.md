@@ -1,3 +1,16 @@
+---
+# Van Wrap Color Extraction Spec
+
+**Scope:** This document is specifically for extracting and documenting colors from the Waves physical van wrap (Pantone references, vinyl swatch samples). It is NOT the brand style guide.
+
+**For brand tokens (colors, fonts, buttons, spacing):**
+- AUTHORITATIVE source: `wavespestcontrol-astro/docs/STYLE_GUIDE.md` (Astro repo)
+- React portal mirror: `client/src/theme-brand.js`
+- See `docs/design/waves-customer-facing-design-brief.md` for intent
+
+Editing tokens in this file does nothing. Edit the Astro repo STYLE_GUIDE.md, then port to theme-brand.js.
+---
+
 # Waves Pest Control — Style Guide
 
 **Source:** Van-wrap spec (Pantone-sampled, 2026-04-17). Site tokens updated to match.

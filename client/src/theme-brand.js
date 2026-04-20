@@ -1,11 +1,31 @@
-// Waves Pest Control — Brand Kit Tokens
-// Mirror of wavespestcontrol.com (Astro) design tokens — source: wavespestcontrol-astro/docs/STYLE_GUIDE.md
-// Last sync: 2026-04-18 — unified .btn system (primary/info/secondary/nav/utility/tertiary),
-// uppercase default, section heading+subhead pattern, FAQ/review card/form-header tokens.
+// ============================================================
+// WAVES BRAND TOKENS — MIRROR OF ASTRO SITE
+// ============================================================
 //
-// Drop-in replacement for ../theme: same shape (COLORS/FONTS/BUTTON_BASE/TIER/HALFTONE_*),
-// so any page that currently imports `{ COLORS as B, FONTS, BUTTON_BASE, ... } from '../theme'`
-// can swap to `'../theme-brand'` without touching JSX.
+// AUTHORITY FLOW:  Astro repo (upstream) → theme-brand.js (downstream)
+// SOURCE OF TRUTH: wavespestcontrol-astro/docs/STYLE_GUIDE.md
+//                  wavespestcontrol-astro/src/styles/global.css (@theme block)
+//
+// DO NOT EDIT TOKENS HERE WITHOUT UPDATING ASTRO FIRST.
+// This file is a hand-ported read-model. Editing it directly
+// silently forks the brand from the marketing site.
+//
+// HOW TO UPDATE (correct order):
+//   1. Edit Astro repo first (STYLE_GUIDE.md + global.css @theme)
+//   2. Ship the Astro PR
+//   3. Port the new values into this file
+//   4. Bump the "Last sync" line below with today's date
+//   5. Add one-line changelog entry under the Last sync line
+//   6. Ship this PR (or bundle into the same PR as the Astro change)
+//
+// Shape-compatible drop-in for legacy '../theme' imports.
+// Pages can swap '../theme' → '../theme-brand' without JSX changes.
+//
+// Last sync: 2026-04-18
+// Changelog:
+//   2026-04-18 — unified .btn system (gold/navy/info/nav variants)
+//   [add new entries above, most recent first]
+// ============================================================
 
 // =============================================================================
 // 1. COLORS — brand palette (van-wrap Pantone spec) + button system colors + slate neutrals

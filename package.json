@@ -23,6 +23,7 @@
     "test:contracts": "node server/contract-tests/index.js",
     "test:contracts:list": "node server/contract-tests/index.js --list",
     "models:check": "node scripts/check-models.js",
+    "check-brand-sync": "node scripts/check-brand-sync.js",
     "seed:pricing": "node scripts/seed-local-pricing.js",
     "verify:blog-schema": "node packages/blog-schema/scripts/verify-vendor.js",
     "sync:blog-schema": "node packages/blog-schema/scripts/sync-from-astro.js"
