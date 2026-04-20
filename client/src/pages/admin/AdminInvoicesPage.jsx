@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { launchTapToPay } from '../../lib/tapToPay';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -254,7 +255,10 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
               )}
               {inv.status !== 'paid' && inv.status !== 'void' && (
                 <button
-                  onClick={() => { window.location.href = `waves-tap://charge?invoice_id=${inv.id}&amount=${Math.round(Number(inv.total) * 100)}`; }}
+                  onClick={async () => {
+                    try { await launchTapToPay(inv.id); }
+                    catch (e) { showToast(`Tap to Pay failed: ${e.message}`); }
+                  }}
                   style={sBtn(D.purple, D.white, isMobile)}
                   title="Open Waves Tech app to tap customer's card/phone"
                 >Charge in person</button>

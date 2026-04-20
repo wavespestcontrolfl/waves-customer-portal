@@ -7,6 +7,7 @@
 
 import { useState } from 'react';
 import { TIMEZONE } from '../../lib/timezone';
+import { launchTapToPay } from '../../lib/tapToPay';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -85,10 +86,11 @@ export default function MobileAppointmentDetailSheet({
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
 
-  // Mints an invoice for this visit pre-completion, then deep-links to the
-  // Stripe Terminal / Tap-to-Pay iOS shell so the tech can charge the card at
-  // the door before finishing the service report. The completion handler will
-  // later reuse this invoice rather than cutting a second one.
+  // Mints an invoice for this visit pre-completion, then hands off to the
+  // Stripe Terminal / Tap-to-Pay iOS shell via a signed handoff JWT so the
+  // tech can charge the card at the door before finishing the service report.
+  // The completion handler will later reuse this invoice rather than cutting
+  // a second one.
   async function handleChargeNow() {
     if (charging) return;
     setCharging(true);
@@ -104,8 +106,7 @@ export default function MobileAppointmentDetailSheet({
       if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
       const data = await r.json();
       if (!data.invoiceId) throw new Error('No invoice returned');
-      const cents = Math.round(Number(data.total) * 100);
-      window.location.href = `waves-tap://charge?invoice_id=${data.invoiceId}&amount=${cents}`;
+      await launchTapToPay(data.invoiceId);
     } catch (e) {
       setChargeError(e.message || 'Failed to start charge');
       setCharging(false);

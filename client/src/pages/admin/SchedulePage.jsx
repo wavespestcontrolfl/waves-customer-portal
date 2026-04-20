@@ -9,6 +9,7 @@ import CreateAppointmentModal from '../../components/schedule/CreateAppointmentM
 import ScheduleIntelligenceBar from '../../components/admin/ScheduleIntelligenceBar';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
+import { launchTapToPay } from '../../lib/tapToPay';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -1704,8 +1705,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       const r = await onSubmit(service.id, body);
       setSuccess(true);
       if (charge && r?.invoiceId && r?.invoiceTotal != null) {
-        const cents = Math.round(Number(r.invoiceTotal) * 100);
-        window.location.href = `waves-tap://charge?invoice_id=${r.invoiceId}&amount=${cents}`;
+        try { await launchTapToPay(r.invoiceId); }
+        catch (tapErr) { alert(`Service completed but Tap to Pay handoff failed: ${tapErr.message}`); }
       } else if (charge && service.waveguardTier) {
         // Covered by WaveGuard monthly autopay — no invoice to charge against.
         // Silent success; the completion toast is enough.
