@@ -136,6 +136,7 @@ router.get('/', async (req, res, next) => {
       return {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
+        estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,

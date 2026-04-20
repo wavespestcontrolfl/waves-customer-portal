@@ -11,6 +11,7 @@ import TimeGridDay from '../../components/schedule/TimeGridDay';
 import TimeGridDays from '../../components/schedule/TimeGridDays';
 import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
 import MobileDispatchList from '../../components/schedule/MobileDispatchList';
+import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import ScheduleIntelligenceBarV2 from '../../components/admin/ScheduleIntelligenceBarV2';
@@ -660,6 +661,7 @@ export default function DispatchPageV2() {
   const [completingService, setCompletingService] = useState(null);
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
+  const [detailService, setDetailService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
@@ -969,7 +971,7 @@ export default function DispatchPageV2() {
         <MobileDispatchList
           mode="week"
           date={date}
-          onEdit={(svc) => setEditingService(svc)}
+          onEdit={(svc) => setDetailService(svc)}
         />
       )}
       {viewMode === 'week' && !isMobile && (
@@ -1158,7 +1160,7 @@ export default function DispatchPageV2() {
               mode="day"
               date={date}
               services={services}
-              onEdit={(svc) => setEditingService(svc)}
+              onEdit={(svc) => setDetailService(svc)}
             />
           </div>
         </>
@@ -1192,6 +1194,14 @@ export default function DispatchPageV2() {
         <ProtocolPanel
           service={protocolService}
           onClose={() => setProtocolService(null)}
+        />
+      )}
+      {detailService && (
+        <MobileAppointmentDetailSheet
+          service={detailService}
+          onClose={() => setDetailService(null)}
+          onEdit={(svc) => { setDetailService(null); setEditingService(svc); }}
+          onReviewCheckout={(svc) => { setDetailService(null); setCompletingService(svc); }}
         />
       )}
     </div>
