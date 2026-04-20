@@ -981,7 +981,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
         background: D.card, borderRadius: 14, border: `1px solid ${D.border}`,
         width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto', padding: 24,
       }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Edit Service</div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 4 }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Edit Service</div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              flexShrink: 0, width: 32, height: 32, borderRadius: 8,
+              border: `1px solid ${D.border}`, background: D.card, color: D.muted,
+              fontSize: 18, lineHeight: 1, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            ×
+          </button>
+        </div>
         <div style={{ fontSize: 13, color: D.muted, marginBottom: 18 }}>
           {service.customerName} — {service.address || ''}
         </div>
@@ -1056,20 +1071,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
           )}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginBottom: 12 }}>
-          <div>
-            <label style={labelStyle}>Technician</label>
-            <select value={form.technicianId} onChange={e => update('technicianId', e.target.value)} style={inputStyle}>
-              <option value="">— Unassigned —</option>
-              {(technicians || []).map(t => (
-                <option key={t.id} value={t.id}>{t.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label style={labelStyle}>Route #</label>
-            <input type="number" value={form.routeOrder} onChange={e => update('routeOrder', e.target.value)} style={inputStyle} />
-          </div>
+        <div style={{ marginBottom: 12 }}>
+          <label style={labelStyle}>Technician</label>
+          <select value={form.technicianId} onChange={e => update('technicianId', e.target.value)} style={inputStyle}>
+            <option value="">— Unassigned —</option>
+            {(technicians || []).map(t => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
         </div>
 
         <div style={{ marginBottom: 12 }}>
