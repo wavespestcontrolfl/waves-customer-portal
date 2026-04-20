@@ -140,6 +140,7 @@ const limiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.max,
   message: { error: 'Too many requests, please try again later.' },
+  skip: () => process.env.NODE_ENV !== 'production',
 });
 app.use('/api/', limiter);
 
