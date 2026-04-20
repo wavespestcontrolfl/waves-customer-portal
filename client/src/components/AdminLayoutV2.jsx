@@ -12,6 +12,7 @@
  */
 import { useState, useEffect, useRef } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
+import { cn } from './ui/cn';
 import {
   LayoutDashboard,
   Users,
@@ -43,11 +44,27 @@ import {
   Settings,
   LogOut,
   Menu,
+  Home,
   X,
 } from 'lucide-react';
 import useIsMobile from '../hooks/useIsMobile';
 import NotificationBell from './NotificationBell';
 import GlobalCommandPalette from './admin/GlobalCommandPalette';
+
+const MOBILE_TABS = [
+  { path: '/admin/dashboard', icon: Home, label: 'Dashboard' },
+  { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
+  { path: '/admin/customers', icon: Users, label: 'Customers' },
+  { path: '/admin/communications', icon: MessageSquare, label: 'Messages' },
+  { path: '/admin/more', icon: Menu, label: 'More' },
+];
+
+function isTabActive(pathname, tabPath) {
+  if (pathname === tabPath) return true;
+  if (tabPath === '/admin/dashboard' && pathname === '/admin') return true;
+  if (pathname.startsWith(tabPath + '/')) return true;
+  return false;
+}
 
 const NAV_SECTIONS = [
   { section: 'Operations', items: [
@@ -166,13 +183,15 @@ export default function AdminLayoutV2() {
             top: 0,
             left: 0,
             right: 0,
-            height: 52,
+            height: 'calc(52px + env(safe-area-inset-top))',
             background: 'var(--surface-primary)',
             borderBottom: '1px solid var(--border-default)',
             display: 'flex',
             alignItems: 'center',
             gap: 10,
-            padding: '0 12px',
+            paddingTop: 'env(safe-area-inset-top)',
+            paddingLeft: 'max(8px, env(safe-area-inset-left))',
+            paddingRight: 'max(8px, env(safe-area-inset-right))',
             zIndex: 90,
           }}
         >
@@ -184,14 +203,16 @@ export default function AdminLayoutV2() {
               background: 'none',
               border: 'none',
               color: 'var(--text-primary)',
-              padding: 8,
+              width: 44,
+              height: 44,
               borderRadius: 6,
               display: 'flex',
               alignItems: 'center',
+              justifyContent: 'center',
               cursor: 'pointer',
             }}
           >
-            <Menu size={20} strokeWidth={1.75} />
+            <Menu size={22} strokeWidth={1.75} />
           </button>
           <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
           <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', flex: 1 }}>
@@ -266,14 +287,16 @@ export default function AdminLayoutV2() {
                 background: 'none',
                 border: 'none',
                 color: 'var(--text-secondary)',
-                padding: 6,
-                borderRadius: 4,
+                width: 44,
+                height: 44,
+                borderRadius: 6,
                 display: 'flex',
                 alignItems: 'center',
+                justifyContent: 'center',
                 cursor: 'pointer',
               }}
             >
-              <X size={18} strokeWidth={1.75} />
+              <X size={20} strokeWidth={1.75} />
             </button>
           ) : (
             <NotificationBell type="admin" />
@@ -346,12 +369,13 @@ export default function AdminLayoutV2() {
                       display: 'flex',
                       alignItems: 'center',
                       gap: 10,
-                      padding: '7px 12px',
+                      padding: isMobile ? '10px 12px' : '7px 12px',
+                      minHeight: isMobile ? 44 : undefined,
                       borderRadius: 6,
                       marginBottom: 1,
                       background: isActive ? 'var(--surface-active)' : 'transparent',
                       color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      fontSize: 13,
+                      fontSize: isMobile ? 14 : 13,
                       fontWeight: isActive ? 500 : 400,
                       textDecoration: 'none',
                       transition: 'background 0.1s ease',
@@ -449,9 +473,11 @@ export default function AdminLayoutV2() {
       <div
         style={{
           flex: 1,
+          minWidth: 0,
+          maxWidth: '100%',
           marginLeft: isMobile ? 0 : 220,
-          paddingTop: isMobile ? 52 + 16 : 24,
-          paddingBottom: 24,
+          paddingTop: isMobile ? 'calc(52px + env(safe-area-inset-top) + 16px)' : 24,
+          paddingBottom: isMobile ? 'calc(56px + env(safe-area-inset-bottom) + 16px)' : 24,
           paddingLeft: isMobile ? 16 : 28,
           paddingRight: isMobile ? 16 : 28,
           minHeight: '100vh',
@@ -461,6 +487,56 @@ export default function AdminLayoutV2() {
       >
         <Outlet />
       </div>
+
+      {/* Mobile bottom tab bar */}
+      {isMobile && (
+        <nav
+          aria-label="Primary"
+          style={{
+            position: 'fixed',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            background: 'var(--surface-primary)',
+            borderTop: '1px solid var(--border-default)',
+            paddingBottom: 'env(safe-area-inset-bottom)',
+            zIndex: 95,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'stretch', height: 56 }}>
+            {MOBILE_TABS.map(({ path, icon: Icon, label }) => {
+              const active = isTabActive(location.pathname, path);
+              return (
+                <Link
+                  key={path}
+                  to={path}
+                  aria-current={active ? 'page' : undefined}
+                  className={cn(
+                    'flex-1 flex flex-col items-center justify-center gap-[3px] select-none no-underline',
+                  )}
+                  style={{
+                    color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+                    minHeight: 44,
+                  }}
+                >
+                  <Icon size={22} strokeWidth={active ? 2.25 : 1.75} />
+                  <span
+                    style={{
+                      fontSize: 10,
+                      lineHeight: 1,
+                      letterSpacing: '0.08em',
+                      fontWeight: 500,
+                      textTransform: 'uppercase',
+                    }}
+                  >
+                    {label}
+                  </span>
+                </Link>
+              );
+            })}
+          </div>
+        </nav>
+      )}
 
       {/* Global ⌘K palette */}
       <GlobalCommandPalette ref={paletteRef} />

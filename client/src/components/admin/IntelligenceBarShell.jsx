@@ -177,7 +177,7 @@ export default function IntelligenceBarShell({
     <div className={cn('bg-white border-hairline border-zinc-200 rounded-sm mb-4 overflow-hidden', bodyClassName)}>
       {/* Command bar */}
       <div className="px-4 py-3 flex items-center gap-3 flex-wrap">
-        <div className="flex-1 min-w-[220px] relative">
+        <div className="flex-1 min-w-0 sm:min-w-[220px] relative">
           <input
             ref={inputRef}
             value={prompt}
@@ -185,7 +185,7 @@ export default function IntelligenceBarShell({
             onKeyDown={handleKeyDown}
             onFocus={() => setExpanded(true)}
             placeholder={placeholder}
-            className="w-full h-9 pl-3 pr-20 bg-white border-hairline border-zinc-200 rounded-sm text-13 text-ink-primary placeholder-ink-tertiary focus:outline-none focus:border-zinc-900 u-focus-ring"
+            className="w-full h-11 sm:h-9 pl-3 pr-20 bg-white border-hairline border-zinc-200 rounded-sm text-16 sm:text-13 text-ink-primary placeholder-ink-tertiary focus:outline-none focus:border-zinc-900 u-focus-ring"
           />
           <div className="absolute right-1.5 top-1/2 -translate-y-1/2">
             {loading ? (
@@ -195,10 +195,9 @@ export default function IntelligenceBarShell({
                 onClick={() => submit()}
                 disabled={!prompt.trim()}
                 className={cn(
-                  'h-6 px-3 text-11 uppercase tracking-label font-medium rounded-xs u-focus-ring transition-colors',
-                  prompt.trim()
-                    ? 'bg-zinc-900 text-white hover:bg-zinc-800'
-                    : 'bg-transparent text-ink-tertiary opacity-40'
+                  'h-8 sm:h-6 px-3 text-11 uppercase tracking-label font-medium rounded-xs u-focus-ring transition-colors',
+                  'bg-zinc-900 text-white hover:bg-zinc-800',
+                  !prompt.trim() && 'cursor-not-allowed'
                 )}
               >
                 {askLabel}

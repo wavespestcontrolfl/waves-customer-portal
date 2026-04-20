@@ -171,12 +171,15 @@ function PipelineCardV2({ customer, onDelete }) {
 }
 
 // --- Pipeline column (V2) ---
-function PipelineColumnV2({ stage, customers, onDeleteCustomer }) {
+function PipelineColumnV2({ stage, customers, onDeleteCustomer, fullWidth = false }) {
   const monthlyTotal = customers.reduce((sum, c) => sum + (c.monthlyRate || 0), 0);
   const isAlertStage = stage.key === 'at_risk' || stage.key === 'churned';
   return (
     <div
-      className="flex-shrink-0 w-[260px] bg-white border border-hairline border-zinc-200 rounded-md flex flex-col"
+      className={cn(
+        'bg-white border border-hairline border-zinc-200 rounded-md flex flex-col',
+        fullWidth ? 'w-full' : 'flex-shrink-0 w-[260px]'
+      )}
       style={{ maxHeight: 'calc(100vh - 220px)' }}
     >
       <div className="px-3.5 py-3 border-b border-hairline border-zinc-200 flex justify-between items-center">
@@ -372,7 +375,7 @@ const VIEWS = [
 
 function ViewToggleV2({ view, onChange }) {
   return (
-    <div className="inline-flex bg-white border-hairline border-zinc-200 rounded-sm overflow-hidden">
+    <div className="flex w-full sm:inline-flex sm:w-auto bg-white border-hairline border-zinc-200 rounded-sm overflow-hidden">
       {VIEWS.map((v) => {
         const active = v.key === view;
         return (
@@ -381,7 +384,7 @@ function ViewToggleV2({ view, onChange }) {
             type="button"
             onClick={() => onChange(v.key)}
             className={cn(
-              'u-label px-3 h-8 border-r-hairline border-zinc-200 last:border-r-0 transition-colors u-focus-ring',
+              'flex-1 sm:flex-none u-label px-2 sm:px-3 h-11 sm:h-8 border-r-hairline border-zinc-200 last:border-r-0 transition-colors u-focus-ring',
               active
                 ? 'bg-zinc-900 text-white'
                 : 'bg-white text-ink-secondary hover:bg-zinc-50'
@@ -448,8 +451,10 @@ export default function CustomersPageV2() {
   const [sortBy, setSortBy] = useState('lastName');
   const [sortDir, setSortDir] = useState('asc');
   const [showAddModal, setShowAddModal] = useState(false);
-  const [filterCity, setFilterCity] = useState('all');
   const [filterHasBalance, setFilterHasBalance] = useState(false);
+  const [filterLastVisited, setFilterLastVisited] = useState('all'); // all | 30 | 90 | 180 | never
+  const [filterCards, setFilterCards] = useState('all'); // all | has | none
+  const [pipelineStageMobile, setPipelineStageMobile] = useState('new_lead');
   const [showFilters, setShowFilters] = useState(false);
   const [selected360Id, setSelected360Id] = useState(() => {
     const id = searchParams.get('customerId');
@@ -491,7 +496,6 @@ export default function CustomersPageV2() {
     if (search.trim()) params.set('search', search.trim());
     if (filterStage !== 'all') params.set('stage', filterStage);
     if (filterTier !== 'all') params.set('tier', filterTier);
-    if (filterCity !== 'all') params.set('city', filterCity);
     params.set('page', String(pg));
     params.set('limit', '100');
     adminFetch(`/admin/customers?${params.toString()}`)
@@ -510,7 +514,7 @@ export default function CustomersPageV2() {
       .catch(() => {});
   };
 
-  useEffect(() => { setPage(1); loadCustomers(1); /* eslint-disable-next-line */ }, [filterStage, filterTier, filterCity]);
+  useEffect(() => { setPage(1); loadCustomers(1); /* eslint-disable-next-line */ }, [filterStage, filterTier]);
   useEffect(() => { if (view === 'pipeline') loadPipeline(); /* eslint-disable-next-line */ }, [view]);
   useEffect(() => {
     const t = setTimeout(() => { setPage(1); loadCustomers(1); }, 300);
@@ -551,7 +555,26 @@ export default function CustomersPageV2() {
     return 0;
   });
 
-  const filteredSorted = filterHasBalance ? sorted.filter((c) => (c.balanceOwed || 0) > 0) : sorted;
+  const daysSince = (iso) => {
+    if (!iso) return null;
+    const ms = Date.now() - new Date(iso).getTime();
+    if (Number.isNaN(ms)) return null;
+    return Math.floor(ms / 86400000);
+  };
+  const filteredSorted = sorted.filter((c) => {
+    if (filterHasBalance && !((c.balanceOwed || 0) > 0)) return false;
+    if (filterCards === 'has' && !((c.cardsOnFile || 0) > 0)) return false;
+    if (filterCards === 'none' && (c.cardsOnFile || 0) > 0) return false;
+    if (filterLastVisited !== 'all') {
+      const d = daysSince(c.lastServiceDate);
+      if (filterLastVisited === 'never') { if (d !== null) return false; }
+      else {
+        const max = parseInt(filterLastVisited, 10);
+        if (d === null || d > max) return false;
+      }
+    }
+    return true;
+  });
   const totalCount = customers.length;
 
   // Pipeline groups (for rendering V1 PipelineColumn)
@@ -585,9 +608,10 @@ export default function CustomersPageV2() {
   const TABLE_COLS = '2fr 0.3fr 0.6fr 0.9fr';
 
   const activeFilterCount =
-    (filterCity !== 'all' ? 1 : 0) +
     (filterTier !== 'all' ? 1 : 0) +
     (filterStage !== 'all' ? 1 : 0) +
+    (filterLastVisited !== 'all' ? 1 : 0) +
+    (filterCards !== 'all' ? 1 : 0) +
     (filterHasBalance ? 1 : 0);
 
   return (
@@ -596,25 +620,28 @@ export default function CustomersPageV2() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div className="flex items-baseline gap-3">
           <h1 className="text-22 font-medium tracking-h1 text-ink-primary">Customers</h1>
-          <span className="text-13 text-ink-tertiary u-nums">{totalCount}</span>
         </div>
-        <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
           <ViewToggleV2 view={view} onChange={setView} />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search customers…"
-            className="block bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-3 w-56 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-          />
-          <Button variant="primary" onClick={() => setShowAddModal(true)}>
-            + Add Customer
-          </Button>
+          {view === 'directory' && (
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search customers…"
+              className="hidden sm:block bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-3 w-56 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
+            />
+          )}
+          {view === 'directory' && (
+            <Button variant="primary" onClick={() => setShowAddModal(true)} className="hidden sm:inline-flex">
+              + Add Customer
+            </Button>
+          )}
           {view === 'directory' && (
             <button
               type="button"
               onClick={() => setShowFilters(true)}
-              className="inline-flex items-center gap-1.5 h-9 px-3 u-label border-hairline border-zinc-300 rounded-sm text-ink-secondary bg-white hover:bg-zinc-50"
+              className="hidden sm:inline-flex items-center gap-1.5 h-9 px-3 u-label border-hairline border-zinc-300 rounded-sm text-ink-secondary bg-white hover:bg-zinc-50"
             >
               <Filter size={14} strokeWidth={1.75} />
               Filter
@@ -628,8 +655,78 @@ export default function CustomersPageV2() {
         </div>
       </div>
 
-      {/* Intelligence Bar (V2 monochrome) */}
-      <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
+      {/* Waves Intelligent + context-specific mobile stack */}
+      <div className="sm:hidden mb-3">
+        <h2 className="text-14 font-medium text-ink-primary mb-1.5">Waves AI</h2>
+        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} placeholder="" />
+        {view === 'directory' && (
+          <>
+            <h2 className="text-14 font-medium text-ink-primary mt-4 mb-1.5">Search customers</h2>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder=""
+              className="block w-full bg-white text-16 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
+            />
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowAddModal(true)}
+                className="inline-flex items-center justify-center u-label px-3 h-11 bg-zinc-900 text-white border-hairline border-zinc-900 rounded-sm transition-colors u-focus-ring"
+              >
+                + Add Customer
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowFilters(true)}
+                className="inline-flex items-center justify-center gap-1.5 u-label px-3 h-11 bg-white text-ink-secondary border-hairline border-zinc-300 rounded-sm transition-colors u-focus-ring"
+              >
+                <Filter size={14} strokeWidth={1.75} />
+                Filter
+                {activeFilterCount > 0 && (
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-zinc-900 text-white u-nums text-11">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </button>
+            </div>
+          </>
+        )}
+        {view === 'pipeline' && (
+          <>
+            <h2 className="text-14 font-medium text-ink-primary mt-4 mb-1.5">Stage</h2>
+            <div className="grid grid-cols-2 gap-1.5">
+              {KANBAN_STAGES.map((key) => {
+                const stage = STAGE_MAP[key];
+                const count = (pipelineGroups[key] || []).length;
+                const active = pipelineStageMobile === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setPipelineStageMobile(key)}
+                    className={cn(
+                      'inline-flex items-center justify-between gap-2 u-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring',
+                      active
+                        ? 'bg-zinc-900 text-white border-zinc-900'
+                        : 'bg-white text-ink-secondary border-zinc-300'
+                    )}
+                  >
+                    <span className="truncate">{stage.label}</span>
+                    <span className={cn('u-nums text-11 flex-shrink-0', active ? 'text-white/80' : 'text-ink-tertiary')}>{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Desktop Intelligence Bar (V2 monochrome) */}
+      <div className="hidden sm:block">
+        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
+      </div>
 
       {/* ======================= DIRECTORY ======================= */}
       {view === 'directory' && (
@@ -645,34 +742,36 @@ export default function CustomersPageV2() {
             </DialogHeader>
             <DialogBody>
               <div className="mb-4">
-                <div className="u-label text-ink-tertiary mb-1.5">City</div>
+                <div className="u-label text-ink-tertiary mb-1.5">Last visited</div>
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  {['all', 'Lakewood Ranch', 'Parrish', 'Sarasota', 'Venice', 'Bradenton'].map((city) => (
-                    <FilterPill key={city} active={filterCity === city} onClick={() => setFilterCity(city)}>
-                      {city === 'all' ? 'All Cities' : city}
+                  {[
+                    { v: 'all', l: 'Any' },
+                    { v: '30', l: '≤ 30 days' },
+                    { v: '90', l: '≤ 90 days' },
+                    { v: '180', l: '≤ 180 days' },
+                    { v: 'never', l: 'Never' },
+                  ].map((o) => (
+                    <FilterPill key={o.v} active={filterLastVisited === o.v} onClick={() => setFilterLastVisited(o.v)}>
+                      {o.l}
                     </FilterPill>
                   ))}
                 </div>
               </div>
               <div className="mb-4">
-                <div className="u-label text-ink-tertiary mb-1.5">Tier</div>
+                <div className="u-label text-ink-tertiary mb-1.5">Cards on file</div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
-                    { v: 'all', l: 'All Tiers' },
-                    { v: 'Platinum', l: 'Platinum' },
-                    { v: 'Gold', l: 'Gold' },
-                    { v: 'Silver', l: 'Silver' },
-                    { v: 'Bronze', l: 'Bronze' },
-                    { v: 'One-Time', l: 'One-Time' },
-                    { v: 'none', l: 'No Plan' },
-                  ].map((t) => (
-                    <FilterPill key={t.v} active={filterTier === t.v} onClick={() => setFilterTier(t.v)}>
-                      {t.l}
+                    { v: 'all', l: 'Any' },
+                    { v: 'has', l: 'Has card' },
+                    { v: 'none', l: 'No card' },
+                  ].map((o) => (
+                    <FilterPill key={o.v} active={filterCards === o.v} onClick={() => setFilterCards(o.v)}>
+                      {o.l}
                     </FilterPill>
                   ))}
                 </div>
               </div>
-              <div>
+              <div className="mb-4">
                 <div className="u-label text-ink-tertiary mb-1.5">Status</div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
@@ -690,14 +789,33 @@ export default function CustomersPageV2() {
                   </FilterPill>
                 </div>
               </div>
+              <div>
+                <div className="u-label text-ink-tertiary mb-1.5">Tier</div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: 'all', l: 'All Tiers' },
+                    { v: 'Platinum', l: 'Platinum' },
+                    { v: 'Gold', l: 'Gold' },
+                    { v: 'Silver', l: 'Silver' },
+                    { v: 'Bronze', l: 'Bronze' },
+                    { v: 'One-Time', l: 'One-Time' },
+                    { v: 'none', l: 'No Plan' },
+                  ].map((t) => (
+                    <FilterPill key={t.v} active={filterTier === t.v} onClick={() => setFilterTier(t.v)}>
+                      {t.l}
+                    </FilterPill>
+                  ))}
+                </div>
+              </div>
             </DialogBody>
             <DialogFooter>
               <Button
                 variant="secondary"
                 onClick={() => {
-                  setFilterCity('all');
                   setFilterTier('all');
                   setFilterStage('all');
+                  setFilterLastVisited('all');
+                  setFilterCards('all');
                   setFilterHasBalance(false);
                 }}
               >
@@ -735,7 +853,7 @@ export default function CustomersPageV2() {
               return (
                 <div key={c.id} className="mb-2">
                   {isMobile ? (() => {
-                    const displayTier = c.tier && c.tier !== 'Bronze' ? c.tier : null;
+                    const addr = (c.address || '').replace(/^,\s*|\s*,\s*$/g, '').trim();
                     return (
                       <div
                         onClick={() => setSelected360Id(c.id)}
@@ -747,19 +865,26 @@ export default function CustomersPageV2() {
                           <div className="text-14 font-medium text-ink-primary truncate">
                             {c.firstName} {c.lastName}
                           </div>
-                          <div className="text-11 text-ink-tertiary truncate flex items-center gap-1.5">
-                            {c.city && <span className="truncate">{c.city}</span>}
-                            {c.city && displayTier && <span className="text-zinc-300">·</span>}
-                            {displayTier && <span>{displayTier}</span>}
-                            {!c.city && !displayTier && <span>—</span>}
-                          </div>
+                          {addr ? (
+                            <a
+                              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-11 text-ink-tertiary truncate no-underline hover:text-ink-primary"
+                            >
+                              {addr}
+                            </a>
+                          ) : (
+                            <div className="text-11 text-ink-tertiary">—</div>
+                          )}
                         </div>
                         {c.phone && (
                           <a
                             href={`tel:${c.phone}`}
                             onClick={(e) => e.stopPropagation()}
                             aria-label="Call"
-                            className="inline-flex items-center justify-center h-9 w-9 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white"
+                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
                           >
                             <Phone size={16} strokeWidth={1.75} />
                           </a>
@@ -769,7 +894,7 @@ export default function CustomersPageV2() {
                             href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
                             onClick={(e) => e.stopPropagation()}
                             aria-label="SMS"
-                            className="inline-flex items-center justify-center h-9 w-9 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white"
+                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
                           >
                             <MessageSquare size={16} strokeWidth={1.75} />
                           </a>
@@ -934,19 +1059,31 @@ export default function CustomersPageV2() {
 
       {/* ======================= PIPELINE (V2 monochrome) ======================= */}
       {view === 'pipeline' && (
-        <div className="flex gap-3 overflow-x-auto pb-3 mt-4" style={{ WebkitOverflowScrolling: 'touch' }}>
-          {KANBAN_STAGES.map((key) => {
-            const stage = STAGE_MAP[key];
-            return (
-              <PipelineColumnV2
-                key={key}
-                stage={stage}
-                customers={pipelineGroups[key] || []}
-                onDeleteCustomer={() => { loadPipeline(); loadCustomers(); }}
-              />
-            );
-          })}
-        </div>
+        <>
+          {/* Mobile: single selected stage, full-width */}
+          <div className="sm:hidden mt-4">
+            <PipelineColumnV2
+              stage={STAGE_MAP[pipelineStageMobile]}
+              customers={pipelineGroups[pipelineStageMobile] || []}
+              onDeleteCustomer={() => { loadPipeline(); loadCustomers(); }}
+              fullWidth
+            />
+          </div>
+          {/* Desktop: horizontal scrolling board */}
+          <div className="hidden sm:flex gap-3 overflow-x-auto pb-3 mt-4" style={{ WebkitOverflowScrolling: 'touch' }}>
+            {KANBAN_STAGES.map((key) => {
+              const stage = STAGE_MAP[key];
+              return (
+                <PipelineColumnV2
+                  key={key}
+                  stage={stage}
+                  customers={pipelineGroups[key] || []}
+                  onDeleteCustomer={() => { loadPipeline(); loadCustomers(); }}
+                />
+              );
+            })}
+          </div>
+        </>
       )}
 
       {/* ======================= HEALTH ======================= */}

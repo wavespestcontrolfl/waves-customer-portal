@@ -62,11 +62,11 @@ function CustomerRow({ customer, onSelect }) {
   );
 }
 
-export default function IntelligenceBarV2({ onSelectCustomer }) {
+export default function IntelligenceBarV2({ onSelectCustomer, placeholder }) {
   return (
     <IntelligenceBarShell
       fallbackActions={FALLBACK_ACTIONS}
-      placeholder="Ask anything about your customers, schedule, or revenue…"
+      placeholder={placeholder ?? 'Ask anything about your customers, schedule, or revenue…'}
       responseSlot={(data) => {
         const list = data?.customers || data?.overdue_customers;
         if (!list?.length) return null;

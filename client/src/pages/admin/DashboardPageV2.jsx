@@ -88,10 +88,10 @@ export default function DashboardPageV2() {
       .catch((err) => console.error('[dashboard-v2] core-kpis failed', err));
   }, [period]);
 
-  if (loading) return <div className="p-16 text-center text-13 text-ink-secondary">Loading dashboard…</div>;
+  if (loading) return <div className="p-16 text-center text-14 sm:text-13 text-ink-secondary">Loading dashboard…</div>;
   if (!data || data.error || !data.kpis) {
     return (
-      <div className="p-16 text-center text-13 text-alert-fg">
+      <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
         Failed to load dashboard. <a href="/admin/login" className="underline">Try logging in again</a>
       </div>
     );
@@ -108,7 +108,7 @@ export default function DashboardPageV2() {
   ];
 
   return (
-    <div className="font-sans bg-surface-page min-h-full p-6 text-zinc-900">
+    <div className="font-sans bg-surface-page min-h-full p-3 sm:p-6 text-zinc-900">
       {/* Header */}
       <header className="mb-5">
         <div className="flex items-start justify-between flex-wrap gap-3">
@@ -161,7 +161,7 @@ export default function DashboardPageV2() {
                 key={p.id}
                 onClick={() => setPeriod(p.id)}
                 className={cn(
-                  'h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors',
+                  'h-11 sm:h-7 px-4 sm:px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors',
                   period === p.id
                     ? 'bg-zinc-900 text-white'
                     : 'bg-white text-ink-secondary hover:bg-zinc-50'
@@ -174,7 +174,7 @@ export default function DashboardPageV2() {
         </CardHeader>
         <CardBody>
           {!kpis ? (
-            <div className="py-10 text-center text-13 text-ink-secondary">Loading KPIs…</div>
+            <div className="py-10 text-center text-14 sm:text-13 text-ink-secondary">Loading KPIs…</div>
           ) : (
             <>
               <SectionLabel>Operations</SectionLabel>
@@ -357,7 +357,7 @@ export default function DashboardPageV2() {
           </CardHeader>
           <CardBody className="p-0">
             {data.todaysSchedule.length === 0 ? (
-              <div className="py-10 text-center text-13 text-ink-secondary">
+              <div className="py-10 text-center text-14 sm:text-13 text-ink-secondary">
                 No services scheduled today
               </div>
             ) : (
@@ -386,14 +386,14 @@ export default function DashboardPageV2() {
           </CardHeader>
           <CardBody className="p-0">
             {data.recentActivity.length === 0 ? (
-              <div className="py-10 text-center text-13 text-ink-secondary">No recent activity</div>
+              <div className="py-10 text-center text-14 sm:text-13 text-ink-secondary">No recent activity</div>
             ) : (
               <ul className="divide-y divide-zinc-200 max-h-[400px] overflow-y-auto">
                 {data.recentActivity.map((a) => (
                   <li key={a.id} className="flex items-start gap-3 px-4 py-3">
                     <span className="u-dot u-dot--filled mt-[7px] flex-shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <div className="text-13 leading-snug">{a.description}</div>
+                      <div className="text-14 sm:text-13 leading-snug">{a.description}</div>
                     </div>
                     <span className="text-11 text-ink-tertiary flex-shrink-0 whitespace-nowrap">{timeAgo(a.createdAt)}</span>
                   </li>

@@ -117,6 +117,7 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT NULL) as last_rating"),
       db.raw("(SELECT COALESCE(SUM(total), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
       db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY created_at DESC LIMIT 1) as health_score"),
+      db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
     );
 
     if (search) {
@@ -179,6 +180,7 @@ router.get('/', async (req, res, next) => {
         onboardingComplete: c.onboarding_complete,
         balanceOwed: parseFloat(c.balance_owed || 0),
         healthScore: c.health_score != null ? parseInt(c.health_score) : null,
+        cardsOnFile: parseInt(c.cards_on_file || 0),
       })),
       total: totalCount, page, limit,
       totalPages: Math.max(1, Math.ceil(totalCount / limit)),
