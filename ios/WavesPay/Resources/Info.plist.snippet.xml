@@ -1,0 +1,34 @@
+<!--
+  Drop these entries into the Info.plist Xcode generates when you create
+  the WavesPay project. You can also edit Info.plist directly in Xcode's
+  project navigator (right-click → Open As → Source Code) and paste them
+  inside the outer <dict>.
+-->
+
+<!-- Custom URL scheme: wavespay://collect?t=<jwt> -->
+<key>CFBundleURLTypes</key>
+<array>
+    <dict>
+        <key>CFBundleURLName</key>
+        <string>com.wavespestcontrol.wavespay</string>
+        <key>CFBundleURLSchemes</key>
+        <array>
+            <string>wavespay</string>
+        </array>
+    </dict>
+</array>
+
+<!-- Tap to Pay on iPhone permissions -->
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>Tap to Pay on iPhone requires location access to authenticate card-present transactions.</string>
+
+<!-- Optional: override API base URL for dev/staging. Leave unset in Release. -->
+<key>WAVESPAY_API_BASE</key>
+<string>https://portal.wavespestcontrol.com/api</string>
+
+<!-- Optional: Stripe Terminal location ID. Set per environment. -->
+<key>STRIPE_TERMINAL_LOCATION_ID</key>
+<string></string>
+
+<!-- Minimum iOS version — Tap to Pay on iPhone needs 16.7+ -->
+<!-- (Set this in Xcode's deployment target, not in Info.plist.) -->

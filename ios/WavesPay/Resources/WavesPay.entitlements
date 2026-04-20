@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Tap to Pay on iPhone requires this entitlement. You must request it
+      from Apple before it will work — the entitlement key on its own is
+      rejected at build time until Apple approves your request.
+
+      Request form:
+        https://developer.apple.com/contact/request/tap-to-pay-on-iphone
+    -->
+    <key>com.apple.developer.proximity-reader.payment.acceptance</key>
+    <true/>
+</dict>
+</plist>
