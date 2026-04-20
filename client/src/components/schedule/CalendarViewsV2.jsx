@@ -81,13 +81,17 @@ function formatDateISO(d) { return d.toISOString().split('T')[0]; }
 
 // ─── VIEW MODE SELECTOR ──────────────────────────────────────────
 
-export function ViewModeSelectorV2({ viewMode, onViewModeChange }) {
-  const modes = [
-    { id: 'day', label: 'Day' },
-    { id: '5day', label: '5-Day' },
-    { id: 'week', label: 'Week' },
-    { id: 'month', label: 'Month' },
-  ];
+const ALL_MODES = [
+  { id: 'day', label: 'Day' },
+  { id: '5day', label: '5-Day' },
+  { id: 'week', label: 'Week' },
+  { id: 'month', label: 'Month' },
+];
+
+export function ViewModeSelectorV2({ viewMode, onViewModeChange, allowed }) {
+  const modes = allowed
+    ? ALL_MODES.filter((m) => allowed.includes(m.id))
+    : ALL_MODES;
 
   return (
     <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden bg-white">

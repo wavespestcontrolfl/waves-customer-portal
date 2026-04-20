@@ -9,6 +9,7 @@ import ProtocolReferenceTabV2 from './ProtocolReferenceTabV2';
 import { ViewModeSelectorV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
 import TimeGridDay from '../../components/schedule/TimeGridDay';
 import TimeGridDays from '../../components/schedule/TimeGridDays';
+import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import ScheduleIntelligenceBarV2 from '../../components/admin/ScheduleIntelligenceBarV2';
@@ -685,6 +686,13 @@ export default function DispatchPageV2() {
 
   useEffect(() => { fetchSchedule(date); }, [date, fetchSchedule]);
 
+  // Mobile only exposes Day + Week. Snap back if user loaded with 5day/month.
+  useEffect(() => {
+    if (isMobile && (viewMode === '5day' || viewMode === 'month')) {
+      setViewMode('week');
+    }
+  }, [isMobile, viewMode]);
+
   const syncDispatchAI = async () => {
     setSyncing(true); setSyncMsg('');
     try {
@@ -933,13 +941,11 @@ export default function DispatchPageV2() {
         </div>
       )}
 
-      {/* Mobile-only ViewMode selector — always visible so user can switch from week/month back to day */}
-      <div className="md:hidden mb-3 grid grid-cols-4 gap-1.5">
+      {/* Mobile-only ViewMode selector — Day + Week only on phones. */}
+      <div className="md:hidden mb-3 grid grid-cols-2 gap-1.5">
         {[
           { id: 'day', label: 'Day' },
-          { id: '5day', label: '5-Day' },
           { id: 'week', label: 'Week' },
-          { id: 'month', label: 'Month' },
         ].map((m) => (
           <button
             key={m.id}
@@ -969,12 +975,20 @@ export default function DispatchPageV2() {
       )}
 
       {/* Week / 5-Day = Square-style time grid (drag to reschedule). Month = summary grid. */}
-      {viewMode === 'week' && (
+      {viewMode === 'week' && isMobile && (
+        <MobileWeekGrid
+          date={date}
+          onEdit={(svc) => setEditingService(svc)}
+          onChange={() => fetchSchedule(date)}
+          onNavigate={(iso) => setDate(iso)}
+        />
+      )}
+      {viewMode === 'week' && !isMobile && (
         <TimeGridDays
           date={date}
           dayCount={7}
           selectedDate={date}
-          hideUnassignedRail={isMobile}
+          hideUnassignedRail={false}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
         />
