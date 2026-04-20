@@ -60,6 +60,7 @@ export default function MobileAppointmentDetailSheet({
   onClose,
   onEdit,
   onReviewCheckout,
+  onMarkPrepaid,
 }) {
   if (!service) return null;
 
@@ -75,6 +76,8 @@ export default function MobileAppointmentDetailSheet({
   // (already paid via the monthly cycle). Surface this so the tech doesn't try
   // to charge them again at the door.
   const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null);
+  const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
+  const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
 
   return (
     <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
@@ -110,15 +113,36 @@ export default function MobileAppointmentDetailSheet({
           className="w-full rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
           style={{ padding: '14px 20px', fontSize: 16 }}
         >
-          {coveredByMembership ? 'Complete visit' : 'Review & checkout'}
+          {coveredByMembership || isPrepaid ? 'Complete visit' : 'Review & checkout'}
         </button>
-        {coveredByMembership && (
+        {coveredByMembership && !isPrepaid && (
           <div
             className="text-ink-secondary"
             style={{ fontSize: 12, marginTop: 8, textAlign: 'center' }}
           >
             Covered by WaveGuard {tierLabel(tier)} — no charge needed
           </div>
+        )}
+        {isPrepaid && (
+          <div
+            className="text-ink-secondary"
+            style={{ fontSize: 12, marginTop: 8, textAlign: 'center' }}
+          >
+            Prepaid ${prepaidAmt.toFixed(2)}
+            {service.prepaidMethod ? ` via ${service.prepaidMethod.replace(/_/g, ' ')}` : ''} — no charge needed
+          </div>
+        )}
+
+        {/* Mark prepaid — only show when not already prepaid and not WG-covered */}
+        {!coveredByMembership && !isPrepaid && (
+          <button
+            type="button"
+            onClick={() => onMarkPrepaid?.(service)}
+            className="w-full rounded-full bg-zinc-100 text-zinc-900 font-medium u-focus-ring"
+            style={{ padding: '12px 20px', fontSize: 14, marginTop: 10 }}
+          >
+            Mark prepaid (cash · Zelle · phone CC)
+          </button>
         )}
 
         {/* Customer */}

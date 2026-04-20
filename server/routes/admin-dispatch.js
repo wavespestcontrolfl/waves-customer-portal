@@ -220,7 +220,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         .first();
       if (existingPaid) alreadyPaid = true;
     } catch (e) { /* non-blocking */ }
-    const shouldInvoice = !alreadyPaid && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
+    // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
+    // and the recorded amount covers the would-be invoice, skip auto-invoicing.
+    const prepaidCovered = svc.prepaid_amount != null
+      && Number(svc.prepaid_amount) > 0
+      && Number(svc.prepaid_amount) >= invoiceAmount;
+    const shouldInvoice = !alreadyPaid && !prepaidCovered && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     const portalUrl = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
 
     let invoiceCreated = false;
@@ -252,6 +257,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             pay_url: payUrl,
           }, fallback);
           await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
+        } else if (prepaidCovered) {
+          const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${svc.service_type} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+          const body = await renderTemplate('service_complete_prepaid', {
+            first_name: svc.first_name || '',
+            service_type: svc.service_type || 'your service',
+            portal_url: portalUrl,
+          }, fallback);
+          await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);

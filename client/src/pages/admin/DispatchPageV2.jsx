@@ -12,6 +12,7 @@ import TimeGridDays from '../../components/schedule/TimeGridDays';
 import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
 import MobileDispatchList from '../../components/schedule/MobileDispatchList';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
+import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import ScheduleIntelligenceBarV2 from '../../components/admin/ScheduleIntelligenceBarV2';
@@ -662,6 +663,7 @@ export default function DispatchPageV2() {
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
   const [detailService, setDetailService] = useState(null);
+  const [prepaidService, setPrepaidService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
@@ -1203,6 +1205,14 @@ export default function DispatchPageV2() {
           onClose={() => setDetailService(null)}
           onEdit={(svc) => { setDetailService(null); setEditingService(svc); }}
           onReviewCheckout={(svc) => { setDetailService(null); setCompletingService(svc); }}
+          onMarkPrepaid={(svc) => { setDetailService(null); setPrepaidService(svc); }}
+        />
+      )}
+      {prepaidService && (
+        <MarkPrepaidModal
+          service={prepaidService}
+          onClose={() => setPrepaidService(null)}
+          onSaved={() => { setPrepaidService(null); fetchSchedule(date); }}
         />
       )}
     </div>

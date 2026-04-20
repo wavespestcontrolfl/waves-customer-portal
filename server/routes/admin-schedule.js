@@ -137,6 +137,9 @@ router.get('/', async (req, res, next) => {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+        prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
+        prepaidMethod: s.prepaid_method || null,
+        prepaidAt: s.prepaid_at || null,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
@@ -729,6 +732,41 @@ router.put('/:id/assign', async (req, res, next) => {
     const tech = await db('technicians').where({ id: technicianId }).first();
     logger.info(`[schedule] Assigned service ${req.params.id} to ${tech?.name || technicianId}`);
     res.json({ success: true, technicianName: tech?.name });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/prepaid — record payment taken in advance
+// (cash at door, phone CC, Zelle, etc.). Completion handler skips auto-invoice
+// when prepaid_amount >= the would-be invoice total.
+router.post('/:id/prepaid', async (req, res, next) => {
+  try {
+    const { amount, method, note } = req.body;
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt < 0) {
+      return res.status(400).json({ error: 'amount must be a non-negative number' });
+    }
+    const updated = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .update({
+        prepaid_amount: amt,
+        prepaid_method: method || null,
+        prepaid_note: note || null,
+        prepaid_at: db.fn.now(),
+      })
+      .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
+    if (!updated.length) return res.status(404).json({ error: 'Scheduled service not found' });
+    logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);
+    res.json({ success: true, ...updated[0] });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/admin/schedule/:id/prepaid — clear a prepayment record
+router.delete('/:id/prepaid', async (req, res, next) => {
+  try {
+    await db('scheduled_services').where({ id: req.params.id }).update({
+      prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
+    });
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 
