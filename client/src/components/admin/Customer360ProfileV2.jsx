@@ -471,7 +471,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                 {c.phone && (
                   <a
                     href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white u-focus-ring"
+                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
                   >
                     Text
                   </a>
@@ -479,7 +479,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                 {c.phone && (
                   <a
                     href={`tel:${c.phone}`}
-                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
                   >
                     Call
                   </a>
