@@ -64,7 +64,7 @@ export default function BadgesPage() {
 
   return (
     <div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: D.heading, marginBottom: 20 }}>Badge Management</div>
+      <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 20px' }}>Badge Management</h1>
 
       {/* Stats */}
       {stats && (

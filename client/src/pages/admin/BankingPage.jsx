@@ -636,7 +636,7 @@ export default function BankingPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Banking & Cash Flow</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Banking & Cash Flow</h1>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {lastSync && (

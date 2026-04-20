@@ -304,9 +304,7 @@ export default function WavesVoiceAgentAdmin() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 28, flexWrap: "wrap", gap: 12 }}>
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.3px" }}>
-              <span style={{ color: "#18181B" }}>Waves</span> Voice Agent
-            </span>
+            <h1 style={{ fontSize: 28, fontWeight: 400, color: "#18181B", margin: 0 }}>Waves Voice Agent</h1>
             <StatusBadge active={agentEnabled} label={agentEnabled ? "Active" : "Off"} />
           </div>
           <div style={{ fontSize: 12, color: "#71717A" }}>

@@ -65,7 +65,7 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <div style={{ fontSize: 28, fontWeight: 700, color: D.heading, marginBottom: 24 }}>Settings</div>
+      <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 24px' }}>Settings</h1>
 
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto' }}>
         {TABS.map(t => (

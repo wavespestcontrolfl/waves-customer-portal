@@ -989,7 +989,7 @@ export default function SEOPage() {
         }
       `}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
-        <div style={{ fontSize: 28, fontWeight: 700, color: D.heading }}>SEO</div>
+        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>SEO</h1>
         <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>wavespestcontrol.com</div>
       </div>
 

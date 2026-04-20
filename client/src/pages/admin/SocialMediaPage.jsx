@@ -58,7 +58,7 @@ export default function SocialMediaPage() {
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Social Media Engine</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Social Media Engine</h1>
         </div>
       </div>
 

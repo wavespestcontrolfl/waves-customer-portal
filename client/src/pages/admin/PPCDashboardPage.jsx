@@ -276,9 +276,7 @@ export default function WavesPPCDashboard() {
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
         <div className="ppc-header-badge" style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
-          <span style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em" }}>
-            <span style={{ color: C.blue }}>Waves</span> PPC Command Center
-          </span>
+          <h1 style={{ fontSize: 28, fontWeight: 400, margin: 0 }}>Waves PPC Command Center</h1>
           <span style={{ padding: "4px 12px", borderRadius: 8, fontSize: 11, fontWeight: 700, background: C.greenGlow, color: C.green }}>
             {activeCampaigns} Active Campaigns
           </span>

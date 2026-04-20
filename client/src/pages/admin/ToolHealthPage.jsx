@@ -74,7 +74,7 @@ export default function ToolHealthPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: D.heading }}>Tool Health</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Tool Health</h1>
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
             Live status of every AI tool across admin, voice, and lead agents.
           </div>

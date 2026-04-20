@@ -42,7 +42,7 @@ export default function AdminInvoicesPage() {
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
         <div>
-          <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: D.heading }}>Invoices</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Invoices</h1>
         </div>
       </div>
 

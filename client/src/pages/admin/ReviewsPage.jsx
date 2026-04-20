@@ -1292,6 +1292,8 @@ export default function ReviewsPage() {
 
   return (
     <div>
+      <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 16px' }}>Reviews</h1>
+
       {/* ====================== INTELLIGENCE BAR ====================== */}
       <SEOIntelligenceBar context="reviews" />
 
