@@ -201,6 +201,60 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     }
   }
 
+  // ── Card-present enrichment (Tap to Pay on iPhone) ─────────
+  //
+  // For card_present PIs the brand/last4/wallet live on the Charge's
+  // payment_method_details, not on the PaymentIntent itself, and Stripe
+  // doesn't include charges in the webhook event payload by default. We
+  // fetch the charge and backfill payment_method / card_brand /
+  // card_last_four on the invoice so the admin portal shows what the
+  // customer actually tapped with (physical card vs Apple Pay wallet).
+  //
+  // Fire-and-forget — the invoice is already marked paid above, enrichment
+  // is display metadata only. A missing charge fetch or a schema change in
+  // Stripe's response should never leave an unpaid invoice.
+  //
+  // Guard on payment_method_types to skip the ACH / online-card paths that
+  // the existing handler below already covers. The tap_to_pay metadata tag
+  // is belt-and-suspenders in case Stripe ever ships a PI with multiple
+  // method types that includes card_present but isn't actually our flow.
+  const isCardPresent =
+    paymentIntent.payment_method_types?.includes('card_present') ||
+    paymentIntent.metadata?.source === 'tap_to_pay';
+  if (isCardPresent && paymentIntent.latest_charge) {
+    try {
+      const stripe = new Stripe(stripeConfig.secretKey);
+      const charge = await stripe.charges.retrieve(paymentIntent.latest_charge);
+      const cp = charge?.payment_method_details?.card_present;
+      if (cp) {
+        // wallet.type: 'apple_pay' | 'google_pay' | null (null = physical
+        // card tapped). We record apple_pay / google_pay verbatim so the
+        // admin portal can show "Apple Pay — Visa •4242" vs plain
+        // "Visa •4242". Default to 'card_present' so we never overwrite
+        // with an empty string.
+        const walletType = cp.wallet?.type || null;
+        const paymentMethod = walletType || 'card_present';
+        const cardBrand = cp.brand || null;           // visa / mastercard / amex / discover / etc
+        const cardLastFour = cp.last4 || null;        // 4 chars; last4 of DPAN for wallets
+
+        await db('invoices')
+          .where({ stripe_payment_intent_id: piId })
+          .update({
+            payment_method: paymentMethod,
+            card_brand: cardBrand,
+            card_last_four: cardLastFour,
+          });
+        logger.info(
+          `[stripe-webhook] card_present enriched PI ${piId}: ${paymentMethod} ${cardBrand || '?'} •${cardLastFour || '????'}`,
+        );
+      } else {
+        logger.warn(`[stripe-webhook] card_present PI ${piId} had no card_present details on charge`);
+      }
+    } catch (err) {
+      logger.error(`[stripe-webhook] card_present enrichment failed for ${piId}: ${err.message}`);
+    }
+  }
+
   // If ACH payment succeeded, resolve any pending ACH failures for this customer
   const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
   if (pmType === 'us_bank_account') {
