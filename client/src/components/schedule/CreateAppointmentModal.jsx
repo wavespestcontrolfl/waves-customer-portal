@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+// Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
 const D = {
-  bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', input: '#FFFFFF',
-  teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B',
-  blue: '#3b82f6', purple: '#7C3AED', gray: '#64748b',
-  text: '#334155', muted: '#64748B', white: '#fff',
+  bg: '#FAFAFA', card: '#FFFFFF', border: '#E4E4E7', input: '#FFFFFF',
+  teal: '#18181B', green: '#18181B', amber: '#71717A', red: '#DC2626',
+  blue: '#18181B', purple: '#18181B', gray: '#71717A',
+  text: '#18181B', muted: '#71717A', white: '#fff',
 };
 
 function adminFetch(path, options = {}) {
@@ -130,9 +131,9 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   return isNaN(d.getTime()) ? base : d;
 }
 
-const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid #CBD5E1`, borderRadius: 8, color: '#0F172A', fontSize: 14, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
-const labelStyle = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 4 };
-const sectionStyle = { background: D.card, borderRadius: 12, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
+const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, outline: 'none', boxSizing: 'border-box', minHeight: 44 };
+const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
+const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultTechId, onClose, onCreated }) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -409,23 +410,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       <div style={modalStyle}>
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: '#0F172A' }}>New Appointment</div>
+          <div style={{ fontSize: 18, fontWeight: 600, color: '#18181B', letterSpacing: '-0.01em' }}>New appointment</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
         </div>
 
         {/* Toast */}
-        {toast && <div style={{ background: `${D.green}22`, border: `1px solid ${D.green}`, borderRadius: 10, padding: '10px 14px', marginBottom: 12, color: D.green, fontSize: 14, fontWeight: 600 }}>{toast}</div>}
+        {toast && <div style={{ background: '#F4F4F5', border: `1px solid ${D.border}`, borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: D.text, fontSize: 13, fontWeight: 500 }}>{toast}</div>}
 
         {/* Section 1: Customer */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Customer</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Customer</div>
           {!selectedCustomer ? (
             <div style={{ position: 'relative' }}>
               <input ref={searchRef} type="text" value={customerSearch} onChange={(e) => doSearch(e.target.value)} placeholder="Search by name or phone..." style={inputStyle} />
               {customerResults.length > 0 && (
                 <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', zIndex: 20 }}>
                   {customerResults.map(c => (
-                    <div key={c.id} onClick={() => selectCustomer(c)} style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#0F172A', minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div key={c.id} onClick={() => selectCustomer(c)} style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
                       <strong>{c.firstName} {c.lastName}</strong>
                       <span style={{ color: D.muted, fontSize: 12 }}>{c.phone || ''}</span>
                       {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
@@ -433,9 +434,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   ))}
                 </div>
               )}
-              <button onClick={() => setShowQuickAdd(!showQuickAdd)} style={{ background: 'none', border: 'none', color: D.teal, fontSize: 12, cursor: 'pointer', marginTop: 6, padding: '4px 0', minHeight: 44, display: 'inline-flex', alignItems: 'center' }}>+ New Customer</button>
+              <button onClick={() => setShowQuickAdd(!showQuickAdd)} style={{ background: 'none', border: 'none', color: D.text, fontSize: 13, fontWeight: 500, cursor: 'pointer', marginTop: 6, padding: '4px 0', minHeight: 44, display: 'inline-flex', alignItems: 'center', textDecoration: 'underline', textUnderlineOffset: 3 }}>+ New customer</button>
               {showQuickAdd && (
-                <div style={{ marginTop: 8, padding: 12, background: '#F8FAFC', borderRadius: 10, border: `1px solid #CBD5E1` }}>
+                <div style={{ marginTop: 8, padding: 12, background: '#FAFAFA', borderRadius: 10, border: `1px solid #E4E4E7` }}>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
                     <div><label style={labelStyle}>First Name</label><input value={quickAdd.firstName} onChange={e => setQuickAdd(q => ({ ...q, firstName: e.target.value }))} style={inputStyle} /></div>
                     <div><label style={labelStyle}>Last Name</label><input value={quickAdd.lastName} onChange={e => setQuickAdd(q => ({ ...q, lastName: e.target.value }))} style={inputStyle} /></div>
@@ -446,14 +447,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div><label style={labelStyle}>City</label><input value={quickAdd.city} onChange={e => setQuickAdd(q => ({ ...q, city: e.target.value }))} style={inputStyle} /></div>
                     <div><label style={labelStyle}>ZIP</label><input value={quickAdd.zip} onChange={e => setQuickAdd(q => ({ ...q, zip: e.target.value }))} style={inputStyle} /></div>
                   </div>
-                  <button onClick={handleQuickAdd} style={{ padding: '10px 16px', background: D.teal, color: D.white, border: 'none', borderRadius: 8, fontSize: 13, cursor: 'pointer', minHeight: 44, width: '100%' }}>Add Customer</button>
+                  <button onClick={handleQuickAdd} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%' }}>Add customer</button>
                 </div>
               )}
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#F8FAFC', borderRadius: 10, padding: 12, border: `1px solid #CBD5E1` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FAFAFA', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, color: '#0F172A', fontSize: 14 }}>{selectedCustomer.firstName} {selectedCustomer.lastName}</div>
+                <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14 }}>{selectedCustomer.firstName} {selectedCustomer.lastName}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{selectedCustomer.address || `${selectedCustomer.city || ''}`}</div>
                 {selectedCustomer.phone && <div style={{ fontSize: 12, color: D.muted }}>{selectedCustomer.phone}</div>}
               </div>
@@ -465,7 +466,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
         {/* Section 2: Service */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Service</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Service</div>
           {!selectedService ? (
             <div>
               <input
@@ -502,9 +503,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </div>
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#F8FAFC', borderRadius: 10, padding: 12, border: `1px solid #CBD5E1` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FAFAFA', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, color: '#0F172A', fontSize: 14 }}>{selectedService.name}</div>
+                <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14 }}>{selectedService.name}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
                   {selectedService.duration || selectedService.default_duration_minutes || 60} min
                   {(selectedService.priceMin || selectedService.base_price) ? ` — $${selectedService.priceMin || selectedService.base_price}${selectedService.priceMax && selectedService.priceMax !== selectedService.priceMin ? `–$${selectedService.priceMax}` : ''}` : ''}
@@ -524,13 +525,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         {/* Section 3: Date, Time & Tech */}
         <div style={sectionStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Date, Time & Tech</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Date, time & tech</div>
             {selectedCustomer && selectedService && (
               <button
                 onClick={handleFindTimes}
                 disabled={findingTimes}
                 style={{
-                  padding: '6px 12px', background: findingTimes ? '#CBD5E1' : `${D.teal}15`,
+                  padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
                   color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
                   fontSize: 12, fontWeight: 600, cursor: findingTimes ? 'default' : 'pointer',
                   display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -549,7 +550,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
 
           {timeSlots !== null && (
-            <div style={{ marginBottom: 12, background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
+            <div style={{ marginBottom: 12, background: '#FAFAFA', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                   {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : 'No feasible slots in next 7 days'}
@@ -573,7 +574,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
                       }}>#{slot.rank}</div>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B' }}>
                           {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
                         </div>
                         <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
@@ -722,14 +723,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
         {/* Section 4: Notes & Confirm */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 10 }}>Notes & Confirm</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Notes & confirm</div>
           <div style={{ marginBottom: 10 }}>
             <label style={labelStyle}>Customer Notes</label>
             <textarea value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} placeholder="Notes visible to customer..." style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
           <div style={{ marginBottom: 10 }}>
             <label style={{ ...labelStyle, color: D.amber }}>Internal Notes (Admin only)</label>
-            <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} placeholder="Internal notes..." style={{ ...inputStyle, resize: 'vertical', minHeight: 60, borderColor: `${D.amber}55` }} />
+            <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} placeholder="Internal notes..." style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
           <div style={{ marginBottom: 12 }}>
             <label style={labelStyle}>Price</label>
@@ -751,12 +752,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             ))}
           </div>
           <button disabled={!selectedCustomer || !selectedService || saving} onClick={handleSubmit} style={{
-            width: '100%', padding: '14px 20px', background: D.green, color: D.white,
-            border: 'none', borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: 'pointer',
+            width: '100%', padding: '14px 20px', background: D.text, color: D.white,
+            border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 500, cursor: 'pointer',
             minHeight: 52, opacity: (!selectedCustomer || !selectedService || saving) ? 0.5 : 1,
             transition: 'opacity 0.15s',
           }}>
-            {saving ? 'Scheduling...' : 'Schedule Appointment'}
+            {saving ? 'Scheduling…' : 'Schedule appointment'}
           </button>
         </div>
       </div>
