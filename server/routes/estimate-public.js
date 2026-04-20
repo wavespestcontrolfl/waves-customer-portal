@@ -117,6 +117,17 @@ function renderPage(token, estimate, estData) {
   const onetimeTotal = Number(est.onetimeTotal || 0);
   const locked = est.status === 'accepted';
 
+  const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
+  const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
+
+  const inputs = estData?.inputs || {};
+  const homeSqFt = Number(inputs.homeSqFt) || null;
+  const lotSqFt = Number(inputs.lotSqFt) || null;
+  const propertyLine = [
+    homeSqFt ? `${homeSqFt.toLocaleString()} sq ft home` : null,
+    lotSqFt ? `${lotSqFt.toLocaleString()} sq ft lot` : null,
+  ].filter(Boolean).join(' \u00B7 ');
+
   const showUpsell = recurring.length === 1;
   const upsellService = showUpsell ? (recurring[0].name === 'Pest Control' ? 'Lawn Care' : 'Pest Control') : null;
 
@@ -158,6 +169,12 @@ function renderPage(token, estimate, estData) {
   .hero{background:linear-gradient(135deg,${BRAND.blueLight} 0%,#fff 100%);border-radius:20px;padding:40px 32px;margin-bottom:24px;border:1px solid rgba(6,90,140,.08)}
   .hero .eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:12px;color:${BRAND.blueDark};font-weight:600;margin-bottom:8px}
   .hero .addr{color:${BRAND.navy};opacity:.72;margin-top:4px;font-size:15px}
+  .hero .prop-meta{color:${BRAND.navy};opacity:.55;font-size:13px;font-family:'JetBrains Mono',monospace;margin-top:2px}
+  .hero .anchor{font-family:Anton,sans-serif;font-size:clamp(24px,4vw,36px);color:${BRAND.navy};opacity:.4;text-decoration:line-through;margin-right:4px;align-self:flex-end;margin-bottom:10px}
+  .save-row{margin-top:12px}
+  .save-pill{display:inline-block;background:${BRAND.green};color:#fff;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:700;letter-spacing:.02em}
+  .day-price{margin-top:8px;font-size:14px;color:${BRAND.navy};opacity:.75}
+  .mini-guarantee{margin-top:10px;font-size:13px;color:${BRAND.blueDark};font-weight:600}
   .big-price{display:flex;align-items:baseline;gap:12px;margin-top:24px;flex-wrap:wrap}
   .big-price .num{font-family:Anton,sans-serif;font-size:clamp(56px,10vw,96px);line-height:1;color:${BRAND.blueDeeper}}
   .big-price .per{font-size:20px;color:${BRAND.navy};opacity:.6}
@@ -235,14 +252,21 @@ function renderPage(token, estimate, estData) {
 
   <div class="hero">
     <div class="eyebrow">Your Waves Estimate</div>
-    <h1>Hi ${firstName} \u2014 here\u2019s your plan.</h1>
+    <h1>Hey ${firstName}, here\u2019s your custom plan.</h1>
     <div class="addr">${address}</div>
+    ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
     <div class="big-price">
+      ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(baseMonthly)}/mo</span>` : ''}
       <span class="num" id="monthly-display">${fmtMoney(monthlyTotal)}</span>
-      <span class="per">/month</span>
+      <span class="per">/mo</span>
       <span class="tier-lbl" id="tier-display">${escapeHtml(tier)} WaveGuard</span>
     </div>
-    ${annualTotal ? `<div style="margin-top:8px;opacity:.65;font-size:14px">Locked in for 24 months \u2014 <span id="annual-display">${fmtMoney(annualTotal)}</span>/yr</div>` : ''}
+    <div class="save-row"${savingsPerMo > 0 ? '' : ' style="display:none"'}>
+      <span class="save-pill">You save <span id="savings-display">${fmtMoney(savingsPerMo)}</span>/mo with <span id="savings-tier">${escapeHtml(tier)}</span></span>
+    </div>
+    <div class="day-price">That\u2019s just <span id="day-price">${fmtMoney(dayPrice)}</span>/day for complete home protection</div>
+    <div class="mini-guarantee">\u{1F6E1}\uFE0F Try us risk-free \u2014 90-day money-back guarantee</div>
+    ${annualTotal ? `<div style="margin-top:12px;opacity:.6;font-size:13px">Locked in for 24 months \u2014 <span id="annual-display">${fmtMoney(annualTotal)}</span>/yr</div>` : ''}
   </div>
 
   <div class="card">
@@ -346,6 +370,26 @@ function renderPage(token, estimate, estData) {
       document.getElementById('tier-display').textContent = newTier + ' WaveGuard';
       const annualEl = document.getElementById('annual-display'); if (annualEl) annualEl.textContent = fmt(data.annualTotal);
       document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(data.monthlyTotal));
+      const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal / 30) * 100) / 100);
+      const savings = Math.max(0, Math.round((${baseMonthly} - data.monthlyTotal) * 100) / 100);
+      const saveRow = document.querySelector('.save-row');
+      const savingsEl = document.getElementById('savings-display');
+      const savingsTierEl = document.getElementById('savings-tier');
+      if (savings > 0) {
+        if (savingsEl) savingsEl.textContent = fmt(savings);
+        if (savingsTierEl) savingsTierEl.textContent = newTier;
+        if (saveRow) saveRow.style.display = '';
+        let anchor = document.getElementById('anchor-display');
+        if (!anchor) {
+          anchor = document.createElement('span');
+          anchor.id = 'anchor-display'; anchor.className = 'anchor';
+          document.querySelector('.big-price').prepend(anchor);
+        }
+        anchor.textContent = fmt(${baseMonthly}) + '/mo';
+      } else {
+        if (saveRow) saveRow.style.display = 'none';
+        const anchor = document.getElementById('anchor-display'); if (anchor) anchor.remove();
+      }
       document.querySelectorAll('.tier-card').forEach((el) => {
         el.classList.toggle('selected', el.dataset.tier === newTier);
         const badge = el.querySelector('.tier-badge'); if (badge) badge.remove();
