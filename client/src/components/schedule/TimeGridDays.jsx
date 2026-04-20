@@ -215,7 +215,10 @@ function SlotDroppable({ date, slotIdx }) {
 }
 
 function DayColumn({ day, onEdit, isToday, isSelected }) {
-  const services = (day.services || []).filter((s) => parseHHMM(s.windowStart) != null);
+  // Unassigned-with-time services render in the UnassignedRail, not here.
+  const services = (day.services || []).filter(
+    (s) => s.technicianId && parseHHMM(s.windowStart) != null,
+  );
   return (
     <div
       className="flex-1 relative"
@@ -233,7 +236,7 @@ function DayColumn({ day, onEdit, isToday, isSelected }) {
           <span className="ml-2 u-nums text-13">{day.dayNum}</span>
         </span>
         <span className={cn('u-nums text-11', isToday ? 'text-white/80' : 'text-ink-secondary')}>
-          {day.count}
+          {services.length}
         </span>
       </div>
       <div className="relative" style={{ height: GRID_HEIGHT }}>
@@ -299,6 +302,85 @@ function TimeAxis({ headerHeight }) {
   );
 }
 
+function RailItem({ service, dayLabel, onEdit }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `svc-${service.id}`,
+    data: { service },
+  });
+  const dragStyle = transform
+    ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
+    : {};
+  const startMin = parseHHMM(service.windowStart);
+  const timeLabel = startMin != null ? minutesToLabel(startMin) : '';
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      onClick={(e) => {
+        if (isDragging) return;
+        e.stopPropagation();
+        onEdit?.(service);
+      }}
+      className={cn(
+        'px-2 py-2 rounded-sm bg-white cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
+        isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
+      )}
+      style={{ border: '1px solid #D4D4D8', ...dragStyle }}
+      title={`${service.customerName} · ${service.serviceType || ''} · ${dayLabel} ${timeLabel}`}
+    >
+      <div className="u-nums text-10 text-zinc-500 mb-0.5">
+        {dayLabel}{timeLabel && ` · ${timeLabel}`}
+      </div>
+      <div className="font-medium truncate text-zinc-900">{service.customerName}</div>
+      {service.serviceType && (
+        <div className="truncate text-zinc-700">{service.serviceType}</div>
+      )}
+    </div>
+  );
+}
+
+function UnassignedRail({ items, onEdit }) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: 'rail-unassigned',
+    data: { target: 'rail' },
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      className={cn(
+        'bg-zinc-50 flex-shrink-0 sticky left-0 z-30 transition-colors',
+        isOver && 'bg-zinc-100',
+      )}
+      style={{ width: 180, borderRight: '1px solid #E4E4E7' }}
+    >
+      <div
+        className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 flex items-center justify-between"
+        style={{ height: 36, borderBottom: '1px solid #E4E4E7' }}
+      >
+        <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
+        <span className="u-nums text-11 text-zinc-700">{items.length}</span>
+      </div>
+      {items.length === 0 ? (
+        <div className="px-3 py-6 text-11 text-ink-tertiary text-center">
+          Drop here to unassign
+        </div>
+      ) : (
+        <div className="px-2 py-2 flex flex-col gap-1.5">
+          {items.map(({ service, dayLabel }) => (
+            <RailItem
+              key={service.id}
+              service={service}
+              dayLabel={dayLabel}
+              onEdit={onEdit}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function startOfWeek(dateStr) {
   const d = new Date(dateStr + 'T12:00:00');
   const day = d.getDay();
@@ -338,6 +420,26 @@ export default function TimeGridDays({
     return dayCount === 5 ? all.slice(0, 5) : all;
   }, [data, optimistic, dayCount]);
 
+  const unassignedList = useMemo(() => {
+    const items = [];
+    days.forEach((day) => {
+      (day.services || []).forEach((s) => {
+        if (!s.technicianId && parseHHMM(s.windowStart) != null) {
+          items.push({
+            service: s,
+            dayLabel: `${day.dayOfWeek} ${day.dayNum}`,
+          });
+        }
+      });
+    });
+    items.sort((a, b) => {
+      const aMin = parseHHMM(a.service.windowStart) ?? Infinity;
+      const bMin = parseHHMM(b.service.windowStart) ?? Infinity;
+      return aMin - bMin;
+    });
+    return items;
+  }, [days]);
+
   const today = new Date().toISOString().split('T')[0];
 
   const onDragEnd = useCallback((event) => {
@@ -350,8 +452,34 @@ export default function TimeGridDays({
     const fromDate = (data?.days || []).find((d) =>
       d.services?.some((s) => s.id === svc.id),
     )?.date;
-    const toDate = drop.date;
     const fromMin = parseHHMM(svc.windowStart);
+    const fromTechName = svc.technicianName || null;
+
+    // Case A: drop onto the rail → unassign (no date/time change).
+    if (drop.target === 'rail') {
+      if (!svc.technicianId) return; // already unassigned, no-op
+      const updatedSvc = { ...svc, technicianId: null, technicianName: null };
+      const nextDays = (data?.days || []).map((d) =>
+        d.date === fromDate
+          ? { ...d, services: d.services.map((s) => (s.id === svc.id ? updatedSvc : s)) }
+          : d,
+      );
+      setOptimistic({ ...data, days: nextDays });
+      setPending({
+        mode: 'assign',
+        svc,
+        toDate: fromDate,
+        newWindow: null,
+        fromLabel: `${fromDate} · ${minutesToLabel(fromMin)}`,
+        toLabel: `${fromDate} · ${minutesToLabel(fromMin)}`,
+        technicianChange: { fromName: fromTechName, toName: null },
+      });
+      return;
+    }
+
+    // Case B: drop onto a date slot → reschedule (existing behavior,
+    // also works when source is from the rail — tech stays unchanged).
+    const toDate = drop.date;
     const toMin = drop.slotMin;
     if (fromDate === toDate && fromMin === toMin) return;
 
@@ -382,29 +510,38 @@ export default function TimeGridDays({
     });
     setOptimistic({ ...data, days: nextDays });
     setPending({
+      mode: 'reschedule',
       svc,
       toDate,
       newWindow,
       fromLabel: `${fromDate} · ${minutesToLabel(fromMin)}`,
       toLabel: `${toDate} · ${minutesToLabel(toMin)}`,
+      technicianChange: null,
     });
   }, [data]);
 
   const commitReschedule = useCallback(async ({ notificationType }) => {
     if (!pending) return;
-    const { svc, toDate, newWindow } = pending;
+    const { mode, svc, toDate, newWindow } = pending;
     setBusy(true);
     try {
-      await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
-        method: 'POST',
-        body: JSON.stringify({
-          newDate: toDate,
-          newWindow,
-          reasonCode: 'dispatch_drag',
-          reasonText: 'Rescheduled via drag-and-drop on multi-day grid',
-          notifyCustomer: notificationType === 'sms',
-        }),
-      });
+      if (mode === 'assign') {
+        await adminFetch(`/admin/schedule/${svc.id}/assign`, {
+          method: 'PUT',
+          body: JSON.stringify({ technicianId: null }),
+        });
+      } else {
+        await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+          method: 'POST',
+          body: JSON.stringify({
+            newDate: toDate,
+            newWindow,
+            reasonCode: 'dispatch_drag',
+            reasonText: 'Rescheduled via drag-and-drop on multi-day grid',
+            notifyCustomer: notificationType === 'sms',
+          }),
+        });
+      }
       const j = await adminFetch(`/admin/schedule/week?start=${monday}`);
       setData(j);
       setOptimistic(null);
@@ -441,18 +578,21 @@ export default function TimeGridDays({
       style={{ border: '1px solid #E4E4E7' }}
     >
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
-        <div className="overflow-auto" style={{ maxHeight: '70vh' }}>
-          <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + days.length * COL_MIN_WIDTH }}>
-            <TimeAxis headerHeight={36} />
-            {days.map((day) => (
-              <DayColumn
-                key={day.date}
-                day={day}
-                onEdit={onEdit}
-                isToday={day.date === today}
-                isSelected={selectedDate && day.date === selectedDate}
-              />
-            ))}
+        <div className="flex" style={{ maxHeight: '70vh' }}>
+          <UnassignedRail items={unassignedList} onEdit={onEdit} />
+          <div className="overflow-auto flex-1">
+            <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + days.length * COL_MIN_WIDTH }}>
+              <TimeAxis headerHeight={36} />
+              {days.map((day) => (
+                <DayColumn
+                  key={day.date}
+                  day={day}
+                  onEdit={onEdit}
+                  isToday={day.date === today}
+                  isSelected={selectedDate && day.date === selectedDate}
+                />
+              ))}
+            </div>
           </div>
         </div>
       </DndContext>
@@ -467,6 +607,7 @@ export default function TimeGridDays({
         customerName={pending?.svc?.customerName}
         fromLabel={pending?.fromLabel || ''}
         toLabel={pending?.toLabel || ''}
+        technicianChange={pending?.technicianChange}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />
