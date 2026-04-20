@@ -628,7 +628,6 @@ export default function CustomersPageV2() {
           <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Customers</h1>
         </div>
         <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
-          <ViewToggleV2 view={view} onChange={setView} />
           {view === 'directory' && (
             <input
               type="text"
@@ -661,13 +660,27 @@ export default function CustomersPageV2() {
         </div>
       </div>
 
-      {/* Waves Intelligent + context-specific mobile stack */}
+      {/* Mobile Waves AI — above view toggle */}
       <div className="sm:hidden mb-3">
         <h2 className="text-12 font-medium text-ink-primary mb-1.5">Waves AI</h2>
         <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
+      </div>
+
+      {/* Desktop Intelligence Bar — above view toggle */}
+      <div className="hidden sm:block mb-4">
+        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
+      </div>
+
+      {/* View toggle — own row, below Waves AI */}
+      <div className="mb-4">
+        <ViewToggleV2 view={view} onChange={setView} />
+      </div>
+
+      {/* Context-specific mobile stack (search/filter/stage picker) */}
+      <div className="sm:hidden mb-3">
         {view === 'directory' && (
           <>
-            <h2 className="text-12 font-medium text-ink-primary mt-4 mb-1.5">Search customers</h2>
+            <h2 className="text-12 font-medium text-ink-primary mb-1.5">Search customers</h2>
             <input
               type="text"
               value={search}
@@ -701,7 +714,7 @@ export default function CustomersPageV2() {
         )}
         {view === 'pipeline' && (
           <>
-            <h2 className="text-12 font-medium text-ink-primary mt-4 mb-1.5">Stage</h2>
+            <h2 className="text-12 font-medium text-ink-primary mb-1.5">Stage</h2>
             <div className="grid grid-cols-2 gap-1.5">
               {KANBAN_STAGES.map((key) => {
                 const stage = STAGE_MAP[key];
@@ -727,11 +740,6 @@ export default function CustomersPageV2() {
             </div>
           </>
         )}
-      </div>
-
-      {/* Desktop Intelligence Bar (V2 monochrome) */}
-      <div className="hidden sm:block">
-        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
       </div>
 
       {/* ======================= DIRECTORY ======================= */}
