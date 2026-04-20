@@ -476,6 +476,14 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                     Text
                   </a>
                 )}
+                {c.phone && (
+                  <a
+                    href={`tel:${c.phone}`}
+                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+                  >
+                    Call
+                  </a>
+                )}
                 <button
                   onClick={() => setActiveTab('comms')}
                   aria-label="More"
