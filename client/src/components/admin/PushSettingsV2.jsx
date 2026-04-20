@@ -145,7 +145,7 @@ export default function PushSettingsV2() {
         )}
 
         {/* Column headers */}
-        <div className="grid grid-cols-[1fr_60px_60px_60px] gap-3 px-3 py-2 text-10 uppercase tracking-label text-ink-tertiary">
+        <div className="grid grid-cols-[1fr_48px_48px_48px] md:grid-cols-[1fr_60px_60px_60px] gap-2 md:gap-3 px-3 py-2 text-11 uppercase tracking-label text-ink-tertiary">
           <div>Event</div>
           <div className="text-center">Push</div>
           <div className="text-center">Bell</div>
@@ -162,7 +162,7 @@ export default function PushSettingsV2() {
                 <div
                   key={p.key}
                   className={cn(
-                    'grid grid-cols-[1fr_60px_60px_60px] gap-3 p-3 items-center',
+                    'grid grid-cols-[1fr_48px_48px_48px] md:grid-cols-[1fr_60px_60px_60px] gap-2 md:gap-3 p-3 items-center min-h-[44px]',
                     i > 0 && 'border-t border-zinc-200',
                   )}
                 >

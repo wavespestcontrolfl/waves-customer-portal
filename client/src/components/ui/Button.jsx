@@ -7,7 +7,7 @@ const BASE =
   'disabled:opacity-50 disabled:cursor-not-allowed';
 
 const SIZES = {
-  sm: 'h-9 sm:h-7 px-3 text-11 rounded-xs',
+  sm: 'h-11 sm:h-7 px-3 text-11 rounded-xs',
   md: 'h-11 sm:h-9 px-4 text-12 rounded-sm',
 };
 

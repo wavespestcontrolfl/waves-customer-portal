@@ -85,7 +85,7 @@ export function SmsTemplatesTabV2() {
             type="button"
             onClick={() => setFilter('all')}
             className={cn(
-              'h-7 px-3 rounded-xs text-11 uppercase tracking-label border-hairline transition-colors',
+              'min-h-[44px] md:min-h-0 md:h-7 px-3 py-2 md:py-0 inline-flex items-center rounded-xs text-14 md:text-11 normal-case md:uppercase tracking-normal md:tracking-label border-hairline transition-colors',
               filter === 'all'
                 ? 'bg-zinc-900 text-white border-zinc-900'
                 : 'bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50',
@@ -99,7 +99,7 @@ export function SmsTemplatesTabV2() {
               type="button"
               onClick={() => setFilter(c)}
               className={cn(
-                'h-7 px-3 rounded-xs text-11 uppercase tracking-label border-hairline transition-colors capitalize',
+                'min-h-[44px] md:min-h-0 md:h-7 px-3 py-2 md:py-0 inline-flex items-center rounded-xs text-14 md:text-11 normal-case md:uppercase tracking-normal md:tracking-label border-hairline transition-colors capitalize',
                 filter === c
                   ? 'bg-zinc-900 text-white border-zinc-900'
                   : 'bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50',

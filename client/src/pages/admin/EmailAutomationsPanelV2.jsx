@@ -98,7 +98,7 @@ export default function EmailAutomationsPanelV2() {
           ].map((s) => (
             <div key={s.label} className="bg-white border-hairline border-zinc-200 rounded-md p-3 text-center">
               <div className="text-22 font-mono u-nums text-ink-primary">{s.value}</div>
-              <div className="text-10 uppercase tracking-label text-ink-tertiary mt-0.5">{s.label}</div>
+              <div className="text-11 uppercase tracking-label text-ink-tertiary mt-0.5">{s.label}</div>
             </div>
           ))}
         </div>
@@ -112,7 +112,7 @@ export default function EmailAutomationsPanelV2() {
             type="button"
             onClick={() => setTab(t.key)}
             className={cn(
-              'h-8 px-4 rounded-sm text-12 uppercase tracking-label transition-colors',
+              'min-h-[44px] md:min-h-0 md:h-8 px-4 py-2 md:py-0 inline-flex items-center rounded-sm text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label transition-colors',
               tab === t.key
                 ? 'bg-zinc-900 text-white'
                 : 'text-ink-secondary hover:bg-zinc-50',
@@ -194,6 +194,7 @@ function SendTabV2({ automations, showToast, onSent }) {
             value={search}
             onChange={(e) => doSearch(e.target.value)}
             placeholder="Search by name, phone, or email…"
+            className="h-11 md:h-9 text-16 md:text-13 min-h-[44px] md:min-h-0"
           />
           {searching && <div className="text-12 text-ink-tertiary mt-2">Searching…</div>}
 

@@ -198,7 +198,11 @@ export default function CallLogTabV2() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
             <div>
               <label className="block text-11 uppercase tracking-label text-ink-tertiary mb-1">From</label>
-              <Select value={callFrom} onChange={(e) => setCallFrom(e.target.value)}>
+              <Select
+                value={callFrom}
+                onChange={(e) => setCallFrom(e.target.value)}
+                className="h-11 md:h-9 text-16 md:text-13 min-h-[44px] md:min-h-0"
+              >
                 {ALL_NUMBERS.map((group) => (
                   <optgroup key={group.group} label={group.group}>
                     {group.numbers.map((n) => (
@@ -233,7 +237,10 @@ export default function CallLogTabV2() {
                     } else { setCallToResults([]); }
                   }
                 }}
-                className={callToSearch ? '' : 'font-mono u-nums'}
+                className={cn(
+                  callToSearch ? '' : 'font-mono u-nums',
+                  'h-11 md:h-9 text-16 md:text-13 min-h-[44px] md:min-h-0',
+                )}
               />
               {callToResults.length > 0 && (
                 <div className="mt-1 bg-white border-hairline rounded-md max-h-[180px] overflow-y-auto">
@@ -246,7 +253,7 @@ export default function CallLogTabV2() {
                         setCallToSearch(`${c.firstName} ${c.lastName} — ${c.phone || ''}`);
                         setCallToResults([]);
                       }}
-                      className="w-full text-left px-3 py-2 border-b border-zinc-200 last:border-0 hover:bg-zinc-50 text-13"
+                      className="w-full text-left px-3 py-3 md:py-2 min-h-[44px] md:min-h-0 border-b border-zinc-200 last:border-0 hover:bg-zinc-50 text-14 md:text-13"
                     >
                       <span className="font-medium text-ink-primary">{c.firstName} {c.lastName}</span>
                       <span className="ml-2 text-ink-tertiary">{c.phone || 'no phone'}</span>
@@ -283,7 +290,7 @@ export default function CallLogTabV2() {
               placeholder="Search calls by name or phone…"
               value={callLogSearch}
               onChange={(e) => setCallLogSearch(e.target.value)}
-              className="max-w-[360px] min-w-[200px]"
+              className="max-w-[360px] min-w-[200px] h-11 md:h-9 text-16 md:text-13 min-h-[44px] md:min-h-0"
             />
           </div>
 
@@ -339,7 +346,7 @@ export default function CallLogTabV2() {
                       <Select
                         value={currentDisp}
                         onChange={(e) => handleDisposition(c.id, e.target.value)}
-                        className={cn('h-7 text-11 py-0 w-auto', savingDisp === c.id && 'opacity-50')}
+                        className={cn('h-11 md:h-7 text-16 md:text-11 min-h-[44px] md:min-h-0 py-0 w-auto', savingDisp === c.id && 'opacity-50')}
                       >
                         {CALL_DISPOSITIONS.map((d) => (
                           <option key={d.value} value={d.value}>{d.label}</option>
