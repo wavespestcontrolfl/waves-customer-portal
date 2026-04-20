@@ -701,7 +701,7 @@ export default function CustomersPageV2() {
         )}
         {view === 'pipeline' && (
           <>
-            <h2 className="text-14 font-medium text-ink-primary mt-4 mb-1.5">Stage</h2>
+            <h2 className="text-12 font-medium text-ink-primary mt-4 mb-1.5">Stage</h2>
             <div className="grid grid-cols-2 gap-1.5">
               {KANBAN_STAGES.map((key) => {
                 const stage = STAGE_MAP[key];
