@@ -22,6 +22,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { ChevronLeft, MoreHorizontal } from 'lucide-react';
 import { CustomerActionBar } from './StickyActionBar';
 import { Card, CardBody, Badge, Button, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
 
@@ -405,49 +406,113 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
             .c360-billing-grid { grid-template-columns: 1fr 1fr !important; }
             .c360-property-grid { grid-template-columns: 1fr !important; }
             .c360-panel { width: 100% !important; max-width: 100% !important; }
-            .c360-header-actions { display: none !important; }
+            .c360-header-desktop { display: none !important; }
+            .c360-header-mobile { display: block !important; }
             .c360-mobile-footer-spacer { display: block !important; }
           }
+          .c360-header-mobile { display: none; }
           .c360-mobile-footer-spacer { display: none; }
         `}</style>
 
         {/* ZONE 1 — STICKY HEADER */}
-        <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 px-6 py-4">
-          <div className="flex justify-between items-start mb-2">
-            <div className="flex items-center gap-3 flex-wrap">
-              <div className="text-22 font-medium tracking-tight text-zinc-900">{c.firstName} {c.lastName}</div>
-              <HealthCircle score={score} />
+        <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200">
+          {/* Desktop header (>= 768px) */}
+          <div className="c360-header-desktop px-6 py-4">
+            <div className="flex justify-between items-start mb-2">
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="text-22 font-medium tracking-tight text-zinc-900">{c.firstName} {c.lastName}</div>
+                <HealthCircle score={score} />
+                <TierBadgeV2 tier={c.tier} />
+                <StageBadgeV2 stage={c.pipelineStage} />
+              </div>
+              <button onClick={onClose} aria-label="Close"
+                className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring">×</button>
+            </div>
+            {(c.phone || c.email) && (
+              <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-1.5">
+                {c.phone && <a href={`tel:${c.phone}`} className="u-nums text-zinc-900 hover:underline">{c.phone}</a>}
+                {c.email && <a href={`mailto:${c.email}`} className="text-zinc-900 hover:underline">{c.email}</a>}
+              </div>
+            )}
+            <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
+              <span>{c.address?.line1}, {c.address?.city}, {c.address?.state} {c.address?.zip}</span>
+              <span className="u-nums text-zinc-900">{fmtCurrency(c.monthlyRate)}/mo</span>
+              <span className="u-nums">{fmtCurrency(c.annualValue)}/yr</span>
+              {c.memberSince && <span>Since {fmtDate(c.memberSince)}</span>}
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              {c.phone && <>
+                <a href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white hover:bg-zinc-800 u-focus-ring">Text</a>
+                <a href={`tel:${c.phone}`}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Call</a>
+              </>}
+              <a href={`/admin/schedule?customer=${customerId}`}
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Book Appt</a>
+              <a href={`/admin/invoices?customer=${customerId}`}
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Invoice</a>
+              <button onClick={() => setActiveTab('comms')}
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Add Note</button>
+            </div>
+          </div>
+
+          {/* Mobile header (< 768px) — per mobile-admin-audit PR #3 item 2:
+              back / menu / Text pills on top, large name, three-stat row */}
+          <div className="c360-header-mobile px-4 pt-3 pb-3">
+            <div className="flex items-center justify-between mb-3">
+              <button
+                onClick={onClose}
+                aria-label="Back"
+                className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+              >
+                <ChevronLeft size={18} strokeWidth={1.75} />
+              </button>
+              <div className="flex items-center gap-2">
+                {c.phone && (
+                  <a
+                    href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
+                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white u-focus-ring"
+                  >
+                    Text
+                  </a>
+                )}
+                <button
+                  onClick={() => setActiveTab('comms')}
+                  aria-label="More"
+                  className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+                >
+                  <MoreHorizontal size={18} strokeWidth={1.75} />
+                </button>
+              </div>
+            </div>
+
+            <div className="text-26 font-medium tracking-tight text-zinc-900 leading-tight mb-2">
+              {c.firstName} {c.lastName}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap mb-3">
               <TierBadgeV2 tier={c.tier} />
               <StageBadgeV2 stage={c.pipelineStage} />
             </div>
-            <button onClick={onClose} aria-label="Close"
-              className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring">×</button>
-          </div>
-          {(c.phone || c.email) && (
-            <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-1.5">
-              {c.phone && <a href={`tel:${c.phone}`} className="u-nums text-zinc-900 hover:underline">{c.phone}</a>}
-              {c.email && <a href={`mailto:${c.email}`} className="text-zinc-900 hover:underline">{c.email}</a>}
+
+            <div className="flex items-stretch gap-3 pt-3 border-t border-hairline border-zinc-200">
+              <div className="flex-1">
+                <div className="u-label text-ink-tertiary">Monthly</div>
+                <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">{fmtCurrency(c.monthlyRate)}</div>
+              </div>
+              <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
+                <div className="u-label text-ink-tertiary">Annual</div>
+                <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">{fmtCurrency(c.annualValue)}</div>
+              </div>
+              <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
+                <div className="u-label text-ink-tertiary">Health</div>
+                <div className={cn(
+                  'u-nums text-15 font-medium mt-0.5',
+                  score != null && score < 40 ? 'text-alert-fg' : 'text-zinc-900'
+                )}>
+                  {score != null ? score : '—'}
+                </div>
+              </div>
             </div>
-          )}
-          <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
-            <span>{c.address?.line1}, {c.address?.city}, {c.address?.state} {c.address?.zip}</span>
-            <span className="u-nums text-zinc-900">{fmtCurrency(c.monthlyRate)}/mo</span>
-            <span className="u-nums">{fmtCurrency(c.annualValue)}/yr</span>
-            {c.memberSince && <span>Since {fmtDate(c.memberSince)}</span>}
-          </div>
-          <div className="c360-header-actions flex gap-2 flex-wrap">
-            {c.phone && <>
-              <a href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white hover:bg-zinc-800 u-focus-ring">Text</a>
-              <a href={`tel:${c.phone}`}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Call</a>
-            </>}
-            <a href={`/admin/schedule?customer=${customerId}`}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Book Appt</a>
-            <a href={`/admin/invoices?customer=${customerId}`}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Invoice</a>
-            <button onClick={() => setActiveTab('comms')}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Add Note</button>
           </div>
         </div>
 
