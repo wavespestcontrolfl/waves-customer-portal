@@ -1116,7 +1116,6 @@ export default function CustomersPage() {
               { key: 'map', label: 'Map' },
               { key: 'pipeline', label: 'Pipeline' },
               { key: 'health', label: 'Health' },
-              { key: 'intelligence', label: 'AI Advisor' },
             ].map(v => (
               <button key={v.key} onClick={() => setView(v.key)} style={{
                 padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
