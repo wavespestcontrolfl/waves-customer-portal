@@ -29,6 +29,33 @@ const GRID_HEIGHT = SLOT_COUNT * SLOT_HEIGHT;
 const COL_MIN_WIDTH = 200;
 const TIME_AXIS_WIDTH = 64;
 
+// Monochrome accent palette for per-tech column headers / block left-borders.
+// Cycles per tech order. Avoids hue to keep the V2 zinc ramp intact.
+const TECH_ACCENT_COLORS = ['#18181B', '#52525B', '#A1A1AA', '#D4D4D8'];
+function techAccent(idx) {
+  return TECH_ACCENT_COLORS[idx % TECH_ACCENT_COLORS.length];
+}
+
+function parseISODate(iso) {
+  if (!iso || typeof iso !== 'string') return null;
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+}
+
+function toISODate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function isSameISODate(a, b) {
+  return a && b && a === b;
+}
+
+const DOW_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -151,7 +178,92 @@ function computeLanes(services) {
   return result;
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, isSelected, onToggleSelect }) {
+function WeekStrip({ date, onDateChange }) {
+  const selected = parseISODate(date) || new Date();
+  const sunday = new Date(selected);
+  sunday.setDate(selected.getDate() - selected.getDay());
+  const todayIso = toISODate(new Date());
+  const days = Array.from({ length: 7 }).map((_, i) => {
+    const d = new Date(sunday);
+    d.setDate(sunday.getDate() + i);
+    return { iso: toISODate(d), dow: DOW_LABELS[i], dom: d.getDate() };
+  });
+  return (
+    <div
+      className="flex bg-white"
+      style={{ borderBottom: '1px solid #E4E4E7' }}
+    >
+      {days.map((d) => {
+        const isSel = isSameISODate(d.iso, date);
+        const isToday = isSameISODate(d.iso, todayIso);
+        return (
+          <button
+            key={d.iso}
+            type="button"
+            onClick={() => onDateChange?.(d.iso)}
+            className={cn(
+              'flex-1 flex flex-col items-center justify-center py-2 text-zinc-900 u-focus-ring',
+              isSel ? 'bg-zinc-900 text-white' : 'hover:bg-zinc-50',
+            )}
+            style={{ minWidth: 40 }}
+          >
+            <span className={cn(
+              'text-10 uppercase tracking-label',
+              isSel ? 'text-zinc-300' : 'text-ink-tertiary',
+            )}>{d.dow}</span>
+            <span className={cn(
+              'u-nums text-14',
+              isSel ? 'font-medium' : isToday ? 'font-medium text-zinc-900' : '',
+            )}>{d.dom}</span>
+            {isToday && !isSel && (
+              <span
+                className="mt-0.5"
+                style={{ width: 4, height: 4, borderRadius: '50%', background: '#18181B' }}
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function NowLine() {
+  const [nowMin, setNowMin] = useState(() => {
+    const n = new Date();
+    return n.getHours() * 60 + n.getMinutes();
+  });
+  useEffect(() => {
+    const t = setInterval(() => {
+      const n = new Date();
+      setNowMin(n.getHours() * 60 + n.getMinutes());
+    }, 60000);
+    return () => clearInterval(t);
+  }, []);
+  if (nowMin < DAY_START_HOUR * 60 || nowMin >= DAY_END_HOUR * 60) return null;
+  const top = minutesToTopPx(nowMin);
+  return (
+    <div
+      className="absolute left-0 right-0 pointer-events-none z-40"
+      style={{ top }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          left: -5,
+          top: -4,
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          background: '#C8312F',
+        }}
+      />
+      <div style={{ height: 1, background: '#C8312F' }} />
+    </div>
+  );
+}
+
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -218,10 +330,19 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         left: `calc(${laneIdx * (100 / laneCount)}% + 2px)`,
         width: `calc(${100 / laneCount}% - 4px)`,
         border: `1px solid ${statusBorderColor(service.status)}`,
+        borderLeft: accent ? `3px solid ${accent}` : `1px solid ${statusBorderColor(service.status)}`,
         ...dragStyle,
       }}
       title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowDisplay || ''}\nShift+click to select for bulk actions`}
     >
+      {routeOrder != null && (
+        <div
+          className="absolute top-0.5 right-0.5 u-nums text-10 font-medium text-ink-tertiary bg-white/80 px-1 rounded-xs"
+          style={{ minWidth: 14, textAlign: 'center', lineHeight: '14px' }}
+        >
+          {routeOrder}
+        </div>
+      )}
       <div className="font-medium truncate">{service.customerName}</div>
       <div className="opacity-80 truncate">
         {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)} · {service.serviceType || ''}
@@ -261,7 +382,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection, onToggleSelect }) {
+function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -313,7 +434,7 @@ function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection,
     >
       <div
         className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 text-12 font-medium text-zinc-900 flex items-center justify-between"
-        style={{ borderBottom: '1px solid #E4E4E7' }}
+        style={{ borderBottom: '1px solid #E4E4E7', borderTop: accent ? `2px solid ${accent}` : undefined }}
       >
         <span className="truncate">{tech.name}</span>
         <span className="u-nums text-11 text-ink-secondary">
@@ -335,8 +456,13 @@ function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection,
             style={{ top: selTop, height: selHeight }}
           />
         )}
+        {showNowLine && <NowLine />}
         {(() => {
           const lanes = computeLanes(services);
+          const orderedIds = [...services]
+            .filter((s) => parseHHMM(s.windowStart) != null)
+            .sort((a, b) => (parseHHMM(a.windowStart) || 0) - (parseHHMM(b.windowStart) || 0))
+            .map((s) => s.id);
           return services.map((svc) => {
             const startMin = parseHHMM(svc.windowStart);
             if (startMin == null || startMin < DAY_START_HOUR * 60 || startMin >= DAY_END_HOUR * 60) return null;
@@ -344,6 +470,8 @@ function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection,
             const dur = effectiveDuration(svc);
             const height = (dur / SLOT_MIN) * SLOT_HEIGHT;
             const lane = lanes.get(svc.id) || { laneIdx: 0, laneCount: 1 };
+            const orderIdx = orderedIds.indexOf(svc.id);
+            const routeOrder = orderIdx >= 0 ? orderIdx + 1 : null;
             return (
               <AppointmentBlock
                 key={svc.id}
@@ -356,6 +484,8 @@ function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection,
                 onResize={onResize}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
+                routeOrder={routeOrder}
+                accent={accent}
               />
             );
           });
@@ -567,7 +697,9 @@ export default function TimeGridDay({
   onEdit,
   onChange,
   onCreateSlot,
+  onDateChange,
 }) {
+  const todayIso = toISODate(new Date());
   const handleCreateSlot = useCallback((slot) => {
     onCreateSlot?.({ date, ...slot });
   }, [onCreateSlot, date]);
@@ -842,8 +974,14 @@ export default function TimeGridDay({
 
   if (techList.length === 0 && unassignedInRail.length === 0) {
     return (
-      <div className="text-ink-secondary text-center py-16 text-13">
-        No technicians scheduled for this day.
+      <div
+        className="bg-white rounded-md overflow-hidden"
+        style={{ border: '1px solid #E4E4E7' }}
+      >
+        {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
+        <div className="text-ink-secondary text-center py-16 text-13">
+          No technicians scheduled for this day.
+        </div>
       </div>
     );
   }
@@ -853,6 +991,7 @@ export default function TimeGridDay({
       className="bg-white rounded-md overflow-hidden"
       style={{ border: '1px solid #E4E4E7' }}
     >
+      {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
       <AllDayStrip services={allDay} onEdit={onEdit} />
       {selection.size > 0 && (
         <BulkActionBar
@@ -880,7 +1019,7 @@ export default function TimeGridDay({
             <div className="overflow-auto flex-1">
               <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + techList.length * COL_MIN_WIDTH }}>
                 <TimeAxis />
-                {techList.map((tech) => (
+                {techList.map((tech, idx) => (
                   <TechColumn
                     key={tech.id}
                     tech={tech}
@@ -890,6 +1029,8 @@ export default function TimeGridDay({
                     onResize={handleResize}
                     selection={selection}
                     onToggleSelect={toggleSelection}
+                    accent={techAccent(idx)}
+                    showNowLine={date === todayIso}
                   />
                 ))}
               </div>

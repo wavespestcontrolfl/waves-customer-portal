@@ -885,24 +885,19 @@ export default function DispatchPageV2() {
             </span>
           </div>
 
-          {/* Square-style time grid */}
-          {services.length === 0 ? (
-            <div className="text-ink-secondary text-center py-16 text-13">
-              No services scheduled for {formatDateDisplay(date)}.
-            </div>
-          ) : (
-            <TimeGridDay
-              date={date}
-              services={services}
-              technicians={technicians}
-              onEdit={(svc) => setEditingService(svc)}
-              onChange={() => fetchSchedule(date)}
-              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
-                setNewApptDefaults({ date: slotDate, windowStart, techId });
-                setShowNewAppt(true);
-              }}
-            />
-          )}
+          {/* Calendar-style time grid */}
+          <TimeGridDay
+            date={date}
+            services={services}
+            technicians={technicians}
+            onEdit={(svc) => setEditingService(svc)}
+            onChange={() => fetchSchedule(date)}
+            onDateChange={setDate}
+            onCreateSlot={({ date: slotDate, windowStart, techId }) => {
+              setNewApptDefaults({ date: slotDate, windowStart, techId });
+              setShowNewAppt(true);
+            }}
+          />
         </>
       )}
 
