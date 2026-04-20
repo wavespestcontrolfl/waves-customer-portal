@@ -34,7 +34,6 @@ import AdminLayout from './components/AdminLayoutGate';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import AdminDashboardGate from './pages/admin/DashboardGate';
-import EstimateViewPage from './pages/EstimateViewPage';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
 import AdminDispatchGate from './pages/admin/DispatchGate';
 import AdminInventoryPage from './pages/admin/InventoryPage';
@@ -159,7 +158,6 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/onboard/:token" element={<OnboardingPage />} />
-          <Route path="/estimate/:token" element={<EstimateViewPage />} />
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />

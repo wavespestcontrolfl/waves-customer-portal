@@ -202,6 +202,8 @@ app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));
 app.use('/api/admin/estimates', adminEstimateRoutes);
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
+// Customer-facing estimate URL — server-rendered HTML
+app.get('/estimate/:token', estimatePublicRoutes.handleEstimateView);
 app.use('/api/public/quote', publicQuoteRoutes);
 app.use('/api/public/estimator', publicPropertyLookupRoutes);
 app.use('/api/admin/reviews', adminReviewRoutes);
