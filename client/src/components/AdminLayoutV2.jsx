@@ -312,18 +312,19 @@ export default function AdminLayoutV2() {
             alignItems: 'center',
             gap: 8,
             margin: '10px 12px',
-            padding: '8px 10px',
+            padding: isMobile ? '12px 12px' : '8px 10px',
+            minHeight: isMobile ? 44 : undefined,
             borderRadius: 8,
             border: '1px solid var(--border-default)',
             background: 'var(--surface-hover)',
             color: 'var(--text-tertiary)',
-            fontSize: 13,
+            fontSize: isMobile ? 14 : 13,
             cursor: 'pointer',
             textAlign: 'left',
           }}
           aria-label="Open search"
         >
-          <Search size={14} strokeWidth={2} />
+          <Search size={isMobile ? 16 : 14} strokeWidth={2} />
           <span style={{ flex: 1 }}>Search…</span>
           <kbd
             style={{
@@ -450,10 +451,14 @@ export default function AdminLayoutV2() {
               border: 'none',
               color: 'var(--text-tertiary)',
               cursor: 'pointer',
-              padding: 6,
-              borderRadius: 4,
+              padding: isMobile ? 0 : 6,
+              width: isMobile ? 44 : undefined,
+              height: isMobile ? 44 : undefined,
+              minWidth: isMobile ? 44 : undefined,
+              borderRadius: isMobile ? 6 : 4,
               display: 'flex',
               alignItems: 'center',
+              justifyContent: 'center',
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = 'var(--surface-hover)';
