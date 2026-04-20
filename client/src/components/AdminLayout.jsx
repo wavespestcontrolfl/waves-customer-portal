@@ -99,7 +99,10 @@ export default function AdminLayout() {
 
       {/* Mobile shell v2 (flag-gated) — replaces hamburger + drawer on <768px */}
       {useMobileShell && (
-        <MobileAdminShell onCommandOpen={() => paletteRef.current?.open()} />
+        <MobileAdminShell
+          onCommandOpen={() => paletteRef.current?.open()}
+          onMenuOpen={() => setSidebarOpen(true)}
+        />
       )}
 
       {/* Legacy mobile top bar (hidden when shell v2 is active) */}
@@ -120,17 +123,17 @@ export default function AdminLayout() {
         </div>
       )}
 
-      {/* Sidebar overlay (mobile, legacy only) */}
-      {!useMobileShell && sidebarOpen && (
+      {/* Sidebar overlay (any mobile path when drawer is open) */}
+      {sidebarOpen && (
         <div onClick={() => setSidebarOpen(false)} style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 90,
         }} className="sidebar-overlay" />
       )}
 
-      {/* Sidebar — always rendered so desktop keeps it; on mobile with shell v2, CSS hides it. */}
+      {/* Sidebar — desktop always, mobile as drawer when sidebarOpen. */}
       <div style={{
         width: 240, background: SB.bg, borderRight: `1px solid ${SB.border}`,
-        display: useMobileShell ? 'none' : 'flex', flexDirection: 'column', flexShrink: 0,
+        display: (useMobileShell && !sidebarOpen) ? 'none' : 'flex', flexDirection: 'column', flexShrink: 0,
         position: 'fixed', left: 0, top: 0, bottom: 0, zIndex: 100,
         transform: sidebarOpen ? 'translateX(0)' : (isDesktop ? 'translateX(0)' : 'translateX(-100%)'),
         transition: 'transform 0.2s ease',
@@ -152,7 +155,7 @@ export default function AdminLayout() {
           </div>
           <button onClick={() => setSidebarOpen(false)} style={{
             background: 'none', border: 'none', color: SB.text, fontSize: 20, cursor: 'pointer',
-            padding: 4, lineHeight: 1, display: 'none',
+            padding: 4, lineHeight: 1, display: useMobileShell ? 'block' : 'none',
           }} className="sidebar-close">✕</button>
         </div>
 

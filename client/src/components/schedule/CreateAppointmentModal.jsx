@@ -393,7 +393,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         `}</style>
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div style={{ fontSize: 28, fontWeight: 500, color: '#18181B', letterSpacing: '-0.015em' }}>New Appointment</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
         </div>
 

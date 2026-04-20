@@ -20,24 +20,34 @@ const TABS = [
   { path: '/admin/more', icon: Menu, label: 'More' },
 ];
 
-export default function MobileAdminShell({ onCommandOpen }) {
+export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   return (
     <>
-      {/* Top bar — logo left, command + notifications right */}
+      {/* Top bar — hamburger + logo left, command + notifications right */}
       <header
         className="md:hidden fixed top-0 left-0 right-0 z-40 h-14 bg-white border-b border-hairline border-zinc-200 flex items-center justify-between px-4"
         style={{ paddingTop: 'env(safe-area-inset-top, 0)' }}
       >
-        <button
-          onClick={() => navigate('/admin/dashboard')}
-          className="flex items-center gap-2 -ml-1 px-1 py-1 rounded-md active:bg-zinc-50"
-          aria-label="Go to dashboard"
-        >
-          <img src="/waves-logo.png" alt="" className="h-6 w-auto" />
-          <span className="text-13 font-medium text-zinc-900 tracking-label">WAVES</span>
-        </button>
+        <div className="flex items-center gap-1 -ml-2">
+          <button
+            type="button"
+            onClick={onMenuOpen}
+            aria-label="Open menu"
+            className="w-11 h-11 flex items-center justify-center rounded-md text-zinc-900 active:bg-zinc-100"
+          >
+            <Menu size={22} strokeWidth={1.75} />
+          </button>
+          <button
+            onClick={() => navigate('/admin/dashboard')}
+            className="flex items-center gap-2 px-1 py-1 rounded-md active:bg-zinc-50"
+            aria-label="Go to dashboard"
+          >
+            <img src="/waves-logo.png" alt="" className="h-6 w-auto" />
+            <span className="text-13 font-medium text-zinc-900 tracking-label">WAVES</span>
+          </button>
+        </div>
         <div className="flex items-center gap-1">
           <button
             type="button"
