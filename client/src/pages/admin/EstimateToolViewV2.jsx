@@ -143,21 +143,39 @@ function CheckboxV2({ k, label }) {
 }
 
 // H3 — section header within a Card (e.g. "Property Lookup", "Property Data").
-// UI SoR §3: DM Sans sentence case, not an eyebrow.
+// Matches the Margin Calculator header on Pricing Logic: Montserrat 12/500,
+// letter-spacing 0.02em. Keeps the hairline divider so panels still read as
+// sectioned cards.
 function PanelTitle({ children }) {
   return (
-    <h3 className="text-18 font-medium text-zinc-900 tracking-tight mt-0 pb-2.5 mb-4 border-b border-hairline border-zinc-200">
+    <h3
+      className="text-zinc-900 mt-0 pb-2.5 mb-4 border-b border-hairline border-zinc-200"
+      style={{
+        fontFamily: "'Montserrat', sans-serif",
+        fontSize: 12,
+        fontWeight: 500,
+        letterSpacing: '0.02em',
+      }}
+    >
       {children}
     </h3>
   );
 }
 
 // H4 — sub-group header inside the Services panel (Recurring / One-Time /
-// Lawn / Termite / Pest / Rodent). V1 used colored accents (amber/green/
-// red) — V2 collapses to zinc-900. UI SoR §3: sentence case, not an eyebrow.
+// Lawn / Termite / Pest / Rodent). Same Montserrat 12/500 treatment as
+// PanelTitle so the whole Create Estimate form reads as one visual family.
 function SubGroupLabel({ children, className }) {
   return (
-    <h4 className={cn('text-16 font-medium text-zinc-900 mt-4 mb-2 pb-1 border-b border-hairline border-zinc-200', className)}>
+    <h4
+      className={cn('text-zinc-900 mt-4 mb-2 pb-1 border-b border-hairline border-zinc-200', className)}
+      style={{
+        fontFamily: "'Montserrat', sans-serif",
+        fontSize: 12,
+        fontWeight: 500,
+        letterSpacing: '0.02em',
+      }}
+    >
       {children}
     </h4>
   );
@@ -1359,7 +1377,15 @@ export default function EstimateToolViewV2() {
           <div>
             {!estimate ? (
               <Card className="p-10 text-center">
-                <div className="text-28 font-medium text-zinc-900 mb-3">
+                <div
+                  className="text-zinc-900 mb-3"
+                  style={{
+                    fontFamily: "'Montserrat', sans-serif",
+                    fontSize: 12,
+                    fontWeight: 500,
+                    letterSpacing: '0.02em',
+                  }}
+                >
                   {!livePreview.anySelected ? 'Select Services to Get Started' : 'Ready to Generate'}
                 </div>
                 <div className="text-14 text-ink-secondary mb-4">
