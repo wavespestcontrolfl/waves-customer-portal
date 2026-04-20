@@ -61,8 +61,18 @@ function detectServiceCategory(serviceType) {
   return 'pest';
 }
 
+// ET-aware date formatter. toISOString() is UTC — after 8 PM ET the UTC
+// date rolls forward, so a user loading the page at night used to send
+// tomorrow's date to the server and see "0 jobs today" even when today
+// had scheduled work. The business is in SW Florida; all scheduling is
+// done against the ET calendar day.
 function formatDateISO(d) {
-  return d.toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(d);
+  const get = (t) => parts.find((p) => p.type === t).value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
 function formatDateDisplay(dateStr) {
