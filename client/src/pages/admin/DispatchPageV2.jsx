@@ -306,7 +306,7 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
                 onFocus={() => setShowServiceResults(true)}
                 onBlur={() => setTimeout(() => setShowServiceResults(false), 150)}
                 placeholder="Search service library..."
-                className="h-8 text-12 px-2 rounded-sm bg-white border-hairline border-zinc-300 u-focus-ring w-56"
+                className="h-11 md:h-8 text-16 md:text-12 px-2 rounded-sm bg-white border-hairline border-zinc-300 u-focus-ring w-56"
               />
               {showServiceResults && serviceResults.length > 0 && (
                 <div className="absolute top-full left-0 mt-1 min-w-[280px] bg-white border-hairline border-zinc-200 rounded-sm z-30 max-h-60 overflow-auto shadow-md">
@@ -339,7 +339,7 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
               type="number"
               value={editDuration}
               onChange={(e) => setEditDuration(e.target.value)}
-              className="h-8 text-12 px-2 rounded-sm bg-white border-hairline border-zinc-300 u-focus-ring w-14 u-nums"
+              className="h-11 md:h-8 text-16 md:text-12 px-2 rounded-sm bg-white border-hairline border-zinc-300 u-focus-ring w-14 u-nums"
             />
             <span className="text-11 text-ink-secondary">min</span>
             <Button size="sm" onClick={saveEdit}>Save</Button>
@@ -573,6 +573,7 @@ export default function DispatchPageV2() {
   const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
+  const [showMoreSheet, setShowMoreSheet] = useState(false);
 
   const fetchSchedule = useCallback((d) => {
     setLoading(true);
@@ -590,6 +591,13 @@ export default function DispatchPageV2() {
   }, []);
 
   useEffect(() => { fetchSchedule(date); }, [date, fetchSchedule]);
+
+  useEffect(() => {
+    if (isMobile && viewMode !== 'day') {
+      setViewMode('day');
+      setActiveTab('board');
+    }
+  }, [isMobile, viewMode]);
 
   const syncDispatchAI = async () => {
     setSyncing(true); setSyncMsg('');
@@ -715,17 +723,17 @@ export default function DispatchPageV2() {
         <div>
           <h1 className="text-28 font-medium tracking-h1 text-zinc-900">Schedule &amp; Dispatch</h1>
           <div className="flex items-center gap-2 mt-2 justify-between flex-wrap">
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-center gap-2 min-w-0 w-full md:w-auto">
               <button
                 type="button"
                 onClick={() => shiftDate(-1)}
-                className="w-8 h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center"
+                className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-14 md:text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
                 title="Previous"
               >
                 ◀
               </button>
               <span
-                className="u-nums text-13 font-medium text-zinc-900 text-center"
+                className="u-nums text-14 md:text-13 font-medium text-zinc-900 text-center"
                 style={{ minWidth: isMobile ? 0 : 220, flex: isMobile ? 1 : undefined }}
               >
                 {dateHeader}
@@ -733,7 +741,7 @@ export default function DispatchPageV2() {
               <button
                 type="button"
                 onClick={() => shiftDate(1)}
-                className="w-8 h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center"
+                className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-14 md:text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
                 title="Next"
               >
                 ▶
@@ -742,7 +750,9 @@ export default function DispatchPageV2() {
                 <Button size="sm" variant="secondary" onClick={() => setDate(formatDateISO(new Date()))}>Today</Button>
               )}
             </div>
-            <ViewModeSelectorV2 viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
+            {!isMobile && (
+              <ViewModeSelectorV2 viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
+            )}
           </div>
         </div>
 
@@ -772,6 +782,39 @@ export default function DispatchPageV2() {
         </div>
       </div>
       {syncMsg && <div className="text-11 text-ink-secondary mb-2">{syncMsg}</div>}
+
+      {/* Mobile week strip — 7 rolling days centered on selected date */}
+      {viewMode === 'day' && (
+        <div className="md:hidden mb-4 -mx-4 px-4 overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+          <div className="flex gap-1.5 min-w-max">
+            {Array.from({ length: 7 }).map((_, i) => {
+              const d = new Date(date + 'T12:00:00');
+              d.setDate(d.getDate() + (i - 3));
+              const iso = formatDateISO(d);
+              const selected = iso === date;
+              const today = isToday(iso);
+              return (
+                <button
+                  key={iso}
+                  onClick={() => setDate(iso)}
+                  className={cn(
+                    'flex-1 inline-flex flex-col items-center justify-center h-14 min-w-[44px] rounded-sm border-hairline u-focus-ring transition-colors',
+                    selected ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white border-zinc-300',
+                    !selected && today && 'border-zinc-900'
+                  )}
+                >
+                  <span className={cn('text-10 uppercase tracking-label font-medium', selected ? 'text-white/80' : 'text-ink-tertiary')}>
+                    {d.toLocaleDateString('en-US', { weekday: 'short' })}
+                  </span>
+                  <span className={cn('u-nums text-14 font-medium', selected ? 'text-white' : 'text-ink-primary')}>
+                    {d.getDate()}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {showNewAppt && (
         <CreateAppointmentModal
@@ -810,21 +853,82 @@ export default function DispatchPageV2() {
 
       {/* Tabs bar — day view only */}
       {viewMode === 'day' && (
-        <div className="mb-5 bg-white rounded-md p-1 border-hairline border-zinc-200">
-          <HorizontalScroll gap={4} edgeBleed={4} style={{ paddingBottom: 0 }}>
-            {SCHEDULE_TABS.map((t) => (
+        <>
+          {/* Mobile: Board + More */}
+          <div className="md:hidden mb-4 flex items-center gap-2">
+            <button
+              onClick={() => setActiveTab('board')}
+              className={cn(
+                'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
+                activeTab === 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
+              )}
+            >
+              Board
+            </button>
+            <button
+              onClick={() => setShowMoreSheet(true)}
+              className={cn(
+                'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
+                activeTab !== 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
+              )}
+            >
+              {activeTab === 'board' ? 'More' : SCHEDULE_TABS.find((t) => t.id === activeTab)?.label || 'More'}
+            </button>
+          </div>
+
+          {/* Desktop: full tab strip */}
+          <div className="hidden md:block mb-5 bg-white rounded-md p-1 border-hairline border-zinc-200">
+            <HorizontalScroll gap={4} edgeBleed={4} style={{ paddingBottom: 0 }}>
+              {SCHEDULE_TABS.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setActiveTab(t.id)}
+                  className={cn(
+                    'px-4 h-9 rounded-sm text-12 font-medium uppercase tracking-label whitespace-nowrap flex-shrink-0 u-focus-ring transition-colors',
+                    activeTab === t.id ? 'bg-zinc-900 text-white' : 'bg-transparent text-ink-secondary hover:bg-zinc-50'
+                  )}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </HorizontalScroll>
+          </div>
+        </>
+      )}
+
+      {/* Mobile "More" bottom sheet */}
+      {showMoreSheet && (
+        <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
+          <div className="absolute inset-0 bg-zinc-900/30" onClick={() => setShowMoreSheet(false)} />
+          <div
+            className="absolute inset-x-0 bottom-0 bg-white rounded-t-md border-t border-hairline border-zinc-200"
+            style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+          >
+            <div className="px-4 pt-3 pb-2 flex items-center justify-between border-b border-hairline border-zinc-200">
+              <span className="u-label text-ink-secondary">Switch tool</span>
               <button
-                key={t.id}
-                onClick={() => setActiveTab(t.id)}
-                className={cn(
-                  'px-4 h-9 rounded-sm text-12 font-medium uppercase tracking-label whitespace-nowrap flex-shrink-0 u-focus-ring transition-colors',
-                  activeTab === t.id ? 'bg-zinc-900 text-white' : 'bg-transparent text-ink-secondary hover:bg-zinc-50'
-                )}
+                onClick={() => setShowMoreSheet(false)}
+                className="inline-flex items-center justify-center h-11 w-11 -mr-3 text-ink-secondary u-focus-ring"
               >
-                {t.label}
+                ✕
               </button>
-            ))}
-          </HorizontalScroll>
+            </div>
+            <div className="py-2">
+              {SCHEDULE_TABS.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => { setActiveTab(t.id); setShowMoreSheet(false); }}
+                  className={cn(
+                    'w-full flex items-center justify-between px-4 h-12 text-14 text-left u-focus-ring transition-colors',
+                    activeTab === t.id ? 'bg-zinc-50 text-zinc-900 font-medium' : 'bg-white text-ink-primary hover:bg-zinc-50'
+                  )}
+                >
+                  <span>{t.label}</span>
+                  {activeTab === t.id && <span className="text-11 u-label text-ink-tertiary">Active</span>}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
