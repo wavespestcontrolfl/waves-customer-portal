@@ -13,9 +13,9 @@ function adminFetch(path, options = {}) {
 }
 
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
-const sBtn = (bg, color) => ({ padding: '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
+const sBtn = (bg, color, isMobile) => ({ padding: isMobile ? '12px 18px' : '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: isMobile ? 14 : 13, fontWeight: 600, cursor: 'pointer', minHeight: isMobile ? 44 : undefined });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
-const sInput = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box' };
+const sInput = (isMobile) => ({ width: '100%', padding: isMobile ? '12px 14px' : '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: isMobile ? 16 : 13, outline: 'none', boxSizing: 'border-box', minHeight: isMobile ? 44 : undefined });
 
 const STATUS_COLORS = { draft: D.muted, sent: D.blue, viewed: D.teal, paid: D.green, overdue: D.red, void: D.muted };
 
@@ -57,8 +57,8 @@ export default function AdminInvoicesPage() {
             { label: 'Outstanding $', value: `$${stats.totalOutstanding?.toLocaleString()}`, color: D.amber },
           ].map(s => (
             <div key={s.label} style={{ ...sCard, marginBottom: 0, textAlign: 'center', padding: isMobile ? 12 : 20 }}>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: isMobile ? 14 : 18, fontWeight: 700, color: s.color }}>{s.value}</div>
-              <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: isMobile ? 16 : 18, fontWeight: 700, color: s.color }}>{s.value}</div>
+              <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
             </div>
           ))}
         </div>
@@ -67,7 +67,8 @@ export default function AdminInvoicesPage() {
       <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
         {[{ key: 'list', label: 'All Invoices' }, { key: 'create', label: 'Create Invoice' }].map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
+            padding: isMobile ? '14px 20px' : '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            fontSize: isMobile ? 14 : 13, fontWeight: 500, minHeight: isMobile ? 44 : undefined,
             background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
           }}>{t.label}</button>
         ))}
@@ -171,15 +172,17 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
               key={f.key || 'all'}
               onClick={() => setFilter(f.key)}
               style={{
-                padding: '6px 12px', borderRadius: 6, border: `1px solid ${active ? D.teal : D.border}`,
+                padding: isMobile ? '12px 14px' : '6px 12px', borderRadius: 6,
+                border: `1px solid ${active ? D.teal : D.border}`,
                 background: active ? D.teal : D.card, color: active ? D.white : D.text,
-                fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                fontSize: isMobile ? 14 : 12, fontWeight: 500, cursor: 'pointer',
+                minHeight: isMobile ? 44 : undefined,
               }}
             >{f.label}</button>
           );
         })}
         {sendableInvoices.length > 0 && (
-          <button onClick={selectAllSendable} style={{ ...sBtn(D.border, D.text), padding: '6px 12px', fontSize: 12 }}>
+          <button onClick={selectAllSendable} style={{ ...sBtn(D.border, D.text, isMobile), padding: isMobile ? '12px 14px' : '6px 12px', fontSize: isMobile ? 14 : 12 }}>
             Select all sendable ({sendableInvoices.length})
           </button>
         )}
@@ -237,54 +240,54 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
                 <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: inv.status === 'paid' ? D.green : D.heading }}>
                   ${parseFloat(inv.total).toFixed(2)}
                 </div>
-                <div style={{ fontSize: 10, color: D.muted }}>
+                <div style={{ fontSize: 11, color: D.muted }}>
                   {inv.service_date ? new Date(inv.service_date + 'T12:00:00').toLocaleDateString() : new Date(inv.created_at).toLocaleDateString()}
                 </div>
               </div>
             </div>
 
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-              {inv.status === 'draft' && <button onClick={() => handleSend(inv.id)} style={sBtn(D.teal, D.white)}>Send SMS</button>}
-              {(inv.status === 'sent' || inv.status === 'viewed') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.blue, D.white)}>Resend</button>}
+              {inv.status === 'draft' && <button onClick={() => handleSend(inv.id)} style={sBtn(D.teal, D.white, isMobile)}>Send SMS</button>}
+              {(inv.status === 'sent' || inv.status === 'viewed') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.blue, D.white, isMobile)}>Resend</button>}
               {inv.status !== 'paid' && inv.status !== 'void' && (
-                <button onClick={() => { navigator.clipboard.writeText(`${domain}/pay/${inv.token}`); showToast('Pay link copied'); }} style={sBtn(D.border, D.muted)}>Copy Link</button>
+                <button onClick={() => { navigator.clipboard.writeText(`${domain}/pay/${inv.token}`); showToast('Pay link copied'); }} style={sBtn(D.border, D.muted, isMobile)}>Copy Link</button>
               )}
               {inv.status !== 'paid' && inv.status !== 'void' && (
                 <button
                   onClick={() => { window.location.href = `waves-tap://charge?invoice_id=${inv.id}&amount=${Math.round(Number(inv.total) * 100)}`; }}
-                  style={sBtn(D.purple, D.white)}
+                  style={sBtn(D.purple, D.white, isMobile)}
                   title="Open Waves Tech app to tap customer's card/phone"
                 >Charge in person</button>
               )}
-              {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red)}>Void</button>}
+              {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
               {inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft' && (
-                <button onClick={() => setExpanded(expanded === inv.id ? null : inv.id)} style={sBtn(D.border, D.muted)}>
+                <button onClick={() => setExpanded(expanded === inv.id ? null : inv.id)} style={sBtn(D.border, D.muted, isMobile)}>
                   {expanded === inv.id ? '▾ Hide' : '▸ Follow-ups'}
                 </button>
               )}
-              {inv.view_count > 0 && <span style={{ fontSize: 10, color: D.muted }}>{inv.view_count} views</span>}
+              {inv.view_count > 0 && <span style={{ fontSize: 11, color: D.muted }}>{inv.view_count} views</span>}
               {reminderCount > 0 && (
-                <span style={{ fontSize: 10, color: D.amber }} title="SMS reminders sent so far">
+                <span style={{ fontSize: 11, color: D.amber }} title="SMS reminders sent so far">
                   ↩ {reminderCount} reminder{reminderCount === 1 ? '' : 's'}
                 </span>
               )}
               {inv.status === 'paid' && (inv.payment_method || inv.card_brand) && (
-                <span style={{ fontSize: 10, color: D.green }} title="Paid via">
+                <span style={{ fontSize: 11, color: D.green }} title="Paid via">
                   ✓ {inv.card_brand ? `${inv.card_brand}` : (inv.payment_method || 'paid')}
                   {inv.card_last_four ? ` •${inv.card_last_four}` : ''}
                   {inv.payment_method && inv.payment_method !== 'card' ? ` (${inv.payment_method.replace('_', ' ')})` : ''}
                 </span>
               )}
               {cardOnFile && inv.status !== 'paid' && inv.status !== 'void' && (
-                <span style={{ fontSize: 10, color: D.teal }} title="Default card on file for this customer">
+                <span style={{ fontSize: 11, color: D.teal }} title="Default card on file for this customer">
                   💳 {cardOnFile.brand || 'Card'} •{cardOnFile.last_four}
                 </span>
               )}
-              {inv.sms_sent_at && <span style={{ fontSize: 10, color: D.muted }}>SMS: {new Date(inv.sms_sent_at).toLocaleString()}</span>}
+              {inv.sms_sent_at && <span style={{ fontSize: 11, color: D.muted }}>SMS: {new Date(inv.sms_sent_at).toLocaleString()}</span>}
             </div>
 
             {expanded === inv.id && (
-              <FollowupPanel invoiceId={inv.id} showToast={showToast} />
+              <FollowupPanel invoiceId={inv.id} showToast={showToast} isMobile={isMobile} />
             )}
           </div>
         );
@@ -297,10 +300,10 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
           display: 'flex', alignItems: 'center', gap: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', zIndex: 50,
         }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}>{selected.size} selected</span>
-          <button onClick={handleBatchSend} disabled={batchSending} style={{ ...sBtn(D.teal, D.white), opacity: batchSending ? 0.6 : 1 }}>
+          <button onClick={handleBatchSend} disabled={batchSending} style={{ ...sBtn(D.teal, D.white, isMobile), opacity: batchSending ? 0.6 : 1 }}>
             {batchSending ? 'Sending…' : `Send ${selected.size} via SMS`}
           </button>
-          <button onClick={clearSelection} style={sBtn('transparent', D.white)}>Clear</button>
+          <button onClick={clearSelection} style={sBtn('transparent', D.white, isMobile)}>Clear</button>
         </div>
       )}
     </div>
@@ -427,11 +430,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   <span style={{ color: D.muted, fontSize: 12, marginLeft: 8 }}>{selectedCustomer.phone}</span>
                   {selectedCustomer.waveguard_tier && <span style={{ ...sBadge(`${D.amber}22`, D.amber), marginLeft: 8 }}>{selectedCustomer.waveguard_tier}</span>}
                 </div>
-                <button onClick={() => { setSelectedCustomer(null); setSelectedService(null); setCustomerQuery(''); }} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16 }}>x</button>
+                <button onClick={() => { setSelectedCustomer(null); setSelectedService(null); setCustomerQuery(''); }} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 18, padding: isMobile ? '10px 12px' : '4px 8px', minHeight: isMobile ? 44 : undefined, minWidth: isMobile ? 44 : undefined }}>x</button>
               </div>
             ) : (
               <div style={{ position: 'relative' }}>
-                <input value={customerQuery} onChange={e => setCustomerQuery(e.target.value)} placeholder="Search by name, phone, or email..." style={sInput} />
+                <input value={customerQuery} onChange={e => setCustomerQuery(e.target.value)} placeholder="Search by name, phone, or email..." style={sInput(isMobile)} />
                 {customers.length > 0 && (
                   <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 10, maxHeight: 200, overflow: 'auto', marginTop: 4 }}>
                     {customers.map(c => (
@@ -458,7 +461,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 if (sr && lineItems.length === 1 && !lineItems[0].description) {
                   setLineItems([{ description: sr.service_type, quantity: 1, unit_price: 0 }]);
                 }
-              }} style={sInput}>
+              }} style={sInput(isMobile)}>
                 <option value="">No service linked</option>
                 {serviceRecords.map(r => (
                   <option key={r.id} value={r.id}>
@@ -481,7 +484,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     onFocus={() => setServiceSearchIdx(i)}
                     onBlur={() => setTimeout(() => { setServiceSearchIdx(prev => (prev === i ? null : prev)); }, 150)}
                     placeholder="Search service library or type custom..."
-                    style={sInput}
+                    style={sInput(isMobile)}
                   />
                   {serviceSearchIdx === i && serviceResults.length > 0 && (
                     <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 20, maxHeight: 240, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
@@ -508,24 +511,24 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   )}
                 </div>
                 <input type="number" value={item.quantity} onChange={e => updateLineItem(i, 'quantity', e.target.value)}
-                  min="1" style={{ ...sInput, flex: isMobile ? '0 0 60px' : 0.5, textAlign: 'center' }} />
+                  min="1" style={{ ...sInput(isMobile), flex: isMobile ? '0 0 72px' : 0.5, textAlign: 'center' }} />
                 <div style={{ position: 'relative', flex: 1 }}>
-                  <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 13 }}>$</span>
+                  <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: isMobile ? 16 : 13 }}>$</span>
                   <input type="number" value={item.unit_price || ''} onChange={e => updateLineItem(i, 'unit_price', e.target.value)}
-                    placeholder="0.00" step="0.01" style={{ ...sInput, paddingLeft: 22 }} />
+                    placeholder="0.00" step="0.01" style={{ ...sInput(isMobile), paddingLeft: 22 }} />
                 </div>
                 {lineItems.length > 1 && (
-                  <button onClick={() => removeLineItem(i)} style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 16, padding: '10px 4px' }}>x</button>
+                  <button onClick={() => removeLineItem(i)} style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 18, padding: isMobile ? '12px 12px' : '10px 4px', minHeight: isMobile ? 44 : undefined, minWidth: isMobile ? 44 : undefined }}>x</button>
                 )}
               </div>
             ))}
-            <button onClick={addLineItem} style={{ ...sBtn('transparent', D.teal), padding: '6px 12px', fontSize: 12 }}>+ Add line item</button>
+            <button onClick={addLineItem} style={{ ...sBtn('transparent', D.teal, isMobile), padding: isMobile ? '12px 14px' : '6px 12px', fontSize: isMobile ? 14 : 12 }}>+ Add line item</button>
           </div>
 
           {/* Notes */}
           <div style={{ marginBottom: 16 }}>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Notes (optional)</label>
-            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="Internal or customer-facing notes" style={{ ...sInput, resize: 'vertical' }} />
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="Internal or customer-facing notes" style={{ ...sInput(isMobile), resize: 'vertical' }} />
           </div>
 
           {/* Send toggle */}
@@ -534,7 +537,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <label htmlFor="send-toggle" style={{ fontSize: 13, color: D.text }}>Send via SMS immediately after creating</label>
           </div>
 
-          <button onClick={handleCreate} disabled={saving} style={{ ...sBtn(D.green, D.white), width: '100%', padding: 14, opacity: saving ? 0.5 : 1 }}>
+          <button onClick={handleCreate} disabled={saving} style={{ ...sBtn(D.green, D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1 }}>
             {saving ? 'Creating...' : sendAfterCreate ? 'Create & Send Invoice' : 'Create Draft'}
           </button>
         </div>
@@ -577,7 +580,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
 }
 
 // ── Follow-up Sequence Panel (per-invoice) ──
-function FollowupPanel({ invoiceId, showToast }) {
+function FollowupPanel({ invoiceId, showToast, isMobile }) {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -651,22 +654,22 @@ function FollowupPanel({ invoiceId, showToast }) {
             <button disabled={busy} onClick={() => {
               const reason = prompt('Why pause? (e.g. "customer said they\'ll pay Friday")');
               if (reason !== null) act('pause', { reason });
-            }} style={sBtn(D.amber, D.white)}>Pause</button>
+            }} style={sBtn(D.amber, D.white, isMobile)}>Pause</button>
             <button disabled={busy} onClick={() => {
               if (confirm('Send the next follow-up SMS right now?')) act('send-now');
-            }} style={sBtn(D.teal, D.white)}>Send Next Now</button>
+            }} style={sBtn(D.teal, D.white, isMobile)}>Send Next Now</button>
             <button disabled={busy} onClick={() => {
               const reason = prompt('Why stop? (e.g. "waived", "customer disputed")');
               if (reason !== null) act('stop', { reason });
-            }} style={sBtn('transparent', D.red)}>Stop</button>
+            }} style={sBtn('transparent', D.red, isMobile)}>Stop</button>
           </>
         )}
         {seq && (seq.status === 'paused' || seq.status === 'autopay_hold') && (
           <>
-            <button disabled={busy} onClick={() => act('resume')} style={sBtn(D.green, D.white)}>Resume</button>
+            <button disabled={busy} onClick={() => act('resume')} style={sBtn(D.green, D.white, isMobile)}>Resume</button>
             <button disabled={busy} onClick={() => {
               if (confirm('Send the next follow-up SMS right now?')) act('send-now');
-            }} style={sBtn(D.teal, D.white)}>Send Now</button>
+            }} style={sBtn(D.teal, D.white, isMobile)}>Send Now</button>
           </>
         )}
       </div>
