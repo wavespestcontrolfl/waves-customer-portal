@@ -225,10 +225,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     let invoiceCreated = false;
     let payUrl = null;
+    let invoice = null;
     if (shouldInvoice) {
       try {
         const InvoiceService = require('../services/invoice');
-        const invoice = await InvoiceService.createFromService(record.id, {
+        invoice = await InvoiceService.createFromService(record.id, {
           amount: invoiceAmount,
           description: svc.service_type,
           taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
@@ -301,7 +302,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
-    res.json({ success: true, serviceRecordId: record.id });
+    res.json({
+      success: true,
+      serviceRecordId: record.id,
+      invoiceId: invoice?.id || null,
+      invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
+    });
   } catch (err) { next(err); }
 });
 

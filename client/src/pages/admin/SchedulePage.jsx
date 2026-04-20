@@ -1675,7 +1675,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     setServicePhotos(prev => prev.filter((_, i) => i !== index));
   }
 
-  async function handleSubmit() {
+  async function handleSubmit({ charge = false } = {}) {
     setSubmitting(true);
     try {
       const body = {
@@ -1701,8 +1701,14 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         if (soilPh) body.soilPh = parseFloat(soilPh);
         if (soilMoisture) body.soilMoisture = parseFloat(soilMoisture);
       }
-      await onSubmit(service.id, body);
+      const r = await onSubmit(service.id, body);
       setSuccess(true);
+      if (charge && r?.invoiceId && r?.invoiceTotal != null) {
+        const cents = Math.round(Number(r.invoiceTotal) * 100);
+        window.location.href = `waves-tap://charge?invoice_id=${r.invoiceId}&amount=${cents}`;
+      } else if (charge) {
+        alert('Service completed, but no invoice was generated — cannot start Tap to Pay. Check the invoice list.');
+      }
       setTimeout(() => onClose(true), 1200);
     } catch (e) {
       alert('Failed to complete service: ' + e.message);
@@ -2090,8 +2096,21 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         </div>
 
         {/* Footer */}
-        <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0 }}>
-          <button onClick={handleSubmit} disabled={submitting} style={{
+        <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <button onClick={() => handleSubmit({ charge: true })} disabled={submitting} style={{
+            ...btnBase, width: '100%', background: D.text, color: '#fff', fontSize: 14, height: 52,
+            opacity: submitting ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
+          }}>
+            {submitting ? 'Completing...' : (
+              <>
+                <span style={{ fontSize: 15, fontWeight: 700 }}>Complete &amp; charge</span>
+                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
+                  Mark complete, create invoice, launch Tap to Pay
+                </span>
+              </>
+            )}
+          </button>
+          <button onClick={() => handleSubmit()} disabled={submitting} style={{
             ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
             opacity: submitting ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
@@ -2757,11 +2776,12 @@ export default function SchedulePage() {
   }, []);
 
   const handleCompleteSubmit = useCallback(async (serviceId, body) => {
-    await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
+    const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
       method: 'POST',
       body: JSON.stringify(body),
     });
     handleStatusChange(serviceId, 'completed');
+    return r;
   }, [handleStatusChange]);
 
   const handleDelete = useCallback(async (service) => {

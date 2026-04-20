@@ -731,8 +731,9 @@ export default function DispatchPageV2() {
   const handleComplete = useCallback((service) => { setCompletingService(service); }, []);
 
   const handleCompleteSubmit = useCallback(async (serviceId, body) => {
-    await adminFetch(`/admin/dispatch/${serviceId}/complete`, { method: 'POST', body: JSON.stringify(body) });
+    const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, { method: 'POST', body: JSON.stringify(body) });
     handleStatusChange(serviceId, 'completed');
+    return r;
   }, [handleStatusChange]);
 
   const handleDelete = useCallback(async (service) => {
