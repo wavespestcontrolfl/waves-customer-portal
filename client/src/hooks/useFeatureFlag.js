@@ -35,17 +35,23 @@ async function loadFlags() {
   return inflight;
 }
 
-export function useFeatureFlag(key) {
-  const [enabled, setEnabled] = useState(false);
+// `defaultValue` is returned when the user has no row for this flag (absence
+// in the DB). Pass `true` to flip a flag default-on: every user gets the
+// feature unless they have an explicit `enabled: false` row. Fetch errors
+// still fail closed to the default — the cache entry for the key is absent,
+// so the default applies.
+export function useFeatureFlag(key, defaultValue = false) {
+  const [enabled, setEnabled] = useState(defaultValue);
   useEffect(() => {
     let mounted = true;
     loadFlags().then((flags) => {
-      if (mounted) setEnabled(!!flags[key]);
+      if (!mounted) return;
+      setEnabled(Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue);
     });
     return () => {
       mounted = false;
     };
-  }, [key]);
+  }, [key, defaultValue]);
   return enabled;
 }
 
