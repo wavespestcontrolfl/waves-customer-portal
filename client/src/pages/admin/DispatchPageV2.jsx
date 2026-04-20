@@ -1212,7 +1212,12 @@ export default function DispatchPageV2() {
         <MarkPrepaidModal
           service={prepaidService}
           onClose={() => setPrepaidService(null)}
-          onSaved={() => { setPrepaidService(null); fetchSchedule(date); }}
+          onSaved={() => {
+            const svc = prepaidService;
+            setPrepaidService(null);
+            setCompletingService(svc);
+            fetchSchedule(date);
+          }}
         />
       )}
     </div>
