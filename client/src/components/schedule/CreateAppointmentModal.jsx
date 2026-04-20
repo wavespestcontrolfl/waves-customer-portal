@@ -392,7 +392,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         windowStart,
         windowEnd: getEndTime(),
         assignmentMode: techMode,
-        technicianId: techMode === 'choose' ? techId : techMode === 'unassigned' ? null : undefined,
+        technicianId: techMode === 'choose' ? techId : undefined,
         estimatedPrice: price ? parseFloat(price) : null,
         urgency: 'routine',
         notes: customerNotes || undefined,
@@ -520,7 +520,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         <div style={sectionStyle}>
           <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Service</div>
           {!selectedService ? (
-            <div style={{ position: 'relative' }}>
+            <div>
               <input
                 type="text"
                 value={serviceSearch}
@@ -529,7 +529,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 style={inputStyle}
               />
               {serviceSearch.trim().length > 0 && (
-                <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 280, overflowY: 'auto', zIndex: 20 }}>
+                <div style={{ marginTop: 8, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 280, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
                   {filteredServices.map((svc, i) => (
                     <div
                       key={`${svc.category}-${svc.name}-${i}`}
@@ -761,11 +761,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           </div>
         </div>
 
-        {/* Section 3b: Tech Assignment — its own section below Date */}
+        {/* Section 3b: Technician — its own section below Date */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Tech assignment</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Technician</div>
           <div style={{ display: 'flex', gap: 6 }}>
-            {[{ v: 'auto', l: 'Auto' }, { v: 'choose', l: 'Choose' }, { v: 'unassigned', l: 'Unassigned' }].map(o => (
+            {[{ v: 'auto', l: 'Auto' }, { v: 'choose', l: 'Choose' }].map(o => (
               <button key={o.v} onClick={() => setTechMode(o.v)} style={{
                 flex: 1, padding: '10px 8px', borderRadius: 8, border: `1px solid ${techMode === o.v ? D.teal : D.border}`,
                 background: techMode === o.v ? `${D.teal}22` : D.input, color: techMode === o.v ? D.teal : D.text,
