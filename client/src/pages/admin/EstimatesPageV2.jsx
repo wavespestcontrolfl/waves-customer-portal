@@ -28,6 +28,7 @@ import {
   DeclineModalV2,
 } from '../../components/admin/EstimateModalsV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
+import { Flag, Globe, Mic, Users, Bot } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -77,7 +78,8 @@ function FilterPillV2({ active, label, count, onClick }) {
       type="button"
       onClick={onClick}
       className={cn(
-        'h-7 px-3 text-11 rounded-xs uppercase font-medium tracking-label',
+        'h-11 sm:h-7 px-4 sm:px-3 text-13 sm:text-11 rounded-full sm:rounded-xs font-medium',
+        'sm:uppercase sm:tracking-label',
         'border-hairline u-focus-ring transition-colors',
         active
           ? 'bg-zinc-900 text-white border-zinc-900'
@@ -133,10 +135,10 @@ function timeAgo(d) {
 }
 
 const SOURCE_ICON = {
-  lead_webhook: { icon: '🌐', title: 'Website lead' },
-  voice_agent: { icon: '🎙️', title: 'Voice agent lead' },
-  referral: { icon: '🤝', title: 'Referral' },
-  ai_agent: { icon: '🤖', title: 'AI agent draft — review before sending' },
+  lead_webhook: { Icon: Globe, title: 'Website lead' },
+  voice_agent: { Icon: Mic, title: 'Voice agent lead' },
+  referral: { Icon: Users, title: 'Referral' },
+  ai_agent: { Icon: Bot, title: 'AI agent draft — review before sending' },
 };
 
 function EstimatePipelineViewV2() {
@@ -349,12 +351,12 @@ function EstimatePipelineViewV2() {
                 {/* Customer info */}
                 <div className="flex-1 min-w-[150px]">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-14 font-medium text-zinc-900">
+                    <span className="text-14 sm:text-14 font-medium text-zinc-900">
                       {e.customerName || 'Unknown'}
                     </span>
                     {source && (
-                      <span title={source.title} className="text-14">
-                        {source.icon}
+                      <span title={source.title} className="inline-flex text-ink-tertiary">
+                        <source.Icon size={14} strokeWidth={1.75} aria-hidden />
                       </span>
                     )}
                     <UrgencyBadge urgency={urgency} />
@@ -367,7 +369,7 @@ function EstimatePipelineViewV2() {
                       <Badge tone="alert">{e.declineReason}</Badge>
                     )}
                   </div>
-                  <div className="text-12 text-ink-secondary mt-0.5 truncate">
+                  <div className="text-13 sm:text-12 text-ink-secondary mt-0.5 truncate">
                     {e.address || '—'}
                     {e.serviceInterest ? ` · ${e.serviceInterest}` : ''}
                   </div>
@@ -403,19 +405,20 @@ function EstimatePipelineViewV2() {
                 </div>
 
                 {/* Actions */}
-                <div className="flex gap-1.5 flex-wrap">
+                <div className="flex gap-1.5 flex-wrap items-center">
                   <button
                     type="button"
                     onClick={() => togglePriority(e)}
                     title={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
+                    aria-label={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
                     className={cn(
-                      'h-7 w-7 flex items-center justify-center rounded-xs border-hairline u-focus-ring transition-colors',
+                      'h-11 w-11 sm:h-7 sm:w-7 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors',
                       e.isPriority
                         ? 'bg-alert-bg text-alert-fg border-alert-fg'
                         : 'bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50',
                     )}
                   >
-                    ⚑
+                    <Flag size={16} strokeWidth={1.75} aria-hidden />
                   </button>
 
                   {e.status === 'draft' && e.monthlyTotal > 0 && (
@@ -505,9 +508,9 @@ export default function EstimatesPageV2() {
   return (
     <div>
       <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
-        <div className="text-28 font-medium text-zinc-900 tracking-display">
+        <h1 className="text-28 font-normal text-zinc-900 tracking-display">
           Pipeline
-        </div>
+        </h1>
         <div className="flex gap-1.5 flex-wrap">
           {TABS.map((t) => (
             <button
@@ -515,7 +518,9 @@ export default function EstimatesPageV2() {
               type="button"
               onClick={() => setActiveTab(t.key)}
               className={cn(
-                'h-9 px-4 text-12 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
+                'h-11 sm:h-9 px-5 sm:px-4 text-14 sm:text-12 font-medium',
+                'sm:uppercase sm:tracking-label',
+                'rounded-full sm:rounded-sm border-hairline u-focus-ring transition-colors',
                 activeTab === t.key
                   ? 'bg-zinc-900 text-white border-zinc-900'
                   : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
