@@ -2654,6 +2654,13 @@ export function RecurringAlertsBanner() {
 
 /* ── Main Schedule Page ───────────────────────────────── */
 
+/**
+ * @deprecated V1 SchedulePage. DispatchGate now always renders DispatchPageV2;
+ * this default export is no longer reached as a route. The named exports above
+ * (CompletionPanel, RescheduleModal, EditServiceModal, ProtocolPanel,
+ * MONTH_NAMES, PRODUCT_DESCRIPTIONS, TRACK_SAFETY_RULES,
+ * stripLegacyBoilerplate) are still consumed by V2 and ProtocolReferenceTabV2.
+ */
 export default function SchedulePage() {
   const isMobile = useIsMobile();
   const [activeTab, setActiveTab] = useState('board');
