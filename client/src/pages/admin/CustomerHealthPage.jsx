@@ -867,7 +867,7 @@ export default function CustomerHealthPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: COLORS.heading }}>Customer Health & Churn Prediction</h1>
+          <h1 style={{ margin: 0, fontSize: 28, fontWeight: 400, color: COLORS.heading }}>Customer Health & Churn Prediction</h1>
           <p style={{ margin: '4px 0 0', fontSize: 13, color: COLORS.textMuted }}>Monitor customer health scores, detect churn risk, and automate retention</p>
         </div>
         <button

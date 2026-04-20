@@ -1019,7 +1019,7 @@ export default function LeadsPage() {
   // MAIN RENDER
   // ═════════════════════════════════════════════════════════════════════════
   return <div style={{ padding:24, maxWidth:1400, margin:'0 auto', color:C.text }}>
-    <h1 style={{ margin:'0 0 8px', fontSize:24, color:C.heading }}>Lead Attribution & Marketing ROI</h1>
+    <h1 style={{ margin:'0 0 8px', fontSize:28, fontWeight:400, color:C.heading }}>Lead Attribution & Marketing ROI</h1>
     <p style={{ margin:'0 0 24px', fontSize:14, color:C.muted }}>Track every lead from first touch to conversion</p>
 
     <SEOIntelligenceBar context="leads" />

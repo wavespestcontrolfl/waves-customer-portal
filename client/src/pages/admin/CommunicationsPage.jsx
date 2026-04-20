@@ -1587,7 +1587,7 @@ export default function CommunicationsPage() {
       {/* --- Header --- */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexWrap: 'wrap', gap: 16 }}>
         <div>
-          <h1 style={{ fontFamily: 'DM Sans, sans-serif', fontSize: 24, fontWeight: 700, color: D.heading, margin: 0 }}>SMS & Calls</h1>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>SMS & Calls</h1>
         </div>
       </div>
 

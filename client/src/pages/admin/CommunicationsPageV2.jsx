@@ -1085,7 +1085,7 @@ export default function CommunicationsPageV2() {
           <div className="text-11 uppercase tracking-label text-ink-secondary">
             Operations
           </div>
-          <h1 className="text-28 font-medium tracking-display text-zinc-900">
+          <h1 className="text-28 font-normal tracking-display text-zinc-900">
             SMS &amp; Calls
           </h1>
         </div>

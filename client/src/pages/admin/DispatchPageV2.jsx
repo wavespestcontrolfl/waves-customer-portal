@@ -807,7 +807,7 @@ export default function DispatchPageV2() {
       {/* Header */}
       <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
         <div>
-          <h1 className="text-28 font-medium tracking-h1 text-zinc-900">Schedule</h1>
+          <h1 className="text-28 font-normal tracking-h1 text-zinc-900">Schedule</h1>
 
           {/* Mobile: Schedule + More pills — above the date nav so users can switch tools first */}
           {viewMode === 'day' && (

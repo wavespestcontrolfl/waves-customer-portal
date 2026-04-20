@@ -852,7 +852,7 @@ function EstimateToolView() {
       `}</style>
       {/* HEADER */}
       <div className="estimate-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28, paddingBottom: 18, borderBottom: `2px solid ${C.border}` }}>
-        <h1 style={{ fontSize: 26, fontWeight: 700, color: C.teal, margin: 0 }}>Waves Estimating Engine</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, color: C.heading, margin: 0 }}>Waves Estimating Engine</h1>
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: C.gray, background: C.navy, padding: '6px 14px', borderRadius: 20 }}>v1.3 — Internal Use Only</span>
       </div>
 

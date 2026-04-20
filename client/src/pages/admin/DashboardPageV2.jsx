@@ -114,7 +114,7 @@ export default function DashboardPageV2() {
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
             <div className="u-label text-ink-secondary">{today}</div>
-            <h1 className="text-28 font-medium tracking-h1 mt-1">{greeting()}, Adam</h1>
+            <h1 className="text-28 font-normal tracking-h1 mt-1">{greeting()}, Adam</h1>
           </div>
         </div>
       </header>

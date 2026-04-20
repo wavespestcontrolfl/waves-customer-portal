@@ -77,7 +77,7 @@ export default function DesignSystemPage() {
   if (!isAllowed()) {
     return (
       <div className="p-8">
-        <h1 className="text-22 font-medium text-zinc-900">Not available</h1>
+        <h1 className="text-28 font-normal text-zinc-900">Not available</h1>
         <p className="text-13 text-ink-secondary mt-2">
           The design system reference is only available in development or to
           allowlisted users.
@@ -92,7 +92,7 @@ export default function DesignSystemPage() {
         <div className="text-11 uppercase tracking-label text-ink-secondary">
           Internal
         </div>
-        <h1 className="text-28 font-medium tracking-tight">Design System</h1>
+        <h1 className="text-28 font-normal tracking-tight">Design System</h1>
         <p className="text-13 text-ink-secondary mt-1 max-w-2xl">
           Canonical reference for every primitive in the monochrome admin
           spec. When building a Tier 1 page, render the primitive here and

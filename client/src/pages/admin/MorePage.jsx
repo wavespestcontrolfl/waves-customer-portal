@@ -62,7 +62,7 @@ export default function MorePage() {
   return (
     <div className="md:hidden pb-4">
       <div className="px-4 pt-4 pb-3">
-        <h1 className="text-22 font-medium text-zinc-900 tracking-tight">More</h1>
+        <h1 className="text-28 font-normal text-zinc-900 tracking-tight">More</h1>
         <p className="text-13 text-zinc-500 mt-1">Everything beyond the five tabs.</p>
       </div>
 

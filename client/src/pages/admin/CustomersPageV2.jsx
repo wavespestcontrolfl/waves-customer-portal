@@ -625,7 +625,7 @@ export default function CustomersPageV2() {
       {/* ======================= HEADER ======================= */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div className="flex items-baseline gap-3">
-          <h1 className="text-22 font-medium tracking-h1 text-ink-primary">Customers</h1>
+          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Customers</h1>
         </div>
         <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
           <ViewToggleV2 view={view} onChange={setView} />
