@@ -10,6 +10,7 @@ const { adminAuthenticate } = require('../middleware/admin-auth');
 const {
   auditTerminalHandoffMint,
   auditTerminalHandoffRateLimited,
+  auditTerminalHandoffValidate,
   ipFromReq,
   uaFromReq,
 } = require('../services/audit-log');
@@ -200,6 +201,182 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
   } catch (err) {
     logger.error(`[stripe-terminal] handoff mint failed: ${err.message}`);
     res.status(500).json({ error: 'Handoff mint failed' });
+  }
+});
+
+// POST /api/stripe/terminal/validate-handoff
+// Called by the native iOS app with the handoff JWT. Authenticates the request
+// purely via the signed token — no adminAuthenticate middleware. The jti is
+// atomically burned so a second call with the same token is rejected.
+//
+// Body: { token }
+// Returns (200): { invoice_id, customer_name, amount_cents, currency }
+// Returns (401): signature_invalid (bad sig, wrong aud/iss, unknown jti)
+// Returns (410): expired | replay
+// Returns (409): invoice_status_changed | invoice_amount_changed | technician_not_active
+//
+// Every outcome is audited — mint-to-validate funnel + failure-mode
+// distribution are the primary signals for the Tool Health Dashboard.
+router.post('/validate-handoff', async (req, res) => {
+  const ip = ipFromReq(req);
+  const ua = uaFromReq(req);
+  try {
+    const secret = getHandoffSecret();
+    if (!secret) {
+      logger.error('[stripe-terminal] validate-handoff refused — TERMINAL_HANDOFF_SECRET unset or too short');
+      return res.status(500).json({ error: 'Handoff signing not configured' });
+    }
+
+    const { token } = req.body || {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+
+    let claims;
+    try {
+      claims = jwt.verify(token, secret, {
+        audience: HANDOFF_AUD,
+        issuer: HANDOFF_ISS,
+        algorithms: ['HS256'],
+      });
+    } catch (err) {
+      // Forensic-only decode: claims here are UNTRUSTED (signature failed or
+      // aud/iss mismatched). We record them anyway so we can see what
+      // tech_user_id / jti an attacker tried to forge against.
+      const forensic = jwt.decode(token) || {};
+      const expired = err.name === 'TokenExpiredError';
+      auditTerminalHandoffValidate({
+        tech_user_id: forensic.tech_user_id || null,
+        invoice_id: forensic.invoice_id || null,
+        jti: forensic.jti || null,
+        outcome: expired ? 'expired' : 'signature_invalid',
+        ip_address: ip,
+        user_agent: ua,
+      });
+      if (expired) {
+        return res.status(410).json({ error: 'Token expired', code: 'expired' });
+      }
+      return res.status(401).json({ error: 'Invalid token', code: 'signature_invalid' });
+    }
+
+    // Atomic burn. UPDATE ... WHERE used_at IS NULL holds a row lock under
+    // any isolation level, so two concurrent validates for the same jti
+    // cannot both succeed — one wins, the other sees zero rows affected.
+    // DB-side expiry check protects against the narrow window where the JWT
+    // exp hasn't quite fired but the DB row's expires_at has (clock drift).
+    const burned = await db('terminal_handoff_tokens')
+      .where({ jti: claims.jti })
+      .whereNull('used_at')
+      .where('expires_at', '>', db.fn.now())
+      .update({ used_at: db.fn.now() })
+      .returning(['jti', 'tech_user_id']);
+
+    if (burned.length === 0) {
+      // Disambiguate. Three reasons the UPDATE hit nothing:
+      //   - row exists, used_at is set     → replay (410)
+      //   - row exists, expires_at past    → expired (410) [rare — JWT exp
+      //                                      would usually catch this first]
+      //   - no row                         → forged jti against a valid sig
+      //                                      (impossible unless secret leaked;
+      //                                      treat as signature_invalid 401)
+      const existing = await db('terminal_handoff_tokens').where({ jti: claims.jti }).first();
+      let outcome = 'signature_invalid';
+      let status = 401;
+      let errMsg = 'Invalid token';
+      if (existing?.used_at) {
+        outcome = 'replay';
+        status = 410;
+        errMsg = 'Token already used';
+      } else if (existing) {
+        outcome = 'expired';
+        status = 410;
+        errMsg = 'Token expired';
+      }
+      auditTerminalHandoffValidate({
+        tech_user_id: claims.tech_user_id || null,
+        invoice_id: claims.invoice_id || null,
+        jti: claims.jti,
+        outcome,
+        ip_address: ip,
+        user_agent: ua,
+      });
+      return res.status(status).json({ error: errMsg, code: outcome });
+    }
+
+    // jti is burned. Any failure path below leaves a consumed token and a
+    // clear audit row — by design. The mint can't be re-used, the tech has
+    // to request a fresh handoff, and the reason is explicit in the audit log.
+    const invoice = await db('invoices').where({ id: claims.invoice_id }).first();
+    if (!invoice || ['paid', 'void', 'refunded'].includes(invoice.status)) {
+      auditTerminalHandoffValidate({
+        tech_user_id: claims.tech_user_id || null,
+        invoice_id: claims.invoice_id || null,
+        jti: claims.jti,
+        outcome: 'invoice_changed',
+        ip_address: ip,
+        user_agent: ua,
+      });
+      return res.status(409).json({
+        error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
+        code: 'invoice_status_changed',
+      });
+    }
+
+    const invoiceAmountCents = Math.round(Number(invoice.total) * 100);
+    if (invoiceAmountCents !== Number(claims.amount_cents)) {
+      auditTerminalHandoffValidate({
+        tech_user_id: claims.tech_user_id || null,
+        invoice_id: invoice.id,
+        jti: claims.jti,
+        outcome: 'invoice_changed',
+        ip_address: ip,
+        user_agent: ua,
+      });
+      return res.status(409).json({
+        error: 'Invoice amount changed since handoff',
+        code: 'invoice_amount_changed',
+      });
+    }
+
+    const tech = await db('technicians').where({ id: claims.tech_user_id }).first();
+    if (!tech || tech.active === false) {
+      auditTerminalHandoffValidate({
+        tech_user_id: claims.tech_user_id || null,
+        invoice_id: invoice.id,
+        jti: claims.jti,
+        outcome: 'tech_inactive',
+        ip_address: ip,
+        user_agent: ua,
+      });
+      return res.status(409).json({
+        error: 'Technician not active',
+        code: 'technician_not_active',
+      });
+    }
+
+    const customer = invoice.customer_id
+      ? await db('customers').where({ id: invoice.customer_id }).first()
+      : null;
+    const customer_name = customer
+      ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null
+      : null;
+
+    auditTerminalHandoffValidate({
+      tech_user_id: claims.tech_user_id,
+      invoice_id: invoice.id,
+      jti: claims.jti,
+      outcome: 'success',
+      ip_address: ip,
+      user_agent: ua,
+    });
+
+    return res.json({
+      invoice_id: String(invoice.id),
+      customer_name,
+      amount_cents: invoiceAmountCents,
+      currency: 'usd',
+    });
+  } catch (err) {
+    logger.error(`[stripe-terminal] validate-handoff failed: ${err.message}`);
+    return res.status(500).json({ error: 'Validation failed' });
   }
 });
 

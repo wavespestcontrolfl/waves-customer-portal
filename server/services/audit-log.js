@@ -104,6 +104,44 @@ async function auditTerminalHandoffRateLimited({ tech_user_id, invoice_id, recen
   });
 }
 
+/**
+ * Tap to Pay handoff token validation attempt. Called from POST
+ * /api/stripe/terminal/validate-handoff for every outcome — success
+ * and every rejection. Outcome taxonomy:
+ *
+ *   'success'           — jti burned, invoice + amount + tech all clean
+ *   'signature_invalid' — JWT verify failed (bad sig, wrong aud/iss, or
+ *                         jti never minted). For forensics, claims are
+ *                         parsed via jwt.decode() without verification —
+ *                         they're untrusted; record them anyway so we
+ *                         can see what tech_user_id an attacker tried to
+ *                         forge against.
+ *   'expired'           — JWT exp has passed, OR (rare) the JWT exp
+ *                         passed but the DB row's expires_at triggered
+ *                         first due to clock drift.
+ *   'replay'            — jti exists but used_at is already set.
+ *   'invoice_changed'   — jti burned cleanly, but invoice is now paid /
+ *                         voided / refunded, or the total no longer
+ *                         matches claims.amount_cents.
+ *   'tech_inactive'     — jti burned, but the technician has been
+ *                         deactivated between mint and validate.
+ *
+ * Mint-to-validate-success ratio and the failure-mode distribution are
+ * the signals the Tool Health Dashboard will key off once it exists.
+ */
+async function auditTerminalHandoffValidate({ tech_user_id, invoice_id, jti, outcome, ip_address, user_agent }) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id || null,
+    action: 'terminal.handoff.validate',
+    resource_type: 'invoice',
+    resource_id: invoice_id || null,
+    metadata: { jti: jti || null, outcome },
+    ip_address,
+    user_agent,
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -116,6 +154,7 @@ module.exports = {
   recordAuditEvent,
   auditTerminalHandoffMint,
   auditTerminalHandoffRateLimited,
+  auditTerminalHandoffValidate,
   ipFromReq,
   uaFromReq,
 };
