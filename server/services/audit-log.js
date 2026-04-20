@@ -66,7 +66,10 @@ async function recordAuditEvent({
 /**
  * Tap to Pay handoff token mint. Called from POST /api/stripe/terminal/handoff.
  * Fire-and-forget: the terminal_handoff_tokens row + Stripe PI are the
- * primary record; audit_log is secondary forensics.
+ * primary record; audit_log is secondary forensics. This is an intentional
+ * choice, not a default — if the audit row is lost we can reconstruct the
+ * mint event from the jti row (durable) + the eventual PI (Stripe), so a
+ * failed audit write should not fail the user-facing request.
  */
 async function auditTerminalHandoffMint({ tech_user_id, invoice_id, amount_cents, jti, ip_address, user_agent }) {
   return recordAuditEvent({
@@ -76,6 +79,26 @@ async function auditTerminalHandoffMint({ tech_user_id, invoice_id, amount_cents
     resource_type: 'invoice',
     resource_id: invoice_id,
     metadata: { amount_cents, jti },
+    ip_address,
+    user_agent,
+  });
+}
+
+/**
+ * Tap to Pay handoff mint rejected by rate limit. Called from the same
+ * endpoint on the 429 path. Fire-and-forget matches the mint audit. A
+ * spike in these rows means either a UX problem (tech fumbling the flow
+ * and re-minting repeatedly) or an incident (leaked JWT, scripted abuse)
+ * — worth surfacing in the Tool Health Dashboard once it exists.
+ */
+async function auditTerminalHandoffRateLimited({ tech_user_id, invoice_id, recent_count, retry_after_seconds, ip_address, user_agent }) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id,
+    action: 'terminal.handoff.rate_limited',
+    resource_type: 'invoice',
+    resource_id: invoice_id,
+    metadata: { recent_count, retry_after_seconds },
     ip_address,
     user_agent,
   });
@@ -92,6 +115,7 @@ function uaFromReq(req) {
 module.exports = {
   recordAuditEvent,
   auditTerminalHandoffMint,
+  auditTerminalHandoffRateLimited,
   ipFromReq,
   uaFromReq,
 };

@@ -463,6 +463,23 @@ const server = app.listen(PORT, () => {
       initScheduledJobs();
     }
 
+    // Terminal Tap to Pay: surface missing/short TERMINAL_HANDOFF_SECRET in
+    // the deploy log immediately. Not a hard boot failure — the portal is
+    // designed to tolerate partial config, and taking down 90 unrelated
+    // routes because one feature's secret is missing would be wrong blast
+    // radius. The endpoint still refuses to mint at runtime, but this log
+    // line means ops sees the problem when they look at the deploy, not
+    // when a tech on-site gets a 500.
+    {
+      const s = process.env.TERMINAL_HANDOFF_SECRET;
+      if (!s || s.length < 32) {
+        const msg = s
+          ? '[stripe-terminal] TERMINAL_HANDOFF_SECRET is set but shorter than 32 chars — handoff minting DISABLED. Regenerate with: openssl rand -hex 32'
+          : '[stripe-terminal] TERMINAL_HANDOFF_SECRET is NOT SET — handoff minting DISABLED. Generate with: openssl rand -hex 32 and set in Railway env.';
+        if (config.nodeEnv === 'production') logger.error(msg); else logger.warn(msg);
+      }
+    }
+
     // Sync pricing engine constants from admin-edited DB values
     try {
       const { syncConstantsFromDB } = require('./services/pricing-engine');

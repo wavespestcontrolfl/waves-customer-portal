@@ -17,6 +17,13 @@
  * Nullable + ON DELETE SET NULL so a deactivated technician's ephemeral
  * rows don't block cleanup and so back-filled rows from before this
  * migration (dev only) don't blow up.
+ *
+ * Nullability is transitional. All new inserts go through POST /handoff
+ * which always provides tech_user_id (adminAuthenticate guarantees it),
+ * so any NULL you see in this column is a dev row from before this
+ * migration or a row whose technician was deleted. A future migration
+ * may backfill historical nulls and enforce NOT NULL — leaving it loose
+ * now keeps the ALTER trivial on a live DB.
  */
 
 exports.up = async function (knex) {

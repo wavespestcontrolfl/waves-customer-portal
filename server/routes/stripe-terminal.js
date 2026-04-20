@@ -7,7 +7,12 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const { adminAuthenticate } = require('../middleware/admin-auth');
-const { auditTerminalHandoffMint, ipFromReq, uaFromReq } = require('../services/audit-log');
+const {
+  auditTerminalHandoffMint,
+  auditTerminalHandoffRateLimited,
+  ipFromReq,
+  uaFromReq,
+} = require('../services/audit-log');
 
 const TERMINAL_LOCATION_ID = process.env.STRIPE_TERMINAL_LOCATION_ID || null;
 
@@ -20,7 +25,20 @@ const HANDOFF_AUD = 'waves-pay-ios';
 // Per-tech mint ceiling. The limiter is a security control (handoff tokens
 // authorize real-money charges) — it MUST survive deploys and be accurate
 // across replicas. Enforced in Postgres, not in-memory.
-const HANDOFF_MINTS_PER_HOUR = 20;
+//
+// Baseline reasoning for 20/hr: a normal field day is 8–12 stops. 20 mints
+// gives 8–12 legitimate taps plus generous headroom for retries (tech
+// fumbles the flow, customer says "wait let me grab a different card",
+// reader disconnects and has to reconnect). Any tech hitting 20 in a
+// rolling hour is either in trouble or the token is leaked — either way
+// we want a 429 + audit row, not silent passage.
+//
+// Env-overridable so dev can use 100 for easier testing and so the number
+// can be tuned in production without a deploy.
+const HANDOFF_MINTS_PER_HOUR = (() => {
+  const raw = parseInt(process.env.HANDOFF_MINT_RATE_LIMIT_PER_HOUR, 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 20;
+})();
 
 function getStripe() {
   return new Stripe(stripeConfig.secretKey);
@@ -68,6 +86,8 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     }
 
     let rateLimited = false;
+    let rateLimitedCount = 0;
+    let rateLimitedRetryAfter = 3600;
     let mintedJti = null;
     let mintedExpiresAt = null;
 
@@ -75,18 +95,36 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       // Serialize concurrent mints for this tech. Two int4 args give us a
       // namespace + key pair; the lock is held until the transaction ends.
       // Different techs get different keys and proceed in parallel.
+      //
+      // Explicit ::text cast on tech_user_id: hashtext() accepts text and
+      // uuid has no implicit cast to text in all postgres versions. The
+      // cast is free and makes the call safe if Knex ever hands us the
+      // uuid as something other than a JS string.
       await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))',
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['terminal.handoff.mint', String(req.technicianId)],
       );
 
-      const [{ count }] = await trx('terminal_handoff_tokens')
+      // Single query for both the count AND the oldest qualifying row.
+      // oldest.created_at + 1 hour is the moment the bucket frees up a
+      // slot — we return that delta as Retry-After so iOS can render
+      // "try again in N minutes" instead of a generic error.
+      const [row] = await trx('terminal_handoff_tokens')
         .where('tech_user_id', req.technicianId)
         .where('created_at', '>', trx.raw("NOW() - INTERVAL '1 hour'"))
-        .count('* as count');
+        .select(
+          trx.raw('COUNT(*)::int AS count'),
+          trx.raw('MIN(created_at) AS oldest'),
+        );
 
-      if (Number(count) >= HANDOFF_MINTS_PER_HOUR) {
+      const recent = Number(row?.count || 0);
+
+      if (recent >= HANDOFF_MINTS_PER_HOUR) {
         rateLimited = true;
+        rateLimitedCount = recent;
+        const oldestMs = row?.oldest ? new Date(row.oldest).getTime() : Date.now();
+        const retryAtMs = oldestMs + 60 * 60 * 1000;
+        rateLimitedRetryAfter = Math.max(1, Math.ceil((retryAtMs - Date.now()) / 1000));
         return; // commit with no writes — lock releases, count is unchanged
       }
 
@@ -111,7 +149,19 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     });
 
     if (rateLimited) {
-      return res.status(429).json({ error: 'Too many handoff mints. Try again in an hour.' });
+      auditTerminalHandoffRateLimited({
+        tech_user_id: req.technicianId,
+        invoice_id: invoice.id,
+        recent_count: rateLimitedCount,
+        retry_after_seconds: rateLimitedRetryAfter,
+        ip_address: ipFromReq(req),
+        user_agent: uaFromReq(req),
+      });
+      res.setHeader('Retry-After', String(rateLimitedRetryAfter));
+      return res.status(429).json({
+        error: 'Too many handoff mints. Try again in an hour.',
+        retry_after_seconds: rateLimitedRetryAfter,
+      });
     }
 
     const token = jwt.sign(
