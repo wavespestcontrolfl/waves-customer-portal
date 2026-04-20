@@ -58,15 +58,15 @@ export function MarginCalculator() {
   };
 
   const inputStyle = {
-    padding: '6px 10px', background: D.input, border: `1px solid ${D.border}`,
-    borderRadius: 6, color: D.heading, fontSize: 13, width: 90, textAlign: 'right',
+    padding: '8px 10px', background: D.input, border: `1px solid ${D.border}`,
+    borderRadius: 6, color: D.heading, fontSize: 14, width: 90, textAlign: 'right',
     fontFamily: "'JetBrains Mono', monospace", outline: 'none',
   };
 
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Margin Calculator</div>
+        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: D.heading, fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Margin Calculator</h2>
         <button onClick={fetchMargins} disabled={loading} style={{
           padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer',
           fontSize: 12, fontWeight: 600, background: D.teal, color: D.white,
@@ -155,7 +155,7 @@ function SpecServicesPanel() {
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Missing-Services Pricing Spec</div>
+        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: D.heading, fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Missing-Services Pricing Spec</h2>
         <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 12, background: D.green + '22', color: D.green, border: `1px solid ${D.green}55` }}>
           ✓ Linked to Estimator Engine
         </span>

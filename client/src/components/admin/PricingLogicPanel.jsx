@@ -85,7 +85,7 @@ function ChangelogTab() {
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A' }}>Pricing Changelog</div>
+        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Pricing Changelog</h2>
         <label style={{ fontSize: 12, color: D.muted }}>
           Filter
           <select value={filter} onChange={e => setFilter(e.target.value)} style={{
@@ -259,7 +259,7 @@ function ProposalsTab() {
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A' }}>Pricing Proposals</div>
+        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Pricing Proposals</h2>
         <div style={{ display: 'flex', gap: 6 }}>
           {statusOptions.map(s => (
             <button
@@ -764,7 +764,7 @@ function DiscountRulesTab() {
 
   return (
     <div>
-      <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>Service Discount Rules</div>
+      <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Service Discount Rules</h2>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
           <thead>
@@ -842,7 +842,7 @@ function ProductsTab() {
 
   return (
     <div>
-      <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 4 }}>Product Cost Reference</div>
+      <h2 style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Product Cost Reference</h2>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
         {products.length} products loaded. Full catalog available under Inventory tab.
       </div>
@@ -947,7 +947,7 @@ export default function PricingLogicPanel() {
           {/* Lawn tab has special bracket grid */}
           {activeTab === 'lawn' && (
             <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>Monthly Price Brackets</div>
+              <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Monthly Price Brackets</h2>
               <LawnBracketsTab />
             </div>
           )}
@@ -972,12 +972,12 @@ export default function PricingLogicPanel() {
           {activeTab !== 'products' && activeTab !== 'changelog' && activeTab !== 'proposals' && filteredConfigs.length > 0 && (
             <div>
               {activeTab !== 'lawn' && activeTab !== 'waveguard' && (
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12 }}>
+                <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>
                   {TABS.find(t => t.key === activeTab)?.label || activeTab} Configuration
-                </div>
+                </h2>
               )}
-              {activeTab === 'waveguard' && <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12, marginTop: 12 }}>Tier Configuration</div>}
-              {activeTab === 'lawn' && <div style={{ fontSize: 14, fontWeight: 600, color: '#0F172A', marginBottom: 12, marginTop: 12 }}>Lawn Pricing Config</div>}
+              {activeTab === 'waveguard' && <h2 style={{ margin: '12px 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Tier Configuration</h2>}
+              {activeTab === 'lawn' && <h2 style={{ margin: '12px 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Lawn Pricing Config</h2>}
               {filteredConfigs.map(c => (
                 <ConfigCard key={c.config_key} config={c} onUpdate={handleConfigUpdate} />
               ))}

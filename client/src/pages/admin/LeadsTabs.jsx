@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
+import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBarV2';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -320,7 +320,7 @@ export function LeadsSection() {
 
       {/* Funnel */}
       <Card style={{ marginBottom:24 }}>
-        <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Lead Funnel</h3>
+        <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Lead Funnel</h2>
         <div style={{ display:'flex', alignItems:'flex-end', gap:2, height:120 }}>
           {funnelData.map((f, i) => {
             const maxCount = Math.max(...funnelData.map(d => d.count), 1);
@@ -345,8 +345,8 @@ export function LeadsSection() {
           <option value="">All Statuses</option>
           {STATUSES.map(s => <option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
         </select>
-        <input placeholder="Search leads..." value={filters.search} onChange={e=>setFilters(f=>({...f, search:e.target.value, page:1}))}
-          style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13, minWidth:200 }} />
+        <input placeholder="Search by name, phone, email" value={filters.search} onChange={e=>setFilters(f=>({...f, search:e.target.value, page:1}))}
+          style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'8px 12px', color:C.text, fontSize:14, minWidth:200 }} />
         <select value={filters.sort} onChange={e=>setFilters(f=>({...f, sort:e.target.value}))}
           style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13 }}>
           <option value="first_contact_at">Newest First</option>
@@ -569,7 +569,7 @@ export function LeadsSection() {
   const renderSources = () => {
     return <>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-        <h3 style={{ margin:0, color:C.heading, fontSize:16 }}>Lead Sources ({sources.length})</h3>
+        <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Lead Sources ({sources.length})</h2>
         <div style={{ display:'flex', gap:8 }}>
           <Btn small onClick={()=>{ setFormData({ source_type:'phone_tracking', cost_type:'per_month' }); setShowModal('newSource'); }}>+ Add Source</Btn>
         </div>
@@ -639,7 +639,7 @@ export function LeadsSection() {
   const renderCampaigns = () => {
     return <>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-        <h3 style={{ margin:0, color:C.heading, fontSize:16 }}>Marketing Campaigns ({campaigns.length})</h3>
+        <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Marketing Campaigns ({campaigns.length})</h2>
         <Btn onClick={()=>{ setFormData({ channel:'website_organic' }); setShowModal('newCampaign'); }}>+ New Campaign</Btn>
       </div>
       <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
@@ -709,7 +709,7 @@ export function LeadsSection() {
     return <>
       {/* Channel Comparison */}
       <Card style={{ marginBottom:24 }}>
-        <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Channel Comparison</h3>
+        <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Channel Comparison</h2>
         {byChannel.length === 0 && <div style={{ color:C.muted, fontSize:13 }}>No channel data available yet</div>}
         {byChannel.map(ch => <div key={ch.channel} style={{ marginBottom:12 }}>
           <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginBottom:4 }}>
@@ -733,7 +733,7 @@ export function LeadsSection() {
 
       {/* Source ROI Matrix */}
       <Card style={{ marginBottom:24 }}>
-        <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Source ROI Matrix</h3>
+        <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Source ROI Matrix</h2>
         {scatterSources.length === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No source data with leads yet</div> :
         <svg viewBox="0 0 400 300" style={{ width:'100%', maxWidth:600, height:'auto' }}>
           {/* Quadrant lines */}
@@ -764,7 +764,7 @@ export function LeadsSection() {
       <div style={{ display:'flex', gap:16, flexWrap:'wrap', marginBottom:24 }}>
         {/* Response Time vs Conversion */}
         <Card style={{ flex:'1 1 400px' }}>
-          <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Response Time vs Conversion</h3>
+          <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Response Time vs Conversion</h2>
           {responseBuckets.length === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No response data yet</div> :
           <div style={{ display:'flex', alignItems:'flex-end', gap:6, height:140 }}>
             {responseBuckets.map((b, i) => {
@@ -789,7 +789,7 @@ export function LeadsSection() {
 
         {/* Lost Lead Analysis */}
         <Card style={{ flex:'1 1 300px' }}>
-          <h3 style={{ margin:'0 0 16px', color:C.heading, fontSize:15 }}>Lost Lead Reasons</h3>
+          <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Lost Lead Reasons</h2>
           {totalLost === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No lost leads yet</div> :
           <div style={{ display:'flex', gap:24, alignItems:'center' }}>
             <svg viewBox="0 0 100 100" style={{ width:120, height:120, flexShrink:0 }}>
@@ -829,7 +829,7 @@ export function LeadsSection() {
       {/* Phone Number ROI Table */}
       <Card style={{ padding:0, overflow:'auto' }}>
         <div style={{ padding:'16px 20px', borderBottom:`1px solid ${C.border}` }}>
-          <h3 style={{ margin:0, color:C.heading, fontSize:15 }}>Phone Number ROI</h3>
+          <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Phone Number ROI</h2>
         </div>
         <table style={{ width:'100%', borderCollapse:'collapse', minWidth:700 }}>
           <thead>
