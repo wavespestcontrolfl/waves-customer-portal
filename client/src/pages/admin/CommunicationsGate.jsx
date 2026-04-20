@@ -5,7 +5,7 @@ import { useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 const CommunicationsPageV2 = lazy(() => import('./CommunicationsPageV2'));
 
 export default function CommunicationsGate() {
-  const { enabled: v2, ready } = useFeatureFlagReady('comms-v2');
+  const { enabled: v2, ready } = useFeatureFlagReady('comms-v2', true);
   if (!ready) {
     return (
       <div className="p-16 text-center text-13 text-ink-secondary">

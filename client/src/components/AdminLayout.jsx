@@ -60,7 +60,7 @@ export default function AdminLayout() {
   const [user, setUser] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const isMobile = useIsMobile(768);
-  const mobileShellEnabled = useFeatureFlag('mobile-shell-v2');
+  const mobileShellEnabled = useFeatureFlag('mobile-shell-v2', true);
   const useMobileShell = isMobile && mobileShellEnabled;
   const paletteRef = useRef(null);
 

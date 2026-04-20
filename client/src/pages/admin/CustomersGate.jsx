@@ -5,7 +5,7 @@ import { useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 const CustomersPageV2 = lazy(() => import('./CustomersPageV2'));
 
 export default function CustomersGate() {
-  const { enabled: v2, ready } = useFeatureFlagReady('customers-v2');
+  const { enabled: v2, ready } = useFeatureFlagReady('customers-v2', true);
   if (!ready) {
     return <div className="p-16 text-center text-13 text-ink-secondary">Loading customers…</div>;
   }
