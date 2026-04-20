@@ -1018,6 +1018,39 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — Orphaned-validated handoff sweeper
+  //
+  // Targets rows where /validate-handoff burned the jti but /payment-intent
+  // was never called (tech's iOS app crashed post-validate, user backed out
+  // of the charge screen, network dropped between apps, etc.). 15-minute
+  // threshold is deliberately longer than a realistic Tap to Pay flow
+  // (20-60s of tech-customer interaction + charge) but short enough that
+  // these rows don't accumulate and silently chew the per-tech rate-limit
+  // budget.
+  //
+  // The partial index terminal_handoff_tokens_orphaned_validated_idx covers
+  // exactly this WHERE clause — it's a direct index scan, not a table scan.
+  // Cheap enough to run every 5 minutes on Railway's shared Postgres.
+  //
+  // Note: the daily 1AM cleanup above catches these rows eventually (via
+  // expires_at), but only after 1h of post-expiry buffer. The 5-min sweeper
+  // is specifically for the rate-limit-budget case.
+  cron.schedule('*/5 * * * *', async () => {
+    const started = Date.now();
+    try {
+      const deleted = await db('terminal_handoff_tokens')
+        .whereNotNull('used_at')
+        .whereNull('stripe_payment_intent_id')
+        .where('used_at', '<', db.raw("NOW() - INTERVAL '15 minutes'"))
+        .del();
+      if (deleted > 0) {
+        logger.info(`[terminal-sweeper] ok — deleted ${deleted} orphaned-validated handoff(s) in ${Date.now() - started}ms`);
+      }
+    } catch (err) {
+      logger.error(`[terminal-sweeper] failed after ${Date.now() - started}ms: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 

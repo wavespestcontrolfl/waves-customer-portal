@@ -139,9 +139,19 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       // reserved and the row is visible to the next rate-limit count. A
       // jti collision is ~1 in 2^128 — if it ever happens, the unique
       // violation surfaces here and no token is returned.
+      //
+      // invoice_id + amount_cents lock in the mint-time binding. /payment-
+      // intent reads both from this row (not the request body, not the JWT
+      // claims) so the data model enforces "this jti can only ever charge
+      // this invoice for this amount." If the invoice total changes between
+      // mint and validate, /validate-handoff rejects on amount_changed and
+      // the tech re-handoffs for the new total. amount_cents here is also
+      // the durable reconciliation record for disputes months down the road.
       await trx('terminal_handoff_tokens').insert({
         jti,
         tech_user_id: req.technicianId,
+        invoice_id: invoice.id,
+        amount_cents,
         expires_at,
       });
 
@@ -262,12 +272,18 @@ router.post('/validate-handoff', async (req, res) => {
     // cannot both succeed — one wins, the other sees zero rows affected.
     // DB-side expiry check protects against the narrow window where the JWT
     // exp hasn't quite fired but the DB row's expires_at has (clock drift).
+    //
+    // RETURNING the DB-side bindings (tech_user_id, invoice_id, amount_cents)
+    // so the belt-and-suspenders recheck below can compare them against the
+    // signed JWT claims. If they disagree, that's a signal of DB corruption,
+    // cross-environment replay, or a bug — reject rather than trust either
+    // source. Costs one extra comparison per validate.
     const burned = await db('terminal_handoff_tokens')
       .where({ jti: claims.jti })
       .whereNull('used_at')
       .where('expires_at', '>', db.fn.now())
       .update({ used_at: db.fn.now() })
-      .returning(['jti', 'tech_user_id']);
+      .returning(['jti', 'tech_user_id', 'invoice_id', 'amount_cents']);
 
     if (burned.length === 0) {
       // Disambiguate. Three reasons the UPDATE hit nothing:
@@ -304,11 +320,42 @@ router.post('/validate-handoff', async (req, res) => {
     // jti is burned. Any failure path below leaves a consumed token and a
     // clear audit row — by design. The mint can't be re-used, the tech has
     // to request a fresh handoff, and the reason is explicit in the audit log.
-    const invoice = await db('invoices').where({ id: claims.invoice_id }).first();
+
+    // Belt-and-suspenders: JWT claims must agree with the DB row that was
+    // written at mint time. The JWT signature check already proves the
+    // issuer signed these claims — but if the DB row's bindings disagree,
+    // something is wrong (cross-env replay, DB corruption, migration bug).
+    // Trust the DB row over the claim and reject. Cheap comparison, catches
+    // a class of bug that would otherwise silently charge the wrong invoice.
+    const handoffRow = burned[0];
+    const claimInvoiceMatches = String(handoffRow.invoice_id) === String(claims.invoice_id);
+    const claimAmountMatches = Number(handoffRow.amount_cents) === Number(claims.amount_cents);
+    const claimTechMatches = String(handoffRow.tech_user_id) === String(claims.tech_user_id);
+    if (!claimInvoiceMatches || !claimAmountMatches || !claimTechMatches) {
+      logger.error(
+        `[stripe-terminal] validate-handoff claim/db mismatch jti=${claims.jti} ` +
+          `inv_claim=${claims.invoice_id} inv_db=${handoffRow.invoice_id} ` +
+          `amt_claim=${claims.amount_cents} amt_db=${handoffRow.amount_cents} ` +
+          `tech_claim=${claims.tech_user_id} tech_db=${handoffRow.tech_user_id}`,
+      );
+      auditTerminalHandoffValidate({
+        tech_user_id: handoffRow.tech_user_id || null,
+        invoice_id: handoffRow.invoice_id || null,
+        jti: claims.jti,
+        outcome: 'signature_invalid',
+        ip_address: ip,
+        user_agent: ua,
+      });
+      return res.status(401).json({ error: 'Invalid token', code: 'signature_invalid' });
+    }
+
+    // From here on the DB row is the authoritative source for invoice_id,
+    // amount_cents, and tech_user_id. Stop reading from `claims` for those.
+    const invoice = await db('invoices').where({ id: handoffRow.invoice_id }).first();
     if (!invoice || ['paid', 'void', 'refunded'].includes(invoice.status)) {
       auditTerminalHandoffValidate({
-        tech_user_id: claims.tech_user_id || null,
-        invoice_id: claims.invoice_id || null,
+        tech_user_id: handoffRow.tech_user_id || null,
+        invoice_id: handoffRow.invoice_id || null,
         jti: claims.jti,
         outcome: 'invoice_changed',
         ip_address: ip,
@@ -320,10 +367,15 @@ router.post('/validate-handoff', async (req, res) => {
       });
     }
 
+    // Compare the CURRENT invoice total against the mint-time amount stored
+    // on the handoff row — not against the JWT claim. If the admin adjusted
+    // the invoice between mint and validate, that shows up here and the tech
+    // re-handoffs for the new total. handoffRow.amount_cents is the durable
+    // reconciliation record.
     const invoiceAmountCents = Math.round(Number(invoice.total) * 100);
-    if (invoiceAmountCents !== Number(claims.amount_cents)) {
+    if (invoiceAmountCents !== Number(handoffRow.amount_cents)) {
       auditTerminalHandoffValidate({
-        tech_user_id: claims.tech_user_id || null,
+        tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: invoice.id,
         jti: claims.jti,
         outcome: 'invoice_changed',
@@ -336,10 +388,10 @@ router.post('/validate-handoff', async (req, res) => {
       });
     }
 
-    const tech = await db('technicians').where({ id: claims.tech_user_id }).first();
+    const tech = await db('technicians').where({ id: handoffRow.tech_user_id }).first();
     if (!tech || tech.active === false) {
       auditTerminalHandoffValidate({
-        tech_user_id: claims.tech_user_id || null,
+        tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: invoice.id,
         jti: claims.jti,
         outcome: 'tech_inactive',
@@ -360,7 +412,7 @@ router.post('/validate-handoff', async (req, res) => {
       : null;
 
     auditTerminalHandoffValidate({
-      tech_user_id: claims.tech_user_id,
+      tech_user_id: handoffRow.tech_user_id,
       invoice_id: invoice.id,
       jti: claims.jti,
       outcome: 'success',
@@ -371,7 +423,7 @@ router.post('/validate-handoff', async (req, res) => {
     return res.json({
       invoice_id: String(invoice.id),
       customer_name,
-      amount_cents: invoiceAmountCents,
+      amount_cents: Number(handoffRow.amount_cents),
       currency: 'usd',
     });
   } catch (err) {
@@ -396,34 +448,131 @@ router.post('/connection-token', adminAuthenticate, async (req, res) => {
 });
 
 // POST /api/stripe/terminal/payment-intent
-// Creates a card_present PaymentIntent tied to an invoice.
-// Body: { invoiceId }
+// Creates the card_present PaymentIntent for a previously-validated handoff.
+// iOS sends this after /validate-handoff has burned the jti and surfaced
+// amount to the tech for confirmation. By the time this route is hit the
+// binding work is already done — we just need to create the PI and record
+// it on the handoff row.
+//
+// Auth: adminAuthenticate (tech JWT in header). Consistent with every other
+// terminal endpoint. Body: { jti }. invoice_id, amount, and the authorized
+// tech are all read from the handoff row — never from the request.
+//
+// Timing: no TTL on this call. Once validate has burned the jti, the tech
+// can take as long as they need to show the amount to the customer, answer
+// questions, and tap charge. The 60s JWT mint window is UX-hostile for real
+// customer interactions; this flow bounds the validate→PI gap with a 15m
+// sweeper in scheduler.js instead.
+//
+// Idempotency: Stripe call uses Idempotency-Key `handoff_<jti>`. If the PI
+// create succeeds but the subsequent UPDATE fails (DB blip, crash, network
+// flake), the retry hits Stripe with the same key and Stripe returns the
+// original PI — no duplicate charge. The UPDATE is idempotent too
+// (stripe_payment_intent_id column, SET to the same value).
+//
 // Returns: { clientSecret, paymentIntentId, amount }
 router.post('/payment-intent', adminAuthenticate, async (req, res) => {
   try {
-    const { invoiceId } = req.body;
-    if (!invoiceId) return res.status(400).json({ error: 'invoiceId required' });
+    const { jti } = req.body || {};
+    if (!jti || typeof jti !== 'string') {
+      return res.status(400).json({ error: 'jti required' });
+    }
 
-    const invoice = await db('invoices').where({ id: invoiceId }).first();
-    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
+    // Look up the handoff row. The ONLY trusted source for invoice binding,
+    // amount, and the tech who minted this handoff. Request body cannot
+    // lie because the fields that matter aren't in the request body.
+    const handoff = await db('terminal_handoff_tokens').where({ jti }).first();
+    if (!handoff) {
+      return res.status(404).json({ error: 'Handoff not found', code: 'handoff_unknown' });
+    }
+    if (!handoff.used_at) {
+      return res.status(409).json({ error: 'Handoff not validated', code: 'handoff_not_validated' });
+    }
+    if (handoff.stripe_payment_intent_id) {
+      // Clean "your iOS app already created a PI for this jti — use that
+      // clientSecret" path. iOS should be retrieving the existing PI via
+      // the Stripe API using the ID we return here, not re-creating.
+      return res.status(409).json({
+        error: 'Payment intent already created for this handoff',
+        code: 'payment_intent_already_created',
+        paymentIntentId: handoff.stripe_payment_intent_id,
+      });
+    }
 
-    const amountCents = Math.round(Number(invoice.total) * 100);
-    if (!amountCents || amountCents < 50) return res.status(400).json({ error: 'Invalid invoice amount' });
+    // Prevent tech-cross-use: if tech A's validated jti somehow ends up in
+    // tech B's iOS app, the authenticated tech won't match the handoff row's
+    // tech_user_id. 403 because this is a permission violation, not a state
+    // violation. Logged at error level — this shouldn't happen in the
+    // normal flow and warrants investigation.
+    if (String(handoff.tech_user_id) !== String(req.technicianId)) {
+      logger.error(
+        `[stripe-terminal] payment-intent tech mismatch jti=${jti} ` +
+          `handoff_tech=${handoff.tech_user_id} req_tech=${req.technicianId}`,
+      );
+      return res.status(403).json({ error: 'Handoff belongs to a different technician', code: 'tech_mismatch' });
+    }
 
+    // Re-verify invoice state at PI-create time. Between /validate-handoff
+    // and /payment-intent, the invoice could have been voided, paid by the
+    // office, or adjusted. These checks run against the current invoice
+    // state and the mint-time snapshot in handoff.amount_cents.
+    const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
+    if (!invoice || ['paid', 'void', 'refunded'].includes(invoice.status)) {
+      return res.status(409).json({
+        error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
+        code: 'invoice_status_changed',
+      });
+    }
+    const currentAmountCents = Math.round(Number(invoice.total) * 100);
+    if (currentAmountCents !== Number(handoff.amount_cents)) {
+      return res.status(409).json({
+        error: 'Invoice amount changed since handoff',
+        code: 'invoice_amount_changed',
+      });
+    }
+
+    const tech = await db('technicians').where({ id: handoff.tech_user_id }).first();
+    if (!tech || tech.active === false) {
+      return res.status(409).json({
+        error: 'Technician not active',
+        code: 'technician_not_active',
+      });
+    }
+
+    // Stripe PI create. Idempotency-Key ensures a retry returns the
+    // original PI instead of creating a duplicate — the key scenario is
+    // "Stripe succeeded but our UPDATE failed, iOS retries." The key is
+    // bound to the jti so it's stable across retries but unique per handoff.
     const stripe = getStripe();
-    const pi = await stripe.paymentIntents.create({
-      amount: amountCents,
-      currency: 'usd',
-      payment_method_types: ['card_present'],
-      capture_method: 'automatic',
-      metadata: {
-        invoice_id: String(invoice.id),
-        customer_id: String(invoice.customer_id || ''),
-        source: 'tap_to_pay',
+    const pi = await stripe.paymentIntents.create(
+      {
+        amount: Number(handoff.amount_cents),
+        currency: 'usd',
+        payment_method_types: ['card_present'],
+        capture_method: 'automatic',
+        metadata: {
+          handoff_jti: jti,
+          tech_user_id: String(handoff.tech_user_id),
+          invoice_id: String(invoice.id),
+          customer_id: String(invoice.customer_id || ''),
+          source: 'tap_to_pay',
+        },
       },
-    });
+      { idempotencyKey: `handoff_${jti}` },
+    );
 
+    // Atomic record: SET only if still NULL. Two concurrent /payment-intent
+    // calls for the same jti both hit Stripe with the same idempotency key
+    // and both get the same PI back — the first UPDATE wins, the second is
+    // a no-op (same value). Either way, the jti ends up pointing at one PI.
+    await db('terminal_handoff_tokens')
+      .where({ jti })
+      .whereNull('stripe_payment_intent_id')
+      .update({ stripe_payment_intent_id: pi.id });
+
+    // Also backfill the invoice row for admin-portal consistency. Not the
+    // source of truth for the terminal flow (handoff row is) — this just
+    // keeps the existing invoice detail view working.
     await db('invoices').where({ id: invoice.id }).update({
       stripe_payment_intent_id: pi.id,
     });
@@ -431,7 +580,7 @@ router.post('/payment-intent', adminAuthenticate, async (req, res) => {
     res.json({
       clientSecret: pi.client_secret,
       paymentIntentId: pi.id,
-      amount: amountCents,
+      amount: Number(handoff.amount_cents),
     });
   } catch (err) {
     logger.error(`[stripe-terminal] payment-intent failed: ${err.message}`);
