@@ -173,6 +173,7 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
   const [showSkipReasons, setShowSkipReasons] = useState(false);
   const [lawnUploading, setLawnUploading] = useState(false);
   const [lawnDone, setLawnDone] = useState(false);
+  const [sendingReview, setSendingReview] = useState(false);
   const lawnFileRef = useRef(null);
 
   useEffect(() => {
@@ -216,6 +217,21 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
     } catch (e) {
       alert('Save failed: ' + e.message);
     }
+  }
+
+  async function sendReview() {
+    if (!service.customerId) return;
+    if (!window.confirm(`Send review request SMS to ${service.customerName || 'customer'}?`)) return;
+    setSendingReview(true);
+    try {
+      await adminFetch('/admin/review-requests/trigger', {
+        method: 'POST',
+        body: JSON.stringify({ customerId: service.customerId, triggeredBy: 'tech' }),
+      });
+    } catch (e) {
+      alert('Review send failed: ' + e.message);
+    }
+    setSendingReview(false);
   }
 
   async function handleLawnPhotos(e) {
@@ -429,6 +445,9 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
             {status === 'en_route' && (
               <Button size="sm" onClick={() => changeStatus('on_site')} disabled={updating}>On Site</Button>
             )}
+            <Button size="sm" variant="secondary" onClick={sendReview} disabled={sendingReview || !service.customerId}>
+              {sendingReview ? 'Sending…' : 'Review'}
+            </Button>
             <Button size="sm" onClick={() => onComplete(service)}>Complete</Button>
             <div className="relative inline-block">
               <Button size="sm" variant="secondary" onClick={() => setShowSkipReasons((s) => !s)} disabled={updating}>Skip</Button>
