@@ -193,11 +193,11 @@ export default function CallLogTabV2() {
       {/* Make a Call */}
       <Card>
         <CardBody>
-          <div className="text-11 uppercase tracking-label text-ink-tertiary mb-3">Make a Call</div>
+          <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-3">Make a Call</div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
             <div>
-              <label className="block text-11 uppercase tracking-label text-ink-tertiary mb-1">From</label>
+              <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">From</label>
               <Select
                 value={callFrom}
                 onChange={(e) => setCallFrom(e.target.value)}
@@ -213,7 +213,7 @@ export default function CallLogTabV2() {
               </Select>
             </div>
             <div className="relative">
-              <label className="block text-11 uppercase tracking-label text-ink-tertiary mb-1">To</label>
+              <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">To</label>
               <Input
                 type="text"
                 placeholder="Search by name or enter phone number…"
@@ -284,7 +284,7 @@ export default function CallLogTabV2() {
       <Card>
         <CardBody>
           <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
-            <div className="text-11 uppercase tracking-label text-ink-tertiary">Call History</div>
+            <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary">Call History</div>
             <Input
               type="text"
               placeholder="Search calls by name or phone…"
@@ -321,23 +321,23 @@ export default function CallLogTabV2() {
                     <div className="flex items-center gap-3">
                       <span className="w-5 text-center text-14 text-ink-secondary">{c.direction === 'inbound' ? '↓' : '↑'}</span>
                       <div className="flex-1 min-w-0">
-                        <div className="text-13 text-ink-primary font-medium">
+                        <div className="text-15 md:text-13 text-ink-primary font-medium">
                           {c.first_name ? `${c.first_name} ${c.last_name || ''}` : (c.from_phone || 'Unknown')}
-                          <span className="ml-2 text-11 text-ink-tertiary font-normal">
+                          <span className="ml-2 text-12 md:text-11 text-ink-tertiary font-normal">
                             {c.direction === 'inbound' ? 'Inbound' : 'Outbound'}
                           </span>
                         </div>
-                        <div className="text-11 text-ink-tertiary">
+                        <div className="text-13 md:text-11 text-ink-tertiary">
                           {c.from_phone}{c.to_phone ? ` → ${c.to_phone}` : ''} · {dur}
                           {c.caller_city ? ` · ${c.caller_city}, ${c.caller_state}` : ''}
                         </div>
                         {c.voice_agent_outcome && (
-                          <div className="text-11 text-ink-secondary mt-0.5">Outcome: {c.voice_agent_outcome?.replace(/_/g, ' ')}</div>
+                          <div className="text-13 md:text-11 text-ink-secondary mt-0.5">Outcome: {c.voice_agent_outcome?.replace(/_/g, ' ')}</div>
                         )}
                       </div>
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
                         <Badge tone={badgeTone}>{answeredLabel}</Badge>
-                        <span className="text-10 text-ink-tertiary">{timeAgo(c.created_at)}</span>
+                        <span className="text-12 md:text-10 text-ink-tertiary">{timeAgo(c.created_at)}</span>
                       </div>
                     </div>
 
@@ -369,7 +369,7 @@ export default function CallLogTabV2() {
                     {/* Recording */}
                     {c.recording_url && (
                       <div className="mt-2 ml-8 p-2 bg-zinc-50 border-hairline rounded-md">
-                        <div className="text-11 text-ink-tertiary font-medium mb-1">
+                        <div className="text-13 md:text-11 text-ink-tertiary font-medium mb-1">
                           Recording{c.recording_duration_seconds
                             ? ` (${Math.floor(c.recording_duration_seconds / 60)}:${String(c.recording_duration_seconds % 60).padStart(2, '0')})`
                             : ''}
@@ -383,8 +383,8 @@ export default function CallLogTabV2() {
                     {/* Transcription */}
                     {c.transcription && (
                       <div className="mt-1.5 ml-8 p-2 bg-zinc-50 border-hairline rounded-md">
-                        <div className="text-11 text-ink-tertiary font-medium mb-0.5">Transcription</div>
-                        <div className="text-12 text-ink-secondary italic leading-relaxed">"{c.transcription}"</div>
+                        <div className="text-13 md:text-11 text-ink-tertiary font-medium mb-0.5">Transcription</div>
+                        <div className="text-14 md:text-12 text-ink-secondary italic leading-relaxed">"{c.transcription}"</div>
                       </div>
                     )}
                   </div>
