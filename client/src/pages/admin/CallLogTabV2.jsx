@@ -1,14 +1,12 @@
 // client/src/pages/admin/CallLogTabV2.jsx
-// Monochrome V2 of CallLogTab. Strict 1:1 on endpoints, state, actions:
+// Monochrome V2 of CallLogTab. Endpoints:
 //   GET  /ai/admin/calls[?search=...][?days=365&limit=200]
 //   POST /admin/communications/call
-//   PUT  /admin/call-recordings/calls/:id/disposition
-// alert-fg reserved for Missed stat / missed-call row accent / Call Back button only.
+// alert-fg reserved for Missed stat / missed-call row accent only.
 import { useState, useEffect } from 'react';
 import { Badge, Button, Card, CardBody, Input, Select, cn } from '../../components/ui';
 import {
   ALL_NUMBERS,
-  CALL_DISPOSITIONS,
   NUMBER_LABEL_MAP,
 } from './CommunicationsPage';
 
@@ -65,8 +63,6 @@ export default function CallLogTabV2() {
   const [callFrom, setCallFrom] = useState('+19413187612');
   const [calling, setCalling] = useState(false);
   const [callResult, setCallResult] = useState(null);
-  const [dispositions, setDispositions] = useState({});
-  const [savingDisp, setSavingDisp] = useState(null);
   const [callFilter, setCallFilter] = useState('all');
   const [callLogSearch, setCallLogSearch] = useState('');
 
@@ -102,28 +98,6 @@ export default function CallLogTabV2() {
     } finally {
       setCalling(false);
     }
-  };
-
-  const handleDisposition = async (callId, value) => {
-    if (value === 'spam' && !confirm('Block this number and delete the call log? This cannot be undone.')) return;
-    setDispositions((prev) => ({ ...prev, [callId]: value }));
-    setSavingDisp(callId);
-    try {
-      const r = await adminFetch(`/admin/call-recordings/calls/${callId}/disposition`, {
-        method: 'PUT',
-        body: JSON.stringify({ disposition: value }),
-      });
-      if (r.deleted) setCalls((prev) => prev.filter((c) => c.id !== callId));
-    } catch (e) {
-      alert('Tag failed: ' + e.message);
-    } finally {
-      setSavingDisp(null);
-    }
-  };
-
-  const handleCallBack = (phone) => {
-    setCallTo(phone);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleCreateLead = (phone, city, state) => {
@@ -308,7 +282,6 @@ export default function CallLogTabV2() {
                   ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, '0')}`
                   : '--';
                 const isUnknown = !c.first_name && !c.customer_id;
-                const currentDisp = dispositions[c.id] || c.disposition || '';
 
                 return (
                   <div
@@ -341,30 +314,14 @@ export default function CallLogTabV2() {
                       </div>
                     </div>
 
-                    {/* Action row */}
-                    <div className="mt-2 ml-8 flex gap-2 flex-wrap items-center">
-                      <Select
-                        value={currentDisp}
-                        onChange={(e) => handleDisposition(c.id, e.target.value)}
-                        className={cn('h-11 md:h-7 text-16 md:text-11 min-h-[44px] md:min-h-0 py-0 w-auto', savingDisp === c.id && 'opacity-50')}
-                      >
-                        {CALL_DISPOSITIONS.map((d) => (
-                          <option key={d.value} value={d.value}>{d.label}</option>
-                        ))}
-                      </Select>
-
-                      {isMissed && c.from_phone && (
-                        <Button variant="danger" size="sm" onClick={() => handleCallBack(c.from_phone)}>
-                          Call Back
-                        </Button>
-                      )}
-
-                      {isUnknown && c.from_phone && (
+                    {/* Action row — Create Lead only shown for unknown inbound callers */}
+                    {isUnknown && c.from_phone && (
+                      <div className="mt-2 ml-8 flex gap-2 flex-wrap items-center">
                         <Button variant="secondary" size="sm" onClick={() => handleCreateLead(c.from_phone, c.caller_city, c.caller_state)}>
                           Create Lead
                         </Button>
-                      )}
-                    </div>
+                      </div>
+                    )}
 
                     {/* Recording */}
                     {c.recording_url && (

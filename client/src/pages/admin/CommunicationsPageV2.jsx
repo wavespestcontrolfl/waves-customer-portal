@@ -320,10 +320,9 @@ function SmsTab() {
     } catch { return {}; }
   });
   const [smsSearch, setSmsSearch] = useState('');
-  // PR 4 — status filter chips, reply-from lock, blocked-numbers set.
+  // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState('all');
   const [threadLock, setThreadLock] = useState(null);
-  const [blockedNumbers, setBlockedNumbers] = useState([]);
 
   const loadData = useCallback((search = '') => {
     const logUrl = search
@@ -345,14 +344,6 @@ function SmsTab() {
     const t = setTimeout(() => { loadData(smsSearch.trim()); }, 300);
     return () => clearTimeout(t);
   }, [smsSearch, loadData]);
-
-  // PR 4 — blocked-numbers fetch + mutations.
-  const loadBlocked = useCallback(() => {
-    adminFetch('/admin/communications/blocked-numbers')
-      .then((d) => setBlockedNumbers((d.numbers || []).map((b) => b.number)))
-      .catch(() => setBlockedNumbers([]));
-  }, []);
-  useEffect(() => { loadBlocked(); }, [loadBlocked]);
 
   useEffect(() => {
     adminFetch('/admin/communications/ai-auto-reply-status')
@@ -469,7 +460,6 @@ function SmsTab() {
   }, [messages]);
 
   const phoneLast10 = (p) => (p || '').replace(/\D/g, '').slice(-10);
-  const blockedSet = useMemo(() => new Set(blockedNumbers.map(phoneLast10)), [blockedNumbers]);
 
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
@@ -480,7 +470,6 @@ function SmsTab() {
       if (statusFilter === 'unread' && !hasUnseen) return false;
       if (statusFilter === 'unanswered' && !t.unanswered) return false;
       if (statusFilter === 'unknown' && t.customerName) return false;
-      if (statusFilter === 'blocked' && !blockedSet.has(key)) return false;
     }
     if (smsFilter === 'all') return true;
     if (smsFilter === 'sent') return t.messages.some((m) => m.direction === 'outbound');
@@ -499,33 +488,16 @@ function SmsTab() {
   });
 
   const chipCounts = useMemo(() => {
-    let unread = 0, unanswered = 0, unknown = 0, blocked = 0;
+    let unread = 0, unanswered = 0, unknown = 0;
     threads.forEach((t) => {
       const key = phoneLast10(t.contactPhone);
       const lastReadAt = threadReadAt[key];
       if (t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt))) unread++;
       if (t.unanswered) unanswered++;
       if (!t.customerName) unknown++;
-      if (blockedSet.has(key)) blocked++;
     });
-    return { all: threads.length, unread, unanswered, unknown, blocked };
-  }, [threads, threadReadAt, blockedSet]);
-
-  const blockNumber = async (number, reason) => {
-    try {
-      await adminFetch('/admin/communications/blocked-numbers', {
-        method: 'POST',
-        body: JSON.stringify({ number, blockType: 'hard_block', reason: reason || 'Manual block from inbox' }),
-      });
-      loadBlocked();
-    } catch (e) { alert('Failed to block: ' + e.message); }
-  };
-  const unblockNumber = async (number) => {
-    try {
-      await adminFetch(`/admin/communications/blocked-numbers/${encodeURIComponent(number)}`, { method: 'DELETE' });
-      loadBlocked();
-    } catch (e) { alert('Failed to unblock: ' + e.message); }
-  };
+    return { all: threads.length, unread, unanswered, unknown };
+  }, [threads, threadReadAt]);
 
   const handleThreadReply = (contactPhone, ourNumber) => {
     setToNumber(contactPhone);
@@ -798,8 +770,8 @@ function SmsTab() {
         )}
       </Card>
 
-      {/* View toggle */}
-      <div className="flex items-center gap-3 mb-3 flex-wrap">
+      {/* View toggle — desktop power-user feature; mobile just shows Conversations */}
+      <div className="hidden md:flex items-center gap-3 mb-3 flex-wrap">
         <div className="flex border-hairline border-zinc-300 rounded-sm p-0.5 bg-white">
           <button
             type="button"
@@ -865,7 +837,6 @@ function SmsTab() {
               { key: 'unread', label: 'Unread', count: chipCounts.unread },
               { key: 'unanswered', label: 'Unanswered', count: chipCounts.unanswered },
               { key: 'unknown', label: 'Unknown', count: chipCounts.unknown },
-              { key: 'blocked', label: 'Blocked', count: chipCounts.blocked },
             ].map((chip) => {
               const active = statusFilter === chip.key;
               return (
@@ -906,7 +877,6 @@ function SmsTab() {
                 const hasUnseen = t.unanswered
                   && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
                 const isUnknown = !t.customerName;
-                const isBlocked = blockedSet.has(threadKey);
                 return (
                   <div
                     key={i}
@@ -927,13 +897,12 @@ function SmsTab() {
                       });
                     }}
                     className={cn(
-                      'w-full text-left px-3.5 py-3 border-b border-hairline border-zinc-200 flex items-center gap-3 cursor-pointer',
+                      'w-full text-left px-3.5 py-3.5 md:py-3 border-b border-hairline border-zinc-200 flex items-start gap-3 cursor-pointer',
                       'hover:bg-zinc-50 transition-colors',
                       hasUnseen && 'bg-alert-bg/40',
-                      isBlocked && 'opacity-60',
                     )}
                   >
-                    <div className="w-2.5 flex-shrink-0">
+                    <div className="w-2.5 flex-shrink-0 mt-2">
                       {hasUnseen && (
                         <span
                           className="block w-2 h-2 rounded-full bg-alert-fg"
@@ -944,49 +913,30 @@ function SmsTab() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between mb-0.5">
                         <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="text-15 md:text-14 font-medium text-zinc-900 truncate">
+                          <span className="text-16 md:text-14 font-medium text-zinc-900 truncate">
                             {t.customerName || t.contactPhone}
                           </span>
                           {isUnknown && <Badge tone="neutral">Unknown</Badge>}
-                          {isBlocked && <Badge tone="muted">Blocked</Badge>}
                         </div>
                         <span className="font-mono text-12 md:text-11 text-ink-tertiary flex-shrink-0 ml-2">
                           {timeAgo(t.lastTimestamp)}
                         </span>
                       </div>
                       {t.customerName && (
-                        <div className="font-mono text-12 md:text-11 text-ink-tertiary mb-0.5">
+                        <div className="font-mono text-13 md:text-11 text-ink-tertiary mb-0.5">
                           {t.contactPhone}
                         </div>
                       )}
-                      <div className="text-14 md:text-12 text-ink-secondary truncate">
+                      <div className="text-15 md:text-12 text-ink-secondary truncate leading-snug">
                         <span className="mr-1" aria-hidden>
                           {t.lastDirection === 'inbound' ? '↓' : '↑'}
                         </span>
                         {preview}
                       </div>
                     </div>
-                    <div className="flex-shrink-0 flex items-center gap-2.5">
-                      <span className="hidden md:inline font-mono text-11 text-ink-tertiary u-nums">
-                        {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
-                      </span>
-                      {/* PR 4 — Block / Unblock action */}
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (isBlocked) {
-                            if (!confirm(`Unblock ${t.contactPhone}?`)) return;
-                            unblockNumber(t.contactPhone);
-                          } else {
-                            if (!confirm(`Block ${t.contactPhone}? Future inbound calls will be rejected.`)) return;
-                            blockNumber(t.contactPhone, `Blocked from SMS inbox${t.customerName ? ` (${t.customerName})` : ''}`);
-                          }
-                        }}
-                        className="text-13 md:text-11 px-3 md:px-2 py-2 md:py-1 min-h-[44px] md:min-h-0 inline-flex items-center border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
-                        title={isBlocked ? 'Unblock this number' : 'Block this number'}
-                      >{isBlocked ? 'Unblock' : 'Block'}</button>
-                    </div>
+                    <span className="hidden md:inline font-mono text-11 text-ink-tertiary u-nums flex-shrink-0 mt-0.5">
+                      {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
+                    </span>
                   </div>
                 );
               })
@@ -1067,7 +1017,14 @@ export default function CommunicationsPageV2() {
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900 max-w-[1200px]">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
-          <h1 className="text-28 font-normal tracking-display text-zinc-900">
+          {/* Mobile h1 matches MobileSettingsPage Square style (inline 700 escapes V2 400/500 font restriction). Desktop stays on the V2 28/normal spec. */}
+          <h1
+            className="md:hidden text-zinc-900"
+            style={{ fontSize: 34, fontWeight: 700, letterSpacing: '-0.015em', lineHeight: 1.1, margin: 0 }}
+          >
+            Communications
+          </h1>
+          <h1 className="hidden md:block text-28 font-normal tracking-display text-zinc-900">
             Communications
           </h1>
         </div>
