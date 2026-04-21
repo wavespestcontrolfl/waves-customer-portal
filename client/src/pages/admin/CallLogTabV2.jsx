@@ -164,8 +164,8 @@ export default function CallLogTabV2() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Stats filter bar */}
-      <div className="flex gap-2 flex-wrap">
+      {/* Stats filter bar — desktop only */}
+      <div className="hidden md:flex gap-2 flex-wrap">
         <StatButton label="Total" value={calls.length} filter="all" active={callFilter === 'all'} onClick={() => setCallFilter('all')} />
         <StatButton label="Answered" value={answered} filter="answered" active={callFilter === 'answered'} onClick={() => setCallFilter((p) => p === 'answered' ? 'all' : 'answered')} />
         <StatButton label="AI Agent" value={aiHandled} filter="ai_agent" active={callFilter === 'ai_agent'} onClick={() => setCallFilter((p) => p === 'ai_agent' ? 'all' : 'ai_agent')} />
@@ -173,9 +173,9 @@ export default function CallLogTabV2() {
         <StatButton label="Missed" value={missed} filter="missed" active={callFilter === 'missed'} alert onClick={() => setCallFilter((p) => p === 'missed' ? 'all' : 'missed')} />
       </div>
 
-      {/* Source analytics */}
+      {/* Source analytics — desktop only */}
       {sortedSources.length > 0 && (
-        <Card>
+        <Card className="hidden md:block">
           <CardBody>
             <div className="text-11 uppercase tracking-label text-ink-tertiary mb-3">Calls Per Source (This Month)</div>
             <div className="flex flex-wrap gap-2">
