@@ -11,7 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { useEffect, useMemo, useState } from 'react';
-import { Truck, Star } from 'lucide-react';
+import { Truck } from 'lucide-react';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
 import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib/timezone';
@@ -90,7 +90,7 @@ function headerLabel(dateStr) {
   });
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute, onReviewRequest }) {
+function AppointmentRow({ service, onEdit, onEnRoute }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -175,22 +175,11 @@ function AppointmentRow({ service, onEdit, onEnRoute, onReviewRequest }) {
           <Truck size={18} strokeWidth={1.75} />
         </button>
       )}
-      {onReviewRequest && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onReviewRequest(service); }}
-          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
-          title="Review Request"
-          aria-label="Review Request"
-        >
-          <Star size={18} strokeWidth={1.75} />
-        </button>
-      )}
     </div>
   );
 }
 
-function DaySegment({ dateStr, services, onEdit, onEnRoute, onReviewRequest }) {
+function DaySegment({ dateStr, services, onEdit, onEnRoute }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const today = isETToday(dateStr);
   return (
@@ -226,7 +215,6 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onReviewRequest }) {
             service={svc}
             onEdit={onEdit}
             onEnRoute={onEnRoute}
-            onReviewRequest={onReviewRequest}
           />
         ))
       )}
@@ -234,7 +222,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onReviewRequest }) {
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute, onReviewRequest }) {
+export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -267,7 +255,6 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
           services={services || []}
           onEdit={onEdit}
           onEnRoute={onEnRoute}
-          onReviewRequest={onReviewRequest}
         />
       </div>
     );
@@ -296,7 +283,6 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
           services={d.services || []}
           onEdit={onEdit}
           onEnRoute={onEnRoute}
-          onReviewRequest={onReviewRequest}
         />
       ))}
     </div>

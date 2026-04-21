@@ -753,24 +753,6 @@ export default function DispatchPageV2() {
     }
   }, [handleStatusChange]);
 
-  const handleReviewRequest = useCallback(async (service) => {
-    if (!service.customerId) { alert('No customer on this appointment'); return; }
-    const name = service.customerName || 'customer';
-    if (!window.confirm(`Send review request SMS to ${name}?`)) return;
-    try {
-      await adminFetch('/admin/review-requests/trigger', {
-        method: 'POST',
-        body: JSON.stringify({
-          customerId: service.customerId,
-          serviceRecordId: service.id,
-          triggeredBy: 'dispatch-mobile',
-        }),
-      });
-    } catch (e) {
-      alert('Review request failed: ' + e.message);
-    }
-  }, []);
-
   const handleCompleteSubmit = useCallback(async (serviceId, body) => {
     const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, { method: 'POST', body: JSON.stringify(body) });
     handleStatusChange(serviceId, 'completed');
@@ -1015,7 +997,6 @@ export default function DispatchPageV2() {
           date={date}
           onEdit={(svc) => setDetailService(svc)}
           onEnRoute={handleEnRoute}
-          onReviewRequest={handleReviewRequest}
         />
       )}
       {viewMode === 'week' && !isMobile && (
@@ -1199,7 +1180,6 @@ export default function DispatchPageV2() {
               services={services}
               onEdit={(svc) => setDetailService(svc)}
               onEnRoute={handleEnRoute}
-              onReviewRequest={handleReviewRequest}
             />
           </div>
         </>
