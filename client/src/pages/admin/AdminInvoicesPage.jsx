@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -40,42 +40,24 @@ export default function AdminInvoicesPage() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
 
   return (
-    <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Invoices</h1>
-        </div>
+    <div style={{ maxWidth: 960, margin: '0 auto', padding: isMobile ? '8px 4px 24px' : '0' }}>
+      {/* Header — title + round add button (mirrors attached UI) */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: isMobile ? '16px 16px 12px' : '4px 0 16px' }}>
+        <h1 style={{ fontSize: isMobile ? 32 : 28, fontWeight: 700, color: D.heading, margin: 0, letterSpacing: '-0.01em' }}>Invoices</h1>
+        <button
+          onClick={() => setTab(tab === 'create' ? 'list' : 'create')}
+          aria-label={tab === 'create' ? 'Back to invoices' : 'Create invoice'}
+          style={{
+            width: 44, height: 44, borderRadius: '50%', border: 'none',
+            background: D.heading, color: D.white, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', fontSize: 24, fontWeight: 300, lineHeight: 1,
+          }}
+        >
+          {tab === 'create' ? '×' : '+'}
+        </button>
       </div>
 
-      {stats && (
-        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
-          {[
-            { label: 'Total', value: stats.total, color: D.heading },
-            { label: 'Paid', value: stats.paid, color: D.green },
-            { label: 'Outstanding', value: stats.outstanding, color: D.amber },
-            { label: 'Overdue', value: stats.overdue, color: D.red },
-            { label: 'Collected', value: `$${stats.totalCollected?.toLocaleString()}`, color: D.green },
-            { label: 'Outstanding $', value: `$${stats.totalOutstanding?.toLocaleString()}`, color: D.amber },
-          ].map(s => (
-            <div key={s.label} style={{ ...sCard, marginBottom: 0, textAlign: 'center', padding: isMobile ? 12 : 20 }}>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: isMobile ? 16 : 18, fontWeight: 700, color: s.color }}>{s.value}</div>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{s.label}</div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
-        {[{ key: 'list', label: 'All Invoices' }, { key: 'create', label: 'Create Invoice' }].map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: isMobile ? '14px 20px' : '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            fontSize: isMobile ? 14 : 13, fontWeight: 500, minHeight: isMobile ? 44 : undefined,
-            background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
-          }}>{t.label}</button>
-        ))}
-      </div>
-
-      {tab === 'list' && <InvoiceList showToast={showToast} onRefresh={loadStats} isMobile={isMobile} />}
+      {tab === 'list' && <InvoiceList showToast={showToast} onRefresh={loadStats} isMobile={isMobile} stats={stats} />}
       {tab === 'create' && <CreateInvoice showToast={showToast} onCreated={() => { loadStats(); setTab('list'); }} isMobile={isMobile} />}
 
       <div style={{
@@ -89,29 +71,76 @@ export default function AdminInvoicesPage() {
   );
 }
 
-// ── Invoice List ──
-function InvoiceList({ showToast, onRefresh, isMobile }) {
+// ── Filter pill with dropdown ──
+function FilterPill({ label, value, options, onChange, isMobile }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const current = options.find(o => o.key === value) || options[0];
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          padding: '10px 16px', borderRadius: 999,
+          border: `1px solid ${D.border}`, background: D.card, color: D.text,
+          fontSize: 14, fontWeight: 400, cursor: 'pointer',
+          minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 6,
+        }}
+      >
+        <span style={{ color: D.muted }}>{label}</span>
+        <span style={{ fontWeight: 700, color: D.heading }}>{current.label}</span>
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 20,
+          background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.08)', minWidth: 180, overflow: 'hidden',
+        }}>
+          {options.map(o => (
+            <button
+              key={o.key}
+              onClick={() => { onChange(o.key); setOpen(false); }}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left',
+                padding: isMobile ? '12px 14px' : '10px 14px',
+                border: 'none', background: o.key === value ? '#F4F4F5' : D.card,
+                color: D.heading, fontSize: 14, cursor: 'pointer',
+                fontWeight: o.key === value ? 600 : 400,
+              }}
+            >{o.label}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Invoice List (mirrors attached UI) ──
+function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [invoices, setInvoices] = useState([]);
-  const [filter, setFilter] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [datePeriod, setDatePeriod] = useState('all');
+  const [sort, setSort] = useState('newest');
+  const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [batchSending, setBatchSending] = useState(false);
 
   const load = useCallback(async () => {
-    const params = new URLSearchParams({ limit: '50' });
-    // Server-side: only forward filters that map to an exact status value
+    const params = new URLSearchParams({ limit: '100' });
     if (filter === 'overdue' || filter === 'draft') params.set('status', filter);
     const data = await adminFetch(`/admin/invoices?${params}`).catch(() => ({ invoices: [] }));
     let rows = data.invoices || [];
     if (filter === 'unpaid') {
       rows = rows.filter(i => i.status !== 'paid' && i.status !== 'void');
-    } else if (filter === 'paid_this_month') {
-      const now = new Date();
-      rows = rows.filter(i => {
-        if (i.status !== 'paid' || !i.paid_at) return false;
-        const d = new Date(i.paid_at);
-        return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
-      });
+    } else if (filter === 'paid') {
+      rows = rows.filter(i => i.status === 'paid');
     }
     setInvoices(rows);
     setSelected(new Set());
@@ -157,145 +186,253 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
 
   const domain = typeof window !== 'undefined' ? window.location.origin : '';
 
+  // Derive display status: overdue when unpaid + past due
+  const getDisplayStatus = (inv) => {
+    if (inv.status === 'paid') return { key: 'paid', label: 'Paid', color: D.green };
+    if (inv.status === 'void') return { key: 'void', label: 'Void', color: D.muted };
+    if (inv.status === 'draft') return { key: 'draft', label: 'Draft', color: D.muted };
+    if (inv.due_date) {
+      const due = new Date(inv.due_date + 'T23:59:59');
+      if (Date.now() > due.getTime()) return { key: 'overdue', label: 'Overdue', color: D.red };
+    }
+    if (inv.status === 'overdue') return { key: 'overdue', label: 'Overdue', color: D.red };
+    if (inv.status === 'viewed') return { key: 'viewed', label: 'Viewed', color: D.text };
+    return { key: 'sent', label: 'Sent', color: D.text };
+  };
+
+  const getRowDate = (inv) => {
+    const s = inv.service_date ? inv.service_date + 'T12:00:00' : inv.created_at;
+    return new Date(s);
+  };
+
+  // Date-period filter
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const periodFloor = (() => {
+    if (datePeriod === 'today') return startOfToday;
+    if (datePeriod === '7d') return new Date(startOfToday.getTime() - 7 * 86400000);
+    if (datePeriod === '30d') return new Date(startOfToday.getTime() - 30 * 86400000);
+    if (datePeriod === 'month') return new Date(now.getFullYear(), now.getMonth(), 1);
+    return null;
+  })();
+
+  const q = query.trim().toLowerCase();
+  let rows = invoices.filter(inv => {
+    if (periodFloor && getRowDate(inv) < periodFloor) return false;
+    if (!q) return true;
+    const hay = [
+      inv.invoice_number, inv.first_name, inv.last_name,
+      inv.title, `${inv.first_name || ''} ${inv.last_name || ''}`,
+    ].join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+
+  rows = [...rows].sort((a, b) => {
+    if (sort === 'oldest') return getRowDate(a) - getRowDate(b);
+    if (sort === 'amount_high') return parseFloat(b.total) - parseFloat(a.total);
+    if (sort === 'amount_low') return parseFloat(a.total) - parseFloat(b.total);
+    return getRowDate(b) - getRowDate(a);
+  });
+
+  // Group by day — date header matches "Saturday, April 18, 2026"
+  const groups = [];
+  const groupMap = new Map();
+  for (const inv of rows) {
+    const d = getRowDate(inv);
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    if (!groupMap.has(key)) {
+      const label = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+      const g = { key, label, items: [] };
+      groupMap.set(key, g);
+      groups.push(g);
+    }
+    groupMap.get(key).items.push(inv);
+  }
+
+  const rowPad = isMobile ? '18px 16px' : '16px 18px';
+
   return (
     <div>
-      <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        {[
-          { key: '', label: 'All' },
-          { key: 'overdue', label: 'Overdue' },
-          { key: 'unpaid', label: 'Unpaid' },
-          { key: 'paid_this_month', label: 'Paid this month' },
-          { key: 'draft', label: 'Draft' },
-        ].map(f => {
-          const active = filter === f.key;
-          return (
-            <button
-              key={f.key || 'all'}
-              onClick={() => setFilter(f.key)}
-              style={{
-                padding: isMobile ? '12px 14px' : '6px 12px', borderRadius: 6,
-                border: `1px solid ${active ? D.teal : D.border}`,
-                background: active ? D.teal : D.card, color: active ? D.white : D.text,
-                fontSize: isMobile ? 14 : 12, fontWeight: 500, cursor: 'pointer',
-                minHeight: isMobile ? 44 : undefined,
-              }}
-            >{f.label}</button>
-          );
-        })}
+      {/* Search */}
+      <div style={{ padding: isMobile ? '4px 16px 12px' : '4px 0 12px' }}>
+        <div style={{ position: 'relative' }}>
+          <span style={{ position: 'absolute', left: 18, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 16, pointerEvents: 'none' }}>⌕</span>
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search"
+            style={{
+              width: '100%', padding: '14px 18px 14px 44px',
+              background: D.card, border: `1px solid ${D.border}`,
+              borderRadius: 999, fontSize: 16, color: D.text,
+              outline: 'none', boxSizing: 'border-box', minHeight: 48,
+            }}
+          />
+        </div>
+      </div>
+
+      {/* Filter pills */}
+      <div style={{ display: 'flex', gap: 10, padding: isMobile ? '4px 16px 16px' : '4px 0 16px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <FilterPill
+          label="Filter"
+          value={filter}
+          onChange={setFilter}
+          isMobile={isMobile}
+          options={[
+            { key: 'all', label: 'All' },
+            { key: 'overdue', label: 'Overdue' },
+            { key: 'unpaid', label: 'Unpaid' },
+            { key: 'paid', label: 'Paid' },
+            { key: 'draft', label: 'Draft' },
+          ]}
+        />
+        <FilterPill
+          label="Date"
+          value={datePeriod}
+          onChange={setDatePeriod}
+          isMobile={isMobile}
+          options={[
+            { key: 'all', label: 'All' },
+            { key: 'today', label: 'Today' },
+            { key: '7d', label: 'Last 7 days' },
+            { key: '30d', label: 'Last 30 days' },
+            { key: 'month', label: 'This month' },
+          ]}
+        />
+        <FilterPill
+          label="Sort"
+          value={sort}
+          onChange={setSort}
+          isMobile={isMobile}
+          options={[
+            { key: 'newest', label: 'Newest' },
+            { key: 'oldest', label: 'Oldest' },
+            { key: 'amount_high', label: 'Amount ↓' },
+            { key: 'amount_low', label: 'Amount ↑' },
+          ]}
+        />
         {sendableInvoices.length > 0 && (
-          <button onClick={selectAllSendable} style={{ ...sBtn(D.border, D.text, isMobile), padding: isMobile ? '12px 14px' : '6px 12px', fontSize: isMobile ? 14 : 12 }}>
-            Select all sendable ({sendableInvoices.length})
-          </button>
+          <button onClick={selectAllSendable} style={{
+            padding: '10px 16px', borderRadius: 999, border: `1px solid ${D.border}`,
+            background: D.card, color: D.muted, fontSize: 13, cursor: 'pointer',
+          }}>Select sendable ({sendableInvoices.length})</button>
+        )}
+        {stats && !isMobile && (
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: D.muted }}>
+            {stats.paid} paid · {stats.outstanding} outstanding · {stats.overdue} overdue
+          </span>
         )}
       </div>
 
-      {invoices.length === 0 ? (
-        <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No invoices yet</div>
-      ) : invoices.map(inv => {
-        const lineItems = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
-        const canSelect = inv.status === 'draft' || inv.status === 'sent' || inv.status === 'viewed';
-        const isSelected = selected.has(inv.id);
+      {/* List */}
+      {rows.length === 0 ? (
+        <div style={{ padding: 48, textAlign: 'center', color: D.muted, fontSize: 15 }}>No invoices match</div>
+      ) : (
+        <div style={{ background: D.card, borderTop: `1px solid ${D.border}`, borderBottom: `1px solid ${D.border}` }}>
+          {groups.map(g => (
+            <div key={g.key}>
+              <div style={{
+                padding: isMobile ? '16px 16px 10px' : '16px 18px 10px',
+                fontSize: 15, fontWeight: 700, color: D.heading,
+                borderBottom: `1px solid ${D.border}`,
+              }}>{g.label}</div>
+              {g.items.map(inv => {
+                const lineItems = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
+                const canSelect = inv.status === 'draft' || inv.status === 'sent' || inv.status === 'viewed';
+                const isSelected = selected.has(inv.id);
+                const display = getDisplayStatus(inv);
+                const isOpen = expanded === inv.id;
+                const cardOnFile = inv.card_on_file && inv.card_on_file.last_four ? inv.card_on_file : null;
+                const reminderCount = inv.sms_reminder_count || 0;
+                return (
+                  <div key={inv.id} style={{ borderBottom: `1px solid ${D.border}` }}>
+                    <button
+                      onClick={() => setExpanded(isOpen ? null : inv.id)}
+                      style={{
+                        width: '100%', textAlign: 'left', border: 'none',
+                        background: isSelected ? '#FAFAFA' : D.card,
+                        padding: rowPad, cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 12,
+                      }}
+                    >
+                      {canSelect && (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelect(inv.id)}
+                          onClick={e => e.stopPropagation()}
+                          style={{ width: 18, height: 18, cursor: 'pointer', accentColor: D.heading }}
+                        />
+                      )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 17, fontWeight: 700, color: D.heading, lineHeight: 1.25, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {inv.first_name} {inv.last_name}
+                        </div>
+                        <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                          #{inv.invoice_number}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: 17, fontWeight: 700, color: D.heading, fontFamily: "'JetBrains Mono', monospace" }}>
+                          ${parseFloat(inv.total).toFixed(2)}
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: display.color, marginTop: 4 }}>
+                          {display.label}
+                        </div>
+                      </div>
+                      <span aria-hidden style={{ color: D.muted, fontSize: 18, marginLeft: 4, transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>›</span>
+                    </button>
 
-        // Aging — derived from due_date for unpaid invoices
-        let agingChip = null;
-        if (inv.due_date && inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft') {
-          const due = new Date(inv.due_date + 'T23:59:59');
-          const diffDays = Math.floor((Date.now() - due.getTime()) / 86400000);
-          if (diffDays > 0) {
-            const tone = diffDays >= 30 ? D.red : diffDays >= 15 ? D.amber : D.muted;
-            agingChip = { text: `${diffDays}d overdue`, color: tone };
-          } else if (diffDays >= -3) {
-            agingChip = { text: diffDays === 0 ? 'Due today' : `Due in ${-diffDays}d`, color: D.amber };
-          }
-        }
+                    {isOpen && (
+                      <div style={{ padding: isMobile ? '0 16px 18px' : '0 18px 18px', background: '#FAFAFA', borderTop: `1px solid ${D.border}` }}>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, padding: '14px 0', fontSize: 13, color: D.muted }}>
+                          <span>{inv.title || lineItems[0]?.description || 'Service'}</span>
+                          {inv.waveguard_tier && <span style={sBadge(`${D.amber}22`, D.amber)}>{inv.waveguard_tier}</span>}
+                          {inv.view_count > 0 && <span>{inv.view_count} views</span>}
+                          {reminderCount > 0 && <span style={{ color: D.amber }}>↩ {reminderCount} reminder{reminderCount === 1 ? '' : 's'}</span>}
+                          {inv.status === 'paid' && (inv.payment_method || inv.card_brand) && (
+                            <span style={{ color: D.green }}>
+                              ✓ {inv.card_brand || inv.payment_method}
+                              {inv.card_last_four ? ` •${inv.card_last_four}` : ''}
+                            </span>
+                          )}
+                          {cardOnFile && inv.status !== 'paid' && inv.status !== 'void' && (
+                            <span>💳 {cardOnFile.brand || 'Card'} •{cardOnFile.last_four} on file</span>
+                          )}
+                          {inv.sms_sent_at && <span>SMS: {new Date(inv.sms_sent_at).toLocaleString()}</span>}
+                        </div>
 
-        const cardOnFile = inv.card_on_file && inv.card_on_file.last_four ? inv.card_on_file : null;
-        const reminderCount = inv.sms_reminder_count || 0;
-        return (
-          <div key={inv.id} style={{ ...sCard, marginBottom: 8, borderColor: isSelected ? D.teal : D.border }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'flex-start', marginBottom: 8, flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 8 : 0 }}>
-              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flex: 1 }}>
-                {canSelect && (
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={() => toggleSelect(inv.id)}
-                    style={{ marginTop: 4, width: 18, height: 18, cursor: 'pointer', accentColor: D.teal }}
-                  />
-                )}
-                <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{inv.invoice_number}</span>
-                  <span style={sBadge(`${STATUS_COLORS[inv.status]}22`, STATUS_COLORS[inv.status])}>
-                    {inv.status}
-                  </span>
-                  {inv.waveguard_tier && <span style={sBadge(`${D.amber}22`, D.amber)}>{inv.waveguard_tier}</span>}
-                  {agingChip && <span style={sBadge(`${agingChip.color}22`, agingChip.color)}>{agingChip.text}</span>}
-                </div>
-                <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-                  {inv.first_name} {inv.last_name} -- {inv.title || lineItems[0]?.description || 'Service'}
-                </div>
-                </div>
-              </div>
-              <div style={{ textAlign: isMobile ? 'left' : 'right' }}>
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: inv.status === 'paid' ? D.green : D.heading }}>
-                  ${parseFloat(inv.total).toFixed(2)}
-                </div>
-                <div style={{ fontSize: 11, color: D.muted }}>
-                  {inv.service_date ? new Date(inv.service_date + 'T12:00:00').toLocaleDateString() : new Date(inv.created_at).toLocaleDateString()}
-                </div>
-              </div>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          {inv.status === 'draft' && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)}>Send SMS</button>}
+                          {(inv.status === 'sent' || inv.status === 'viewed') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)}>Resend</button>}
+                          {inv.status !== 'paid' && inv.status !== 'void' && (
+                            <button onClick={() => { navigator.clipboard.writeText(`${domain}/pay/${inv.token}`); showToast('Pay link copied'); }} style={sBtn(D.card, D.text, isMobile)}>Copy Link</button>
+                          )}
+                          {inv.status !== 'paid' && inv.status !== 'void' && (
+                            <button
+                              onClick={async () => {
+                                try { await launchTapToPay(inv.id); }
+                                catch (e) { showToast(`Tap to Pay failed: ${e.message}`); }
+                              }}
+                              style={sBtn(D.heading, D.white, isMobile)}
+                              title="Open Waves Tech app to tap customer's card/phone"
+                            >Charge in person</button>
+                          )}
+                          {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
+                        </div>
+
+                        {inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft' && (
+                          <FollowupPanel invoiceId={inv.id} showToast={showToast} isMobile={isMobile} />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-              {inv.status === 'draft' && <button onClick={() => handleSend(inv.id)} style={sBtn(D.teal, D.white, isMobile)}>Send SMS</button>}
-              {(inv.status === 'sent' || inv.status === 'viewed') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.blue, D.white, isMobile)}>Resend</button>}
-              {inv.status !== 'paid' && inv.status !== 'void' && (
-                <button onClick={() => { navigator.clipboard.writeText(`${domain}/pay/${inv.token}`); showToast('Pay link copied'); }} style={sBtn(D.border, D.muted, isMobile)}>Copy Link</button>
-              )}
-              {inv.status !== 'paid' && inv.status !== 'void' && (
-                <button
-                  onClick={async () => {
-                    try { await launchTapToPay(inv.id); }
-                    catch (e) { showToast(`Tap to Pay failed: ${e.message}`); }
-                  }}
-                  style={sBtn(D.purple, D.white, isMobile)}
-                  title="Open Waves Tech app to tap customer's card/phone"
-                >Charge in person</button>
-              )}
-              {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
-              {inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft' && (
-                <button onClick={() => setExpanded(expanded === inv.id ? null : inv.id)} style={sBtn(D.border, D.muted, isMobile)}>
-                  {expanded === inv.id ? '▾ Hide' : '▸ Follow-ups'}
-                </button>
-              )}
-              {inv.view_count > 0 && <span style={{ fontSize: 11, color: D.muted }}>{inv.view_count} views</span>}
-              {reminderCount > 0 && (
-                <span style={{ fontSize: 11, color: D.amber }} title="SMS reminders sent so far">
-                  ↩ {reminderCount} reminder{reminderCount === 1 ? '' : 's'}
-                </span>
-              )}
-              {inv.status === 'paid' && (inv.payment_method || inv.card_brand) && (
-                <span style={{ fontSize: 11, color: D.green }} title="Paid via">
-                  ✓ {inv.card_brand ? `${inv.card_brand}` : (inv.payment_method || 'paid')}
-                  {inv.card_last_four ? ` •${inv.card_last_four}` : ''}
-                  {inv.payment_method && inv.payment_method !== 'card' ? ` (${inv.payment_method.replace('_', ' ')})` : ''}
-                </span>
-              )}
-              {cardOnFile && inv.status !== 'paid' && inv.status !== 'void' && (
-                <span style={{ fontSize: 11, color: D.teal }} title="Default card on file for this customer">
-                  💳 {cardOnFile.brand || 'Card'} •{cardOnFile.last_four}
-                </span>
-              )}
-              {inv.sms_sent_at && <span style={{ fontSize: 11, color: D.muted }}>SMS: {new Date(inv.sms_sent_at).toLocaleString()}</span>}
-            </div>
-
-            {expanded === inv.id && (
-              <FollowupPanel invoiceId={inv.id} showToast={showToast} isMobile={isMobile} />
-            )}
-          </div>
-        );
-      })}
+          ))}
+        </div>
+      )}
 
       {selected.size > 0 && (
         <div style={{
@@ -304,7 +441,7 @@ function InvoiceList({ showToast, onRefresh, isMobile }) {
           display: 'flex', alignItems: 'center', gap: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', zIndex: 50,
         }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}>{selected.size} selected</span>
-          <button onClick={handleBatchSend} disabled={batchSending} style={{ ...sBtn(D.teal, D.white, isMobile), opacity: batchSending ? 0.6 : 1 }}>
+          <button onClick={handleBatchSend} disabled={batchSending} style={{ ...sBtn(D.white, D.heading, isMobile), opacity: batchSending ? 0.6 : 1 }}>
             {batchSending ? 'Sending…' : `Send ${selected.size} via SMS`}
           </button>
           <button onClick={clearSelection} style={sBtn('transparent', D.white, isMobile)}>Clear</button>
