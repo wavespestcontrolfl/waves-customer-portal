@@ -110,9 +110,6 @@ export default function MorePage() {
             </button>
           </li>
         </ul>
-        <div className="px-4 py-4 text-[10px] font-medium uppercase tracking-label text-zinc-400 text-center">
-          Waves Admin v2.0
-        </div>
       </section>
     </div>
   );
