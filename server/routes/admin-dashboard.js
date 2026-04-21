@@ -450,4 +450,26 @@ router.get('/core-kpis', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/mobile-summary — Square-style 4-card home screen
+router.get('/mobile-summary', async (req, res, next) => {
+  try {
+    const today = etDateString();
+    const thirtyDaysAgo = etDateString(addETDays(new Date(), -30));
+
+    const [paid30d, outstanding, pendingEst, acceptedEst30d] = await Promise.all([
+      db('invoices').where({ status: 'paid' }).where('paid_at', '>=', thirtyDaysAgo).sum('total as total').first(),
+      db('invoices').whereIn('status', ['sent', 'viewed', 'overdue']).sum('total as total').first(),
+      db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', new Date().toISOString()).sum('annual_total as total').first(),
+      db('estimates').where({ status: 'accepted' }).where('accepted_at', '>=', thirtyDaysAgo).sum('annual_total as total').first(),
+    ]);
+
+    res.json({
+      paidInvoices30d: parseFloat(paid30d?.total || 0),
+      outstandingInvoices: parseFloat(outstanding?.total || 0),
+      pendingEstimates: parseFloat(pendingEst?.total || 0),
+      acceptedEstimates30d: parseFloat(acceptedEst30d?.total || 0),
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
