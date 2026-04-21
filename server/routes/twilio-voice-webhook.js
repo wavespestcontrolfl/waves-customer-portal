@@ -4,6 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { etDateString } = require('../utils/datetime-et');
+const VoiceResponse = require('twilio').twiml.VoiceResponse;
 
 function capitalizeName(name) {
   if (!name) return '';
@@ -282,20 +283,31 @@ router.post('/lead-alert-announce', async (req, res) => {
 // =========================================================================
 router.post('/outbound-admin-prompt', async (req, res) => {
   try {
-    const customerNumber = req.query.customerNumber || req.body.customerNumber;
-    const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber;
-    const leadName = req.query.leadName || req.body.leadName || '';
-    const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
+    const { callLogId, customerNumber, callerIdNumber, leadName: rawName = '' } = req.query;
+    const firstName = rawName.trim().split(/\s+/)[0] || 'a new customer';
 
-    const namePrompt = leadName ? `New quote request from ${leadName}.` : `Outbound call to ${customerNumber.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1 $2 $3')}.`;
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Gather numDigits="1" action="https://${domain}/api/webhooks/twilio/outbound-connect?customerNumber=${encodeURIComponent(customerNumber)}&amp;callerIdNumber=${encodeURIComponent(callerIdNumber)}" method="POST" timeout="10">
-    <Say voice="alice">${namePrompt} Press 1 to connect.</Say>
-  </Gather>
-  <Say voice="alice">No input received. Goodbye.</Say>
-</Response>`;
-    res.type('text/xml').send(twiml);
+    const params = new URLSearchParams();
+    if (callLogId) params.set('callLogId', callLogId);
+    params.set('customerNumber', customerNumber);
+    if (callerIdNumber) params.set('callerIdNumber', callerIdNumber);
+
+    const twiml = new VoiceResponse();
+    const gather = twiml.gather({
+      numDigits: 1,
+      action: `/api/webhooks/twilio/outbound-connect?${params.toString()}`,
+      method: 'POST',
+      timeout: 8,
+    });
+
+    gather.say(
+      { voice: 'Polly.Joanna' },
+      `You have a quote request from ${firstName}. Press 1 to connect.`
+    );
+
+    twiml.say('No response received. Goodbye.');
+    twiml.hangup();
+
+    res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Outbound admin prompt error: ${err.message}`);
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Error. Goodbye.</Say></Response>');
@@ -309,15 +321,32 @@ router.post('/outbound-connect', async (req, res) => {
   try {
     const customerNumber = req.query.customerNumber || req.body.customerNumber;
     const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+    const rawCallLogId = req.query.callLogId || req.body.callLogId;
 
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say voice="alice">Connecting now.</Say>
-  <Dial callerId="${callerIdNumber}" record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed">
-    <Number>${customerNumber}</Number>
-  </Dial>
-</Response>`;
-    res.type('text/xml').send(twiml);
+    // Guard against the literal string "undefined" slipping in from a caller
+    // that forgot to pass callLogId — a NaN/undefined update would throw or
+    // no-op silently. call_log.id is a uuid, so we keep it as a string.
+    if (rawCallLogId && rawCallLogId !== 'undefined') {
+      try {
+        await db('call_log')
+          .where({ id: rawCallLogId })
+          .update({ status: 'bridged', bridged_at: new Date(), updated_at: new Date() });
+      } catch (dbErr) {
+        // Don't fail the TwiML response on a DB error — log and continue.
+        logger.warn(`[outbound-connect] call_log update failed for ${rawCallLogId}: ${dbErr.message}`);
+      }
+    }
+
+    const twiml = new VoiceResponse();
+    twiml.say({ voice: 'Polly.Joanna' }, 'Connecting now.');
+    const dial = twiml.dial({
+      callerId: callerIdNumber,
+      record: 'record-from-answer-dual',
+      recordingStatusCallback: '/api/webhooks/twilio/recording-status',
+      recordingStatusCallbackEvent: 'completed',
+    });
+    dial.number(customerNumber);
+    res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Outbound connect error: ${err.message}`);
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, unable to connect.</Say></Response>');
@@ -326,6 +355,12 @@ router.post('/outbound-connect', async (req, res) => {
 
 // =========================================================================
 // POST /api/webhooks/twilio/call-status — Status callback for outbound calls
+//
+// Lookup key convention: this endpoint keys on twilio_call_sid (the parent
+// leg's CallSid that Twilio supplies). The /outbound-connect handler uses
+// callLogId (our own uuid) because it's a child-leg TwiML callback and
+// doesn't have a stable CallSid convention yet. Keep them separate — do not
+// add callLogId lookup here or the two code paths will drift.
 // =========================================================================
 router.post('/call-status', async (req, res) => {
   try {

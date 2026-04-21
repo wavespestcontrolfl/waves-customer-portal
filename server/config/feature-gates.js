@@ -52,6 +52,11 @@ const gates = {
 
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
+
+  // Lead Auto-Bridge — when a website lead comes in during business hours,
+  // ring Adam and offer Press-1 to bridge directly to the customer. Off by
+  // default in prod until verified; admin-click bridge is unaffected.
+  leadAutoBridge: isProd ? process.env.GATE_LEAD_AUTO_BRIDGE === 'true' : true,
 };
 
 function isEnabled(gate) {
