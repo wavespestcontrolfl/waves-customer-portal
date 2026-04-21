@@ -29,6 +29,13 @@ enum API {
         let token: String
         let technician: Technician
         struct Technician: Decodable { let id: String; let name: String }
+
+        // Server returns the tech under `user` (shared with the web admin portal);
+        // iOS keeps the domain-correct `technician` name locally.
+        enum CodingKeys: String, CodingKey {
+            case token
+            case technician = "user"
+        }
     }
 
     enum APIError: LocalizedError {
@@ -49,7 +56,7 @@ enum API {
 
     static func login(email: String, password: String) async throws -> LoginResponse {
         let body = ["email": email, "password": password]
-        return try await request("/admin/login", body: body, auth: false)
+        return try await request("/admin/auth/login", body: body, auth: false)
     }
 
     static func validateHandoff(token: String) async throws -> ValidatedHandoff {
