@@ -26,7 +26,7 @@ settings:
 packages:
   StripeTerminal:
     url: https://github.com/stripe/stripe-terminal-ios
-    from: "3.8.0"
+    from: "5.4.0"
 
 targets:
   WavesPay:
@@ -55,11 +55,17 @@ targets:
             CFBundleURLSchemes:
               - wavespay
         NSLocationWhenInUseUsageDescription: "Tap to Pay on iPhone requires location access to authenticate card-present transactions."
+        # Stripe Terminal iOS 5.x validateInfoPlistForDiscoveryConfiguration
+        # aborts unless these keys exist even for Tap-to-Pay-only apps. Empty
+        # UIBackgroundModes array + a Bluetooth usage string satisfy the check
+        # without enabling any actual background behavior.
+        NSBluetoothAlwaysUsageDescription: "Bluetooth is not used by WavesPay, but the Stripe Terminal SDK requires this key."
+        UIBackgroundModes: []
         # Override per environment if needed. Leave empty to use the default
         # baked into API.swift (https://portal.wavespestcontrol.com/api).
         WAVESPAY_API_BASE: "https://portal.wavespestcontrol.com/api"
         # Paste the tml_… id from Stripe Dashboard → Terminal → Locations.
-        STRIPE_TERMINAL_LOCATION_ID: ""
+        STRIPE_TERMINAL_LOCATION_ID: "tml_GdySzQ3nA6YhEC"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.wavespestcontrol.wavespay
