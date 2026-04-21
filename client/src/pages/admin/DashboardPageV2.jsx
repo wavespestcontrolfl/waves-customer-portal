@@ -1,6 +1,4 @@
 import { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { Zap, Clock, CheckCircle2, TrendingUp, Plus } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import {
   Card,
@@ -109,40 +107,46 @@ export default function DashboardPageV2() {
   ];
 
   return (
-    <div className="font-sans bg-surface-page min-h-full text-zinc-900">
-      {/* Mobile-only Square-style dashboard */}
-      <MobileDashboard />
-
-      {/* Desktop dashboard (hidden on mobile) */}
-      <div className="hidden md:block p-3 sm:p-6">
-      <header className="mb-5">
+    <div className="font-sans bg-surface-page min-h-full p-3 sm:p-6 text-zinc-900">
+      <header className="mb-5 max-md:mb-6">
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
-            <div className="u-label text-ink-secondary">{today}</div>
-            <h1 className="text-28 font-normal tracking-h1 mt-1">{greeting()}, Adam</h1>
+            <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">{today}</div>
+            <h1
+              className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2"
+              style={{}}
+            >
+              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, letterSpacing: '-0.015em', lineHeight: 1.1 }}>{greeting()}, Adam</span>
+              <span className="hidden md:inline">{greeting()}, Adam</span>
+            </h1>
           </div>
         </div>
       </header>
 
       {/* Hero KPI row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-5">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-5 max-md:grid-cols-1">
         {HERO_KPIS.map((h, i) => (
-          <Card key={i}>
-            <CardBody className="p-4">
-              <div className="u-label text-ink-secondary">{h.label}</div>
-              <div className="u-nums text-28 font-medium tracking-tight mt-2 leading-none">{h.value}</div>
+          <Card key={i} className="max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+            <CardBody className="p-4 max-md:p-5">
+              <div className="u-label text-ink-secondary max-md:text-13 max-md:font-medium max-md:normal-case max-md:tracking-normal max-md:text-zinc-500">{h.label}</div>
+              <div
+                className="u-nums text-28 font-medium tracking-tight mt-2 leading-none max-md:mt-2"
+              >
+                <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1 }}>{h.value}</span>
+                <span className="hidden md:inline">{h.value}</span>
+              </div>
               {h.delta != null && (
                 <div
                   className={cn(
-                    'mt-2 text-12 font-medium',
-                    h.delta < 0 ? 'text-alert-fg' : 'text-ink-secondary'
+                    'mt-2 text-12 font-medium max-md:text-14 max-md:mt-3',
+                    h.delta < 0 ? 'text-alert-fg' : 'text-ink-secondary max-md:text-zinc-900'
                   )}
                 >
                   {h.delta >= 0 ? '↑' : '↓'} {h.deltaPrefix || ''}{Math.abs(h.delta)}{h.deltaSuffix}
                 </div>
               )}
               {h.sub && h.delta == null && (
-                <div className="mt-2 text-12 text-ink-secondary">{h.sub}</div>
+                <div className="mt-2 text-12 text-ink-secondary max-md:text-14 max-md:mt-3 max-md:text-zinc-900">{h.sub}</div>
               )}
             </CardBody>
           </Card>
@@ -150,7 +154,7 @@ export default function DashboardPageV2() {
       </div>
 
       {/* Core KPIs */}
-      <Card className="mb-5">
+      <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
         <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
           <div>
             <CardTitle>Core KPIs</CardTitle>
@@ -268,7 +272,7 @@ export default function DashboardPageV2() {
 
       {/* Tech Leaderboard */}
       {kpis?.leaderboard?.length > 0 && (
-        <Card className="mb-5">
+        <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
           <CardHeader>
             <CardTitle>Tech Leaderboard</CardTitle>
             <div className="text-12 text-ink-secondary mt-1">{kpis.periodLabel}</div>
@@ -307,7 +311,7 @@ export default function DashboardPageV2() {
       )}
 
       {/* Revenue chart */}
-      <Card className="mb-5">
+      <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
         <CardHeader className="flex items-center justify-between flex-wrap gap-3">
           <CardTitle>
             Revenue — {new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
@@ -353,7 +357,7 @@ export default function DashboardPageV2() {
 
       {/* Schedule + Activity */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
-        <Card>
+        <Card className="max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
           <CardHeader className="flex items-center justify-between">
             <CardTitle>Today's Schedule</CardTitle>
             <Badge>{data.todaysSchedule.length} services</Badge>
@@ -383,7 +387,7 @@ export default function DashboardPageV2() {
           </CardBody>
         </Card>
 
-        <Card>
+        <Card className="max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
           <CardHeader>
             <CardTitle>Recent Activity</CardTitle>
           </CardHeader>
@@ -418,104 +422,11 @@ export default function DashboardPageV2() {
           <a
             key={a.label}
             href={a.path}
-            className="block bg-white border-hairline border-zinc-200 rounded-md px-4 py-5 text-center no-underline u-focus-ring hover:bg-zinc-50"
+            className="block bg-white border-hairline border-zinc-200 rounded-md px-4 py-5 text-center no-underline u-focus-ring hover:bg-zinc-50 max-md:border-0 max-md:shadow-sm max-md:rounded-xl"
           >
-            <div className="u-label text-ink-secondary">{a.label}</div>
+            <div className="u-label text-ink-secondary max-md:text-14 max-md:font-medium max-md:normal-case max-md:tracking-normal max-md:text-zinc-900">{a.label}</div>
           </a>
         ))}
-      </div>
-      </div>
-    </div>
-  );
-}
-
-function MobileDashboard() {
-  const navigate = useNavigate();
-  const [summary, setSummary] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    adminFetch('/admin/dashboard/mobile-summary')
-      .then((d) => { setSummary(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, []);
-
-  const cards = [
-    {
-      label: 'Paid Invoices (last 30 days)',
-      value: fmtD(summary?.paidInvoices30d),
-      icon: Zap,
-      cta: 'Instant transfer',
-      to: '/admin/banking',
-    },
-    {
-      label: 'Outstanding Invoices',
-      value: fmtD(summary?.outstandingInvoices),
-      icon: Clock,
-      cta: 'Remind customers',
-      to: '/admin/invoices',
-    },
-    {
-      label: 'Pending Estimates',
-      value: fmtD(summary?.pendingEstimates),
-      icon: CheckCircle2,
-      cta: 'Start accepting',
-      to: '/admin/estimates',
-    },
-    {
-      label: 'Accepted Estimates (last 30 days)',
-      value: fmtD(summary?.acceptedEstimates30d),
-      icon: TrendingUp,
-      cta: 'View pipeline',
-      to: '/admin/estimates',
-    },
-  ];
-
-  return (
-    <div className="md:hidden px-4 pt-4 pb-6">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <div className="text-14 text-zinc-500">Welcome</div>
-          <h1
-            className="text-zinc-900 mt-1"
-            style={{ fontSize: 32, fontWeight: 700, letterSpacing: '-0.015em', lineHeight: 1.1 }}
-          >
-            Waves Pest Control
-          </h1>
-        </div>
-        <button
-          type="button"
-          onClick={() => navigate('/admin/estimates')}
-          className="w-11 h-11 rounded-full bg-zinc-900 text-white flex items-center justify-center active:bg-zinc-800 shrink-0 mt-1"
-          aria-label="New"
-        >
-          <Plus size={22} strokeWidth={2} />
-        </button>
-      </div>
-
-      <div className="space-y-3">
-        {cards.map((c) => {
-          const Icon = c.icon;
-          return (
-            <Link
-              key={c.label}
-              to={c.to}
-              className="block bg-white rounded-xl px-5 py-5 shadow-sm active:bg-zinc-50"
-            >
-              <div className="text-13 text-zinc-500 font-medium">{c.label}</div>
-              <div
-                className="u-nums text-zinc-900 mt-2"
-                style={{ fontSize: 32, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1 }}
-              >
-                {loading ? '—' : c.value}
-              </div>
-              <div className="flex items-center gap-1.5 mt-3 text-14 font-medium text-zinc-900">
-                <Icon size={16} strokeWidth={2} />
-                {c.cta}
-              </div>
-            </Link>
-          );
-        })}
       </div>
     </div>
   );
@@ -573,7 +484,7 @@ function BillingHealthCard() {
   ];
 
   return (
-    <Card className="mb-5">
+    <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
       <CardHeader className="flex items-center justify-between">
         <CardTitle>Billing Health</CardTitle>
         <span className="text-11 text-ink-secondary">{h.total_billable} billable customers</span>
