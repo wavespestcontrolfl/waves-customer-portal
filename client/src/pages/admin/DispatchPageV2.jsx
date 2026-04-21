@@ -14,6 +14,7 @@ import MobileDispatchList from '../../components/schedule/MobileDispatchList';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import MobileCheckoutSheet from '../../components/schedule/MobileCheckoutSheet';
 import MobilePaymentSheet from '../../components/schedule/MobilePaymentSheet';
+import MobileServiceEditModal from '../../components/schedule/MobileServiceEditModal';
 import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
@@ -676,6 +677,7 @@ export default function DispatchPageV2() {
   const [detailService, setDetailService] = useState(null);
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
+  const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
@@ -684,19 +686,23 @@ export default function DispatchPageV2() {
   const [syncMsg, setSyncMsg] = useState('');
   const [showMoreSheet, setShowMoreSheet] = useState(false);
 
-  const fetchSchedule = useCallback((d) => {
+  const fetchSchedule = useCallback(async (d) => {
     setLoading(true);
     setError(null);
-    Promise.all([
-      adminFetch(`/admin/schedule?date=${d}`),
-      adminFetch('/admin/dispatch/products/catalog'),
-    ])
-      .then(([scheduleData, catalogData]) => {
-        setData(scheduleData);
-        setProducts(catalogData.products || []);
-        setLoading(false);
-      })
-      .catch((e) => { setError(e.message); setLoading(false); });
+    try {
+      const [scheduleData, catalogData] = await Promise.all([
+        adminFetch(`/admin/schedule?date=${d}`),
+        adminFetch('/admin/dispatch/products/catalog'),
+      ]);
+      setData(scheduleData);
+      setProducts(catalogData.products || []);
+      setLoading(false);
+      return scheduleData;
+    } catch (e) {
+      setError(e.message);
+      setLoading(false);
+      return null;
+    }
   }, []);
 
   useEffect(() => { fetchSchedule(date); }, [date, fetchSchedule]);
@@ -1234,12 +1240,26 @@ export default function DispatchPageV2() {
           onChargeSuccess={({ service: svc, invoiceId, amount }) => {
             setPaymentData({ service: svc, invoiceId, amount });
           }}
-          onEditServiceLine={() => {
-            // PR 2 wires this to the service-edit modal (IMG_3730).
-            alert('Edit service — coming soon');
-          }}
+          onEditServiceLine={(svc) => setEditingLineService(svc)}
           onAddService={() => alert('Add Service — coming soon')}
           onAddItem={() => alert('Add Item or Discount — coming soon')}
+        />
+      )}
+      {editingLineService && (
+        <MobileServiceEditModal
+          service={editingLineService}
+          technicians={technicians}
+          onClose={() => setEditingLineService(null)}
+          onSaved={async () => {
+            const svcId = editingLineService.id;
+            setEditingLineService(null);
+            const fresh = await fetchSchedule(date);
+            // Re-seat the checkout sheet on the updated service record so
+            // the new totals render immediately without the tech having
+            // to close + reopen the sheet.
+            const updated = fresh?.services?.find((s) => s.id === svcId);
+            if (updated) setCheckoutService(updated);
+          }}
         />
       )}
       {paymentData && (
