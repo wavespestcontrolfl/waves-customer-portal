@@ -15,7 +15,7 @@ final class AppState: ObservableObject {
     enum Flow {
         case idle
         case validating
-        case ready(ValidatedHandoff)
+        case ready(API.ValidatedHandoff)
         case collecting
         case success(String)     // paymentIntentId
         case failure(String)     // human message
