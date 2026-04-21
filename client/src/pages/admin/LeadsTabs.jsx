@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBarV2';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -967,8 +966,6 @@ export function LeadsSection() {
   // MAIN RENDER
   // ═════════════════════════════════════════════════════════════════════════
   return <div style={{ padding:24, maxWidth:1400, margin:'0 auto', color:C.text }}>
-    <SEOIntelligenceBar context="leads" />
-
     <TabBar tabs={[
       { key:'pipeline', label:'Pipeline' },
       { key:'sources', label:'Sources' },

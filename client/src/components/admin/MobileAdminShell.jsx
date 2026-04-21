@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Home, Calendar, Users, MessageSquare, Menu, Sparkles } from 'lucide-react';
+import { Home, Calendar, Users, MessageSquare, Menu, Sparkles, ClipboardList, Landmark } from 'lucide-react';
 import NotificationBell from '../NotificationBell';
 import { cn } from '../ui/cn';
 
@@ -14,9 +14,11 @@ import { cn } from '../ui/cn';
 
 const TABS = [
   { path: '/admin/dashboard', icon: Home, label: 'Dashboard' },
-  { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
   { path: '/admin/customers', icon: Users, label: 'Customers' },
+  { path: '/admin/estimates', icon: ClipboardList, label: 'Pipeline' },
+  { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
   { path: '/admin/communications', icon: MessageSquare, label: 'Messages' },
+  { path: '/admin/banking', icon: Landmark, label: 'Banking' },
 ];
 
 export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
@@ -78,9 +80,9 @@ export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
                   active ? 'text-zinc-900' : 'text-zinc-500',
                 )}
               >
-                <Icon size={22} strokeWidth={active ? 2.25 : 1.75} />
+                <Icon size={20} strokeWidth={active ? 2.25 : 1.75} />
                 <span className={cn(
-                  'text-[10px] leading-none tracking-label font-medium uppercase',
+                  'text-[9px] leading-none tracking-label font-medium uppercase',
                 )}>{label}</span>
               </Link>
             );

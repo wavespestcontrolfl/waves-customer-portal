@@ -373,9 +373,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const modalStyle = {
     background: D.bg, width: isMobile ? '100%' : 560, maxWidth: '100%',
     maxHeight: isMobile ? '100%' : '90vh', overflow: 'auto',
-    borderRadius: isMobile ? 0 : 16, padding: isMobile ? 16 : 24,
+    borderRadius: isMobile ? 0 : 16, padding: isMobile ? 0 : 24,
     border: isMobile ? 'none' : `1px solid ${D.border}`,
   };
+
+  const canSubmit = !!selectedCustomer && !!selectedService && !saving;
 
   return (
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -390,11 +392,51 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           .waves-sq-row:active { background: #E4E4E7; }
           .waves-sq-row:last-child { border-bottom: none !important; }
         `}</style>
-        {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <h1 style={{ fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
-        </div>
+        {/* Header — IMG_3713 pattern on mobile: circular × left, centered title, Save pill right */}
+        {isMobile ? (
+          <div style={{
+            position: 'sticky', top: 0, zIndex: 10, background: D.bg,
+            height: 60, padding: '0 16px',
+          }}>
+            <div style={{ position: 'relative', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <h1 style={{ fontSize: 17, fontWeight: 700, color: '#18181B', margin: 0 }}>
+                New Appointment
+              </h1>
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Close"
+                style={{
+                  position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
+                  width: 36, height: 36, borderRadius: 18, border: 'none',
+                  background: '#F4F4F5', color: '#18181B', fontSize: 18, lineHeight: 1,
+                  cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}
+              >×</button>
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={!canSubmit}
+                style={{
+                  position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
+                  padding: '9px 20px', borderRadius: 999, border: 'none',
+                  background: canSubmit ? '#18181B' : '#E4E4E7',
+                  color: canSubmit ? '#fff' : '#A1A1AA',
+                  fontSize: 14, fontWeight: 600,
+                  cursor: canSubmit ? 'pointer' : 'default',
+                }}
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <h1 style={{ fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+          </div>
+        )}
+        <div style={{ padding: isMobile ? '0 16px 24px' : 0 }}>
 
         {/* Toast */}
         {toast && <div style={{ background: '#F4F4F5', border: `1px solid ${D.border}`, borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: D.text, fontSize: 13, fontWeight: 500 }}>{toast}</div>}
@@ -771,14 +813,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <span style={{ fontSize: 13, color: D.text }}>Send confirmation SMS</span>
             </label>
           </div>
-          <button disabled={!selectedCustomer || !selectedService || saving} onClick={handleSubmit} style={{
-            width: '100%', padding: '14px 20px', background: D.text, color: D.white,
-            border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 500, cursor: 'pointer',
-            minHeight: 52, opacity: (!selectedCustomer || !selectedService || saving) ? 0.5 : 1,
-            transition: 'opacity 0.15s',
-          }}>
-            {saving ? 'Scheduling…' : 'Schedule appointment'}
-          </button>
+          {!isMobile && (
+            <button disabled={!selectedCustomer || !selectedService || saving} onClick={handleSubmit} style={{
+              width: '100%', padding: '14px 20px', background: D.text, color: D.white,
+              border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 500, cursor: 'pointer',
+              minHeight: 52, opacity: (!selectedCustomer || !selectedService || saving) ? 0.5 : 1,
+              transition: 'opacity 0.15s',
+            }}>
+              {saving ? 'Scheduling…' : 'Schedule appointment'}
+            </button>
+          )}
+        </div>
         </div>
       </div>
     </div>

@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 function adminFetch(path, options = {}) {
@@ -340,9 +339,6 @@ export default function EmailPage() {
           }}>{syncing ? 'Syncing...' : 'Sync Now'}</button>
         </div>
       </div>
-
-      {/* Intelligence Bar */}
-      <SEOIntelligenceBar context="email" />
 
       {/* Daily digest card */}
       {digest && digest.total_received > 0 && (

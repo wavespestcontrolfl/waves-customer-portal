@@ -12,7 +12,6 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Filter, Phone, MessageSquare } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
-import IntelligenceBarV2 from '../../components/admin/IntelligenceBarV2';
 import useIsMobile from '../../hooks/useIsMobile';
 import { CustomerHealthSection } from './CustomerHealthTabs';
 import {
@@ -658,17 +657,6 @@ export default function CustomersPageV2() {
             </button>
           )}
         </div>
-      </div>
-
-      {/* Mobile Waves AI — above view toggle */}
-      <div className="sm:hidden mb-3">
-        <h2 className="text-12 font-medium text-ink-primary mb-1.5">Waves AI</h2>
-        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
-      </div>
-
-      {/* Desktop Intelligence Bar — above view toggle */}
-      <div className="hidden sm:block mb-4">
-        <IntelligenceBarV2 onSelectCustomer={(id) => setSelected360Id(id)} />
       </div>
 
       {/* View toggle — own row, below Waves AI */}

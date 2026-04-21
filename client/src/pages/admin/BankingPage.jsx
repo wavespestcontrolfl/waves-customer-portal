@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { etDateString } from '../../lib/timezone';
 
@@ -650,9 +649,6 @@ export default function BankingPage() {
           </button>
         </div>
       </div>
-
-      {/* Intelligence Bar */}
-      <SEOIntelligenceBar context="banking" />
 
       {/* Balance Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginBottom: 20 }}>

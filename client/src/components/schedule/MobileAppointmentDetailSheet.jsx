@@ -115,31 +115,51 @@ export default function MobileAppointmentDetailSheet({
 
   return (
     <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
-      {/* Top bar: close + edit */}
+      {/* Top bar: back · centered name+phone · edit (⋯) */}
       <div
-        className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center justify-between px-3"
-        style={{ height: 56 }}
+        className="sticky top-0 bg-white flex items-center px-3"
+        style={{ height: 64, paddingTop: 'env(safe-area-inset-top, 0)' }}
       >
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close"
+          aria-label="Back"
           className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
-          style={{ width: 36, height: 36, fontSize: 18, lineHeight: 1 }}
+          style={{ width: 36, height: 36, fontSize: 20, lineHeight: 1 }}
         >
-          ×
+          ←
         </button>
+        <div
+          className="flex-1 min-w-0 text-center px-3"
+          style={{ lineHeight: 1.2 }}
+        >
+          <div
+            className="font-semibold text-zinc-900 truncate"
+            style={{ fontSize: 17 }}
+          >
+            {service.customerName || 'Appointment'}
+          </div>
+          {service.customerPhone && (
+            <div
+              className="text-ink-secondary truncate"
+              style={{ fontSize: 13, marginTop: 1 }}
+            >
+              {service.customerPhone}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           onClick={() => onEdit?.(service)}
-          className="rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
-          style={{ padding: '8px 20px', fontSize: 14 }}
+          aria-label="Edit"
+          className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
+          style={{ width: 36, height: 36, fontSize: 18, lineHeight: 1 }}
         >
-          Edit
+          ⋯
         </button>
       </div>
 
-      <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 560 }}>
+      <div className="px-4 pt-2 pb-10 mx-auto" style={{ maxWidth: 560 }}>
         {/* Review & checkout */}
         <button
           type="button"
@@ -200,32 +220,6 @@ export default function MobileAppointmentDetailSheet({
             Mark prepaid (cash · Zelle · phone CC)
           </button>
         )}
-
-        {/* Customer */}
-        <section className="mt-8">
-          <div
-            className="font-medium text-zinc-900"
-            style={{ fontSize: 20, marginBottom: 10 }}
-          >
-            Customer
-          </div>
-          <div
-            className="py-3 border-b border-hairline border-zinc-200"
-          >
-            <div
-              className="font-medium text-zinc-900"
-              style={{ fontSize: 15 }}
-            >
-              {service.customerName || 'Unassigned'}
-            </div>
-            <div
-              className="text-ink-secondary"
-              style={{ fontSize: 13, marginTop: 2 }}
-            >
-              {service.customerPhone || '—'}
-            </div>
-          </div>
-        </section>
 
         {/* Services and items */}
         <section className="mt-8">

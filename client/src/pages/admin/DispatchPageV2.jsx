@@ -15,7 +15,6 @@ import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppoin
 import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
-import ScheduleIntelligenceBarV2 from '../../components/admin/ScheduleIntelligenceBarV2';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { Button, Badge, Card, CardBody, cn } from '../../components/ui';
@@ -1059,13 +1058,6 @@ export default function DispatchPageV2() {
       )}
 
       {viewMode === 'day' && <RecurringAlertsBannerV2 />}
-
-      {viewMode === 'day' && (
-        <>
-          <h2 className="md:hidden text-14 font-medium text-ink-primary mt-4 mb-1.5">Waves AI</h2>
-          <ScheduleIntelligenceBarV2 date={date} scheduleData={data} onRefresh={() => fetchSchedule(date)} />
-        </>
-      )}
 
       {/* Non-board tabs — V2 monochrome panels (Match/CSR/Revenue/Insights/Protocols). */}
       {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTabV2 />}

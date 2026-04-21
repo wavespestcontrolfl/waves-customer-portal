@@ -6,7 +6,6 @@ const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanel')
 const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanel'));
 import { ViewModeSelector, WeekView, MonthView } from '../../components/schedule/CalendarViews';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
-import ScheduleIntelligenceBar from '../../components/admin/ScheduleIntelligenceBar';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { launchTapToPay } from '../../lib/tapToPay';
@@ -1850,33 +1849,34 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             </div>
           )}
 
-          {/* Sticky top bar */}
+          {/* Sticky top bar — Square pattern: ← · centered title · ⋯ */}
           <div style={{
             position: 'sticky', top: 0, zIndex: 2, background: M.page,
-            borderBottom: `0.5px solid ${M.hairline}`,
-            padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12,
+            padding: '12px 12px', display: 'flex', alignItems: 'center', gap: 8,
+            height: 64, boxSizing: 'border-box',
           }}>
             <button
               type="button"
               onClick={() => onClose(false)}
-              aria-label="Close"
+              aria-label="Back"
               style={{
                 width: 36, height: 36, minWidth: 36, borderRadius: '50%',
                 background: M.muted, border: 'none', cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 padding: 0, fontSize: 20, lineHeight: 1, color: M.ink,
               }}
-            >×</button>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontFamily: font, fontSize: 11, fontWeight: 600, color: M.ink4,
-                            textTransform: 'uppercase', letterSpacing: '0.3px' }}>
+            >←</button>
+            <div style={{ flex: 1, minWidth: 0, textAlign: 'center', padding: '0 8px', lineHeight: 1.2 }}>
+              <div style={{ fontFamily: font, fontSize: 17, fontWeight: 600, color: M.ink,
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 Complete service
               </div>
-              <div style={{ fontFamily: font, fontSize: 15, fontWeight: 600, color: M.ink,
-                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              <div style={{ fontFamily: font, fontSize: 13, fontWeight: 400, color: M.ink3,
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 1 }}>
                 {service.customerName}
               </div>
             </div>
+            <div style={{ width: 36, height: 36 }} aria-hidden />
           </div>
 
           <div style={{ padding: 20, maxWidth: 560, margin: '0 auto' }}>
@@ -3573,15 +3573,6 @@ export default function SchedulePage() {
 
       {/* Recurring plan alerts */}
       {viewMode === 'day' && <RecurringAlertsBanner />}
-
-      {/* Intelligence Bar — schedule context */}
-      {viewMode === 'day' && (
-        <ScheduleIntelligenceBar
-          date={date}
-          scheduleData={data}
-          onRefresh={() => fetchSchedule(date)}
-        />
-      )}
 
       {/* ── Protocol Reference ── */}
       {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTab />}

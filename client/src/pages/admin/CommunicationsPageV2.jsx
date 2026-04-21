@@ -21,14 +21,12 @@ import React, {
 import {
   ALL_NUMBERS,
   NUMBER_LABEL_MAP,
-  TEMPLATES,
 } from './CommunicationsPage';
 import CallLogTabV2 from './CallLogTabV2';
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from './CommunicationsTabsV2';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 import NewsletterTabV2 from './NewsletterTabV2';
 import PushSettingsV2 from '../../components/admin/PushSettingsV2';
-import SEOIntelligenceBarV2 from '../../components/admin/SEOIntelligenceBarV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 
@@ -76,10 +74,10 @@ function formatTimestamp(dateStr) {
 const TABS = [
   { key: 'sms', label: 'SMS' },
   { key: 'calls', label: 'Calls' },
-  { key: 'templates', label: 'Templates' },
-  { key: 'email', label: 'Email' },
-  { key: 'csr', label: 'CSR Coach' },
-  { key: 'notifications', label: 'Notifications' },
+  { key: 'templates', label: 'Templates', desktopOnly: true },
+  { key: 'email', label: 'Email', desktopOnly: true },
+  { key: 'csr', label: 'CSR Coach', desktopOnly: true },
+  { key: 'notifications', label: 'Notifications', desktopOnly: true },
 ];
 
 // ── V2 helpers ────────────────────────────────────────────────
@@ -570,7 +568,7 @@ function SmsTab() {
   return (
     <div>
       {/* Stats + auto-reply */}
-      <div className="flex items-center gap-2 mb-4 flex-wrap">
+      <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
         <StatCardV2
           label="Sent This Month"
           value={totalSent}
@@ -768,19 +766,6 @@ function SmsTab() {
         />
         <div className="text-right text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
           {msgBody.length} chars
-        </div>
-
-        <div className="flex flex-wrap gap-1.5 mb-3">
-          {TEMPLATES.map((t) => (
-            <button
-              key={t.label}
-              type="button"
-              onClick={() => setMsgBody(t.body.slice(0, 160))}
-              className="bg-white border-hairline border-zinc-300 rounded-xs text-13 md:text-11 px-3 md:px-2.5 py-2 md:py-1 min-h-[44px] md:min-h-0 inline-flex items-center text-ink-secondary hover:bg-zinc-50 u-focus-ring"
-            >
-              {t.label}
-            </button>
-          ))}
         </div>
 
         <div className="flex gap-2">
@@ -1073,7 +1058,7 @@ export default function CommunicationsPageV2() {
     const base = [...TABS];
     if (newsletterEnabled) {
       const emailIdx = base.findIndex((t) => t.key === 'email');
-      base.splice(emailIdx + 1, 0, { key: 'newsletter', label: 'Newsletter' });
+      base.splice(emailIdx + 1, 0, { key: 'newsletter', label: 'Newsletter', desktopOnly: true });
     }
     return base;
   }, [newsletterEnabled]);
@@ -1082,16 +1067,11 @@ export default function CommunicationsPageV2() {
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900 max-w-[1200px]">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
-          <div className="text-11 uppercase tracking-label text-ink-secondary">
-            Operations
-          </div>
           <h1 className="text-28 font-normal tracking-display text-zinc-900">
-            SMS &amp; Calls
+            Communications
           </h1>
         </div>
       </div>
-
-      <SEOIntelligenceBarV2 context="comms" />
 
       <div className="flex gap-1.5 mb-5 mt-4 flex-wrap">
         {tabs.map((t) => (
@@ -1101,6 +1081,7 @@ export default function CommunicationsPageV2() {
             onClick={() => setTab(t.key)}
             className={cn(
               'h-11 md:h-9 px-4 text-14 md:text-12 normal-case md:uppercase font-medium tracking-normal md:tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
+              t.desktopOnly && 'hidden md:inline-flex items-center',
               tab === t.key
                 ? 'bg-zinc-900 text-white border-zinc-900'
                 : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',

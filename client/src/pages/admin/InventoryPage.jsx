@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import ProcurementIntelligenceBar from '../../components/admin/ProcurementIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -63,8 +62,6 @@ export default function InventoryPage() {
           ))}
         </div>
       )}
-
-      <ProcurementIntelligenceBar stats={stats} onRefresh={loadStats} />
 
       <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
         {tabs.map(t => (
