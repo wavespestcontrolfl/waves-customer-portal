@@ -275,7 +275,16 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
   const [comms, setComms] = useState([]);
   const [smsReply, setSmsReply] = useState('');
   const [sendingSms, setSendingSms] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm, setEditForm] = useState({});
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editErr, setEditErr] = useState('');
   const panelRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const reloadCustomer = () =>
+    adminFetch(`/admin/customers/${customerId}`).then(setData).catch(() => {});
 
   useEffect(() => {
     setLoading(true);
@@ -296,6 +305,19 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('touchstart', handler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('touchstart', handler);
+    };
+  }, [menuOpen]);
 
   if (loading) return (
     <div className="fixed inset-0 bg-black/70 z-[1000] flex justify-end" onClick={onClose}>
@@ -453,6 +475,25 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Invoice</a>
               <button onClick={() => setActiveTab('comms')}
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Add Note</button>
+              <button
+                onClick={() => {
+                  setEditForm({
+                    firstName: c.firstName || '',
+                    lastName: c.lastName || '',
+                    email: c.email || '',
+                    phone: c.phone || '',
+                    addressLine1: c.address?.line1 || '',
+                    city: c.address?.city || '',
+                    state: c.address?.state || '',
+                    zip: c.address?.zip || '',
+                    monthlyRate: c.monthlyRate ?? '',
+                    tier: c.tier || '',
+                    pipelineStage: c.pipelineStage || 'new_lead',
+                  });
+                  setEditErr('');
+                  setEditOpen(true);
+                }}
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Edit</button>
             </div>
           </div>
 
@@ -484,13 +525,54 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                     Call
                   </a>
                 )}
-                <button
-                  onClick={() => setActiveTab('comms')}
-                  aria-label="More"
-                  className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
-                >
-                  <MoreHorizontal size={18} strokeWidth={1.75} />
-                </button>
+                <div ref={menuRef} className="relative">
+                  <button
+                    onClick={() => setMenuOpen(v => !v)}
+                    aria-label="More"
+                    aria-expanded={menuOpen}
+                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+                  >
+                    <MoreHorizontal size={18} strokeWidth={1.75} />
+                  </button>
+                  {menuOpen && (
+                    <div
+                      role="menu"
+                      className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
+                    >
+                      <button
+                        role="menuitem"
+                        onClick={() => {
+                          setEditForm({
+                            firstName: c.firstName || '',
+                            lastName: c.lastName || '',
+                            email: c.email || '',
+                            phone: c.phone || '',
+                            addressLine1: c.address?.line1 || '',
+                            city: c.address?.city || '',
+                            state: c.address?.state || '',
+                            zip: c.address?.zip || '',
+                            monthlyRate: c.monthlyRate ?? '',
+                            tier: c.tier || '',
+                            pipelineStage: c.pipelineStage || 'new_lead',
+                          });
+                          setEditErr('');
+                          setEditOpen(true);
+                          setMenuOpen(false);
+                        }}
+                        className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                      >
+                        Edit customer
+                      </button>
+                      <button
+                        role="menuitem"
+                        onClick={() => { setActiveTab('comms'); setMenuOpen(false); }}
+                        className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                      >
+                        Add note
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -1014,6 +1096,106 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
 
       {/* Mobile sticky action bar (mirrors desktop pills) */}
       <CustomerActionBar customer={{ id: customerId, phone: c.phone }} standalone />
+
+      {editOpen && (
+        <div
+          className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+          onClick={() => !savingEdit && setEditOpen(false)}
+        >
+          <div
+            className="bg-white w-full max-w-[560px] rounded-sm border-hairline border-zinc-300 my-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
+              <div className="text-15 font-medium text-zinc-900">Edit customer</div>
+              <button
+                onClick={() => !savingEdit && setEditOpen(false)}
+                aria-label="Close"
+                className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
+              >×</button>
+            </div>
+            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {[
+                { key: 'firstName', label: 'First name' },
+                { key: 'lastName', label: 'Last name' },
+                { key: 'email', label: 'Email', type: 'email' },
+                { key: 'phone', label: 'Phone', type: 'tel' },
+                { key: 'addressLine1', label: 'Address', full: true },
+                { key: 'city', label: 'City' },
+                { key: 'state', label: 'State' },
+                { key: 'zip', label: 'ZIP' },
+                { key: 'monthlyRate', label: 'Monthly rate', type: 'number' },
+              ].map(f => (
+                <div key={f.key} className={f.full ? 'sm:col-span-2' : ''}>
+                  <label className="u-label text-ink-secondary block mb-1">{f.label}</label>
+                  <input
+                    type={f.type || 'text'}
+                    value={editForm[f.key] ?? ''}
+                    onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))}
+                    className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                  />
+                </div>
+              ))}
+              <div>
+                <label className="u-label text-ink-secondary block mb-1">Tier</label>
+                <select
+                  value={editForm.tier || ''}
+                  onChange={e => setEditForm(p => ({ ...p, tier: e.target.value }))}
+                  className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                >
+                  <option value="">No Plan</option>
+                  <option value="Platinum">Platinum</option>
+                  <option value="Gold">Gold</option>
+                  <option value="Silver">Silver</option>
+                  <option value="Bronze">Bronze</option>
+                  <option value="One-Time">One-Time</option>
+                </select>
+              </div>
+              <div>
+                <label className="u-label text-ink-secondary block mb-1">Stage</label>
+                <select
+                  value={editForm.pipelineStage || ''}
+                  onChange={e => setEditForm(p => ({ ...p, pipelineStage: e.target.value }))}
+                  className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                >
+                  {Object.entries(STAGE_LABELS).map(([k, label]) => (
+                    <option key={k} value={k}>{label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {editErr && (
+              <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{editErr}</div>
+            )}
+            <div className="flex justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
+              <Button variant="secondary" onClick={() => setEditOpen(false)} disabled={savingEdit}>Cancel</Button>
+              <Button
+                onClick={async () => {
+                  setSavingEdit(true); setEditErr('');
+                  try {
+                    const payload = {
+                      ...editForm,
+                      monthlyRate: editForm.monthlyRate === '' ? null : parseFloat(editForm.monthlyRate),
+                      tier: editForm.tier || null,
+                    };
+                    await adminFetch(`/admin/customers/${customerId}`, {
+                      method: 'PUT', body: JSON.stringify(payload),
+                    });
+                    await reloadCustomer();
+                    setEditOpen(false);
+                  } catch (e) {
+                    setEditErr(e.message || 'Save failed');
+                  }
+                  setSavingEdit(false);
+                }}
+                disabled={savingEdit}
+              >
+                {savingEdit ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
