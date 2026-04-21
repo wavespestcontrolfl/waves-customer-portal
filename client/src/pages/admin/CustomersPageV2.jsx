@@ -10,8 +10,9 @@
 // from CustomersPage.jsx (PR #4b/#4c/#4d will reskin those in later passes).
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Filter, Phone, MessageSquare } from 'lucide-react';
+import { Filter, Phone, MessageSquare, Plus } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
+import MobileNewCustomerSheet from '../../components/admin/MobileNewCustomerSheet';
 import useIsMobile from '../../hooks/useIsMobile';
 import { CustomerHealthSection } from './CustomerHealthTabs';
 import {
@@ -645,6 +646,17 @@ export default function CustomersPageV2() {
           {view === 'directory' && (
             <button
               type="button"
+              onClick={() => setShowAddModal(true)}
+              aria-label="Add customer"
+              className="sm:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring"
+              style={{ width: 36, height: 36 }}
+            >
+              <Plus size={20} strokeWidth={2} />
+            </button>
+          )}
+          {view === 'directory' && (
+            <button
+              type="button"
               onClick={() => setShowFilters(true)}
               className="hidden sm:inline-flex items-center gap-1.5 h-9 px-3 u-label border-hairline border-zinc-300 rounded-sm text-ink-secondary bg-white hover:bg-zinc-50"
             >
@@ -1095,13 +1107,27 @@ export default function CustomersPageV2() {
       {/* ======================= AI ADVISOR ======================= */}
       {view === 'intelligence' && <div className="mt-4"><CustomerIntelligenceTab /></div>}
 
-      {/* ======================= QUICK ADD MODAL ======================= */}
-      <QuickAddModalV2
-        open={showAddModal}
-        onClose={() => setShowAddModal(false)}
-        onCreated={() => { loadCustomers(); if (view === 'pipeline') loadPipeline(); }}
-        onOpenExisting={(id) => setSelected360Id(id)}
-      />
+      {/* ======================= QUICK ADD (desktop modal / mobile Square sheet) ======================= */}
+      {!isMobile && (
+        <QuickAddModalV2
+          open={showAddModal}
+          onClose={() => setShowAddModal(false)}
+          onCreated={() => { loadCustomers(); if (view === 'pipeline') loadPipeline(); }}
+          onOpenExisting={(id) => setSelected360Id(id)}
+        />
+      )}
+      {isMobile && (
+        <MobileNewCustomerSheet
+          open={showAddModal}
+          onClose={() => setShowAddModal(false)}
+          onCreated={(customer) => {
+            loadCustomers();
+            if (view === 'pipeline') loadPipeline();
+            // Deep-link into the newly created profile (parity with desktop QuickAdd).
+            if (customer?.id) setSelected360Id(customer.id);
+          }}
+        />
+      )}
 
       {/* ======================= CUSTOMER 360 (V1) ======================= */}
       {selected360Id && (
