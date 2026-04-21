@@ -11,6 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { useEffect, useMemo, useState } from 'react';
+import { Truck, Star } from 'lucide-react';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
 import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib/timezone';
@@ -89,7 +90,7 @@ function headerLabel(dateStr) {
   });
 }
 
-function AppointmentRow({ service, onEdit }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onReviewRequest }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -107,65 +108,89 @@ function AppointmentRow({ service, onEdit }) {
     : '';
 
   return (
-    <button
-      type="button"
-      onClick={() => onEdit?.(service)}
-      className="w-full flex items-stretch gap-3 bg-white border-b border-hairline border-zinc-200 active:bg-zinc-50 u-focus-ring text-left"
+    <div
+      className="flex items-stretch gap-2 bg-white border-b border-hairline border-zinc-200"
       style={{ padding: '12px 14px 12px 0' }}
     >
       <span
         aria-hidden
         style={{ width: 4, background: accent, borderRadius: 2, flexShrink: 0 }}
       />
-      <span className="flex-1 min-w-0">
-        <span className="flex items-baseline gap-2">
-          <span
-            className="font-medium text-zinc-900 truncate"
-            style={{ fontSize: 15 }}
-          >
-            {firstName}
+      <button
+        type="button"
+        onClick={() => onEdit?.(service)}
+        className="flex-1 min-w-0 flex items-center gap-3 active:bg-zinc-50 u-focus-ring text-left"
+      >
+        <span className="flex-1 min-w-0">
+          <span className="flex items-baseline gap-2">
+            <span
+              className="font-medium text-zinc-900 truncate"
+              style={{ fontSize: 15 }}
+            >
+              {firstName}
+            </span>
+            {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
           </span>
-          {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
-        </span>
-        {service.serviceType && (
+          {service.serviceType && (
+            <span
+              className="block truncate text-ink-secondary"
+              style={{ fontSize: 13, marginTop: 1 }}
+            >
+              {service.serviceType}
+            </span>
+          )}
           <span
-            className="block truncate text-ink-secondary"
-            style={{ fontSize: 13, marginTop: 1 }}
+            className="block u-nums text-ink-tertiary"
+            style={{ fontSize: 12, marginTop: 3 }}
           >
-            {service.serviceType}
+            {formatWindow(service)}
+          </span>
+        </span>
+        {techInitial && (
+          <span
+            className="flex items-center justify-center font-medium text-zinc-700"
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: '50%',
+              background: '#F4F4F5',
+              fontSize: 12,
+              flexShrink: 0,
+              alignSelf: 'center',
+            }}
+            title={service.technicianName}
+          >
+            {techInitial}
           </span>
         )}
-        <span
-          className="block u-nums text-ink-tertiary"
-          style={{ fontSize: 12, marginTop: 3 }}
+      </button>
+      {onEnRoute && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onEnRoute(service); }}
+          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
+          title="Tech En Route"
+          aria-label="Tech En Route"
         >
-          {formatWindow(service)}
-          {service.zone && <span className="text-zinc-300 mx-1">·</span>}
-          {service.zone && <span className="uppercase tracking-label">{service.zone}</span>}
-        </span>
-      </span>
-      {techInitial && (
-        <span
-          className="flex items-center justify-center font-medium text-zinc-700"
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: '50%',
-            background: '#F4F4F5',
-            fontSize: 12,
-            flexShrink: 0,
-            alignSelf: 'center',
-          }}
-          title={service.technicianName}
-        >
-          {techInitial}
-        </span>
+          <Truck size={18} strokeWidth={1.75} />
+        </button>
       )}
-    </button>
+      {onReviewRequest && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onReviewRequest(service); }}
+          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
+          title="Review Request"
+          aria-label="Review Request"
+        >
+          <Star size={18} strokeWidth={1.75} />
+        </button>
+      )}
+    </div>
   );
 }
 
-function DaySegment({ dateStr, services, onEdit }) {
+function DaySegment({ dateStr, services, onEdit, onEnRoute, onReviewRequest }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const today = isETToday(dateStr);
   return (
@@ -196,14 +221,20 @@ function DaySegment({ dateStr, services, onEdit }) {
         </div>
       ) : (
         sorted.map((svc) => (
-          <AppointmentRow key={svc.id} service={svc} onEdit={onEdit} />
+          <AppointmentRow
+            key={svc.id}
+            service={svc}
+            onEdit={onEdit}
+            onEnRoute={onEnRoute}
+            onReviewRequest={onReviewRequest}
+          />
         ))
       )}
     </section>
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, onEdit }) {
+export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute, onReviewRequest }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -231,7 +262,13 @@ export default function MobileDispatchList({ mode, date, services, onEdit }) {
   if (mode === 'day') {
     return (
       <div className="bg-white">
-        <DaySegment dateStr={date} services={services || []} onEdit={onEdit} />
+        <DaySegment
+          dateStr={date}
+          services={services || []}
+          onEdit={onEdit}
+          onEnRoute={onEnRoute}
+          onReviewRequest={onReviewRequest}
+        />
       </div>
     );
   }
@@ -258,6 +295,8 @@ export default function MobileDispatchList({ mode, date, services, onEdit }) {
           dateStr={d.date}
           services={d.services || []}
           onEdit={onEdit}
+          onEnRoute={onEnRoute}
+          onReviewRequest={onReviewRequest}
         />
       ))}
     </div>
