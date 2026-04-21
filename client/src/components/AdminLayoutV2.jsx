@@ -48,6 +48,7 @@ import {
   X,
 } from 'lucide-react';
 import useIsMobile from '../hooks/useIsMobile';
+import { refetchFlags } from '../hooks/useFeatureFlag';
 import NotificationBell from './NotificationBell';
 import GlobalCommandPalette from './admin/GlobalCommandPalette';
 
@@ -143,6 +144,7 @@ export default function AdminLayoutV2() {
         if (r.status === 401) {
           localStorage.removeItem('waves_admin_token');
           localStorage.removeItem('waves_admin_user');
+          refetchFlags();
           navigate('/admin/login', { replace: true });
         }
       })
@@ -157,6 +159,7 @@ export default function AdminLayoutV2() {
   const handleLogout = () => {
     localStorage.removeItem('waves_admin_token');
     localStorage.removeItem('waves_admin_user');
+    refetchFlags();
     navigate('/admin/login', { replace: true });
   };
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FONTS, BUTTON_BASE } from '../theme';
+import { refetchFlags } from '../hooks/useFeatureFlag';
 
 const EstimatePage = lazy(() => import('./admin/EstimatePage'));
 
@@ -229,6 +230,7 @@ export default function AdminDashboardPage() {
   const handleLogout = () => {
     localStorage.removeItem('waves_admin_token');
     localStorage.removeItem('waves_admin_user');
+    refetchFlags();
     navigate('/admin/login', { replace: true });
   };
 

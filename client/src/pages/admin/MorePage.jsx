@@ -8,6 +8,7 @@ import {
   Award, Activity, Settings as SettingsIcon,
   LogOut, ExternalLink, ChevronRight,
 } from 'lucide-react';
+import { refetchFlags } from '../../hooks/useFeatureFlag';
 
 const SECTIONS = [
   { section: 'Operations', items: [
@@ -56,6 +57,7 @@ export default function MorePage() {
   const handleLogout = () => {
     localStorage.removeItem('waves_admin_token');
     localStorage.removeItem('waves_admin_user');
+    refetchFlags();
     navigate('/admin/login', { replace: true });
   };
 
