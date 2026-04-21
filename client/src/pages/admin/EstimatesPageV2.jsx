@@ -11,7 +11,7 @@
 //   PR #5c → FollowUpModalV2 + DeclineModalV2 replace V1 modals (Dialog
 //            primitive, danger variant on Mark-as-Lost)
 // Leads / Pricing Logic tabs still render V1 panels.
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   STATUS_CONFIG,
@@ -28,8 +28,12 @@ import {
   FollowUpModalV2,
   DeclineModalV2,
 } from '../../components/admin/EstimateModalsV2';
+import useIsMobile from '../../hooks/useIsMobile';
 import { Badge, Button, Card, cn } from '../../components/ui';
-import { Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, SlidersHorizontal, Check, X } from 'lucide-react';
+import {
+  Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, SlidersHorizontal,
+  Check, X, Plus, Search, ChevronRight, ArrowLeft,
+} from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -638,8 +642,405 @@ const TABS = [
   { key: 'pricing', label: 'Pricing Logic' },
 ];
 
+// Mobile-only filter dimensions. FILTER reuses PIPELINE_FILTERS. DATE filters on
+// createdAt relative to now. SORT controls row order; grouping is always by day.
+const MOBILE_DATE_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'today', label: 'Today' },
+  { key: 'week', label: 'This week' },
+  { key: 'month', label: 'This month' },
+  { key: 'last30', label: 'Last 30 days' },
+];
+
+const MOBILE_SORT_OPTIONS = [
+  { key: 'newest', label: 'Newest' },
+  { key: 'oldest', label: 'Oldest' },
+  { key: 'amount-desc', label: 'Amount: high → low' },
+  { key: 'amount-asc', label: 'Amount: low → high' },
+];
+
+function mobileMatchesDate(createdAt, dateKey, nowTs) {
+  if (dateKey === 'all') return true;
+  if (!createdAt) return false;
+  const ts = new Date(createdAt).getTime();
+  if (Number.isNaN(ts)) return false;
+  if (dateKey === 'today') {
+    return new Date(ts).toDateString() === new Date(nowTs).toDateString();
+  }
+  const MS_DAY = 86400000;
+  if (dateKey === 'week') return nowTs - ts <= 7 * MS_DAY;
+  if (dateKey === 'month' || dateKey === 'last30') return nowTs - ts <= 30 * MS_DAY;
+  return true;
+}
+
+function mobileSortFn(sortKey) {
+  switch (sortKey) {
+    case 'oldest': return (a, b) => new Date(a.createdAt) - new Date(b.createdAt);
+    case 'amount-desc': return (a, b) => (b.monthlyTotal || 0) - (a.monthlyTotal || 0);
+    case 'amount-asc': return (a, b) => (a.monthlyTotal || 0) - (b.monthlyTotal || 0);
+    case 'newest':
+    default: return (a, b) => new Date(b.createdAt) - new Date(a.createdAt);
+  }
+}
+
+function fmtMobileDayHeader(ts) {
+  return new Date(ts).toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  });
+}
+
+// Short 6-char ref derived from UUID. estimates.id is a UUID (no human-readable
+// sequence column exists yet); last-6 uppercased is a pragmatic display token.
+function shortEstimateRef(id) {
+  if (!id) return '—';
+  return String(id).replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase();
+}
+
+// Bottom-sheet single-select chip. Matches FilterSheetV2 pattern but chip
+// visual is lighter (zinc-100 bg, label + bold value) to match the mockup.
+function MobileChipSheet({ label, value, options, onChange, title }) {
+  const [open, setOpen] = useState(false);
+  const active = options.find((o) => o.key === value) || options[0];
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`${label}: ${active.label}`}
+        className={cn(
+          'inline-flex items-center gap-1.5 h-9 px-4 rounded-lg',
+          'bg-zinc-100 border-hairline border-zinc-100',
+          'text-13 text-zinc-600 u-focus-ring',
+          'hover:bg-zinc-200 active:bg-zinc-200 whitespace-nowrap',
+        )}
+      >
+        <span>{label}</span>
+        <span className="font-medium text-zinc-900">{active.label}</span>
+      </button>
+
+      {open && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+        >
+          <div className="absolute inset-0 bg-zinc-900/40" onClick={() => setOpen(false)} />
+          <div
+            className={cn(
+              'relative w-full bg-white outline-none',
+              'rounded-t-md sm:rounded-md sm:max-w-md',
+              'border-hairline border-zinc-200',
+              'flex flex-col max-h-[85vh]',
+            )}
+            style={{ paddingBottom: 'env(safe-area-inset-bottom, 0)' }}
+          >
+            <div className="pt-2 pb-1 sm:hidden">
+              <div className="mx-auto w-10 h-1 rounded-full bg-zinc-300" />
+            </div>
+            <div className="px-5 py-3 flex items-center justify-between border-b border-hairline border-zinc-200">
+              <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary">
+                {title}
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                aria-label="Close"
+                className="h-9 w-9 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring"
+              >
+                <X size={16} strokeWidth={1.75} aria-hidden />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {options.map((o) => {
+                const isActive = o.key === value;
+                return (
+                  <button
+                    key={o.key}
+                    type="button"
+                    onClick={() => { onChange(o.key); setOpen(false); }}
+                    className={cn(
+                      'w-full flex items-center justify-between gap-3',
+                      'px-5 py-4 text-left u-focus-ring',
+                      'border-b border-hairline border-zinc-100 last:border-b-0',
+                      isActive ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'text-14 tracking-tight',
+                        isActive ? 'font-medium text-zinc-900' : 'text-zinc-700',
+                      )}
+                    >
+                      {o.label}
+                    </span>
+                    {isActive && (
+                      <Check size={16} strokeWidth={2} className="text-zinc-900" aria-hidden />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+// Status label color on mobile row. Draft = waves blue, alert = red,
+// accepted = zinc-900, others fall back to ink-tertiary for low emphasis.
+function mobileStatusClass(status) {
+  if (status === 'declined' || status === 'expired') return 'text-alert-fg';
+  if (status === 'accepted') return 'text-zinc-900';
+  if (status === 'draft' || status === 'sent' || status === 'viewed') return 'text-waves-blue';
+  return 'text-ink-tertiary';
+}
+
+// Row in the mobile list. Name + short ref left, total + status + chevron right.
+// Row tap is currently a no-op — action sheet will land in a follow-up PR so
+// this PR stays scoped to the list-view redesign per CLAUDE.md Rule 1/2.
+function MobileEstimateRow({ estimate }) {
+  const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
+  return (
+    <button
+      type="button"
+      onClick={() => { /* row action sheet — follow-up PR */ }}
+      className={cn(
+        'w-full flex items-center gap-3 py-3 text-left u-focus-ring',
+        'border-b border-hairline border-zinc-100 last:border-b-0',
+      )}
+    >
+      <div className="flex-1 min-w-0">
+        <div className="text-16 font-medium text-zinc-900 truncate">
+          {estimate.customerName || 'Unknown'}
+        </div>
+        <div className="text-12 text-ink-tertiary u-nums">
+          #{shortEstimateRef(estimate.id)}
+        </div>
+      </div>
+      <div className="text-right">
+        <div className="text-16 font-medium text-zinc-900 u-nums">
+          ${(estimate.monthlyTotal || 0).toFixed(2)}
+        </div>
+        <div className={cn('text-12 font-medium', mobileStatusClass(estimate.status))}>
+          {cfg.label}
+        </div>
+      </div>
+      <ChevronRight size={16} strokeWidth={1.75} className="text-zinc-400 shrink-0" aria-hidden />
+    </button>
+  );
+}
+
+// Mobile list view for /admin/estimates. Strict 1:1 on data + endpoint
+// (GET /admin/estimates) with EstimatePipelineViewV2. KPI bar, Leads tab,
+// and Pricing Logic tab are desktop-only by design.
+function EstimatesMobileListView({ onNew }) {
+  const [estimates, setEstimates] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [dateFilter, setDateFilter] = useState('all');
+  const [sort, setSort] = useState('newest');
+
+  useEffect(() => {
+    adminFetch('/admin/estimates')
+      .then((d) => { setEstimates(d.estimates || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const groups = useMemo(() => {
+    const now = Date.now();
+    const q = search.trim().toLowerCase();
+    const classified = estimates.map((e) => ({ ...e, _class: classifyEstimate(e) }));
+    let list = classified;
+    if (filter !== 'all') list = list.filter((e) => e._class === filter);
+    if (dateFilter !== 'all') {
+      list = list.filter((e) => mobileMatchesDate(e.createdAt, dateFilter, now));
+    }
+    if (q) {
+      list = list.filter((e) => {
+        const name = (e.customerName || '').toLowerCase();
+        const ref = shortEstimateRef(e.id).toLowerCase();
+        return name.includes(q) || ref.includes(q);
+      });
+    }
+    list = [...list].sort(mobileSortFn(sort));
+
+    // Always group by createdAt day; sort=oldest reverses group order.
+    const byDay = new Map();
+    for (const e of list) {
+      const d = e.createdAt ? new Date(e.createdAt) : null;
+      const key = d && !Number.isNaN(d.getTime())
+        ? new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+        : 0;
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key).push(e);
+    }
+    const sortedGroups = Array.from(byDay.entries()).sort((a, b) =>
+      sort === 'oldest' ? a[0] - b[0] : b[0] - a[0],
+    );
+    return sortedGroups;
+  }, [estimates, search, filter, dateFilter, sort]);
+
+  const filterCounts = useMemo(() => {
+    const counts = { all: estimates.length };
+    for (const f of PIPELINE_FILTERS) {
+      if (f.key === 'all') continue;
+      counts[f.key] = estimates.filter((e) => classifyEstimate(e) === f.key).length;
+    }
+    return counts;
+  }, [estimates]);
+
+  return (
+    // Edge-to-edge white canvas. AdminLayout gives the main column a 16px
+    // inline padding on mobile-shell; we cancel it so rows span the viewport
+    // like iOS list views in the mockup.
+    <div className="-mx-4 bg-white min-h-[calc(100vh-152px)] px-4 pt-2 pb-4">
+      {/* Title + add */}
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-28 font-normal text-zinc-900 tracking-display">
+          Estimates
+        </h1>
+        <button
+          type="button"
+          onClick={onNew}
+          aria-label="Create estimate"
+          className="w-10 h-10 rounded-full bg-zinc-900 text-white flex items-center justify-center u-focus-ring hover:bg-zinc-800 active:bg-zinc-800"
+        >
+          <Plus size={20} strokeWidth={2} aria-hidden />
+        </button>
+      </div>
+
+      {/* Search */}
+      <div className="relative mb-3">
+        <Search
+          size={16}
+          strokeWidth={1.75}
+          aria-hidden
+          className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500"
+        />
+        <input
+          type="search"
+          inputMode="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search"
+          aria-label="Search estimates"
+          className={cn(
+            'w-full h-11 pl-10 pr-4 rounded-full',
+            'bg-zinc-100 border-hairline border-zinc-100',
+            'text-14 text-zinc-900 placeholder:text-zinc-500',
+            'u-focus-ring',
+          )}
+        />
+      </div>
+
+      {/* Filter / Date / Sort chips */}
+      <div className="flex gap-2 mb-4 overflow-x-auto -mx-1 px-1">
+        <MobileChipSheet
+          label="Filter"
+          value={filter}
+          onChange={setFilter}
+          options={PIPELINE_FILTERS.map((f) => ({
+            ...f,
+            label: f.key === 'all'
+              ? `All (${filterCounts.all || 0})`
+              : `${f.label} (${filterCounts[f.key] || 0})`,
+          }))}
+          title="Filter estimates"
+        />
+        <MobileChipSheet
+          label="Date"
+          value={dateFilter}
+          onChange={setDateFilter}
+          options={MOBILE_DATE_FILTERS}
+          title="Filter by date"
+        />
+        <MobileChipSheet
+          label="Sort"
+          value={sort}
+          onChange={setSort}
+          options={MOBILE_SORT_OPTIONS}
+          title="Sort estimates"
+        />
+      </div>
+
+      {/* List */}
+      {loading ? (
+        <div className="p-10 text-center text-13 text-ink-secondary">
+          Loading estimates…
+        </div>
+      ) : groups.length === 0 ? (
+        <div className="p-10 text-center text-13 text-ink-secondary">
+          {estimates.length === 0
+            ? 'No estimates yet. Tap + to create one.'
+            : 'No estimates match these filters.'}
+        </div>
+      ) : (
+        <div className="flex flex-col">
+          {groups.map(([dayKey, items]) => (
+            <section key={dayKey} className="mb-4">
+              <h2 className="text-14 font-medium text-zinc-900 py-2 border-b border-hairline border-zinc-200">
+                {dayKey ? fmtMobileDayHeader(dayKey) : 'No date'}
+              </h2>
+              <ul className="flex flex-col list-none p-0 m-0">
+                {items.map((e) => (
+                  <li key={e.id} className="list-none">
+                    <MobileEstimateRow estimate={e} />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EstimatesPageV2() {
+  const isMobile = useIsMobile(768);
   const [activeTab, setActiveTab] = useState('leads');
+  const [mobileView, setMobileView] = useState('list'); // 'list' | 'new'
+
+  // Mobile: list (default) + create-estimate flow. Leads + Pricing Logic are
+  // desktop-only per CLAUDE.md Rule 1 (mobile IA scope confirmed with owner).
+  if (isMobile) {
+    if (mobileView === 'new') {
+      return (
+        <div>
+          <button
+            type="button"
+            onClick={() => setMobileView('list')}
+            aria-label="Back to estimates"
+            className="inline-flex items-center gap-1 mb-3 h-9 px-2 -ml-2 rounded-md text-14 text-zinc-700 hover:bg-zinc-100 u-focus-ring"
+          >
+            <ArrowLeft size={18} strokeWidth={1.75} aria-hidden />
+            Back
+          </button>
+          <EstimateToolViewV2 />
+        </div>
+      );
+    }
+    return <EstimatesMobileListView onNew={() => setMobileView('new')} />;
+  }
 
   return (
     <div>
