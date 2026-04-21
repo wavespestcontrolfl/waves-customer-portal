@@ -1,24 +1,24 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Home, Calendar, Users, MessageSquare, Menu, Sparkles, ClipboardList, Landmark } from 'lucide-react';
+import { Settings as SettingsIcon, Calendar, Users, MessageSquare, Menu, Sparkles, ClipboardList, Landmark } from 'lucide-react';
 import NotificationBell from '../NotificationBell';
 import { cn } from '../ui/cn';
 
 /**
- * Mobile-only admin shell — top bar + 5-tab bottom bar.
+ * Mobile-only admin shell — top bar + 6-tab bottom bar.
  * Activates below md breakpoint (<768px) via Tailwind `md:hidden`.
  * Desktop admin layout (sidebar) continues to render unchanged above md.
  *
- * The 5 tabs are the only nav surface on mobile. Everything else lives
- * under /admin/more. The command palette replaces ⌘K for touch users.
+ * Dashboard was dropped from the bottom bar — the Waves logo in the top bar
+ * already navigates to /admin/dashboard, so Settings takes its slot.
  */
 
 const TABS = [
-  { path: '/admin/dashboard', icon: Home, label: 'Dashboard' },
   { path: '/admin/customers', icon: Users, label: 'Customers' },
   { path: '/admin/estimates', icon: ClipboardList, label: 'Pipeline' },
   { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
   { path: '/admin/communications', icon: MessageSquare, label: 'Messages' },
   { path: '/admin/banking', icon: Landmark, label: 'Banking' },
+  { path: '/admin/settings', icon: SettingsIcon, label: 'Settings' },
 ];
 
 export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
@@ -95,7 +95,6 @@ export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
 
 function isActive(pathname, tabPath) {
   if (pathname === tabPath) return true;
-  if (tabPath === '/admin/dashboard' && pathname === '/admin') return true;
   if (pathname.startsWith(tabPath + '/')) return true;
   return false;
 }

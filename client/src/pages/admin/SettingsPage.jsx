@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import GeofenceSettings from '../../components/admin/GeofenceSettings';
+import MobileSettingsPage from '../../components/admin/MobileSettingsPage';
+import useIsMobile from '../../hooks/useIsMobile';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
@@ -37,11 +40,17 @@ function Toggle({ checked, onChange, label, description }) {
   );
 }
 
+const VALID_TABS = ['general', 'integrations', 'geofence', 'gates', 'team', 'system'];
+
 export default function SettingsPage() {
+  const isMobile = useIsMobile();
+  const [searchParams] = useSearchParams();
   const [health, setHealth] = useState(null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState('general');
+  // ?tab=X deep-links from MobileSettingsPage land on the right tab.
+  const initialTab = VALID_TABS.includes(searchParams.get('tab')) ? searchParams.get('tab') : 'general';
+  const [tab, setTab] = useState(initialTab);
 
   useEffect(() => {
     Promise.all([
@@ -49,6 +58,10 @@ export default function SettingsPage() {
       adminFetch('/admin/auth/me'),
     ]).then(([h, u]) => { setHealth(h); setUser(u); setLoading(false); }).catch(() => setLoading(false));
   }, []);
+
+  // On mobile — and when NOT deep-linked into a specific tab — render the
+  // Square-style section index instead of the desktop tab panel.
+  if (isMobile && !searchParams.get('tab')) return <MobileSettingsPage />;
 
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading settings...</div>;
 
