@@ -71,7 +71,7 @@ const FormCtx = createContext({});
 function FieldV2({ label, children, className }) {
   return (
     <div className={cn('mb-4', className)}>
-      <label className="block text-11 font-medium text-ink-secondary uppercase tracking-label mb-1.5">
+      <label className="block text-13 font-bold text-zinc-900 tracking-normal mb-2 md:text-11 md:font-medium md:text-ink-secondary md:uppercase md:tracking-label md:mb-1.5">
         {label}
       </label>
       {children}
@@ -143,22 +143,31 @@ function CheckboxV2({ k, label }) {
 }
 
 // H3 — section header within a Card (e.g. "Property Lookup", "Property Data").
-// Matches the Margin Calculator header on Pricing Logic: Montserrat 12/500,
-// letter-spacing 0.02em. Keeps the hairline divider so panels still read as
-// sectioned cards.
-function PanelTitle({ children }) {
+// Mobile: Square-style big bold non-uppercase; desktop: Montserrat 12/500 uppercase.
+function PanelTitle({ children, description }) {
   return (
-    <h3
-      className="text-zinc-900 mt-0 pb-2.5 mb-4 border-b border-hairline border-zinc-200"
-      style={{
-        fontFamily: "'Montserrat', sans-serif",
-        fontSize: 12,
-        fontWeight: 500,
-        letterSpacing: '0.02em',
-      }}
-    >
-      {children}
-    </h3>
+    <>
+      <h3
+        className="md:hidden text-zinc-900 mt-0 mb-2"
+        style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.01em', lineHeight: 1.15 }}
+      >
+        {children}
+      </h3>
+      {description && (
+        <p className="md:hidden text-14 text-zinc-600 mb-5 leading-snug">{description}</p>
+      )}
+      <h3
+        className="hidden md:block text-zinc-900 mt-0 pb-2.5 mb-4 border-b border-hairline border-zinc-200"
+        style={{
+          fontFamily: "'Montserrat', sans-serif",
+          fontSize: 12,
+          fontWeight: 500,
+          letterSpacing: '0.02em',
+        }}
+      >
+        {children}
+      </h3>
+    </>
   );
 }
 
@@ -167,17 +176,25 @@ function PanelTitle({ children }) {
 // PanelTitle so the whole Create Estimate form reads as one visual family.
 function SubGroupLabel({ children, className }) {
   return (
-    <h4
-      className={cn('text-zinc-900 mt-4 mb-2 pb-1 border-b border-hairline border-zinc-200', className)}
-      style={{
-        fontFamily: "'Montserrat', sans-serif",
-        fontSize: 12,
-        fontWeight: 500,
-        letterSpacing: '0.02em',
-      }}
-    >
-      {children}
-    </h4>
+    <>
+      <h4
+        className={cn('md:hidden text-zinc-900 mt-5 mb-3', className)}
+        style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.005em' }}
+      >
+        {children}
+      </h4>
+      <h4
+        className={cn('hidden md:block text-zinc-900 mt-4 mb-2 pb-1 border-b border-hairline border-zinc-200', className)}
+        style={{
+          fontFamily: "'Montserrat', sans-serif",
+          fontSize: 12,
+          fontWeight: 500,
+          letterSpacing: '0.02em',
+        }}
+      >
+        {children}
+      </h4>
+    </>
   );
 }
 
@@ -252,7 +269,7 @@ function DiscBadge({ children }) {
 
 function GroupHeader({ children }) {
   return (
-    <div className="text-12 font-medium uppercase tracking-label text-zinc-900 mt-7 mb-4 pb-2 border-b-hairline border-zinc-300">
+    <div className="text-22 font-bold tracking-tight text-zinc-900 mt-7 mb-3 md:text-12 md:font-medium md:uppercase md:tracking-label md:mb-4 md:pb-2 md:border-b-hairline md:border-zinc-300">
       {children}
     </div>
   );
