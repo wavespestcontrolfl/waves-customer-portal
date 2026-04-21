@@ -46,6 +46,7 @@ import {
   Menu,
   Home,
   X,
+  Sparkles,
 } from 'lucide-react';
 import useIsMobile from '../hooks/useIsMobile';
 import { refetchFlags } from '../hooks/useFeatureFlag';
@@ -219,6 +220,25 @@ export default function AdminLayoutV2() {
           </button>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 24 }} />
           <div style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={openPalette}
+            aria-label="Open Intelligence Bar"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-primary)',
+              width: 44,
+              height: 44,
+              borderRadius: 6,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+            }}
+          >
+            <Sparkles size={20} strokeWidth={1.75} />
+          </button>
           <NotificationBell type="admin" />
         </div>
       )}
@@ -290,7 +310,28 @@ export default function AdminLayoutV2() {
               <X size={20} strokeWidth={1.75} />
             </button>
           ) : (
-            <NotificationBell type="admin" />
+            <>
+              <button
+                type="button"
+                onClick={openPalette}
+                aria-label="Open Intelligence Bar"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--text-primary)',
+                  width: 36,
+                  height: 36,
+                  borderRadius: 6,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                }}
+              >
+                <Sparkles size={18} strokeWidth={1.75} />
+              </button>
+              <NotificationBell type="admin" />
+            </>
           )}
         </div>
 

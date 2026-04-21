@@ -232,7 +232,7 @@ function ConversationViewV2({ thread, messages, onReply, onBack }) {
           Reply
         </Button>
       </div>
-      <div className="flex-1 max-h-[500px] overflow-y-auto flex flex-col gap-2">
+      <div className="flex-1 md:max-h-[500px] md:overflow-y-auto flex flex-col gap-2">
         {messages.map((m) => {
           const isOut = m.direction === 'outbound';
           return (
@@ -860,7 +860,7 @@ function SmsTab() {
             })}
           </div>
 
-          <div className="max-h-[600px] overflow-y-auto">
+          <div className="md:max-h-[600px] md:overflow-y-auto">
             {filteredThreads.length === 0 ? (
               <div className="p-5 text-center text-13 text-ink-secondary">
                 No conversations found.
@@ -971,7 +971,7 @@ function SmsTab() {
               </select>
             </div>
           </div>
-          <div className="max-h-[600px] overflow-y-auto">
+          <div className="md:max-h-[600px] md:overflow-y-auto">
             {filtered.length === 0 ? (
               <div className="p-5 text-center text-13 text-ink-secondary">
                 No messages found.
