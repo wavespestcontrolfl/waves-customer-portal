@@ -17,7 +17,6 @@ const TABS = [
   { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
   { path: '/admin/customers', icon: Users, label: 'Customers' },
   { path: '/admin/communications', icon: MessageSquare, label: 'Messages' },
-  { path: '/admin/more', icon: Menu, label: 'More' },
 ];
 
 export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
@@ -35,13 +34,13 @@ export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
             type="button"
             onClick={onMenuOpen}
             aria-label="Open menu"
-            className="w-11 h-11 flex items-center justify-center rounded-md text-zinc-900 active:bg-zinc-100"
+            className="w-11 h-11 flex items-center justify-center rounded-md text-zinc-900 bg-white border-0 active:bg-zinc-100"
           >
             <Menu size={22} strokeWidth={1.75} />
           </button>
           <button
             onClick={() => navigate('/admin/dashboard')}
-            className="flex items-center gap-2 px-1 py-1 rounded-md active:bg-zinc-50"
+            className="flex items-center gap-2 px-1 py-1 rounded-md bg-white border-0 active:bg-zinc-50"
             aria-label="Go to dashboard"
           >
             <img src="/waves-logo.png" alt="" className="h-6 w-auto" />
@@ -53,7 +52,7 @@ export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
             type="button"
             onClick={onCommandOpen}
             aria-label="Open Intelligence Bar"
-            className="w-11 h-11 flex items-center justify-center rounded-md text-zinc-900 active:bg-zinc-100"
+            className="w-11 h-11 flex items-center justify-center rounded-md text-zinc-900 bg-white border-0 active:bg-zinc-100"
           >
             <Sparkles size={20} strokeWidth={1.75} />
           </button>
@@ -76,7 +75,7 @@ export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
                 to={path}
                 aria-current={active ? 'page' : undefined}
                 className={cn(
-                  'flex-1 flex flex-col items-center justify-center gap-[3px] select-none',
+                  'flex-1 flex flex-col items-center justify-center gap-[3px] select-none no-underline',
                   active ? 'text-zinc-900' : 'text-zinc-500',
                 )}
               >
