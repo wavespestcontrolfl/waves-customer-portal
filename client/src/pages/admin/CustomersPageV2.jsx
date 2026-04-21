@@ -895,14 +895,25 @@ export default function CustomersPageV2() {
                           )}
                         </div>
                         {c.phone && (
-                          <a
-                            href={`tel:${c.phone}`}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="Call"
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (!window.confirm(`Call ${c.firstName || ''} ${c.lastName || ''} at ${c.phone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+                              try {
+                                const r = await adminFetch('/admin/communications/call', {
+                                  method: 'POST',
+                                  body: JSON.stringify({ to: c.phone, fromNumber: '+19412975749' }),
+                                });
+                                if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
+                              } catch (err) { alert('Call failed: ' + err.message); }
+                            }}
+                            aria-label="Call via Waves"
+                            title="Call via Waves — rings your phone first, press 1 to connect"
                             className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
                           >
                             <Phone size={16} strokeWidth={1.75} />
-                          </a>
+                          </button>
                         )}
                         {c.phone && (
                           <a
@@ -935,15 +946,25 @@ export default function CustomersPageV2() {
                       </div>
                       <div className="flex gap-1 justify-end">
                         {c.phone && (
-                          <a
-                            href={`tel:${c.phone}`}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="Call"
-                            title={`Call ${c.phone}`}
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (!window.confirm(`Call ${c.firstName || ''} ${c.lastName || ''} at ${c.phone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+                              try {
+                                const r = await adminFetch('/admin/communications/call', {
+                                  method: 'POST',
+                                  body: JSON.stringify({ to: c.phone, fromNumber: '+19412975749' }),
+                                });
+                                if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
+                              } catch (err) { alert('Call failed: ' + err.message); }
+                            }}
+                            aria-label="Call via Waves"
+                            title="Call via Waves — rings your phone first, press 1 to connect"
                             className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
                           >
                             <Phone size={12} strokeWidth={1.75} />
-                          </a>
+                          </button>
                         )}
                         {c.phone && (
                           <a

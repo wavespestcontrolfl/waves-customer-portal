@@ -485,15 +485,25 @@ function EstimatePipelineViewV2() {
                 {/* Call + text trailing buttons — match CustomersPageV2 list row */}
                 {e.customerPhone && (
                   <div className="flex gap-1.5">
-                    <a
-                      href={`tel:${e.customerPhone}`}
-                      onClick={(evt) => evt.stopPropagation()}
-                      aria-label={`Call ${e.customerName || 'customer'}`}
-                      title={`Call ${e.customerPhone}`}
+                    <button
+                      type="button"
+                      onClick={async (evt) => {
+                        evt.stopPropagation();
+                        if (!window.confirm(`Call ${e.customerName || 'customer'} at ${e.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+                        try {
+                          const r = await adminFetch('/admin/communications/call', {
+                            method: 'POST',
+                            body: JSON.stringify({ to: e.customerPhone, fromNumber: '+19412975749' }),
+                          });
+                          if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
+                        } catch (err) { alert('Call failed: ' + err.message); }
+                      }}
+                      aria-label={`Call ${e.customerName || 'customer'} via Waves`}
+                      title="Call via Waves — rings your phone first, press 1 to connect"
                       className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
                     >
                       <Phone size={16} strokeWidth={1.75} />
-                    </a>
+                    </button>
                     <a
                       href={`/admin/communications?phone=${encodeURIComponent(e.customerPhone)}`}
                       onClick={(evt) => evt.stopPropagation()}
@@ -834,14 +844,25 @@ function MobileEstimateRow({ estimate, onCreateFromAddress }) {
         </div>
       </div>
       {estimate.customerPhone && (
-        <a
-          href={`tel:${estimate.customerPhone}`}
-          onClick={(e) => e.stopPropagation()}
-          aria-label="Call"
+        <button
+          type="button"
+          onClick={async (e) => {
+            e.stopPropagation();
+            if (!window.confirm(`Call ${estimate.customerName || 'customer'} at ${estimate.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+            try {
+              const r = await adminFetch('/admin/communications/call', {
+                method: 'POST',
+                body: JSON.stringify({ to: estimate.customerPhone, fromNumber: '+19412975749' }),
+              });
+              if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
+            } catch (err) { alert('Call failed: ' + err.message); }
+          }}
+          aria-label="Call via Waves"
+          title="Call via Waves — rings your phone first, press 1 to connect"
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
         >
           <Phone size={16} strokeWidth={1.75} />
-        </a>
+        </button>
       )}
       {estimate.customerPhone && (
         <a

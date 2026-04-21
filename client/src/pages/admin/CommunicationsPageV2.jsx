@@ -351,6 +351,13 @@ function SmsTab() {
       .catch(() => {});
   }, []);
 
+  // Prefill compose "To" from ?phone= deep-link (Estimates/Customers SMS button)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const phone = params.get('phone');
+    if (phone) setToNumber(phone);
+  }, []);
+
   const toggleAiAutoReply = async () => {
     setTogglingAi(true);
     try {
