@@ -550,10 +550,10 @@ function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplet
 const SCHEDULE_TABS = [
   { id: 'board', label: 'Schedule' },
   { id: 'protocols', label: 'Protocols' },
-  { id: 'match', label: 'Tech Match' },
-  { id: 'csr', label: 'CSR Booking' },
-  { id: 'revenue', label: 'Job Scores' },
-  { id: 'insights', label: 'Insights' },
+  { id: 'match', label: 'Tech Match', desktopOnly: true },
+  { id: 'csr', label: 'CSR Booking', desktopOnly: true },
+  { id: 'revenue', label: 'Job Scores', desktopOnly: true },
+  { id: 'insights', label: 'Insights', desktopOnly: true },
 ];
 
 function MobileScheduleSheet({ children, serviceCount, completedCount }) {
@@ -652,6 +652,16 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
 export default function DispatchPageV2() {
   const isMobile = useIsMobile();
   const [activeTab, setActiveTab] = useState('board');
+
+  // On mobile, desktopOnly tabs (Tech Match / CSR / Job Scores / Insights) are
+  // hidden from both the top row and the More sheet. If a returning user's
+  // persisted activeTab is one of those, snap back to 'board' so they don't
+  // land on a panel they can't navigate away from.
+  useEffect(() => {
+    if (!isMobile) return;
+    const current = SCHEDULE_TABS.find((t) => t.id === activeTab);
+    if (current?.desktopOnly) setActiveTab('board');
+  }, [isMobile, activeTab]);
   const [viewMode, setViewMode] = useState('day');
   const [date, setDate] = useState(formatDateISO(new Date()));
   const [data, setData] = useState(null);
@@ -1039,7 +1049,7 @@ export default function DispatchPageV2() {
               </button>
             </div>
             <div className="py-2">
-              {SCHEDULE_TABS.map((t) => (
+              {SCHEDULE_TABS.filter((t) => !t.desktopOnly).map((t) => (
                 <button
                   key={t.id}
                   onClick={() => { setActiveTab(t.id); setShowMoreSheet(false); }}
