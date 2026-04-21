@@ -1,22 +1,37 @@
 // Mobile-only detail sheet shown when a user taps an appointment row in the
-// MobileDispatchList. Matches IMG_3726 layout: Review & checkout CTA at top,
-// then Customer / Services & items / Date & time sections.
+// MobileDispatchList. Matches the Jobber-style reference shared by the owner:
+//   X · Edit header · Review & checkout CTA · Customer (chevron to Customer 360)
+//   · Services and items · Date and time · Location (map deep-link) ·
+//   Appointment note (editable) · Booked on <date> footer ·
+//   Cancel appointment / Mark as no-show / Book next appointment.
 //
-// Review & checkout → opens MobileCheckoutSheet (Square-style pricing review
-// → MobilePaymentSheet → Tap to Pay / Cash / etc.).
-// Edit (top-right) → opens EditServiceModal (existing V1).
+// Review & checkout  → opens MobileCheckoutSheet (Square-style pricing review
+//                      → MobilePaymentSheet → Tap to Pay / Cash / etc.).
+// Edit (top-right)   → opens EditServiceModal (existing V1).
+// Cancel / No-show   → PUT /admin/dispatch/:id/status with status="cancelled"
+//                      or status="no_show" (existing endpoint).
+// Book next          → opens CreateAppointmentModal with this customer
+//                      pre-filled (defaultCustomer prop).
+// Note save          → PATCH /admin/dispatch/:id/note (new endpoint).
 
+import { useEffect, useState } from 'react';
 import { TIMEZONE } from '../../lib/timezone';
 
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+function adminFetch(path, options = {}) {
+  return fetch(`${API_BASE}${path}`, {
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+    ...options,
+  }).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+}
+
 // WaveGuard tier → discount fraction. Source: server/services/estimate-converter.js.
-// Kept in sync with that file. Used only for display here; the authoritative
-// invoice amount is computed server-side on completion.
-const TIER_DISCOUNT = {
-  bronze: 0,
-  silver: 0.10,
-  gold: 0.15,
-  platinum: 0.18,
-};
+const TIER_DISCOUNT = { bronze: 0, silver: 0.10, gold: 0.15, platinum: 0.18 };
 
 function tierLabel(t) {
   if (!t) return '';
@@ -30,11 +45,15 @@ function formatDateLong(dateStr) {
   const d = new Date(iso + 'T12:00:00Z');
   return d.toLocaleDateString('en-US', {
     timeZone: TIMEZONE,
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
+    weekday: 'long', month: 'short', day: 'numeric', year: 'numeric',
   });
+}
+
+function formatBookedOn(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function formatTime(hhmm) {
@@ -56,12 +75,51 @@ function formatWindow(svc) {
   return `${s} – ${e}`;
 }
 
+function durationHrs(svc) {
+  if (!svc.windowStart || !svc.windowEnd) return '';
+  const toMin = (hm) => {
+    const m = hm.match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  };
+  const a = toMin(svc.windowStart);
+  const b = toMin(svc.windowEnd);
+  if (a == null || b == null || b <= a) return '';
+  const mins = b - a;
+  if (mins === 60) return '1 hr';
+  if (mins % 60 === 0) return `${mins / 60} hr`;
+  if (mins < 60) return `${mins} mins`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h} hr ${m} min`;
+}
+
+function mapDeepLink(address) {
+  if (!address) return '';
+  const isIos = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const encoded = encodeURIComponent(address);
+  return isIos ? `maps://?q=${encoded}` : `https://www.google.com/maps/search/?api=1&query=${encoded}`;
+}
+
 export default function MobileAppointmentDetailSheet({
   service,
   onClose,
   onEdit,
   onReviewCheckout,
+  onBookNext,
+  onCancelled,
+  onNoShow,
 }) {
+  const [note, setNote] = useState(service?.notes || '');
+  const [savingNote, setSavingNote] = useState(false);
+  const [noteSavedAt, setNoteSavedAt] = useState(null);
+  const [actionBusy, setActionBusy] = useState('');
+
+  useEffect(() => {
+    setNote(service?.notes || '');
+    setNoteSavedAt(null);
+  }, [service?.id, service?.notes]);
+
   if (!service) return null;
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
@@ -71,61 +129,90 @@ export default function MobileAppointmentDetailSheet({
   const discount = Math.round(price * pct * 100) / 100;
   const total = Math.max(0, price - discount);
   const timeWindow = formatWindow(service);
+  const hrs = durationHrs(service);
 
-  // WaveGuard monthly autopay customers have estimated_price = 0 on each visit
-  // (already paid via the monthly cycle). Surface this so the tech sees why
-  // the CTA says "Complete visit" instead of "Review & checkout."
   const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null);
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
 
+  const noteDirty = (service?.notes || '') !== note;
+
+  const saveNote = async () => {
+    if (!noteDirty) return;
+    setSavingNote(true);
+    try {
+      await adminFetch(`/admin/dispatch/${service.id}/note`, {
+        method: 'PATCH',
+        body: JSON.stringify({ notes: note }),
+      });
+      setNoteSavedAt(Date.now());
+      // Reflect saved state locally so noteDirty flips back to false.
+      service.notes = note;
+    } catch (err) {
+      alert('Failed to save note: ' + err.message);
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  const cancelAppointment = async () => {
+    if (!window.confirm(`Cancel appointment for ${service.customerName || 'customer'}? This cannot be undone.`)) return;
+    setActionBusy('cancel');
+    try {
+      await adminFetch(`/admin/dispatch/${service.id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: 'cancelled' }),
+      });
+      onCancelled?.(service);
+      onClose?.();
+    } catch (err) {
+      alert('Failed to cancel: ' + err.message);
+    } finally { setActionBusy(''); }
+  };
+
+  const markNoShow = async () => {
+    if (!window.confirm(`Mark ${service.customerName || 'customer'} as a no-show?`)) return;
+    setActionBusy('noshow');
+    try {
+      await adminFetch(`/admin/dispatch/${service.id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: 'no_show' }),
+      });
+      onNoShow?.(service);
+      onClose?.();
+    } catch (err) {
+      alert('Failed to mark no-show: ' + err.message);
+    } finally { setActionBusy(''); }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
-      {/* Top bar: back · centered name+phone · edit (⋯) */}
+      {/* Top bar: X close · Edit */}
       <div
-        className="sticky top-0 bg-white flex items-center px-3"
+        className="sticky top-0 bg-white flex items-center justify-between px-3 border-b border-hairline border-zinc-200"
         style={{ height: 64, paddingTop: 'env(safe-area-inset-top, 0)' }}
       >
         <button
           type="button"
           onClick={onClose}
-          aria-label="Back"
+          aria-label="Close"
           className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
-          style={{ width: 36, height: 36, fontSize: 20, lineHeight: 1 }}
+          style={{ width: 40, height: 40, fontSize: 18, lineHeight: 1 }}
         >
-          ←
+          ✕
         </button>
-        <div
-          className="flex-1 min-w-0 text-center px-3"
-          style={{ lineHeight: 1.2 }}
-        >
-          <div
-            className="font-semibold text-zinc-900 truncate"
-            style={{ fontSize: 17 }}
-          >
-            {service.customerName || 'Appointment'}
-          </div>
-          {service.customerPhone && (
-            <div
-              className="text-ink-secondary truncate"
-              style={{ fontSize: 13, marginTop: 1 }}
-            >
-              {service.customerPhone}
-            </div>
-          )}
-        </div>
         <button
           type="button"
           onClick={() => onEdit?.(service)}
-          aria-label="Edit"
-          className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
-          style={{ width: 36, height: 36, fontSize: 18, lineHeight: 1 }}
+          aria-label="Edit appointment"
+          className="rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
+          style={{ padding: '8px 22px', fontSize: 14 }}
         >
-          ⋯
+          Edit
         </button>
       </div>
 
-      <div className="px-4 pt-2 pb-10 mx-auto" style={{ maxWidth: 560 }}>
+      <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 560 }}>
         {/* Review & checkout */}
         <button
           type="button"
@@ -136,53 +223,56 @@ export default function MobileAppointmentDetailSheet({
           {coveredByMembership || isPrepaid ? 'Complete visit' : 'Review & checkout'}
         </button>
         {coveredByMembership && !isPrepaid && (
-          <div
-            className="text-ink-secondary"
-            style={{ fontSize: 12, marginTop: 8, textAlign: 'center' }}
-          >
+          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
             Covered by WaveGuard {tierLabel(tier)} — no charge needed
           </div>
         )}
         {isPrepaid && (
-          <div
-            className="text-ink-secondary"
-            style={{ fontSize: 12, marginTop: 8, textAlign: 'center' }}
-          >
+          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
             Prepaid ${prepaidAmt.toFixed(2)}
             {service.prepaidMethod ? ` via ${service.prepaidMethod.replace(/_/g, ' ')}` : ''} — no charge needed
           </div>
         )}
 
+        {/* Customer */}
+        {service.customerId && (
+          <section className="mt-8">
+            <div className="font-medium text-zinc-900" style={{ fontSize: 20, marginBottom: 10 }}>
+              Customer
+            </div>
+            <a
+              href={`/admin/customers?customerId=${encodeURIComponent(service.customerId)}`}
+              className="flex items-start justify-between gap-3 py-3 border-b border-hairline border-zinc-200 no-underline hover:bg-zinc-50 -mx-1 px-1 rounded-sm"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-zinc-900 truncate" style={{ fontSize: 16 }}>
+                  {service.customerName || 'Unknown'}
+                </div>
+                <div className="text-ink-secondary truncate" style={{ fontSize: 13, marginTop: 2 }}>
+                  {service.customerPhone || ''}
+                </div>
+              </div>
+              <span aria-hidden className="text-ink-secondary" style={{ fontSize: 22, lineHeight: 1 }}>›</span>
+            </a>
+          </section>
+        )}
+
         {/* Services and items */}
         <section className="mt-8">
-          <div
-            className="font-medium text-zinc-900"
-            style={{ fontSize: 20, marginBottom: 10 }}
-          >
+          <div className="font-medium text-zinc-900" style={{ fontSize: 20, marginBottom: 10 }}>
             Services and items
           </div>
-          <div
-            className="py-3 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3"
-          >
+          <div className="py-3 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
-              <div
-                className="font-medium text-zinc-900"
-                style={{ fontSize: 15 }}
-              >
+              <div className="font-medium text-zinc-900" style={{ fontSize: 15 }}>
                 {service.serviceType || '—'}
               </div>
-              <div
-                className="text-ink-secondary"
-                style={{ fontSize: 13, marginTop: 2 }}
-              >
+              <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
                 {timeWindow}
                 {service.estimatedDuration ? (timeWindow ? ' · ' : '') + `${service.estimatedDuration} mins` : ''}
               </div>
             </div>
-            <div
-              className="u-nums text-zinc-900 font-medium"
-              style={{ fontSize: 15 }}
-            >
+            <div className="u-nums text-zinc-900 font-medium" style={{ fontSize: 15 }}>
               ${price.toFixed(2)}
             </div>
           </div>
@@ -210,23 +300,112 @@ export default function MobileAppointmentDetailSheet({
 
         {/* Date and time */}
         <section className="mt-8">
-          <div
-            className="font-medium text-zinc-900"
-            style={{ fontSize: 20, marginBottom: 10 }}
-          >
+          <div className="font-medium text-zinc-900" style={{ fontSize: 20, marginBottom: 10 }}>
             Date and time
           </div>
-          <div className="text-zinc-900" style={{ fontSize: 14 }}>
+          <div className="text-zinc-900 font-medium" style={{ fontSize: 15 }}>
             {formatDateLong(service.scheduledDate)}
           </div>
           {timeWindow && (
-            <div
-              className="text-ink-secondary"
-              style={{ fontSize: 14, marginTop: 2 }}
-            >
-              {timeWindow}
+            <div className="text-ink-secondary" style={{ fontSize: 14, marginTop: 2 }}>
+              {timeWindow}{hrs ? ` (${hrs})` : ''}
             </div>
           )}
+        </section>
+
+        {/* Location */}
+        {service.address && (
+          <section className="mt-8">
+            <div className="font-medium text-zinc-900" style={{ fontSize: 20, marginBottom: 10 }}>
+              Location
+            </div>
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-zinc-900" style={{ fontSize: 15, lineHeight: 1.3 }}>
+                  {service.address.split(',')[0] || service.address}
+                </div>
+                <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
+                  {service.address.split(',').slice(1).join(',').trim()}
+                </div>
+              </div>
+              <a
+                href={mapDeepLink(service.address)}
+                target="_blank"
+                rel="noreferrer"
+                aria-label="Open in Maps"
+                className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
+                style={{ width: 40, height: 40, fontSize: 18, textDecoration: 'none', color: '#18181B' }}
+              >
+                ➤
+              </a>
+            </div>
+          </section>
+        )}
+
+        {/* Appointment note — editable */}
+        <section className="mt-8">
+          <div className="font-medium text-zinc-900" style={{ fontSize: 20, marginBottom: 10 }}>
+            Appointment note
+          </div>
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Note for staff"
+            rows={4}
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm px-3 py-3 text-ink-primary placeholder:text-ink-tertiary focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+            style={{ fontSize: 15, resize: 'vertical', minHeight: 96 }}
+          />
+          <div className="flex items-center justify-between mt-2">
+            <span className="text-ink-tertiary" style={{ fontSize: 12 }}>
+              {noteSavedAt ? 'Saved' : noteDirty ? 'Unsaved changes' : ''}
+            </span>
+            <button
+              type="button"
+              onClick={saveNote}
+              disabled={!noteDirty || savingNote}
+              className="rounded-full bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-50"
+              style={{ padding: '8px 18px', fontSize: 14 }}
+            >
+              {savingNote ? 'Saving…' : 'Save note'}
+            </button>
+          </div>
+        </section>
+
+        {/* Booked on footer */}
+        {service.createdAt && (
+          <div className="text-center text-ink-secondary mt-8" style={{ fontSize: 13 }}>
+            Booked on {formatBookedOn(service.createdAt)}
+          </div>
+        )}
+
+        {/* Action buttons */}
+        <section className="mt-6 border-t border-hairline border-zinc-200 pt-4 flex flex-col gap-3">
+          <button
+            type="button"
+            onClick={cancelAppointment}
+            disabled={!!actionBusy}
+            className="w-full rounded-full bg-zinc-100 text-alert-fg font-medium u-focus-ring disabled:opacity-50"
+            style={{ padding: '14px 20px', fontSize: 16 }}
+          >
+            {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel appointment'}
+          </button>
+          <button
+            type="button"
+            onClick={markNoShow}
+            disabled={!!actionBusy}
+            className="w-full rounded-full bg-zinc-100 text-alert-fg font-medium u-focus-ring disabled:opacity-50"
+            style={{ padding: '14px 20px', fontSize: 16 }}
+          >
+            {actionBusy === 'noshow' ? 'Saving…' : 'Mark as no-show'}
+          </button>
+          <button
+            type="button"
+            onClick={() => onBookNext?.(service)}
+            className="w-full rounded-full bg-zinc-100 text-zinc-900 font-medium u-focus-ring"
+            style={{ padding: '14px 20px', fontSize: 16 }}
+          >
+            Book next appointment
+          </button>
         </section>
       </div>
     </div>

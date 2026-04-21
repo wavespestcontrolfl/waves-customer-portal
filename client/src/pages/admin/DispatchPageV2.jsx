@@ -1023,6 +1023,7 @@ export default function DispatchPageV2() {
           defaultDate={newApptDefaults?.date || date}
           defaultWindowStart={newApptDefaults?.windowStart}
           defaultTechId={newApptDefaults?.techId}
+          defaultCustomer={newApptDefaults?.customer || null}
           onClose={() => { setShowNewAppt(false); setNewApptDefaults(null); }}
           onCreated={(appt) => {
             setShowNewAppt(false);
@@ -1263,6 +1264,23 @@ export default function DispatchPageV2() {
           onClose={() => setDetailService(null)}
           onEdit={(svc) => { setDetailService(null); setEditingService(svc); }}
           onReviewCheckout={(svc) => setCheckoutService(svc)}
+          onBookNext={(svc) => {
+            setDetailService(null);
+            setNewApptDefaults({
+              customer: {
+                id: svc.customerId,
+                firstName: (svc.customerName || '').split(' ')[0] || '',
+                lastName: (svc.customerName || '').split(' ').slice(1).join(' '),
+                phone: svc.customerPhone || '',
+                address: svc.address || '',
+                city: svc.city || '',
+                tier: svc.waveguardTier || null,
+              },
+            });
+            setShowNewAppt(true);
+          }}
+          onCancelled={() => fetchSchedule(date)}
+          onNoShow={() => fetchSchedule(date)}
         />
       )}
       {checkoutService && (

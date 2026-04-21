@@ -1231,7 +1231,7 @@ export default function EstimateToolViewV2({ initialAddress = '' } = {}) {
                   <option value="__custom__">Custom…</option>
                 </select>
               </FieldV2>
-              <div className="grid grid-cols-[140px_120px_1fr] gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-[140px_120px_1fr] gap-2">
                 <FieldV2 label="Type">
                   <SelectV2 k="manualDiscountType" options={[
                     { value: 'NONE', label: 'None' },
@@ -1240,9 +1240,11 @@ export default function EstimateToolViewV2({ initialAddress = '' } = {}) {
                   ]} />
                 </FieldV2>
                 <FieldV2 label="Amount"><InputV2 k="manualDiscountValue" type="number" min="0" placeholder="0" /></FieldV2>
-                <FieldV2 label="Label (shown on estimate)"><InputV2 k="manualDiscountLabel" placeholder="e.g. Military, Referral" /></FieldV2>
+                <div className="col-span-2 sm:col-span-1">
+                  <FieldV2 label="Label (shown on estimate)"><InputV2 k="manualDiscountLabel" placeholder="e.g. Military, Referral" /></FieldV2>
+                </div>
               </div>
-              <div className="text-11 text-ink-tertiary -mt-2">
+              <div className="text-11 text-ink-tertiary mt-2">
                 Applies after WaveGuard bundle discount. Re-click Generate Estimate to recalculate.
               </div>
             </Card>

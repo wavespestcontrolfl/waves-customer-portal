@@ -72,6 +72,8 @@ router.get('/:date?', async (req, res, next) => {
         windowStart: s.window_start,
         windowEnd: s.window_end,
         status: s.status,
+        notes: s.notes || '',
+        createdAt: s.created_at,
         technicianId: s.technician_id,
         technicianName: s.tech_name,
         customerConfirmed: s.customer_confirmed,
@@ -105,6 +107,20 @@ router.get('/:date?', async (req, res, next) => {
     });
 
     res.json({ date, services: enriched, techSummary: Object.values(techs) });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/dispatch/:serviceId/note — save the staff-facing appointment note
+router.patch('/:serviceId/note', async (req, res, next) => {
+  try {
+    const { notes } = req.body;
+    const text = (notes == null ? '' : String(notes)).slice(0, 2000);
+    const updated = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .update({ notes: text, updated_at: new Date() })
+      .returning(['id', 'notes']);
+    if (!updated.length) return res.status(404).json({ error: 'Service not found' });
+    res.json({ success: true, notes: updated[0].notes });
   } catch (err) { next(err); }
 });
 
