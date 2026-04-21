@@ -43,8 +43,7 @@ export default function MobileAdminShell({ onCommandOpen, onMenuOpen }) {
             className="flex items-center gap-2 px-1 py-1 rounded-md bg-white border-0 active:bg-zinc-50"
             aria-label="Go to dashboard"
           >
-            <img src="/waves-logo.png" alt="" className="h-6 w-auto" />
-            <span className="text-13 font-medium text-zinc-900 tracking-label">WAVES</span>
+            <img src="/waves-logo.png" alt="Waves" className="h-6 w-auto" />
           </button>
         </div>
         <div className="flex items-center gap-1">
