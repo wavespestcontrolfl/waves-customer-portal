@@ -12,6 +12,8 @@ import TimeGridDays from '../../components/schedule/TimeGridDays';
 import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
 import MobileDispatchList from '../../components/schedule/MobileDispatchList';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
+import MobileCheckoutSheet from '../../components/schedule/MobileCheckoutSheet';
+import MobilePaymentSheet from '../../components/schedule/MobilePaymentSheet';
 import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
@@ -672,6 +674,8 @@ export default function DispatchPageV2() {
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
   const [detailService, setDetailService] = useState(null);
+  const [checkoutService, setCheckoutService] = useState(null);
+  const [paymentData, setPaymentData] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
@@ -1220,8 +1224,36 @@ export default function DispatchPageV2() {
           service={detailService}
           onClose={() => setDetailService(null)}
           onEdit={(svc) => { setDetailService(null); setEditingService(svc); }}
-          onReviewCheckout={(svc) => { setDetailService(null); setCompletingService(svc); }}
-          onMarkPrepaid={(svc) => { setDetailService(null); setPrepaidService(svc); }}
+          onReviewCheckout={(svc) => setCheckoutService(svc)}
+        />
+      )}
+      {checkoutService && (
+        <MobileCheckoutSheet
+          service={checkoutService}
+          onClose={() => setCheckoutService(null)}
+          onChargeSuccess={({ service: svc, invoiceId, amount }) => {
+            setPaymentData({ service: svc, invoiceId, amount });
+          }}
+          onEditServiceLine={() => {
+            // PR 2 wires this to the service-edit modal (IMG_3730).
+            alert('Edit service — coming soon');
+          }}
+          onAddService={() => alert('Add Service — coming soon')}
+          onAddItem={() => alert('Add Item or Discount — coming soon')}
+        />
+      )}
+      {paymentData && (
+        <MobilePaymentSheet
+          service={paymentData.service}
+          invoiceId={paymentData.invoiceId}
+          amount={paymentData.amount}
+          onClose={() => setPaymentData(null)}
+          onSelectCash={(svc) => {
+            setPaymentData(null);
+            setCheckoutService(null);
+            setDetailService(null);
+            setPrepaidService(svc);
+          }}
         />
       )}
       {prepaidService && (
