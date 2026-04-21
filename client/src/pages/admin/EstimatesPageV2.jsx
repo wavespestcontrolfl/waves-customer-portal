@@ -493,7 +493,7 @@ function EstimatePipelineViewV2() {
                         try {
                           const r = await adminFetch('/admin/communications/call', {
                             method: 'POST',
-                            body: JSON.stringify({ to: e.customerPhone }),
+                            body: JSON.stringify({ to: e.customerPhone, fromNumber: '+19412975749' }),
                           });
                           if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
                         } catch (err) { alert('Call failed: ' + err.message); }
@@ -852,7 +852,7 @@ function MobileEstimateRow({ estimate, onCreateFromAddress }) {
             try {
               const r = await adminFetch('/admin/communications/call', {
                 method: 'POST',
-                body: JSON.stringify({ to: estimate.customerPhone }),
+                body: JSON.stringify({ to: estimate.customerPhone, fromNumber: '+19412975749' }),
               });
               if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
             } catch (err) { alert('Call failed: ' + err.message); }

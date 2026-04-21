@@ -903,7 +903,7 @@ export default function CustomersPageV2() {
                               try {
                                 const r = await adminFetch('/admin/communications/call', {
                                   method: 'POST',
-                                  body: JSON.stringify({ to: c.phone }),
+                                  body: JSON.stringify({ to: c.phone, fromNumber: '+19412975749' }),
                                 });
                                 if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
                               } catch (err) { alert('Call failed: ' + err.message); }
@@ -954,7 +954,7 @@ export default function CustomersPageV2() {
                               try {
                                 const r = await adminFetch('/admin/communications/call', {
                                   method: 'POST',
-                                  body: JSON.stringify({ to: c.phone }),
+                                  body: JSON.stringify({ to: c.phone, fromNumber: '+19412975749' }),
                                 });
                                 if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
                               } catch (err) { alert('Call failed: ' + err.message); }
