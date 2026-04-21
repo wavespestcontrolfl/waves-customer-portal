@@ -254,7 +254,7 @@ const ReviewService = {
       const existing = await db('review_requests').where({ service_record_id: serviceRecordId }).first();
       if (existing) {
         const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-        const longUrl = `${domain}/review/${existing.token}`;
+        const longUrl = `${domain}/rate/${existing.token}`;
         return shortenOrPassthrough(longUrl, {
           kind: 'review', entityType: 'review_requests', entityId: existing.id, customerId,
         });
@@ -295,7 +295,7 @@ const ReviewService = {
     logger.info(`[review] Created inline request for ${customer.first_name} ${customer.last_name} (bundled with completion SMS)`);
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-    const longUrl = `${domain}/review/${request.token}`;
+    const longUrl = `${domain}/rate/${request.token}`;
     return shortenOrPassthrough(longUrl, {
       kind: 'review', entityType: 'review_requests', entityId: request.id, customerId,
     });
