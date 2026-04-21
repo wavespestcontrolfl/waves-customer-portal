@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import DashboardIntelligenceBar from '../../components/admin/DashboardIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', tealDark: '#065A8C', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', subtle: '#F8FAFC' };
@@ -103,8 +102,6 @@ export default function DashboardPage() {
           <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>{today}</div>
         </div>
       </div>
-
-      <DashboardIntelligenceBar kpiData={data} />
 
       {/* HERO KPI ROW */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 14, marginBottom: 18 }}>

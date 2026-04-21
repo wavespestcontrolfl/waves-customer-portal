@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import ReviewVelocityEngine from './ReviewVelocityEngine';
 import GBPManagementPanel from './GBPManagement';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: `teal` folded to zinc-900. Semantic green/amber/red preserved.
@@ -1293,9 +1292,6 @@ export default function ReviewsPage() {
   return (
     <div>
       <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 16px' }}>Reviews</h1>
-
-      {/* ====================== INTELLIGENCE BAR ====================== */}
-      <SEOIntelligenceBar context="reviews" />
 
       {/* ====================== TAB TOGGLE ====================== */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>

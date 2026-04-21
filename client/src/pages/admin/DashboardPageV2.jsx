@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import DashboardIntelligenceBarV2 from '../../components/admin/DashboardIntelligenceBarV2';
 import {
   Card,
   CardHeader,
@@ -118,8 +117,6 @@ export default function DashboardPageV2() {
           </div>
         </div>
       </header>
-
-      <DashboardIntelligenceBarV2 kpiData={data} />
 
       {/* Hero KPI row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-5">

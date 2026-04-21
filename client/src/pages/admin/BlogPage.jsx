@@ -1,5 +1,4 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBarV2';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
@@ -1100,9 +1099,6 @@ export default function BlogPage() {
           color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: generatingIdeas ? 0.5 : 1,
         }}>{generatingIdeas ? 'Generating...' : 'Generate New Ideas'}</button>
       </div>
-
-      {/* Intelligence Bar */}
-      <SEOIntelligenceBar context="blog" />
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>

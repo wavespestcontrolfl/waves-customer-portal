@@ -3,7 +3,6 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import EmailAutomationsPanel from './EmailAutomationsPanel';
 import CallRecordingsPanel from './CallRecordingsPanel';
 import PushSettings from '../../components/admin/PushSettings';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
@@ -1590,9 +1589,6 @@ export default function CommunicationsPage() {
           <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>SMS & Calls</h1>
         </div>
       </div>
-
-      {/* --- Intelligence Bar --- */}
-      <SEOIntelligenceBar context="comms" />
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>

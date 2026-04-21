@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
 import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1077,9 +1076,6 @@ export default function TaxPage() {
       <div style={{ marginBottom: 20 }}>
         <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Tax Center</h1>
       </div>
-
-      {/* Intelligence Bar */}
-      <SEOIntelligenceBar context="tax" />
 
       {/* Dashboard stats */}
       {d && activeTab === 'overview' && (
