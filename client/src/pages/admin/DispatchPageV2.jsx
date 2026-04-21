@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { Plus } from 'lucide-react';
 import {
   CompletionPanel,
   RescheduleModal,
@@ -848,8 +849,20 @@ export default function DispatchPageV2() {
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900">
       {/* Header */}
       <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
-        <div>
-          <h1 className="text-28 font-normal tracking-h1 text-zinc-900">Schedule</h1>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between gap-3">
+            <h1 className="text-28 font-normal tracking-h1 text-zinc-900">Schedule</h1>
+            {/* Mobile "+" — matches the Customers pattern; opens CreateAppointmentModal. */}
+            <button
+              type="button"
+              onClick={() => setShowNewAppt(true)}
+              aria-label="New appointment"
+              className="md:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
+              style={{ width: 36, height: 36 }}
+            >
+              <Plus size={20} strokeWidth={2} />
+            </button>
+          </div>
 
           {/* Mobile: Schedule + More pills — above the date nav so users can switch tools first */}
           {viewMode === 'day' && (
@@ -1161,9 +1174,9 @@ export default function DispatchPageV2() {
             );
           })()}
 
-          {/* New Appointment CTA — both mobile and desktop, below weather */}
-          <div className="mb-3 md:mb-5">
-            <Button onClick={() => setShowNewAppt(true)} className="w-full md:w-auto">+ New Appointment</Button>
+          {/* New Appointment CTA — desktop only; mobile uses the "+" icon in the header. */}
+          <div className="hidden md:block mb-3 md:mb-5">
+            <Button onClick={() => setShowNewAppt(true)} className="md:w-auto">+ New Appointment</Button>
           </div>
 
           {/* Calendar-style time grid — desktop inline, mobile bottom sheet */}
