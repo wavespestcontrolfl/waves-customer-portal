@@ -366,7 +366,6 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
 
 // --- View toggle (flat pill row, no emoji) ---
 const VIEWS = [
-  { key: 'directory', label: 'Directory' },
   { key: 'map', label: 'Map', desktopOnly: true },
   { key: 'pipeline', label: 'Pipeline', desktopOnly: true },
   { key: 'health', label: 'Health', desktopOnly: true },
@@ -382,7 +381,7 @@ function ViewToggleV2({ view, onChange }) {
           <button
             key={v.key}
             type="button"
-            onClick={() => onChange(v.key)}
+            onClick={() => onChange(active ? 'directory' : v.key)}
             className={cn(
               'flex-1 sm:flex-none u-label px-2 sm:px-3 h-11 sm:h-8 border-r-hairline border-zinc-200 last:border-r-0 transition-colors u-focus-ring',
               v.desktopOnly && 'hidden md:inline-flex items-center justify-center',

@@ -271,7 +271,7 @@ export default function CallLogTabV2() {
           {calls.length === 0 ? (
             <div className="p-5 text-center text-ink-tertiary text-13">No calls recorded yet.</div>
           ) : (
-            <div className="max-h-[600px] overflow-y-auto">
+            <div className="md:max-h-[600px] md:overflow-y-auto">
               {filteredCalls.map((c) => {
                 const isMissed = !c.answered_by || c.answered_by === 'missed';
                 const answeredLabel = c.answered_by === 'human' ? 'Answered'
