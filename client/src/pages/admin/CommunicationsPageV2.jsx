@@ -615,7 +615,7 @@ function SmsTab() {
       {/* Compose */}
       <Card id="sms-compose-v2" className="p-5 mb-5">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-          <div className="text-11 uppercase tracking-label text-ink-secondary">
+          <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
             Send SMS
           </div>
           <button
@@ -625,7 +625,7 @@ function SmsTab() {
             aria-pressed={aiAutoReply}
             className="flex items-center gap-2 min-h-[44px] md:min-h-0 px-1 md:px-0 u-focus-ring"
           >
-            <span className="text-11 text-ink-secondary">AI Auto-Reply</span>
+            <span className="text-13 md:text-11 text-ink-secondary">AI Auto-Reply</span>
             <span
               className={cn(
                 'h-6 w-10 rounded-full border-hairline transition-colors relative',
@@ -657,7 +657,7 @@ function SmsTab() {
           </div>
         )}
 
-        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           From{threadLock && ' (locked to thread)'}
         </label>
         <select
@@ -681,7 +681,7 @@ function SmsTab() {
           ))}
         </select>
 
-        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">To</label>
+        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">To</label>
         <input
           type="text"
           placeholder="Search by name or enter phone number…"
@@ -743,20 +743,20 @@ function SmsTab() {
           if (!lastInbound) return null;
           return (
             <div className="mb-3 px-3 py-2.5 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-1">
+              <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">
                 Last message from customer
               </div>
-              <div className="text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+              <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
                 {lastInbound.body}
               </div>
-              <div className="text-11 text-ink-tertiary mt-1">
+              <div className="text-12 md:text-11 text-ink-tertiary mt-1">
                 {formatTimestamp(lastInbound.createdAt)}
               </div>
             </div>
           );
         })()}
 
-        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Message</label>
+        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">Message</label>
         <textarea
           placeholder="Type your message…"
           value={msgBody}
@@ -764,7 +764,7 @@ function SmsTab() {
           rows={3}
           className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
         />
-        <div className="text-right text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
+        <div className="text-right text-13 md:text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
           {msgBody.length} chars
         </div>
 
@@ -852,7 +852,7 @@ function SmsTab() {
       ) : smsView === 'threads' ? (
         <Card className="p-5">
           <div className="flex items-center justify-between mb-3">
-            <div className="text-11 uppercase tracking-label text-ink-secondary">
+            <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
               Conversations
               <span className="ml-2 u-nums">({filteredThreads.length})</span>
             </div>
@@ -944,22 +944,22 @@ function SmsTab() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between mb-0.5">
                         <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="text-14 font-medium text-zinc-900 truncate">
+                          <span className="text-15 md:text-14 font-medium text-zinc-900 truncate">
                             {t.customerName || t.contactPhone}
                           </span>
                           {isUnknown && <Badge tone="neutral">Unknown</Badge>}
                           {isBlocked && <Badge tone="muted">Blocked</Badge>}
                         </div>
-                        <span className="font-mono text-11 text-ink-tertiary flex-shrink-0 ml-2">
+                        <span className="font-mono text-12 md:text-11 text-ink-tertiary flex-shrink-0 ml-2">
                           {timeAgo(t.lastTimestamp)}
                         </span>
                       </div>
                       {t.customerName && (
-                        <div className="font-mono text-11 text-ink-tertiary mb-0.5">
+                        <div className="font-mono text-12 md:text-11 text-ink-tertiary mb-0.5">
                           {t.contactPhone}
                         </div>
                       )}
-                      <div className="text-12 text-ink-secondary truncate">
+                      <div className="text-14 md:text-12 text-ink-secondary truncate">
                         <span className="mr-1" aria-hidden>
                           {t.lastDirection === 'inbound' ? '↓' : '↑'}
                         </span>
@@ -967,7 +967,7 @@ function SmsTab() {
                       </div>
                     </div>
                     <div className="flex-shrink-0 flex items-center gap-2.5">
-                      <span className="font-mono text-11 text-ink-tertiary u-nums">
+                      <span className="hidden md:inline font-mono text-11 text-ink-tertiary u-nums">
                         {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
                       </span>
                       {/* PR 4 — Block / Unblock action */}
@@ -996,7 +996,7 @@ function SmsTab() {
       ) : (
         <Card className="p-5">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <div className="text-11 uppercase tracking-label text-ink-secondary">
+            <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
               SMS Log
             </div>
             <div className="flex gap-2">

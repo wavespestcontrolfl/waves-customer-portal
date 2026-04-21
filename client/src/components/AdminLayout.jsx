@@ -3,7 +3,7 @@ import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import NotificationBell from './NotificationBell';
 import GlobalCommandPalette from './admin/GlobalCommandPalette';
 import MobileAdminShell from './admin/MobileAdminShell';
-import { useFeatureFlag } from '../hooks/useFeatureFlag';
+import { useFeatureFlag, refetchFlags } from '../hooks/useFeatureFlag';
 import useIsMobile from '../hooks/useIsMobile';
 
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', blue: '#0A7EC2', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', input: '#FFFFFF', inputBorder: '#CBD5E1' };
@@ -70,7 +70,7 @@ export default function AdminLayout() {
     const u = localStorage.getItem('waves_admin_user');
     if (u) setUser(JSON.parse(u));
     fetch('/api/admin/auth/me', { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => { if (r.status === 401) { localStorage.removeItem('waves_admin_token'); localStorage.removeItem('waves_admin_user'); navigate('/admin/login', { replace: true }); } })
+      .then(r => { if (r.status === 401) { localStorage.removeItem('waves_admin_token'); localStorage.removeItem('waves_admin_user'); refetchFlags(); navigate('/admin/login', { replace: true }); } })
       .catch(() => {});
   }, [navigate]);
 
@@ -88,6 +88,7 @@ export default function AdminLayout() {
   const handleLogout = () => {
     localStorage.removeItem('waves_admin_token');
     localStorage.removeItem('waves_admin_user');
+    refetchFlags();
     navigate('/admin/login', { replace: true });
   };
 

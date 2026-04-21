@@ -12,6 +12,9 @@ import TimeGridDays from '../../components/schedule/TimeGridDays';
 import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
 import MobileDispatchList from '../../components/schedule/MobileDispatchList';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
+import MobileCheckoutSheet from '../../components/schedule/MobileCheckoutSheet';
+import MobilePaymentSheet from '../../components/schedule/MobilePaymentSheet';
+import MobileServiceEditModal from '../../components/schedule/MobileServiceEditModal';
 import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
@@ -550,10 +553,10 @@ function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplet
 const SCHEDULE_TABS = [
   { id: 'board', label: 'Schedule' },
   { id: 'protocols', label: 'Protocols' },
-  { id: 'match', label: 'Tech Match' },
-  { id: 'csr', label: 'CSR Booking' },
-  { id: 'revenue', label: 'Job Scores' },
-  { id: 'insights', label: 'Insights' },
+  { id: 'match', label: 'Tech Match', desktopOnly: true },
+  { id: 'csr', label: 'CSR Booking', desktopOnly: true },
+  { id: 'revenue', label: 'Job Scores', desktopOnly: true },
+  { id: 'insights', label: 'Insights', desktopOnly: true },
 ];
 
 function MobileScheduleSheet({ children, serviceCount, completedCount }) {
@@ -652,6 +655,16 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
 export default function DispatchPageV2() {
   const isMobile = useIsMobile();
   const [activeTab, setActiveTab] = useState('board');
+
+  // On mobile, desktopOnly tabs (Tech Match / CSR / Job Scores / Insights) are
+  // hidden from both the top row and the More sheet. If a returning user's
+  // persisted activeTab is one of those, snap back to 'board' so they don't
+  // land on a panel they can't navigate away from.
+  useEffect(() => {
+    if (!isMobile) return;
+    const current = SCHEDULE_TABS.find((t) => t.id === activeTab);
+    if (current?.desktopOnly) setActiveTab('board');
+  }, [isMobile, activeTab]);
   const [viewMode, setViewMode] = useState('day');
   const [date, setDate] = useState(formatDateISO(new Date()));
   const [data, setData] = useState(null);
@@ -662,6 +675,9 @@ export default function DispatchPageV2() {
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
   const [detailService, setDetailService] = useState(null);
+  const [checkoutService, setCheckoutService] = useState(null);
+  const [paymentData, setPaymentData] = useState(null);
+  const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
@@ -670,19 +686,23 @@ export default function DispatchPageV2() {
   const [syncMsg, setSyncMsg] = useState('');
   const [showMoreSheet, setShowMoreSheet] = useState(false);
 
-  const fetchSchedule = useCallback((d) => {
+  const fetchSchedule = useCallback(async (d) => {
     setLoading(true);
     setError(null);
-    Promise.all([
-      adminFetch(`/admin/schedule?date=${d}`),
-      adminFetch('/admin/dispatch/products/catalog'),
-    ])
-      .then(([scheduleData, catalogData]) => {
-        setData(scheduleData);
-        setProducts(catalogData.products || []);
-        setLoading(false);
-      })
-      .catch((e) => { setError(e.message); setLoading(false); });
+    try {
+      const [scheduleData, catalogData] = await Promise.all([
+        adminFetch(`/admin/schedule?date=${d}`),
+        adminFetch('/admin/dispatch/products/catalog'),
+      ]);
+      setData(scheduleData);
+      setProducts(catalogData.products || []);
+      setLoading(false);
+      return scheduleData;
+    } catch (e) {
+      setError(e.message);
+      setLoading(false);
+      return null;
+    }
   }, []);
 
   useEffect(() => { fetchSchedule(date); }, [date, fetchSchedule]);
@@ -730,6 +750,18 @@ export default function DispatchPageV2() {
   }, []);
 
   const handleComplete = useCallback((service) => { setCompletingService(service); }, []);
+
+  const handleEnRoute = useCallback(async (service) => {
+    try {
+      await adminFetch(`/admin/schedule/${service.id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: 'en_route' }),
+      });
+      handleStatusChange(service.id, 'en_route');
+    } catch (e) {
+      alert('En route failed: ' + e.message);
+    }
+  }, [handleStatusChange]);
 
   const handleCompleteSubmit = useCallback(async (serviceId, body) => {
     const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, { method: 'POST', body: JSON.stringify(body) });
@@ -974,6 +1006,7 @@ export default function DispatchPageV2() {
           mode="week"
           date={date}
           onEdit={(svc) => setDetailService(svc)}
+          onEnRoute={handleEnRoute}
         />
       )}
       {viewMode === 'week' && !isMobile && (
@@ -1039,7 +1072,7 @@ export default function DispatchPageV2() {
               </button>
             </div>
             <div className="py-2">
-              {SCHEDULE_TABS.map((t) => (
+              {SCHEDULE_TABS.filter((t) => !t.desktopOnly).map((t) => (
                 <button
                   key={t.id}
                   onClick={() => { setActiveTab(t.id); setShowMoreSheet(false); }}
@@ -1156,6 +1189,7 @@ export default function DispatchPageV2() {
               date={date}
               services={services}
               onEdit={(svc) => setDetailService(svc)}
+              onEnRoute={handleEnRoute}
             />
           </div>
         </>
@@ -1196,8 +1230,50 @@ export default function DispatchPageV2() {
           service={detailService}
           onClose={() => setDetailService(null)}
           onEdit={(svc) => { setDetailService(null); setEditingService(svc); }}
-          onReviewCheckout={(svc) => { setDetailService(null); setCompletingService(svc); }}
-          onMarkPrepaid={(svc) => { setDetailService(null); setPrepaidService(svc); }}
+          onReviewCheckout={(svc) => setCheckoutService(svc)}
+        />
+      )}
+      {checkoutService && (
+        <MobileCheckoutSheet
+          service={checkoutService}
+          onClose={() => setCheckoutService(null)}
+          onChargeSuccess={({ service: svc, invoiceId, amount }) => {
+            setPaymentData({ service: svc, invoiceId, amount });
+          }}
+          onEditServiceLine={(svc) => setEditingLineService(svc)}
+          onAddService={() => alert('Add Service — coming soon')}
+          onAddItem={() => alert('Add Item or Discount — coming soon')}
+        />
+      )}
+      {editingLineService && (
+        <MobileServiceEditModal
+          service={editingLineService}
+          technicians={technicians}
+          onClose={() => setEditingLineService(null)}
+          onSaved={async () => {
+            const svcId = editingLineService.id;
+            setEditingLineService(null);
+            const fresh = await fetchSchedule(date);
+            // Re-seat the checkout sheet on the updated service record so
+            // the new totals render immediately without the tech having
+            // to close + reopen the sheet.
+            const updated = fresh?.services?.find((s) => s.id === svcId);
+            if (updated) setCheckoutService(updated);
+          }}
+        />
+      )}
+      {paymentData && (
+        <MobilePaymentSheet
+          service={paymentData.service}
+          invoiceId={paymentData.invoiceId}
+          amount={paymentData.amount}
+          onClose={() => setPaymentData(null)}
+          onSelectCash={(svc) => {
+            setPaymentData(null);
+            setCheckoutService(null);
+            setDetailService(null);
+            setPrepaidService(svc);
+          }}
         />
       )}
       {prepaidService && (

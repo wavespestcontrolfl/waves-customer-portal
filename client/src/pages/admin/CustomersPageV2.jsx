@@ -366,10 +366,10 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
 // --- View toggle (flat pill row, no emoji) ---
 const VIEWS = [
   { key: 'directory', label: 'Directory' },
-  { key: 'map', label: 'Map' },
-  { key: 'pipeline', label: 'Pipeline' },
-  { key: 'health', label: 'Health' },
-  { key: 'intelligence', label: 'AI Advisor' },
+  { key: 'map', label: 'Map', desktopOnly: true },
+  { key: 'pipeline', label: 'Pipeline', desktopOnly: true },
+  { key: 'health', label: 'Health', desktopOnly: true },
+  { key: 'intelligence', label: 'AI Advisor', desktopOnly: true },
 ];
 
 function ViewToggleV2({ view, onChange }) {
@@ -384,6 +384,7 @@ function ViewToggleV2({ view, onChange }) {
             onClick={() => onChange(v.key)}
             className={cn(
               'flex-1 sm:flex-none u-label px-2 sm:px-3 h-11 sm:h-8 border-r-hairline border-zinc-200 last:border-r-0 transition-colors u-focus-ring',
+              v.desktopOnly && 'hidden md:inline-flex items-center justify-center',
               active
                 ? 'bg-zinc-900 text-white'
                 : 'bg-white text-ink-secondary hover:bg-zinc-50'

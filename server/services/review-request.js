@@ -234,6 +234,74 @@ const ReviewService = {
   },
 
   /**
+   * Create a review-request row and return the (shortened) review URL
+   * without sending its own SMS. Used when the completion flow wants to
+   * bundle the review link into the service-complete SMS so the customer
+   * gets a single message instead of two.
+   *
+   * Marks sms_sent_at = now() so the scheduled-sender cron skips this
+   * record — the outer caller is responsible for the actual SMS body.
+   *
+   * @returns {string|null} shortened review URL, or null on no-phone /
+   * existing-duplicate cases (outer caller can just skip the suffix).
+   */
+  async createInline({ customerId, serviceRecordId }) {
+    const customer = await db('customers').where({ id: customerId }).first();
+    if (!customer) return null;
+
+    // Reuse an existing request for this service so we don't stack tokens.
+    if (serviceRecordId) {
+      const existing = await db('review_requests').where({ service_record_id: serviceRecordId }).first();
+      if (existing) {
+        const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+        const longUrl = `${domain}/rate/${existing.token}`;
+        return shortenOrPassthrough(longUrl, {
+          kind: 'review', entityType: 'review_requests', entityId: existing.id, customerId,
+        });
+      }
+    }
+
+    let techName = null, serviceType = null, serviceDate = null, technicianId = null;
+    if (serviceRecordId) {
+      const sr = await db('service_records')
+        .where({ 'service_records.id': serviceRecordId })
+        .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+        .select('service_records.*', 'technicians.name as tech_name')
+        .first();
+      if (sr) {
+        techName = sr.tech_name;
+        serviceType = sr.service_type;
+        serviceDate = sr.service_date;
+        technicianId = sr.technician_id;
+      }
+    }
+
+    const token = generateToken();
+    const now = new Date();
+    const [request] = await db('review_requests').insert({
+      token,
+      customer_id: customerId,
+      service_record_id: serviceRecordId,
+      technician_id: technicianId,
+      tech_name: techName,
+      service_type: serviceType,
+      service_date: serviceDate,
+      triggered_by: 'auto_inline',
+      scheduled_for: null,
+      sms_sent_at: now,
+      status: 'sent',
+    }).returning('*');
+
+    logger.info(`[review] Created inline request for ${customer.first_name} ${customer.last_name} (bundled with completion SMS)`);
+
+    const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const longUrl = `${domain}/rate/${request.token}`;
+    return shortenOrPassthrough(longUrl, {
+      kind: 'review', entityType: 'review_requests', entityId: request.id, customerId,
+    });
+  },
+
+  /**
    * Get review page data by public token.
    */
   async getByToken(token) {

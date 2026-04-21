@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FONTS, BUTTON_BASE } from '../theme';
+import { refetchFlags } from '../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', red: '#A83B34' };
@@ -26,6 +27,12 @@ export default function AdminLoginPage() {
       if (!res.ok) throw new Error(data.error || 'Login failed');
       localStorage.setItem('waves_admin_token', data.token);
       localStorage.setItem('waves_admin_user', JSON.stringify(data.user));
+      // Flag cache is keyed by user_id on the server and session-cached in
+      // memory on the client. If this tab previously loaded flags (as a
+      // different user, or token-less → fail-closed {}), that stale cache
+      // will decide the V1/V2 shell on the next render. Invalidate + refetch
+      // with the new token before we navigate so AdminLayoutGate sees truth.
+      await refetchFlags();
       navigate('/admin', { replace: true });
     } catch (e) { setError(e.message); }
     setLoading(false);

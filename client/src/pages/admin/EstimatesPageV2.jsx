@@ -29,10 +29,10 @@ import {
   DeclineModalV2,
 } from '../../components/admin/EstimateModalsV2';
 import useIsMobile from '../../hooks/useIsMobile';
-import { Badge, Button, Card, cn } from '../../components/ui';
+import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
   Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, SlidersHorizontal,
-  Check, X, Plus, Search, ChevronRight, ArrowLeft,
+  Check, X, ArrowLeft,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -683,12 +683,6 @@ function mobileSortFn(sortKey) {
   }
 }
 
-function fmtMobileDayHeader(ts) {
-  return new Date(ts).toLocaleDateString('en-US', {
-    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
-  });
-}
-
 // Short 6-char ref derived from UUID. estimates.id is a UUID (no human-readable
 // sequence column exists yet); last-6 uppercased is a pragmatic display token.
 function shortEstimateRef(id) {
@@ -813,38 +807,53 @@ function mobileStatusClass(status) {
   return 'text-ink-tertiary';
 }
 
-// Row in the mobile list. Name + short ref left, total + status + chevron right.
-// Row tap is currently a no-op — action sheet will land in a follow-up PR so
-// this PR stays scoped to the list-view redesign per CLAUDE.md Rule 1/2.
+// Row in the mobile list. Mirrors CustomersPageV2 directory row: 64px white
+// bordered card, name + sub left, trailing Call / Text actions when phone is
+// present. Row tap is currently a no-op — action sheet will land in a
+// follow-up PR so this PR stays scoped to the list-view redesign per
+// CLAUDE.md Rule 1/2.
 function MobileEstimateRow({ estimate }) {
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
+  const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
   return (
-    <button
-      type="button"
+    <div
       onClick={() => { /* row action sheet — follow-up PR */ }}
-      className={cn(
-        'w-full flex items-center gap-3 py-3 text-left u-focus-ring',
-        'border-b border-hairline border-zinc-100 last:border-b-0',
-      )}
+      className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3 cursor-pointer hover:bg-zinc-50"
+      style={{ height: 64 }}
     >
-      <div className="flex-1 min-w-0">
-        <div className="text-16 font-medium text-zinc-900 truncate">
+      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+        <div className="text-14 font-medium text-ink-primary truncate">
           {estimate.customerName || 'Unknown'}
         </div>
-        <div className="text-12 text-ink-tertiary u-nums">
-          #{shortEstimateRef(estimate.id)}
+        <div className="text-11 text-ink-tertiary truncate">
+          <span className="u-nums">{amount}</span>
+          <span className={cn('ml-2 font-medium', mobileStatusClass(estimate.status))}>
+            {cfg.label}
+          </span>
+          <span className="ml-2 u-nums">#{shortEstimateRef(estimate.id)}</span>
         </div>
       </div>
-      <div className="text-right">
-        <div className="text-16 font-medium text-zinc-900 u-nums">
-          ${(estimate.monthlyTotal || 0).toFixed(2)}
-        </div>
-        <div className={cn('text-12 font-medium', mobileStatusClass(estimate.status))}>
-          {cfg.label}
-        </div>
-      </div>
-      <ChevronRight size={16} strokeWidth={1.75} className="text-zinc-400 shrink-0" aria-hidden />
-    </button>
+      {estimate.customerPhone && (
+        <a
+          href={`tel:${estimate.customerPhone}`}
+          onClick={(e) => e.stopPropagation()}
+          aria-label="Call"
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+        >
+          <Phone size={16} strokeWidth={1.75} />
+        </a>
+      )}
+      {estimate.customerPhone && (
+        <a
+          href={`/admin/communications?phone=${encodeURIComponent(estimate.customerPhone)}`}
+          onClick={(e) => e.stopPropagation()}
+          aria-label="SMS"
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+        >
+          <MessageSquare size={16} strokeWidth={1.75} />
+        </a>
+      )}
+    </div>
   );
 }
 
@@ -908,78 +917,74 @@ function EstimatesMobileListView({ onNew }) {
     return counts;
   }, [estimates]);
 
+  // Flat list across all days — mirrors CustomersPageV2 directory layout.
+  const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
+
   return (
-    // Edge-to-edge white canvas. AdminLayout gives the main column a 16px
-    // inline padding on mobile-shell; we cancel it so rows span the viewport
-    // like iOS list views in the mockup.
-    <div className="-mx-4 bg-white min-h-[calc(100vh-152px)] px-4 pt-2 pb-4">
-      {/* Title + add */}
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-28 font-normal text-zinc-900 tracking-display">
+    // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
+    // edge-to-edge overrides, list rows are cards (not hairlined rows).
+    <div>
+      {/* Title row — matches Customers header: h1 + labeled pill buttons. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
           Estimates
         </h1>
-        <button
-          type="button"
-          onClick={onNew}
-          aria-label="Create estimate"
-          className="w-10 h-10 rounded-full bg-zinc-900 text-white flex items-center justify-center u-focus-ring hover:bg-zinc-800 active:bg-zinc-800"
-        >
-          <Plus size={20} strokeWidth={2} aria-hidden />
-        </button>
       </div>
 
-      {/* Search */}
-      <div className="relative mb-3">
-        <Search
-          size={16}
-          strokeWidth={1.75}
-          aria-hidden
-          className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500"
-        />
+      {/* Labeled search + Add/filter row — mirrors Customers mobile block. */}
+      <div className="mb-3">
+        <h2 className="text-12 font-medium text-ink-primary mb-1.5">
+          Search estimates
+        </h2>
         <input
           type="search"
           inputMode="search"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search"
+          placeholder="Search by customer name or reference"
           aria-label="Search estimates"
-          className={cn(
-            'w-full h-11 pl-10 pr-4 rounded-full',
-            'bg-zinc-100 border-hairline border-zinc-100',
-            'text-14 text-zinc-900 placeholder:text-zinc-500',
-            'u-focus-ring',
-          )}
+          className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
         />
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={onNew}
+            className="inline-flex items-center justify-center u-label px-3 h-11 bg-zinc-900 text-white border-hairline border-zinc-900 rounded-sm transition-colors u-focus-ring"
+          >
+            + Add Estimate
+          </button>
+          <MobileChipSheet
+            label="Filter"
+            value={filter}
+            onChange={setFilter}
+            options={PIPELINE_FILTERS.map((f) => ({
+              ...f,
+              label: f.key === 'all'
+                ? `All (${filterCounts.all || 0})`
+                : `${f.label} (${filterCounts[f.key] || 0})`,
+            }))}
+            title="Filter estimates"
+          />
+          <MobileChipSheet
+            label="Date"
+            value={dateFilter}
+            onChange={setDateFilter}
+            options={MOBILE_DATE_FILTERS}
+            title="Filter by date"
+          />
+          <MobileChipSheet
+            label="Sort"
+            value={sort}
+            onChange={setSort}
+            options={MOBILE_SORT_OPTIONS}
+            title="Sort estimates"
+          />
+        </div>
       </div>
 
-      {/* Filter / Date / Sort chips */}
-      <div className="flex gap-2 mb-4 overflow-x-auto -mx-1 px-1">
-        <MobileChipSheet
-          label="Filter"
-          value={filter}
-          onChange={setFilter}
-          options={PIPELINE_FILTERS.map((f) => ({
-            ...f,
-            label: f.key === 'all'
-              ? `All (${filterCounts.all || 0})`
-              : `${f.label} (${filterCounts[f.key] || 0})`,
-          }))}
-          title="Filter estimates"
-        />
-        <MobileChipSheet
-          label="Date"
-          value={dateFilter}
-          onChange={setDateFilter}
-          options={MOBILE_DATE_FILTERS}
-          title="Filter by date"
-        />
-        <MobileChipSheet
-          label="Sort"
-          value={sort}
-          onChange={setSort}
-          options={MOBILE_SORT_OPTIONS}
-          title="Sort estimates"
-        />
+      {/* Result count — mirrors Customers */}
+      <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
+        {flat.length} result{flat.length !== 1 ? 's' : ''}
       </div>
 
       {/* List */}
@@ -987,27 +992,23 @@ function EstimatesMobileListView({ onNew }) {
         <div className="p-10 text-center text-13 text-ink-secondary">
           Loading estimates…
         </div>
-      ) : groups.length === 0 ? (
-        <div className="p-10 text-center text-13 text-ink-secondary">
-          {estimates.length === 0
-            ? 'No estimates yet. Tap + to create one.'
-            : 'No estimates match these filters.'}
-        </div>
+      ) : flat.length === 0 ? (
+        <Card>
+          <CardBody className="p-12 text-center">
+            <div className="text-14 text-ink-primary mb-1">
+              {estimates.length === 0 ? 'No estimates yet' : 'No estimates found'}
+            </div>
+            <div className="text-13 text-ink-tertiary">
+              {estimates.length === 0
+                ? 'Tap Add Estimate to create one'
+                : 'Try adjusting your filters'}
+            </div>
+          </CardBody>
+        </Card>
       ) : (
-        <div className="flex flex-col">
-          {groups.map(([dayKey, items]) => (
-            <section key={dayKey} className="mb-4">
-              <h2 className="text-14 font-medium text-zinc-900 py-2 border-b border-hairline border-zinc-200">
-                {dayKey ? fmtMobileDayHeader(dayKey) : 'No date'}
-              </h2>
-              <ul className="flex flex-col list-none p-0 m-0">
-                {items.map((e) => (
-                  <li key={e.id} className="list-none">
-                    <MobileEstimateRow estimate={e} />
-                  </li>
-                ))}
-              </ul>
-            </section>
+        <div className="flex flex-col gap-2">
+          {flat.map((e) => (
+            <MobileEstimateRow key={e.id} estimate={e} />
           ))}
         </div>
       )}

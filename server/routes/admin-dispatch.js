@@ -272,6 +272,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       else invoiceCreated = true;
     }
 
+    // When the tech completes with both "send report" and "ask for review" on,
+    // mint the review row now and bundle its short URL into the one completion
+    // SMS instead of firing a second message 90-180 min later. Single message
+    // lands higher read-rates than two and matches the Square-style flow.
+    let bundledReviewUrl = null;
+    if (sendCompletionSms && requestReview && svc.cust_phone) {
+      try {
+        const ReviewService = require('../services/review-request');
+        bundledReviewUrl = await ReviewService.createInline({
+          customerId: svc.customer_id,
+          serviceRecordId: record.id,
+        });
+      } catch (e) { logger.error(`[dispatch] Inline review mint failed: ${e.message}`); }
+    }
+    const reviewSuffix = bundledReviewUrl
+      ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
+      : '';
+
     if (sendCompletionSms && svc.cust_phone) {
       try {
         if (invoiceCreated && payUrl) {
@@ -282,7 +300,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             portal_url: portalUrl,
             pay_url: payUrl,
           }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
+          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${svc.service_type} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_prepaid', {
@@ -290,16 +308,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             service_type: svc.service_type || 'your service',
             portal_url: portalUrl,
           }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
+          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body, { customerId: svc.customer_id, messageType: 'service_complete' });
+          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete' });
         }
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
     }
 
-    if (requestReview && svc.cust_phone) {
+    // Only schedule the delayed follow-up message when the review wasn't
+    // already bundled into the completion SMS above.
+    if (requestReview && svc.cust_phone && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
         await ReviewService.create({
