@@ -32,7 +32,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
   Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, SlidersHorizontal,
-  Check, X, ArrowLeft,
+  Check, X, ArrowLeft, FilePlus,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -812,13 +812,13 @@ function mobileStatusClass(status) {
 // present. Row tap is currently a no-op — action sheet will land in a
 // follow-up PR so this PR stays scoped to the list-view redesign per
 // CLAUDE.md Rule 1/2.
-function MobileEstimateRow({ estimate }) {
+function MobileEstimateRow({ estimate, onCreateFromAddress }) {
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
   const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
   return (
     <div
       onClick={() => { /* row action sheet — follow-up PR */ }}
-      className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3 cursor-pointer hover:bg-zinc-50"
+      className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5 cursor-pointer hover:bg-zinc-50"
       style={{ height: 64 }}
     >
       <div className="flex-1 min-w-0 flex flex-col gap-0.5">
@@ -853,6 +853,17 @@ function MobileEstimateRow({ estimate }) {
           <MessageSquare size={16} strokeWidth={1.75} />
         </a>
       )}
+      {estimate.address && onCreateFromAddress && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onCreateFromAddress(estimate.address); }}
+          aria-label={`New estimate at ${estimate.address}`}
+          title="New estimate at this address"
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+        >
+          <FilePlus size={16} strokeWidth={1.75} />
+        </button>
+      )}
     </div>
   );
 }
@@ -860,7 +871,7 @@ function MobileEstimateRow({ estimate }) {
 // Mobile list view for /admin/estimates. Strict 1:1 on data + endpoint
 // (GET /admin/estimates) with EstimatePipelineViewV2. KPI bar, Leads tab,
 // and Pricing Logic tab are desktop-only by design.
-function EstimatesMobileListView({ onNew }) {
+function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -1008,7 +1019,7 @@ function EstimatesMobileListView({ onNew }) {
       ) : (
         <div className="flex flex-col gap-2">
           {flat.map((e) => (
-            <MobileEstimateRow key={e.id} estimate={e} />
+            <MobileEstimateRow key={e.id} estimate={e} onCreateFromAddress={onCreateFromAddress} />
           ))}
         </div>
       )}
@@ -1020,6 +1031,7 @@ export default function EstimatesPageV2() {
   const isMobile = useIsMobile(768);
   const [activeTab, setActiveTab] = useState('leads');
   const [mobileView, setMobileView] = useState('list'); // 'list' | 'new'
+  const [mobilePrefillAddress, setMobilePrefillAddress] = useState('');
 
   // Mobile: list (default) + create-estimate flow. Leads + Pricing Logic are
   // desktop-only per CLAUDE.md Rule 1 (mobile IA scope confirmed with owner).
@@ -1029,18 +1041,23 @@ export default function EstimatesPageV2() {
         <div>
           <button
             type="button"
-            onClick={() => setMobileView('list')}
+            onClick={() => { setMobileView('list'); setMobilePrefillAddress(''); }}
             aria-label="Back to estimates"
             className="inline-flex items-center gap-1 mb-3 h-9 px-2 -ml-2 rounded-md text-14 text-zinc-700 hover:bg-zinc-100 u-focus-ring"
           >
             <ArrowLeft size={18} strokeWidth={1.75} aria-hidden />
             Back
           </button>
-          <EstimateToolViewV2 />
+          <EstimateToolViewV2 initialAddress={mobilePrefillAddress} />
         </div>
       );
     }
-    return <EstimatesMobileListView onNew={() => setMobileView('new')} />;
+    return (
+      <EstimatesMobileListView
+        onNew={() => { setMobilePrefillAddress(''); setMobileView('new'); }}
+        onCreateFromAddress={(addr) => { setMobilePrefillAddress(addr || ''); setMobileView('new'); }}
+      />
+    );
   }
 
   return (
