@@ -46,13 +46,13 @@ final class TerminalManager: NSObject {
 
         // Discover local Tap-to-Pay reader. On iPhone Tap-to-Pay, discovery
         // returns a single synthetic reader representing the device itself.
-        let config = try TapToPayDiscoveryConfigurationBuilder().build()
+        let config = try LocalMobileDiscoveryConfigurationBuilder().build()
         let reader = try await discoverFirstReader(config: config)
         try await connectTapToPay(reader: reader)
         isConnected = true
     }
 
-    private func discoverFirstReader(config: TapToPayDiscoveryConfiguration) async throws -> Reader {
+    private func discoverFirstReader(config: LocalMobileDiscoveryConfiguration) async throws -> Reader {
         try await withCheckedThrowingContinuation { cont in
             var resumed = false
             let delegate = DiscoveryCallback { [weak self] readers in
@@ -73,11 +73,9 @@ final class TerminalManager: NSObject {
 
     private func connectTapToPay(reader: Reader) async throws {
         let locId = Bundle.main.object(forInfoDictionaryKey: "STRIPE_TERMINAL_LOCATION_ID") as? String ?? ""
-        let connConfig = try TapToPayConnectionConfigurationBuilder(delegate: ReconnectDelegate.shared)
-            .setLocationId(locId)
-            .build()
+        let connConfig = try LocalMobileConnectionConfigurationBuilder(locationId: locId).build()
         _ = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Reader, Error>) in
-            Terminal.shared.connectReader(reader, connectionConfig: connConfig) { reader, error in
+            Terminal.shared.connectLocalMobileReader(reader, delegate: ReconnectDelegate.shared, connectionConfig: connConfig) { reader, error in
                 if let error { cont.resume(throwing: error) }
                 else if let reader { cont.resume(returning: reader) }
                 else { cont.resume(throwing: NSError(domain: "wavespay", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown connect failure"])) }
@@ -143,11 +141,26 @@ private final class DiscoveryCallback: NSObject, DiscoveryDelegate {
     }
 }
 
-// MARK: - Reconnect delegate (Tap to Pay)
+// MARK: - Local mobile reader delegate (+ reconnection)
+//
+// `connectLocalMobileReader` requires a `LocalMobileReaderDelegate` (5 required
+// methods covering update install progress, input prompts, and display
+// messages). We also conform to `ReconnectionDelegate` so Stripe's auto-
+// reconnect hooks have somewhere to land if we ever enable them on the
+// connection config. All methods are intentional stubs for v1 — the NFC
+// flow is short and we let Stripe's built-in UI handle user messaging.
 
-private final class ReconnectDelegate: NSObject, TapToPayReaderDelegate {
+private final class ReconnectDelegate: NSObject, LocalMobileReaderDelegate, ReconnectionDelegate {
     static let shared = ReconnectDelegate()
 
+    // LocalMobileReaderDelegate — required
+    func localMobileReader(_ reader: Reader, didStartInstallingUpdate update: ReaderSoftwareUpdate, cancelable: Cancelable?) {}
+    func localMobileReader(_ reader: Reader, didReportReaderSoftwareUpdateProgress progress: Float) {}
+    func localMobileReader(_ reader: Reader, didFinishInstallingUpdate update: ReaderSoftwareUpdate?, error: Error?) {}
+    func localMobileReader(_ reader: Reader, didRequestReaderInput inputOptions: ReaderInputOptions) {}
+    func localMobileReader(_ reader: Reader, didRequestReaderDisplayMessage displayMessage: ReaderDisplayMessage) {}
+
+    // ReconnectionDelegate — stubs
     func reader(_ reader: Reader, didStartReconnect cancelable: Cancelable, disconnectReason: DisconnectReason) {}
     func readerDidSucceedReconnect(_ reader: Reader) {}
     func readerDidFailReconnect(_ reader: Reader) {}
