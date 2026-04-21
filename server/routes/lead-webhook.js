@@ -9,6 +9,8 @@ const logger = require('../services/logger');
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { etDateString } = require('../utils/datetime-et');
+const { isEnabled } = require('../config/feature-gates');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 function capitalizeName(name) {
   if (!name) return '';
@@ -191,35 +193,92 @@ router.post('/', async (req, res) => {
         // back manually from the admin portal or directly.
         try {
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
-          logger.info(`[lead-webhook] Attempting outbound lead alert to Adam. Domain: ${domain}, Lead: ${firstName} ${phoneFormatted}`);
-          const call = await twilioClient.calls.create({
-            to: ADAM_CELL,
-            from: '+19412972606',
-            url: `https://${domain}/api/webhooks/twilio/lead-alert-announce?leadName=${encodeURIComponent(firstName)}&leadPhone=${encodeURIComponent(phoneFormatted)}`,
-            statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
-            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-            record: false,
-          });
-          callConnected = true;
-          logger.info(`[lead-webhook] Business hours — announcing lead ${firstName} to Adam. CallSid: ${call.sid}`);
+          const fromNumber = '+19412972606';
+          const autoBridge = isEnabled('leadAutoBridge');
 
-          // Log outbound call so it shows up in call log
-          try {
-            await db('call_log').insert({
-              customer_id: customer.id,
-              direction: 'outbound',
-              from_phone: '+19412972606',
-              to_phone: ADAM_CELL,
-              twilio_call_sid: call.sid,
-              status: 'initiated',
-              metadata: JSON.stringify({
-                type: 'lead_alert_announce',
-                leadName: `${firstName} ${lastName}`,
-                leadPhone: phoneFormatted,
-              }),
+          if (autoBridge) {
+            // Press-1-to-connect auto-bridge. Create call_log row FIRST so
+            // outbound-admin-prompt / outbound-connect can update it without
+            // racing Twilio's webhook fire (2–5s after create()).
+            const bridgeCallerId = TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+            const [callLogRow] = await db('call_log')
+              .insert({
+                customer_id: customer.id,
+                direction: 'outbound',
+                from_phone: fromNumber,
+                to_phone: ADAM_CELL,
+                status: 'initiated',
+                source: 'lead-webhook-auto-bridge',
+                metadata: JSON.stringify({
+                  type: 'lead_auto_bridge',
+                  leadName: `${firstName} ${lastName}`,
+                  leadPhone: phoneFormatted,
+                  bridgeCallerId,
+                }),
+              })
+              .returning(['id']);
+            const callLogId = callLogRow?.id;
+
+            const promptParams = new URLSearchParams({
+              customerNumber: phoneFormatted,
+              callerIdNumber: bridgeCallerId,
+              leadName: firstName,
             });
-          } catch (logErr) {
-            logger.warn(`[lead-webhook] Could not log outbound call: ${logErr.message}`);
+            if (callLogId) promptParams.set('callLogId', callLogId);
+
+            logger.info(`[lead-webhook] Auto-bridge ON — calling Adam for ${firstName} (${phoneFormatted}). callLogId: ${callLogId}`);
+            const call = await twilioClient.calls.create({
+              to: ADAM_CELL,
+              from: fromNumber,
+              url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
+              statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
+              statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+              record: false,
+            });
+            callConnected = true;
+            logger.info(`[lead-webhook] Auto-bridge CallSid: ${call.sid}`);
+
+            if (callLogId) {
+              await db('call_log').where({ id: callLogId }).update({
+                twilio_call_sid: call.sid,
+                updated_at: new Date(),
+              }).catch(err => {
+                logger.warn(`[lead-webhook] Could not backfill call_log.twilio_call_sid: ${err.message}`);
+              });
+            }
+          } else {
+            // Flag OFF — keep the announce-only behavior: speak the lead name
+            // and phone to Adam, he calls back manually.
+            logger.info(`[lead-webhook] Auto-bridge OFF — announcing lead ${firstName} (${phoneFormatted}) to Adam. Domain: ${domain}`);
+            const call = await twilioClient.calls.create({
+              to: ADAM_CELL,
+              from: fromNumber,
+              url: `https://${domain}/api/webhooks/twilio/lead-alert-announce?leadName=${encodeURIComponent(firstName)}&leadPhone=${encodeURIComponent(phoneFormatted)}`,
+              statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
+              statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+              record: false,
+            });
+            callConnected = true;
+            logger.info(`[lead-webhook] Announce CallSid: ${call.sid}`);
+
+            try {
+              await db('call_log').insert({
+                customer_id: customer.id,
+                direction: 'outbound',
+                from_phone: fromNumber,
+                to_phone: ADAM_CELL,
+                twilio_call_sid: call.sid,
+                status: 'initiated',
+                source: 'lead-webhook-announce',
+                metadata: JSON.stringify({
+                  type: 'lead_alert_announce',
+                  leadName: `${firstName} ${lastName}`,
+                  leadPhone: phoneFormatted,
+                }),
+              });
+            } catch (logErr) {
+              logger.warn(`[lead-webhook] Could not log outbound call: ${logErr.message}`);
+            }
           }
         } catch (callErr) {
           logger.error(`[lead-webhook] Lead alert call failed, falling back to SMS: ${callErr.message}`);

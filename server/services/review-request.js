@@ -195,7 +195,7 @@ const ReviewService = {
     if (!customer?.phone) return;
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-    const longReviewUrl = `${domain}/review/${request.token}`;
+    const longReviewUrl = `${domain}/rate/${request.token}`;
     const reviewUrl = await shortenOrPassthrough(longReviewUrl, {
       kind: 'review', entityType: 'review_requests', entityId: request.id, customerId: customer.id,
     });
@@ -417,7 +417,7 @@ const ReviewService = {
       if (!customer?.phone) continue;
 
       const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-      const longReviewUrl = `${domain}/review/${request.token}`;
+      const longReviewUrl = `${domain}/rate/${request.token}`;
       const reviewUrl = await shortenOrPassthrough(longReviewUrl, {
         kind: 'review', entityType: 'review_requests', entityId: request.id, customerId: customer.id,
       });

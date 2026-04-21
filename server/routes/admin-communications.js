@@ -54,25 +54,51 @@ router.post('/call', async (req, res, next) => {
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
 
+    // Look up customer first so we can pass leadName into the admin prompt
+    // and so the call_log row has the right customer_id before Twilio fires.
+    const customer = await db('customers').where({ phone: to }).first().catch(() => null);
+    const leadName = customer
+      ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
+      : '';
+
+    // Insert call_log FIRST so outbound-admin-prompt / outbound-connect can
+    // update the row reliably. Twilio typically fires those webhooks 2–5s
+    // after calls.create() returns, but racing the insert is cheap to avoid.
+    const [callLogRow] = await db('call_log')
+      .insert({
+        customer_id: customer?.id || null,
+        direction: 'outbound',
+        from_phone: from,
+        to_phone: to,
+        status: 'initiated',
+        source: 'admin-click',
+      })
+      .returning(['id']);
+    const callLogId = callLogRow?.id;
+
+    const promptParams = new URLSearchParams({
+      customerNumber: to,
+      callerIdNumber: from,
+    });
+    if (callLogId) promptParams.set('callLogId', callLogId);
+    if (leadName) promptParams.set('leadName', leadName);
+
     // Step 1: Call the admin first. When admin picks up and presses 1, dial the customer.
     const call = await client.calls.create({
       to: adminPhone,
       from,
-      url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?customerNumber=${encodeURIComponent(to)}&callerIdNumber=${encodeURIComponent(from)}`,
+      url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
       statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
     });
 
-    // Log the outbound call (legacy + unified)
-    const customer = await db('customers').where({ phone: to }).first().catch(() => null);
-    await db('call_log').insert({
-      customer_id: customer?.id || null,
-      direction: 'outbound',
-      from_phone: from,
-      to_phone: to,
-      twilio_call_sid: call.sid,
-      status: 'initiated',
-    }).catch(() => {});
+    // Backfill the Twilio CallSid now that we have it.
+    if (callLogId) {
+      await db('call_log').where({ id: callLogId }).update({
+        twilio_call_sid: call.sid,
+        updated_at: new Date(),
+      }).catch(() => {});
+    }
     require('../services/conversations').recordTouchpoint({
       customerId: customer?.id || null,
       channel: 'voice',
@@ -85,7 +111,7 @@ router.post('/call', async (req, res, next) => {
       deliveryStatus: 'initiated',
     }).catch(() => {});
 
-    res.json({ success: true, callSid: call.sid });
+    res.json({ success: true, callSid: call.sid, callLogId });
   } catch (err) { next(err); }
 });
 
