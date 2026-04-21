@@ -217,10 +217,8 @@ export default function AdminLayoutV2() {
           >
             <Menu size={22} strokeWidth={1.75} />
           </button>
-          <img src="/waves-logo.png" alt="" style={{ height: 24 }} />
-          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', flex: 1 }}>
-            Waves Admin
-          </div>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 24 }} />
+          <div style={{ flex: 1 }} />
           <NotificationBell type="admin" />
         </div>
       )}
@@ -269,18 +267,8 @@ export default function AdminLayoutV2() {
             flexShrink: 0,
           }}
         >
-          <img src="/waves-logo.png" alt="" style={{ height: 28 }} />
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 600,
-              color: 'var(--text-primary)',
-              letterSpacing: '0.01em',
-              flex: 1,
-            }}
-          >
-            Waves Admin
-          </div>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 28 }} />
+          <div style={{ flex: 1 }} />
           {isMobile ? (
             <button
               type="button"
