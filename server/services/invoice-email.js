@@ -207,7 +207,8 @@ async function sendInvoiceEmail(invoiceId) {
   }
 }
 
-async function sendReceiptEmail(invoiceId) {
+async function sendReceiptEmail(invoiceId, options = {}) {
+  const memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
@@ -241,7 +242,13 @@ async function sendReceiptEmail(invoiceId) {
 
   const first = customer.first_name || 'there';
   const heading = 'Payment received — thank you';
-  const intro = `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
+  const memoEscaped = memo
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const memoHtml = memo
+    ? `<div style="margin-top:16px;padding:14px 16px;background:${SAND};border-left:3px solid ${WAVES_BLUE};border-radius:4px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:${BODY};white-space:pre-wrap;">${memoEscaped}</div>`
+    : '';
+  const intro = `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.${memoHtml ? '' : ''}`;
+  const introWithMemo = memoHtml ? `${intro}${memoHtml}` : intro;
   const cardText = (payment?.card_brand && payment?.card_last_four)
     ? `${payment.card_brand.toUpperCase()} ···· ${payment.card_last_four}`
     : (invoice.card_brand && invoice.card_last_four)
@@ -257,7 +264,7 @@ async function sendReceiptEmail(invoiceId) {
   const html = wrapEmail({
     preheader: `Receipt for ${invoice.invoice_number} — ${currency(invoice.total)} paid.`,
     heading,
-    intro,
+    intro: introWithMemo,
     lines,
     ctaHref: receiptUrl,
     ctaLabel: 'View receipt online',
@@ -267,6 +274,8 @@ async function sendReceiptEmail(invoiceId) {
     `Hi ${first},`,
     '',
     intro,
+    memo ? '' : null,
+    memo ? `Note from Waves: ${memo}` : null,
     '',
     `Invoice: ${invoice.invoice_number}`,
     `Paid: ${formatDate(invoice.paid_at)}`,
