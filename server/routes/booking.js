@@ -411,9 +411,9 @@ router.post('/confirm', async (req, res, next) => {
   }
 });
 
-// GET /api/booking/embed-snippet?source=xyz — returns copy-paste HTML for WordPress
+// GET /api/booking/embed-snippet?source=xyz — returns copy-paste iframe HTML
 router.get('/embed-snippet', (req, res) => {
-  const source = (req.query.source || 'wp-site').replace(/[^a-z0-9_-]/gi, '');
+  const source = (req.query.source || 'site').replace(/[^a-z0-9_-]/gi, '');
   const baseUrl = process.env.PUBLIC_URL || 'https://portal.wavespestcontrol.com';
   const iframeSrc = `${baseUrl}/book?source=${encodeURIComponent(source)}`;
   const snippet = `<!-- Waves Pest Control — Online Booking Embed -->

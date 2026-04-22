@@ -92,8 +92,6 @@ function stripLegacyBoilerplate(notes) {
   return notes
     .replace(/\*{3}\s*Please make changes.*?(?:\*{3}|$)/gis, '')
     .replace(/Please make changes to this appointment in the [\s\S]*?next sync\./gi, '')
-    .replace(/https?:\/\/app\.squareup\.com\S*/g, '')
-    .replace(/https?:\/\/squareup\.com\S*/g, '')
     .replace(/New customer\s*[-\u2013\u2014]\s*first visit/gi, '')
     .replace(/New customer\s*[-\u2013\u2014]\s*first time/gi, '')
     .replace(/First[-\s]time customer/gi, '')

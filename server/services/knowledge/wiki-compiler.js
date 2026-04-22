@@ -201,7 +201,7 @@ ${content.substring(0, 50000)}`
    * @param {string} opts.fileType — "blog_post" | "code_comments" | "md" | etc.
    * @param {string} [opts.description]
    * @param {string} [opts.defaultCategory] — hint to the compiler ("pests", "turf", ...)
-   * @param {string} [opts.originUrl] — e.g. WordPress URL, stored in source_documents
+   * @param {string} [opts.originUrl] — e.g. blog post URL, stored in source_documents
    */
   async compileFromContent({ content, filename, fileType, description, defaultCategory, originUrl }) {
     if (!content || content.length < 10) throw new Error('Content too short to compile');

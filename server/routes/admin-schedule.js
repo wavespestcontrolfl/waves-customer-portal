@@ -7,7 +7,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
-  cleanSquareNotes, isNewCustomer, safeDate,
+  isNewCustomer, safeDate,
 } = require('../utils/service-normalizer');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 
@@ -117,7 +117,7 @@ router.get('/', async (req, res, next) => {
       const normalizedType = normalizeServiceType(s.service_type);
       const category = detectServiceCategory(normalizedType);
 
-      const cleanedNotes = cleanSquareNotes(s.notes);
+      const cleanedNotes = (s.notes || '').trim();
 
       const alerts = [];
       if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
@@ -1328,19 +1328,6 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
     res.json({ success: true, brief: svc.pre_service_brief ? JSON.parse(svc.pre_service_brief) : null });
   } catch (err) { next(err); }
-});
-
-// POST /api/admin/schedule/sync-calendar — unified sync from Google Calendar
-router.post('/sync-calendar', async (req, res, next) => {
-  try {
-    const CalendarSync = require('../services/calendar-sync');
-    const days = parseInt(req.body.days) || 14;
-    const result = await CalendarSync.syncAll(days);
-    res.json(result);
-  } catch (err) {
-    logger.error(`[cal-sync] ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 /**

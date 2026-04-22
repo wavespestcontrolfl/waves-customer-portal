@@ -1,14 +1,14 @@
 /**
  * Beehiiv API Service — manages newsletter subscribers, tags, and automations.
  *
- * Replaces 7 Zapier zaps that handled:
- *   - New recurring customer email (#3)
- *   - Cold lead email (#4)
- *   - Lawn care onboarding (#10)
- *   - New appointment email (#11)
- *   - Review thank-you email (#17)
- *   - Bed bug treatment email (#18)
- *   - Cockroach control email (#19)
+ * Automations handled here:
+ *   - New recurring customer email
+ *   - Cold lead email
+ *   - Lawn care onboarding
+ *   - New appointment email
+ *   - Review thank-you email
+ *   - Bed bug treatment email
+ *   - Cockroach control email
  *
  * Env vars:
  *   BEEHIIV_API_KEY     — API key from beehiiv.com/settings/api

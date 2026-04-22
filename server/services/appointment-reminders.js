@@ -130,7 +130,7 @@ const AppointmentReminders = {
   /**
    * Register an appointment for reminders.
    * Sources: 'booking_new', 'admin_manual' => insert + send confirmation (default)
-   *          'gcal_sync'                   => insert only (no confirmation)
+   *          any other source              => insert only (no confirmation)
    *
    * Pass `options.sendConfirmation` (boolean) to override the source-based default —
    * e.g. admin_manual with the "Send confirmation SMS" checkbox unchecked passes false.
@@ -207,7 +207,7 @@ const AppointmentReminders = {
             .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
         }
       } else {
-        // gcal_sync — mark confirmation as "sent" (not applicable)
+        // non-confirmation sources — mark confirmation as "sent" (not applicable)
         await db('appointment_reminders')
           .where({ id: record.id })
           .update({ confirmation_sent: true, confirmation_sent_at: new Date() });

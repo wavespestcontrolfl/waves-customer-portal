@@ -81,8 +81,6 @@ function stripLegacyBoilerplate(notes) {
   return notes
     .replace(/\*{3}\s*Please make changes.*?(?:\*{3}|$)/gis, '')
     .replace(/Please make changes to this appointment in the [\s\S]*?next sync\./gi, '')
-    .replace(/https?:\/\/app\.squareup\.com\S*/g, '')
-    .replace(/https?:\/\/squareup\.com\S*/g, '')
     .replace(/New customer\s*[-\u2013\u2014]\s*first visit/gi, '')
     .replace(/New customer\s*[-\u2013\u2014]\s*first time/gi, '')
     .replace(/First[-\s]time customer/gi, '')
@@ -3382,31 +3380,6 @@ export default function SchedulePage() {
   const handlePanelClose = useCallback((wasCompleted) => {
     setCompletingService(null);
   }, []);
-
-  const [syncingCal, setSyncingCal] = useState(false);
-  const handleSyncCalendar = async () => {
-    setSyncingCal(true);
-    try {
-      const r = await fetch(`${API_BASE}/admin/schedule/sync-calendar`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days: 14 }),
-      });
-      const result = await r.json();
-      if (!r.ok) {
-        alert(`Sync error: ${result.error || r.status}`);
-      } else {
-        const gc = result.google || {};
-        const lines = [`Google Calendar: ${gc.found || 0} found, ${gc.created || 0} new`];
-        if (gc.error) lines.push(`  ⚠ ${gc.error}`);
-        alert(lines.join('\n'));
-        if (gc.created > 0) fetchSchedule(date);
-      }
-    } catch (e) {
-      alert('Calendar sync failed: ' + e.message);
-    }
-    setSyncingCal(false);
-  };
 
   function shiftDate(dir) {
     const d = new Date(date + 'T12:00:00');

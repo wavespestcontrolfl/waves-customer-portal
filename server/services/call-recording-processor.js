@@ -1,5 +1,5 @@
 /**
- * Call Recording Processor — replaces Zapier zaps #2 and #23.
+ * Call Recording Processor.
  *
  * Processes Twilio call recordings end-to-end:
  *   1. Transcribe audio (Gemini or Twilio built-in)

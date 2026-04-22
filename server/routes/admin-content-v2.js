@@ -4,7 +4,6 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const BlogWriter = require('../services/content/blog-writer');
 const BlogAuditor = require('../services/content/blog-auditor');
-// WordPressSync removed — content now publishes to wavespestcontrol.com Astro site
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');

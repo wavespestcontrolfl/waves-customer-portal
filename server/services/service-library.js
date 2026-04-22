@@ -15,7 +15,6 @@ const SERVICE_COLS = [
   'default_equipment', 'default_products', 'typical_materials_cost',
   'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
   'is_active', 'is_archived',
-  'square_service_id', 'square_variation_id',
   'created_at', 'updated_at',
 ];
 

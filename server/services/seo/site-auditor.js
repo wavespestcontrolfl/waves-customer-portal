@@ -9,7 +9,7 @@ const logger = require('../logger');
 const crypto = require('crypto');
 const { etDateString } = require('../../utils/datetime-et');
 
-const SITE_URL = process.env.WORDPRESS_URL || 'https://wavespestcontrol.com';
+const SITE_URL = process.env.WAVES_SITE_URL || 'https://wavespestcontrol.com';
 const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];
 const CTA_PATTERNS = /free estimate|call|schedule|get a quote|contact|book|text us/i;
 const FL_PESTS = /palmetto bug|fire ant|chinch bug|ghost ant|german roach|subterranean termite|whitefly|mole cricket|no-see-um|love bug/i;

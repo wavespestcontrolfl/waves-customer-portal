@@ -3,8 +3,7 @@ const logger = require('./logger');
 const stripeConfig = require('../config/stripe-config');
 
 /**
- * Payment Router — All payments go through Stripe.
- * Square has been removed.
+ * Payment Router — all payments go through Stripe.
  */
 
 let _stripeService;

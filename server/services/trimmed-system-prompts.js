@@ -39,7 +39,7 @@ City pages follow /{service}-{city}-fl/ (cities: bradenton, lakewood-ranch, sara
 Examples: /lawn-care-bradenton-fl/, /mosquito-control-sarasota-fl/, /termite-control-venice-fl/
 Never use bare categories like /lawn-care/ or /termite-control/ — they do not exist.
 
-Publish to WordPress as draft. Distribute to all social channels. Report: title, word count, QA score, WordPress URL.`;
+Save the post as a draft in the portal. Distribute to all social channels. Report: title, word count, QA score, slug.`;
 
 
 // ═══════════════════════════════════════════════════════════════

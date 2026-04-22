@@ -10,7 +10,6 @@
  *   - Wiki knowledge base for technical accuracy
  *   - Blog post DB for overlap/differentiation checking
  *   - ContentQA 50-point scoring gate
- *   - WordPress publishing
  *   - Social media distribution (Facebook, Instagram, LinkedIn, GBP)
  *   - Content calendar scheduling
  */
@@ -44,7 +43,7 @@ City pages follow /{service}-{city}-fl/ (cities: bradenton, lakewood-ranch, sara
 Examples: /lawn-care-bradenton-fl/, /mosquito-control-sarasota-fl/, /termite-control-venice-fl/
 Never use bare categories like /lawn-care/ or /termite-control/ — they do not exist.
 
-Publish to WordPress as draft. Distribute to all social channels. Report: title, word count, QA score, WordPress URL.`,
+Save the post as a draft in the portal. Distribute to all social channels. Report: title, word count, QA score, slug.`,
 
   tools: [
     // Built-in toolset — enable web search for research, disable everything else
@@ -167,19 +166,6 @@ Publish to WordPress as draft. Distribute to all social channels. Report: title,
     },
 
     // ── Publishing tools ────────────────────────────────────────
-
-    {
-      type: 'custom',
-      name: 'publish_to_wordpress',
-      description: `Publish a blog post to the WordPress site (wavespestcontrol.com). Creates the post as a WordPress draft with RankMath SEO meta fields, table of contents, FAQ schema markup, and featured image if available. Returns the WordPress post ID and URL. The post is created as a DRAFT — the team reviews before setting it live.`,
-      input_schema: {
-        type: 'object',
-        properties: {
-          post_id: { type: 'string', description: 'Blog post UUID to publish' },
-        },
-        required: ['post_id'],
-      },
-    },
 
     {
       type: 'custom',

@@ -4,7 +4,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
-const { normalizeServiceType, cleanSquareNotes } = require('../utils/service-normalizer');
+const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString } = require('../utils/datetime-et');
 
 router.use(authenticate);
@@ -47,7 +47,7 @@ router.get('/', async (req, res, next) => {
         technician: s.technician_name,
         customerConfirmed: s.customer_confirmed,
         confirmedAt: s.confirmed_at,
-        notes: cleanSquareNotes(s.notes),
+        notes: s.notes,
       })),
     });
   } catch (err) {

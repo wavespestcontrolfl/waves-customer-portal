@@ -406,7 +406,7 @@ async function checkSiteHealth(input) {
   const { domain, check = 'all' } = input;
 
   // Primary site health — wavespestcontrol.com
-  let query = db('wordpress_sites').orderBy('domain');
+  let query = db('fleet_sites').orderBy('domain');
   if (domain) query = query.whereILike('domain', `%${domain}%`);
   else query = query.whereILike('domain', '%wavespestcontrol.com%');
 
@@ -594,7 +594,7 @@ async function getBacklinkOverview(input) {
 async function compareDomains(input) {
   const { metric = 'clicks', period_days = 28, site_type } = input;
 
-  const sites = await db('wordpress_sites').orderBy('domain');
+  const sites = await db('fleet_sites').orderBy('domain');
   const filteredSites = site_type && site_type !== 'all'
     ? sites.filter(s => s.site_type === site_type)
     : sites;

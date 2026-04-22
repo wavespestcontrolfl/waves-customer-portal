@@ -1,5 +1,5 @@
 /**
- * Social Media Engine — replaces Zapier RSS Social Media Automation (#1)
+ * Social Media Engine.
  *
  * Flow: RSS/Blog trigger → AI content generation → post to all platforms
  *   - Facebook Page
