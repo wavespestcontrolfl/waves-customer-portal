@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
-import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
+import { WavesShell } from '../components/brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -181,44 +181,13 @@ export default function PublicBookingPage() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', background: BRAND.sand, fontFamily: "'Inter', system-ui, sans-serif" }}>
+    <WavesShell variant="customer" topBar="solid">
       <style>{`
-        /* Inter / Anton / Montserrat load globally via client/index.html */
         @keyframes slideUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
         @keyframes checkPop { 0% { transform:scale(0) } 60% { transform:scale(1.2) } 100% { transform:scale(1) } }
         @keyframes pulse { 0%,100% { transform:scale(1) } 50% { transform:scale(1.03) } }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        input, select, button, textarea { font-family: inherit; }
         input:focus { border-color: ${BRAND.teal} !important; }
       `}</style>
-
-      {/* Header */}
-      <div style={{ position: 'relative', overflow: 'hidden', background: BRAND.navy, padding: '18px 24px', display: 'flex', alignItems: 'center', gap: 12 }}>
-        {/* Hero video — waves-hero-service.mp4 */}
-        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
-          aria-hidden="true">
-          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
-        </video>
-        <div style={{
-          position: 'relative', zIndex: 1,
-          width: 36, height: 36, borderRadius: '50%', background: BRAND.teal,
-          display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff',
-          fontWeight: 700, fontSize: 16,
-        }}>W</div>
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          <h1 style={{
-            color: '#fff',
-            fontFamily: "'Anton', 'Luckiest Guy', cursive",
-            fontWeight: 400, fontSize: 22,
-            letterSpacing: '0.02em', lineHeight: 1,
-            margin: 0,
-          }}>
-            Waves Pest Control
-          </h1>
-          <div style={{ color: BRAND.gray400, fontSize: 12, marginTop: 4 }}>Book your service online</div>
-        </div>
-      </div>
 
       {/* Progress bar — steps 1 (address) → 2 (time) → 3 (contact) → 4 (done) */}
       {step < 4 && (
@@ -546,8 +515,7 @@ export default function PublicBookingPage() {
           </div>
         )}
 
-        <BrandFooter />
       </div>
-    </div>
+    </WavesShell>
   );
 }

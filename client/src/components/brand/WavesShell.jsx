@@ -41,12 +41,6 @@ export default function WavesShell({
   const logoWrapStyle = {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 10,
-    color: isTransparent ? '#FFFFFF' : 'var(--text)',
-    fontFamily: "'Inter', system-ui, sans-serif",
-    fontSize: 'var(--text-md)',
-    fontWeight: 600,
-    letterSpacing: '-0.01em',
   };
 
   return (
@@ -64,7 +58,6 @@ export default function WavesShell({
         <header style={topBarStyle}>
           <div style={logoWrapStyle}>
             <WavesMark size={28} fill={markFill} />
-            <span>Waves</span>
           </div>
           <HelpPhoneLink tone={phoneTone} />
         </header>
