@@ -533,6 +533,24 @@ export default function EstimateViewPage() {
                 waveGuardTier={pricing.waveGuardTier}
               />
 
+              {pricing.setupFee && (
+                <div style={{
+                  background: W.white, borderRadius: 12,
+                  padding: '12px 16px', marginBottom: 16,
+                  border: `1px solid rgba(15,23,42,0.08)`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                }}>
+                  <div style={{ fontSize: 14, color: W.textBody, lineHeight: 1.4 }}>
+                    <span style={{ fontWeight: 600, color: W.navy }}>+ {fmtMoney(pricing.setupFee.amount)} one-time {pricing.setupFee.label}</span>
+                    {pricing.setupFee.waivedWithPrepay && (
+                      <span style={{ display: 'block', fontSize: 12, color: W.textCaption || W.textBody, marginTop: 2 }}>
+                        Waived when you prepay the year upfront.
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
               <IncludedChecklist included={currentFrequency?.included || []} />
 
               <AddOnsBlock
