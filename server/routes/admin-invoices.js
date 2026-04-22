@@ -214,6 +214,71 @@ router.post('/:id/void', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:id/send-receipt — operator-triggered receipt delivery for a paid
+// invoice. Hits the branded email + the invoice_receipt SMS template, then
+// stamps invoices.receipt_sent_at so the UI can mark the service closed.
+// Body: { memo?: string (≤400 chars), via?: 'email'|'sms'|'both' (default 'both') }
+router.post('/:id/send-receipt', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { memo, via = 'both' } = req.body || {};
+    if (!['email', 'sms', 'both'].includes(via)) {
+      return res.status(400).json({ error: "via must be 'email', 'sms', or 'both'" });
+    }
+    const trimmedMemo = typeof memo === 'string' ? memo.trim().slice(0, 400) : '';
+
+    const invoice = await db('invoices').where({ id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoice.status !== 'paid') {
+      return res.status(400).json({ error: 'Invoice is not paid — receipt can only be sent for paid invoices' });
+    }
+
+    const { sendReceiptEmail } = require('../services/invoice-email');
+
+    let emailResult = { ok: false, skipped: true };
+    let smsResult = { ok: false, skipped: true };
+
+    if (via === 'email' || via === 'both') {
+      emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
+    }
+    if (via === 'sms' || via === 'both') {
+      // InvoiceService.sendReceipt is a fire-and-forget helper that logs its
+      // own failures; wrap in try/catch so one side failing doesn't block
+      // the other or the stamp below.
+      try {
+        await InvoiceService.sendReceipt(id);
+        smsResult = { ok: true };
+      } catch (err) {
+        smsResult = { ok: false, error: err.message };
+      }
+    }
+
+    // Stamp receipt metadata whenever at least one channel succeeded. If
+    // both failed, leave receipt_sent_at NULL so the operator can retry.
+    if (emailResult.ok || smsResult.ok) {
+      await db('invoices').where({ id }).update({
+        receipt_sent_at: db.fn.now(),
+        receipt_memo: trimmedMemo || null,
+      });
+      await db('activity_log').insert({
+        customer_id: invoice.customer_id,
+        action: 'invoice_receipt_sent',
+        description: `Receipt sent for invoice ${invoice.invoice_number}`
+          + ` (${[emailResult.ok && 'email', smsResult.ok && 'sms'].filter(Boolean).join(' + ')})`
+          + (trimmedMemo ? ` — memo: ${trimmedMemo.slice(0, 80)}${trimmedMemo.length > 80 ? '…' : ''}` : ''),
+      }).catch((err) => logger.warn(`[admin-invoices] activity_log insert failed: ${err.message}`));
+    }
+
+    const updated = await db('invoices').where({ id }).first();
+    res.json({
+      ok: emailResult.ok || smsResult.ok,
+      email: emailResult,
+      sms: smsResult,
+      invoice: updated,
+    });
+  } catch (err) { next(err); }
+});
+
 // ─────────────────────────────────────────────────────────────
 // Per-invoice follow-up sequence (Day 0/3/7/14/30 reminder chain)
 // ─────────────────────────────────────────────────────────────

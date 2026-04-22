@@ -377,6 +377,7 @@ const InvoiceService = {
         'customers.first_name',
         'customers.last_name',
         'customers.phone',
+        'customers.email',
         'customers.waveguard_tier',
         db.raw(`(
           SELECT json_build_object('brand', card_brand, 'last_four', last_four)

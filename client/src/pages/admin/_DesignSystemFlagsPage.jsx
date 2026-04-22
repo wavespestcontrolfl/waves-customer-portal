@@ -46,6 +46,7 @@ const KNOWN_FLAGS = [
   'ff_customer_login_v2',
   'ff_customer_pay_v2',
   'ff_customer_receipt_v2',
+  'ff_invoice_send_receipt',
 ];
 
 export default function DesignSystemFlagsPage() {

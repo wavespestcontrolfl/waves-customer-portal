@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -131,6 +132,8 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [expanded, setExpanded] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [batchSending, setBatchSending] = useState(false);
+  const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
+  const sendReceiptEnabled = useFeatureFlag('ff_invoice_send_receipt');
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ limit: '100' });
@@ -400,6 +403,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                             <span>💳 {cardOnFile.brand || 'Card'} •{cardOnFile.last_four} on file</span>
                           )}
                           {inv.sms_sent_at && <span>SMS: {new Date(inv.sms_sent_at).toLocaleString()}</span>}
+                          {inv.receipt_sent_at && <span style={{ color: D.green }}>✉ Receipt sent {new Date(inv.receipt_sent_at).toLocaleString()}</span>}
                         </div>
 
                         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -419,6 +423,15 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                             >Charge in person</button>
                           )}
                           {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
+                          {sendReceiptEnabled && inv.status === 'paid' && (
+                            <button
+                              onClick={() => setReceiptModalInvoice(inv)}
+                              style={sBtn(inv.receipt_sent_at ? D.card : D.heading, inv.receipt_sent_at ? D.text : D.white, isMobile)}
+                              title={inv.receipt_sent_at ? 'Resend receipt + log another touch' : 'Email + SMS the receipt and close the service'}
+                            >
+                              {inv.receipt_sent_at ? 'Resend receipt' : 'Send receipt & close'}
+                            </button>
+                          )}
                         </div>
 
                         {inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft' && (
@@ -447,6 +460,125 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
           <button onClick={clearSelection} style={sBtn('transparent', D.white, isMobile)}>Clear</button>
         </div>
       )}
+
+      {receiptModalInvoice && (
+        <SendReceiptModal
+          invoice={receiptModalInvoice}
+          isMobile={isMobile}
+          onClose={() => setReceiptModalInvoice(null)}
+          onSent={() => { setReceiptModalInvoice(null); showToast('Receipt sent'); load(); onRefresh(); }}
+          onError={(msg) => showToast(msg)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Send Receipt Modal ──
+// Per-invoice action for paid invoices. Memo is ephemeral (stored on the
+// invoice row as receipt_memo for audit) — not a customer preference.
+function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
+  const [memo, setMemo] = useState('');
+  const [sendEmail, setSendEmail] = useState(!!invoice.email);
+  const [sendSms, setSendSms] = useState(!!invoice.phone);
+  const [sending, setSending] = useState(false);
+
+  const hasEmail = !!invoice.email;
+  const hasPhone = !!invoice.phone;
+  const anyChannel = sendEmail || sendSms;
+
+  const handleSend = async () => {
+    if (!anyChannel || sending) return;
+    const via = sendEmail && sendSms ? 'both' : sendEmail ? 'email' : 'sms';
+    setSending(true);
+    try {
+      const res = await adminFetch(`/admin/invoices/${invoice.id}/send-receipt`, {
+        method: 'POST',
+        body: JSON.stringify({ memo: memo.trim() || undefined, via }),
+      });
+      if (!res.ok) {
+        const detail = [res.email?.error, res.sms?.error].filter(Boolean).join(' · ') || 'Send failed';
+        onError(`Receipt send failed: ${detail}`);
+      } else {
+        onSent();
+      }
+    } catch (err) {
+      onError(`Receipt send failed: ${err.message}`);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 400,
+        display: 'flex', alignItems: isMobile ? 'flex-end' : 'center', justifyContent: 'center',
+        padding: isMobile ? 0 : 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: D.card, borderRadius: isMobile ? '16px 16px 0 0' : 14,
+          width: '100%', maxWidth: 440, padding: isMobile ? '24px 20px 28px' : 28,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.28)',
+        }}
+      >
+        <div style={{ fontSize: 20, fontWeight: 700, color: D.heading, marginBottom: 4 }}>
+          Send receipt & close
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
+          Invoice #{invoice.invoice_number} · ${parseFloat(invoice.total).toFixed(2)} · {invoice.first_name} {invoice.last_name}
+        </div>
+
+        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: D.text, marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Optional memo
+        </label>
+        <textarea
+          value={memo}
+          onChange={(e) => setMemo(e.target.value.slice(0, 400))}
+          placeholder="e.g. Left a spare trap in the garage — rebait in 2 weeks."
+          rows={3}
+          style={{ ...sInput(isMobile), resize: 'vertical', minHeight: 72, fontFamily: 'inherit' }}
+        />
+        <div style={{ fontSize: 11, color: D.muted, textAlign: 'right', marginTop: 4, marginBottom: 18 }}>
+          {memo.length}/400
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 8 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: hasEmail ? 'pointer' : 'not-allowed', opacity: hasEmail ? 1 : 0.5 }}>
+            <input type="checkbox" checked={sendEmail && hasEmail} disabled={!hasEmail} onChange={(e) => setSendEmail(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.heading }} />
+            <span style={{ fontSize: 14, color: D.text }}>
+              Email {invoice.email ? <span style={{ color: D.muted }}>· {invoice.email}</span> : <span style={{ color: D.muted, fontStyle: 'italic' }}>· no email on file</span>}
+            </span>
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: hasPhone ? 'pointer' : 'not-allowed', opacity: hasPhone ? 1 : 0.5 }}>
+            <input type="checkbox" checked={sendSms && hasPhone} disabled={!hasPhone} onChange={(e) => setSendSms(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.heading }} />
+            <span style={{ fontSize: 14, color: D.text }}>
+              SMS {invoice.phone ? <span style={{ color: D.muted }}>· {invoice.phone}</span> : <span style={{ color: D.muted, fontStyle: 'italic' }}>· no phone on file</span>}
+            </span>
+          </label>
+        </div>
+
+        {invoice.receipt_sent_at && (
+          <div style={{ marginTop: 14, padding: '10px 12px', background: '#FEF3C7', border: `1px solid ${D.amber}`, borderRadius: 8, fontSize: 12, color: D.text, lineHeight: 1.45 }}>
+            A receipt was already sent on {new Date(invoice.receipt_sent_at).toLocaleString()}. Sending again logs a second touch.
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 20 }}>
+          <button onClick={onClose} disabled={sending} style={sBtn('transparent', D.text, isMobile)}>Cancel</button>
+          <button
+            onClick={handleSend}
+            disabled={!anyChannel || sending}
+            style={{ ...sBtn(D.heading, D.white, isMobile), opacity: (!anyChannel || sending) ? 0.5 : 1 }}
+          >
+            {sending ? 'Sending…' : 'Send receipt'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
