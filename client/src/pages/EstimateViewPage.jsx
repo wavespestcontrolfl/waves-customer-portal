@@ -200,7 +200,11 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
         Confirm your booking
       </div>
       <div style={{ fontSize: 18, color: W.navy, marginTop: 10, lineHeight: 1.5 }}>
-        Pay option: <strong>{paymentPreference === 'deposit_now' ? 'Deposit now' : 'At the visit'}</strong>
+        Pay option: <strong>{
+          paymentPreference === 'deposit_now' ? 'Deposit now'
+          : paymentPreference === 'prepay_annual' ? 'Pay the year upfront'
+          : 'At the visit'
+        }</strong>
       </div>
       <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
         Slot: {slotId}
@@ -575,6 +579,7 @@ export default function EstimateViewPage() {
               onSelect={handlePaymentChoice}
               disabled={ctaPhase === 'submitting'}
               serviceMode={serviceMode}
+              setupFee={pricing.setupFee || null}
             />
           ) : null}
 

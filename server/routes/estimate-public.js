@@ -594,9 +594,14 @@ router.put('/:token/accept', async (req, res, next) => {
     const slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
     const paymentMethodPreference = (() => {
       const raw = req.body?.paymentMethodPreference;
-      if (raw === 'deposit_now' || raw === 'pay_at_visit') return raw;
+      if (raw === 'deposit_now' || raw === 'pay_at_visit' || raw === 'prepay_annual') return raw;
       return null;
     })();
+    // Billing term is a separate concept from payment method. "prepay_annual"
+    // means the customer is paying for 12 months upfront, which waives the
+    // $99 WaveGuard setup fee. The converter reads this to decide what kind
+    // of draft invoice to create at accept time.
+    const billingTerm = paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : 'standard';
     // serviceMode — 'recurring' (default) | 'one_time'. When one_time, the
     // customer picked the inline toggle on the v2 estimate view and
     // explicitly asked for a single visit instead of a recurring plan.
@@ -809,8 +814,8 @@ router.put('/:token/accept', async (req, res, next) => {
     if (customerId && !treatAsOneTime) {
       try {
         const EstimateConverter = require('../services/estimate-converter');
-        await EstimateConverter.convertEstimate(estimate.id);
-        logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id}`);
+        await EstimateConverter.convertEstimate(estimate.id, { billingTerm });
+        logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm})`);
       } catch (e) { logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`); }
     } else if (customerId && treatAsOneTime) {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
