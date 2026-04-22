@@ -25,9 +25,6 @@ class AppointmentTagger {
         case 'wdo_inspection': await this.triggerWDOPrep(service); break;
         case 'german_roach': case 'cockroach': await this.triggerPestPrep(service, 'cockroach'); break;
         case 'bed_bug': await this.triggerPestPrep(service, 'bed_bug'); break;
-        case 'termite_treatment': await this.triggerPestPrep(service, 'termite'); break;
-        case 'rodent_exclusion': await this.triggerPestPrep(service, 'rodent'); break;
-        case 'tent_fumigation': await this.triggerPestPrep(service, 'fumigation'); break;
       }
     } catch (err) {
       logger.error(`Appointment automation failed for ${type.tag}: ${err.message}`);
@@ -198,13 +195,28 @@ class AppointmentTagger {
   }
 
   getPrepSMS(pestType, service) {
-    const date = new Date(service.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+    // Knex returns DATE columns as Date objects; guard both shapes so the
+    // template never renders "Invalid Date" in a customer-facing SMS.
+    // Mirrors the pattern in server/services/invoice.js (sendViaSMS).
+    let date = '';
+    try {
+      const d = service.scheduled_date instanceof Date
+        ? service.scheduled_date
+        : service.scheduled_date
+          ? new Date(service.scheduled_date + 'T12:00:00')
+          : null;
+      if (d && !isNaN(d.getTime())) {
+        date = d.toLocaleDateString('en-US', {
+          weekday: 'long', month: 'short', day: 'numeric',
+          timeZone: 'America/New_York',
+        });
+      }
+    } catch { date = ''; }
+    if (!date) date = 'your scheduled date';
+
     const msgs = {
       cockroach: `Hi ${service.first_name}! Your cockroach treatment is ${date}. To prep:\n• Clear under sinks and behind appliances\n• Remove items from cabinet bases\n• Clean food debris, take out trash night before\n• Leave home 2-4h after treatment (pets too)\n• Don't clean treated areas for 2 weeks\nQuestions? Reply here. — Waves`,
       bed_bug: `Hi ${service.first_name}! Bed bug treatment prep for ${date} is CRITICAL:\n• Strip bedding — wash/dry on HIGH HEAT (130°F+)\n• Remove items from nightstands/dressers near bed\n• Pull beds 6" from walls\n• Bag all clothing — wash/dry HIGH HEAT\n• Vacuum mattress, box spring, baseboards — empty vacuum outside\n• DO NOT move items to other rooms\nQuestions? Reply here. — Adam, Waves`,
-      termite: `Hi ${service.first_name}! Termite treatment on ${date}. To prep:\n• Clear items 18" from interior perimeter walls\n• Move items from garage walls\n• Trim vegetation 12" from foundation\n• Ensure all rooms accessible\n• We may drill through garage concrete — clear vehicle access\nTreatment takes 3-5h. You can stay home. — Waves`,
-      rodent: `Hi ${service.first_name}! Rodent exclusion on ${date}. To prep:\n• Note where you've heard/seen activity\n• Clear around exterior foundation for inspection\n• Clear path to attic access\n• Secure pet food in sealed containers\n• Save photos of droppings/gnaw marks\nInspection takes 60-90 min. — Waves`,
-      fumigation: `Hi ${service.first_name}! Tent fumigation on ${date}. CRITICAL PREP:\n• Vacate home 2-3 days (ALL pets, plants, fish)\n• Double-bag ALL food/medicine in Nylofume bags (we provide)\n• Open all interior doors, drawers, cabinets\n• Turn off all gas/pilot lights\n• Remove bedding from mattresses\n• Trim vegetation 18" from structure\n• Arrange lodging\nCall (941) 318-7612 with questions. — Adam, Waves`,
     };
     return msgs[pestType];
   }
