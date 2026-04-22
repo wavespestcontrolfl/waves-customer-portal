@@ -608,6 +608,10 @@ function initScheduledJobs() {
       await SearchConsole.syncDailyData(3);
     } catch (err) {
       logger.error(`GSC sync failed: ${err.message}`);
+      try {
+        const { triggerNotification } = require('./notification-triggers');
+        await triggerNotification('seo_sync_failed', { source: 'GSC', reason: err.message });
+      } catch { /* notify best-effort */ }
     }
   }, { timezone: 'America/New_York' });
 
@@ -627,6 +631,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6AM ET — Credential expiry check (credentials v1 §7)
+  // Scans business_credentials for anything expiring within 60 days; fires a
+  // `credential_expiring_soon` notification per credential (deduped 7d).
+  // =========================================================================
+  cron.schedule('5 6 * * *', async () => {
+    logger.info('Running: Credential expiry check');
+    try {
+      const { runCredentialExpiryCheck } = require('./credential-expiry-checker');
+      await runCredentialExpiryCheck();
+    } catch (err) {
+      logger.error(`Credential expiry check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:30AM — Sync Google Business Profile performance metrics
   // =========================================================================
   cron.schedule('30 6 * * *', async () => {
@@ -636,6 +655,10 @@ function initScheduledJobs() {
       await GoogleBusiness.syncPerformanceDaily(3);
     } catch (err) {
       logger.error(`GBP performance sync failed: ${err.message}`);
+      try {
+        const { triggerNotification } = require('./notification-triggers');
+        await triggerNotification('seo_sync_failed', { source: 'GBP', reason: err.message });
+      } catch { /* notify best-effort */ }
     }
   }, { timezone: 'America/New_York' });
 

@@ -10,8 +10,8 @@
  * Threshold lives in env so Virginia can tune without a deploy:
  *   ESTIMATE_EXPIRATION_DAYS=7
  */
-const db = require('../db');
-const logger = require('../utils/logger');
+const db = require('../models/db');
+const logger = require('./logger');
 
 function getThresholdDays() {
   const raw = parseInt(process.env.ESTIMATE_EXPIRATION_DAYS, 10);
@@ -43,6 +43,19 @@ async function runEstimateExpiration() {
     .update({ status: 'expired', updated_at: now });
 
   logger.info(`[estimate-expiration] thresholdDays=${thresholdDays} aged=${agedResult} dateExpired=${dateResult}`);
+
+  // Fire a single batched notification when anything flipped — one ping per
+  // cron run, not per estimate, so Virginia doesn't get 5 bells at 6am.
+  const total = (agedResult || 0) + (dateResult || 0);
+  if (total > 0) {
+    try {
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('estimate_expired', { count: total });
+    } catch (e) {
+      logger.warn(`[estimate-expiration] notification trigger failed: ${e.message}`);
+    }
+  }
+
   return { aged: agedResult, dateExpired: dateResult };
 }
 
