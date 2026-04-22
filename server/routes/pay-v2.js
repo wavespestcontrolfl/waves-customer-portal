@@ -4,6 +4,7 @@ const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
+const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
 const logger = require('../services/logger');
 
 /**
@@ -154,6 +155,19 @@ router.post('/:token/confirm', async (req, res, next) => {
   } catch (err) {
     logger.error(`[pay-v2] Confirm error: ${err.message}`);
     res.status(400).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// GET /api/pay/:token/invoice.pdf — Branded invoice PDF for download/print
+// =========================================================================
+router.get('/:token/invoice.pdf', async (req, res, next) => {
+  try {
+    const data = await InvoiceService.getByToken(req.params.token);
+    if (!data) return res.status(404).json({ error: 'Invoice not found' });
+    generateInvoicePDF(data, res);
+  } catch (err) {
+    next(err);
   }
 });
 

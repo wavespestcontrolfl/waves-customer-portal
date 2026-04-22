@@ -90,3 +90,40 @@ export function refetchFlags() {
   inflight = null;
   return loadFlags();
 }
+
+// Paired-flag gate. Returns enabled=true only when BOTH keys are on.
+// If exactly one is on (mismatched rollout), logs an error and treats both
+// as off — the non-obvious rule for /pay + /receipt so we never charge a
+// customer and 404 their receipt link.
+const pairedLoggedOnce = new Set();
+export function usePairedFeatureFlag(keyA, keyB, defaultValue = false) {
+  const [state, setState] = useState(() => ({
+    enabled: defaultValue,
+    ready: cache !== null,
+    mismatched: false,
+  }));
+  useEffect(() => {
+    let mounted = true;
+    loadFlags().then((flags) => {
+      if (!mounted) return;
+      const a = Object.prototype.hasOwnProperty.call(flags, keyA) ? !!flags[keyA] : defaultValue;
+      const b = Object.prototype.hasOwnProperty.call(flags, keyB) ? !!flags[keyB] : defaultValue;
+      const mismatched = a !== b;
+      if (mismatched) {
+        const tag = `${keyA}|${keyB}`;
+        if (!pairedLoggedOnce.has(tag)) {
+          pairedLoggedOnce.add(tag);
+          console.error(
+            `[usePairedFeatureFlag] Mismatched paired flags: ${keyA}=${a}, ${keyB}=${b}. ` +
+            `Treating both as OFF to prevent half-rollout (e.g. /pay charges while /receipt 404s).`,
+          );
+        }
+      }
+      setState({ enabled: !mismatched && a && b, ready: true, mismatched });
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [keyA, keyB, defaultValue]);
+  return state;
+}
