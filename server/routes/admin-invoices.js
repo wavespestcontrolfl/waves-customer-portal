@@ -157,7 +157,7 @@ router.post('/batch', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /batch/send — send multiple existing invoices via SMS
+// POST /batch/send — send multiple existing invoices via SMS + email
 // Body: { invoiceIds: string[] }
 router.post('/batch/send', async (req, res, next) => {
   try {
@@ -166,16 +166,31 @@ router.post('/batch/send', async (req, res, next) => {
       return res.status(400).json({ error: 'invoiceIds[] required' });
     }
 
+    const { sendInvoiceEmail } = require('../services/invoice-email');
     const sent = [];
     const failed = [];
 
     for (const invoiceId of invoiceIds) {
+      const ok = { sms: false, email: false };
+      const errs = [];
       try {
-        const result = await InvoiceService.sendViaSMS(invoiceId);
-        sent.push({ invoiceId, result });
+        await InvoiceService.sendViaSMS(invoiceId);
+        ok.sms = true;
       } catch (err) {
-        logger.error(`[admin-invoices:batch-send] failed for ${invoiceId}: ${err.message}`);
-        failed.push({ invoiceId, error: err.message });
+        errs.push(`sms: ${err.message}`);
+      }
+      try {
+        const r = await sendInvoiceEmail(invoiceId);
+        if (r?.ok) ok.email = true;
+        else if (r?.error) errs.push(`email: ${r.error}`);
+      } catch (err) {
+        errs.push(`email: ${err.message}`);
+      }
+      if (ok.sms || ok.email) {
+        sent.push({ invoiceId, channels: ok });
+      } else {
+        logger.error(`[admin-invoices:batch-send] ${invoiceId}: ${errs.join(' | ')}`);
+        failed.push({ invoiceId, error: errs.join(' | ') });
       }
     }
 
@@ -198,11 +213,39 @@ router.put('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /:id/send — send invoice via SMS
+// POST /:id/send — send invoice via SMS + email
+// SMS fires via InvoiceService.sendViaSMS (the invoice_sent template);
+// email via the branded sendInvoiceEmail helper with the PDF attached.
+// Either channel failing alone doesn't abort the other — returns per-
+// channel status so the UI can toast accordingly. Missing phone / email
+// on the customer record is treated as "channel skipped", not an error.
 router.post('/:id/send', async (req, res, next) => {
   try {
-    const result = await InvoiceService.sendViaSMS(req.params.id);
-    res.json(result);
+    const { id } = req.params;
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+
+    const sms = { ok: false };
+    const email = { ok: false };
+
+    try {
+      await InvoiceService.sendViaSMS(id);
+      sms.ok = true;
+    } catch (err) {
+      sms.error = err.message;
+    }
+
+    try {
+      const r = await sendInvoiceEmail(id);
+      if (r?.ok) email.ok = true;
+      else if (r?.error) email.error = r.error;
+    } catch (err) {
+      email.error = err.message;
+    }
+
+    if (!sms.ok && !email.ok) {
+      return res.status(500).json({ ok: false, sms, email });
+    }
+    res.json({ ok: true, sms, email });
   } catch (err) { next(err); }
 });
 

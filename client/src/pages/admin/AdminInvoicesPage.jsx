@@ -62,7 +62,9 @@ export default function AdminInvoicesPage() {
       {tab === 'create' && <CreateInvoice showToast={showToast} onCreated={() => { loadStats(); setTab('list'); }} isMobile={isMobile} />}
 
       <div style={{
-        position: 'fixed', bottom: 20, right: 20, background: D.card, border: `1px solid ${D.green}`, borderRadius: 8,
+        position: 'fixed',
+        bottom: isMobile ? 'calc(72px + env(safe-area-inset-bottom, 0px))' : 20,
+        right: 20, background: D.card, border: `1px solid ${D.green}`, borderRadius: 8,
         padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 32px rgba(0,0,0,.4)',
         zIndex: 300, fontSize: 12, transform: toast ? 'translateY(0)' : 'translateY(80px)', opacity: toast ? 1 : 0, transition: 'all .3s', pointerEvents: 'none',
       }}>
@@ -151,8 +153,9 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   useEffect(() => { load(); }, [load]);
 
   const handleSend = async (id) => {
-    await adminFetch(`/admin/invoices/${id}/send`, { method: 'POST' });
-    showToast('Invoice sent via SMS');
+    const res = await adminFetch(`/admin/invoices/${id}/send`, { method: 'POST' });
+    const channels = [res?.sms?.ok && 'SMS', res?.email?.ok && 'email'].filter(Boolean);
+    showToast(channels.length ? `Invoice sent (${channels.join(' + ')})` : 'Invoice send failed');
     load(); onRefresh();
   };
 
@@ -174,7 +177,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const handleBatchSend = async () => {
     const ids = Array.from(selected);
     if (ids.length === 0) return;
-    if (!confirm(`Send ${ids.length} invoice${ids.length === 1 ? '' : 's'} via SMS?`)) return;
+    if (!confirm(`Send ${ids.length} invoice${ids.length === 1 ? '' : 's'} via SMS + email?`)) return;
     setBatchSending(true);
     try {
       const result = await adminFetch('/admin/invoices/batch/send', {
@@ -407,8 +410,8 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                         </div>
 
                         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          {inv.status === 'draft' && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)}>Send SMS</button>}
-                          {(inv.status === 'sent' || inv.status === 'viewed') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)}>Resend</button>}
+                          {inv.status === 'draft' && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Send invoice via SMS + email">Send</button>}
+                          {(inv.status === 'sent' || inv.status === 'viewed') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Resend invoice via SMS + email">Resend</button>}
                           {inv.status !== 'paid' && inv.status !== 'void' && (
                             <button onClick={() => { navigator.clipboard.writeText(`${domain}/pay/${inv.token}`); showToast('Pay link copied'); }} style={sBtn(D.card, D.text, isMobile)}>Copy Link</button>
                           )}
@@ -449,13 +452,15 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
 
       {selected.size > 0 && (
         <div style={{
-          position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+          position: 'fixed',
+          bottom: isMobile ? 'calc(72px + env(safe-area-inset-bottom, 0px))' : 20,
+          left: '50%', transform: 'translateX(-50%)',
           background: D.heading, color: D.white, borderRadius: 10, padding: '12px 20px',
           display: 'flex', alignItems: 'center', gap: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', zIndex: 50,
         }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}>{selected.size} selected</span>
           <button onClick={handleBatchSend} disabled={batchSending} style={{ ...sBtn(D.white, D.heading, isMobile), opacity: batchSending ? 0.6 : 1 }}>
-            {batchSending ? 'Sending…' : `Send ${selected.size} via SMS`}
+            {batchSending ? 'Sending…' : `Send ${selected.size}`}
           </button>
           <button onClick={clearSelection} style={sBtn('transparent', D.white, isMobile)}>Clear</button>
         </div>
@@ -807,7 +812,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           {/* Send toggle */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
             <input type="checkbox" checked={sendAfterCreate} onChange={e => setSendAfterCreate(e.target.checked)} id="send-toggle" />
-            <label htmlFor="send-toggle" style={{ fontSize: 13, color: D.text }}>Send via SMS immediately after creating</label>
+            <label htmlFor="send-toggle" style={{ fontSize: 13, color: D.text }}>Send via SMS + email immediately after creating</label>
           </div>
 
           <button onClick={handleCreate} disabled={saving} style={{ ...sBtn(D.green, D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1 }}>
