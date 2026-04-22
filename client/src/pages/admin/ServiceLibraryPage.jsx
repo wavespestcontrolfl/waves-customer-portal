@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { DiscountsSection } from './DiscountsTabs';
+import useIsMobile from '../../hooks/useIsMobile';
+import MobileServiceLibrary from '../../components/admin/MobileServiceLibrary';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -220,6 +222,7 @@ function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
 }
 
 export default function ServiceLibraryPage() {
+  const isMobile = useIsMobile(768);
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
   const [filters, setFilters] = useState({ category: '', billing_type: '', is_active: 'true', search: '' });
@@ -252,6 +255,8 @@ export default function ServiceLibraryPage() {
     showToast('Service created');
     loadServices();
   };
+
+  if (isMobile) return <MobileServiceLibrary />;
 
   const tabs = [
     { key: 'catalog', label: 'Service Catalog' },
