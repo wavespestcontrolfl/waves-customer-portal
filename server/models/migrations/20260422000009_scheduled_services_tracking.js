@@ -45,14 +45,17 @@ exports.up = async function (knex) {
     'track_token_expires_at',
   ];
   for (const col of orphanColumns) {
-    await knex.raw(`ALTER TABLE scheduled_services DROP COLUMN IF EXISTS ${col}`);
+    // CASCADE so any lingering dependency we didn't explicitly drop above
+    // (implicit unique constraints, multi-column indexes we don't know the
+    // exact name of) gets cleaned up with the column.
+    await knex.raw(`ALTER TABLE scheduled_services DROP COLUMN IF EXISTS ${col} CASCADE`);
   }
 
   // 2. (Re)create the enum type. DROP first in case a prior failed run
-  // left a stale type; safe because we dropped the only column that
-  // could reference it above.
+  // left a stale type; CASCADE in case some column/function we missed
+  // still references it.
   await knex.raw('DROP INDEX IF EXISTS idx_scheduled_services_track_token');
-  await knex.raw('DROP TYPE IF EXISTS track_state');
+  await knex.raw('DROP TYPE IF EXISTS track_state CASCADE');
   await knex.raw(`
     CREATE TYPE track_state AS ENUM (
       'scheduled','en_route','on_property','complete','cancelled'
