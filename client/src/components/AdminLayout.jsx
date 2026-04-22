@@ -35,6 +35,7 @@ const NAV_SECTIONS = [
     { path: '/admin/fleet', icon: '🚐', label: 'Fleet & Mileage' },
     { path: '/admin/inventory', icon: '📦', label: 'Inventory' },
     { path: '/admin/compliance', icon: '📋', label: 'Compliance' },
+    { path: '/admin/credentials', icon: '🪪', label: 'Credentials' },
     { path: '/admin/lawn-assessment', icon: '🌿', label: 'Lawn Assessment' },
   ]},
   { section: 'Intelligence', items: [
