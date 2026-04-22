@@ -366,9 +366,24 @@ async function getSlotDebug(estimateId, userOpts = {}) {
   };
 }
 
+// Narrow cache invalidation for PR B's accept handler — one slot booking
+// on estimate X means estimate X's cached slot list is stale, but nothing
+// else is. Scans all cache entries and drops anything keyed to this
+// estimate (across all hour buckets — the key shape is `${estimateId}:${hour}`).
+function invalidateEstimate(estimateId) {
+  if (!estimateId) return 0;
+  const prefix = `${estimateId}:`;
+  let dropped = 0;
+  for (const k of wrapperCache.keys()) {
+    if (k.startsWith(prefix)) { wrapperCache.delete(k); dropped++; }
+  }
+  return dropped;
+}
+
 module.exports = {
   getAvailableSlots,
   getSlotDebug,
+  invalidateEstimate,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
     parseAnchorTime,
