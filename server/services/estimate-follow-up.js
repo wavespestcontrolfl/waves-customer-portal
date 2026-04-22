@@ -17,6 +17,78 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 
+// ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
+// Centralized so the behavior stays consistent across all four stages.
+
+const TERMINAL_STATUSES = new Set(['declined', 'accepted', 'expired', 'void']);
+
+// 9a–7p America/New_York. Cron runs every 2h; sends blocked outside the
+// window will be re-evaluated at the next cron tick and fire then.
+function isQuietHours(now = new Date()) {
+  const hour = parseInt(
+    new Intl.DateTimeFormat('en-US', {
+      hour: '2-digit',
+      hour12: false,
+      timeZone: 'America/New_York',
+    }).format(now),
+    10,
+  );
+  if (Number.isNaN(hour)) return false; // fail open — better to send than stall
+  return hour < 9 || hour >= 19;
+}
+
+// Engagement signal: if the customer opened the estimate within the last N
+// hours (default 2), skip the scheduled nudge. They're thinking about it
+// right now and don't need a poke.
+function wasRecentlyOpened(est, hours = 2) {
+  const last = est.last_viewed_at || est.viewed_at;
+  if (!last) return false;
+  const ts = new Date(last).getTime();
+  if (Number.isNaN(ts)) return false;
+  return Date.now() - ts < hours * 3600000;
+}
+
+// Reply-pause: if the customer has SMS'd Waves in the last N days (via
+// phone match or customer_id), pause the cron touch and let Virginia
+// handle it live. Soft-fails if the messages/conversations tables aren't
+// present (e.g. fresh env) so we don't break the whole follow-up loop.
+async function hasRepliedRecently(est, days = 14) {
+  const cutoff = new Date(Date.now() - days * 86400000);
+  try {
+    const q = db('messages')
+      .join('conversations', 'messages.conversation_id', 'conversations.id')
+      .where('messages.direction', 'inbound')
+      .where('messages.channel', 'sms')
+      .where('messages.created_at', '>=', cutoff)
+      .first('messages.id');
+    if (est.customer_id) {
+      q.andWhere(function () {
+        this.where('conversations.customer_id', est.customer_id);
+        if (est.customer_phone) this.orWhere('conversations.contact_phone', est.customer_phone);
+      });
+    } else if (est.customer_phone) {
+      q.andWhere('conversations.contact_phone', est.customer_phone);
+    } else {
+      return false;
+    }
+    const row = await q;
+    return !!row;
+  } catch (e) {
+    logger.warn(`[est-followup] reply-pause check skipped: ${e.message}`);
+    return false; // fail open
+  }
+}
+
+// Unified gate. Returns { skip: true, reason } if the send should be
+// blocked, else { skip: false }. Keeps the per-stage loops readable.
+async function safetyGate(est) {
+  if (TERMINAL_STATUSES.has(est.status)) return { skip: true, reason: `terminal-status:${est.status}` };
+  if (isQuietHours()) return { skip: true, reason: 'quiet-hours' };
+  if (wasRecentlyOpened(est)) return { skip: true, reason: 'recently-opened' };
+  if (await hasRepliedRecently(est)) return { skip: true, reason: 'customer-replied-recently' };
+  return { skip: false };
+}
+
 async function renderTemplate(templateKey, vars, fallback) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -74,6 +146,11 @@ const EstimateFollowUp = {
 
       for (const est of unviewed) {
         try {
+          const gate = await safetyGate(est);
+          if (gate.skip) {
+            logger.info(`[est-followup] Unviewed skip ${est.id}: ${gate.reason}`);
+            continue;
+          }
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -114,6 +191,11 @@ const EstimateFollowUp = {
 
       for (const est of viewedNotAccepted) {
         try {
+          const gate = await safetyGate(est);
+          if (gate.skip) {
+            logger.info(`[est-followup] Viewed skip ${est.id}: ${gate.reason}`);
+            continue;
+          }
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -154,6 +236,11 @@ const EstimateFollowUp = {
 
       for (const est of finalNudge) {
         try {
+          const gate = await safetyGate(est);
+          if (gate.skip) {
+            logger.info(`[est-followup] Final skip ${est.id}: ${gate.reason}`);
+            continue;
+          }
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -196,6 +283,11 @@ const EstimateFollowUp = {
 
       for (const est of expiring) {
         try {
+          const gate = await safetyGate(est);
+          if (gate.skip) {
+            logger.info(`[est-followup] Expiring skip ${est.id}: ${gate.reason}`);
+            continue;
+          }
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
