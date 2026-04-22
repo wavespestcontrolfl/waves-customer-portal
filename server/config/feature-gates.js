@@ -57,6 +57,16 @@ const gates = {
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
   leadAutoBridge: isProd ? process.env.GATE_LEAD_AUTO_BRIDGE === 'true' : true,
+
+  // Field Content Module — master gate for the tech capture → review →
+  // publish pipeline (content_prompts, dispatches, media_uploads,
+  // content_queue). Off means no routes, no cron, no UI. Sub-flags for
+  // phased rollout live in the DB-backed feature_flags table:
+  //   field_content.sms_prompts     (phase 3)
+  //   field_content.auto_assemble   (phase 4)
+  //   field_content.publish_fanout  (phase 5)
+  // All three cascade-require this master gate.
+  fieldContentModule: isProd ? process.env.GATE_FIELD_CONTENT === 'true' : true,
 };
 
 function isEnabled(gate) {
