@@ -8,6 +8,9 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { shortenOrPassthrough } = require('../services/short-url');
 const slotReservation = require('../services/slot-reservation');
+const rateLimit = require('express-rate-limit');
+const { generateEstimate } = require('../services/pricing-engine');
+const addonDefaults = require('../config/addon-defaults-by-frequency');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -887,6 +890,302 @@ router.put('/:token/decline', async (req, res, next) => {
     }
 
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// GET /api/estimates/:token/data — JSON shape for the React v2 view
+// =========================================================================
+// Same-origin auth model as the HTML handler: token is the only gate.
+// Ported view-side-effects:
+//   - view_count++ + last_viewed_at + estimate_views row: ALWAYS on every
+//     200 (React refetches count as views; rate limit + per-open log
+//     together make this noisy-but-safe)
+//   - First-view transition (status='draft' → 'viewed', viewed_at stamp,
+//     office SMS, admin notification): fires only when viewed_at IS NULL
+//     AND request IP isn't in the admin allowlist. Keeps Virginia's
+//     preview clicks from triggering "customer just opened" alerts.
+//
+// Admin allowlist: WAVES_ADMIN_IPS env var, comma-separated. Unset =
+// fire-for-everyone (fail open — matches current HTML behavior).
+//
+// Pricing recompute: runs the engine once per active pest-capable frequency
+// (quarterly / bi_monthly / monthly — engine supports 3 today; 5-stop
+// slider waits on Waves deciding an every_6_weeks discount). Cached per
+// estimateId 10 min.
+
+const ADMIN_IP_ALLOWLIST = (process.env.WAVES_ADMIN_IPS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+const FREQUENCY_LADDER = [
+  { key: 'quarterly',  label: 'Quarterly',   engineFrequency: 'quarterly' },
+  { key: 'bi_monthly', label: 'Bi-monthly',  engineFrequency: 'bimonthly' },
+  { key: 'monthly',    label: 'Monthly',     engineFrequency: 'monthly' },
+];
+
+// In-memory cache keyed on estimateId, 10-min TTL. One JSON endpoint hit
+// produces one cache entry; subsequent hits within 10 min skip the
+// engine recompute entirely.
+const pricingCache = new Map();
+const PRICING_TTL_MS = 10 * 60 * 1000;
+
+function pricingCacheCleanup() {
+  const now = Date.now();
+  for (const [k, v] of pricingCache.entries()) {
+    if (v.expiresAt < now) pricingCache.delete(k);
+  }
+}
+
+function extractRequestIp(req) {
+  const raw = (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
+    .toString().split(',')[0].trim();
+  return raw.slice(0, 64);
+}
+
+function isAdminIp(ip) {
+  if (!ip || !ADMIN_IP_ALLOWLIST.length) return false;
+  return ADMIN_IP_ALLOWLIST.includes(ip);
+}
+
+// Derive engine inputs from stored estimate_data. Admin-UI estimates
+// carry { inputs, result, ... } (v1 client-engine shape). IB-sourced
+// estimates carry { engineInputs, engineResult }. Either works.
+function extractEngineInputs(estData) {
+  if (!estData || typeof estData !== 'object') return null;
+  if (estData.engineInputs && typeof estData.engineInputs === 'object') {
+    return estData.engineInputs;
+  }
+  if (estData.inputs && typeof estData.inputs === 'object') {
+    return estData.inputs;
+  }
+  return null;
+}
+
+function canVaryPestFrequency(engineInputs) {
+  return !!engineInputs?.services?.pest;
+}
+
+// Convert one generateEstimate result into the frequency ladder entry
+// shape the React view consumes.
+function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
+  const summary = engineResult?.summary || {};
+  const lineItems = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
+
+  // "included" checklist: every service on the line-item list counts as
+  // included AT this frequency. For v1 we treat it as a flat boolean
+  // ladder — each frequency's checklist is the line items emitted by
+  // running the engine at that frequency. If a service disappears at
+  // a lower frequency (engine drops it), it simply doesn't appear.
+  const included = lineItems
+    .filter((li) => li && (li.service || li.name))
+    .map((li) => ({
+      key: li.service || li.name,
+      label: li.displayName || li.service || li.name,
+      detail: li.note || li.frequency || null,
+      includedAtThisFrequency: true,
+    }));
+
+  // Add-ons surface = same line-item shape with preChecked decided by
+  // the per-frequency defaults config. Keep the list identical to
+  // included for now; UI can filter by key match against the estimate's
+  // add-on catalog. Simpler than inventing a second surface.
+  const preCheckedKeys = new Set(addonDefaults[ladder.key] || []);
+  const addOns = included.map((item) => ({
+    ...item,
+    preChecked: preCheckedKeys.has(item.key),
+  }));
+
+  const monthly = summary.recurringMonthlyAfterDiscount ?? null;
+  const annual = summary.recurringAnnualAfterDiscount ?? null;
+  const onetime = summary.oneTimeTotal ?? null;
+
+  return {
+    key: ladder.key,
+    label: ladder.label,
+    monthly: monthly != null ? Number(monthly) : null,
+    annual: annual != null ? Number(annual) : null,
+    perVisit: lineItems.find((li) => li?.service === 'pest_control')?.perApp ?? null,
+    oneTimeTotal: onetime != null ? Number(onetime) : null,
+    included,
+    addOns,
+  };
+}
+
+async function buildPricingBundle(estimate) {
+  pricingCacheCleanup();
+  const cached = pricingCache.get(estimate.id);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { ...cached.payload, cacheHit: true };
+  }
+
+  const estData = typeof estimate.estimate_data === 'string'
+    ? JSON.parse(estimate.estimate_data)
+    : estimate.estimate_data;
+  const engineInputs = extractEngineInputs(estData);
+
+  // No engine inputs saved → fall back to the single-frequency view using
+  // stored totals. Not ideal but safer than fabricating a multi-frequency
+  // ladder from nothing. React renders a simplified PriceCard.
+  if (!engineInputs) {
+    const payload = {
+      frequencies: [{
+        key: 'quarterly',
+        label: 'Quarterly',
+        monthly: Number(estimate.monthly_total || 0) || null,
+        annual: Number(estimate.annual_total || 0) || null,
+        perVisit: null,
+        oneTimeTotal: Number(estimate.onetime_total || 0) || null,
+        included: [],
+        addOns: [],
+      }],
+      waveGuardTier: estimate.waveguard_tier || 'Bronze',
+      anchorOneTimePrice: Number(estimate.onetime_total || 0) || null,
+      fallback: 'no_engine_inputs',
+    };
+    pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
+    return payload;
+  }
+
+  const frequencies = [];
+  if (canVaryPestFrequency(engineInputs)) {
+    // Run the engine 3x with different pest frequencies. Each call is
+    // pure JS; no external I/O beyond the engine's own DB constants
+    // sync which is cached internally.
+    for (const ladder of FREQUENCY_LADDER) {
+      const inputsForFrequency = JSON.parse(JSON.stringify(engineInputs));
+      inputsForFrequency.services = inputsForFrequency.services || {};
+      inputsForFrequency.services.pest = {
+        ...(inputsForFrequency.services.pest || {}),
+        frequency: ladder.engineFrequency,
+      };
+      try {
+        const engineResult = generateEstimate(inputsForFrequency);
+        frequencies.push(shapeFrequencyEntry(ladder, engineResult, engineInputs));
+      } catch (err) {
+        logger.error(`[estimate-data] engine failed at ${ladder.key}: ${err.message}`);
+      }
+    }
+  } else {
+    // No pest in the estimate — slider is meaningless. Single entry
+    // using the single engine call at whatever was stored.
+    try {
+      const engineResult = generateEstimate(engineInputs);
+      frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
+    } catch (err) {
+      logger.error(`[estimate-data] engine failed (no-pest path): ${err.message}`);
+    }
+  }
+
+  const anchorOneTimePrice = frequencies[0]?.oneTimeTotal
+    ?? (Number(estimate.onetime_total || 0) || null);
+
+  const payload = {
+    frequencies,
+    waveGuardTier: estimate.waveguard_tier || 'Bronze',
+    anchorOneTimePrice,
+  };
+  pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
+  return payload;
+}
+
+const dataLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
+router.get('/:token/data', dataLimiter, async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+
+    // Always-safe view signals — fire on every 200. Defensive try/catch
+    // because schema drift on estimate_views or a locked row shouldn't
+    // break the customer-facing endpoint.
+    try {
+      await db('estimates').where({ id: estimate.id }).update({
+        view_count: db.raw('COALESCE(view_count, 0) + 1'),
+        last_viewed_at: db.fn.now(),
+      });
+    } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
+
+    const ip = extractRequestIp(req);
+    try {
+      const ua = (req.get('user-agent') || '').slice(0, 1000);
+      await db('estimate_views').insert({
+        estimate_id: estimate.id,
+        viewed_at: db.fn.now(),
+        ip: ip || null,
+        user_agent: ua || null,
+      });
+    } catch (e) { logger.warn(`[estimate-data] estimate_views insert skipped: ${e.message}`); }
+
+    // First-view transition — gate on viewed_at IS NULL AND !adminIP.
+    // Admin allowlist keeps Virginia's preview clicks from firing the
+    // "customer just opened their estimate" office SMS.
+    if (!estimate.viewed_at && !isAdminIp(ip)) {
+      await db('estimates').where({ id: estimate.id }).update({
+        viewed_at: db.fn.now(),
+        status: 'viewed',
+      }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
+
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyAdmin(
+          'estimate',
+          `Estimate viewed: ${estimate.customer_name}`,
+          `${estimate.address || 'no address'} — $${estimate.monthly_total || 0}/mo`,
+          { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
+        );
+      } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
+
+      try {
+        await TwilioService.sendSMS(
+          WAVES_OFFICE_PHONE,
+          `\u{1F440} ${estimate.customer_name} just opened their estimate ($${estimate.monthly_total || 0}/mo ${estimate.waveguard_tier || ''}). Great time to follow up! ${estimate.customer_phone || ''}`
+        );
+      } catch (e) { logger.error(`[estimate-data] office SMS failed: ${e.message}`); }
+    }
+
+    const pricingBundle = await buildPricingBundle(estimate);
+
+    const terminalState = (() => {
+      if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
+      if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) return 'expired';
+      return null;
+    })();
+
+    res.json({
+      estimate: {
+        id: estimate.id,
+        token: estimate.token,
+        slug: estimate.estimate_slug || null,
+        customerFirstName: (estimate.customer_name || '').split(' ')[0] || null,
+        customerName: estimate.customer_name || null,
+        customerPhone: estimate.customer_phone || null,
+        customerEmail: estimate.customer_email || null,
+        address: estimate.address || null,
+        category: estimate.category || 'RESIDENTIAL',
+        createdAt: estimate.created_at,
+        expiresAt: estimate.expires_at,
+        status: estimate.status,
+        satelliteUrl: estimate.satellite_url || null,
+        notes: estimate.notes || null,
+        licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
+      },
+      pricing: pricingBundle,
+      cta: {
+        canAccept: terminalState === null,
+        terminalState,
+      },
+      meta: {
+        generatedAt: new Date().toISOString(),
+        engineVersion: estimate.pricing_version || null,
+        cacheHit: !!pricingBundle.cacheHit,
+      },
+    });
   } catch (err) { next(err); }
 });
 
