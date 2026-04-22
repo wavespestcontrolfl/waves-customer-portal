@@ -172,6 +172,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
           actorId: req.technicianId,
         });
       } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    } else if (status === 'cancelled') {
+      try {
+        await trackTransitions.cancel(svc.id, {
+          reason: notes || null,
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] cancel failed: ${e.message}`); }
     }
 
     await db('activity_log').insert({
