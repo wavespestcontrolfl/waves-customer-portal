@@ -22,6 +22,71 @@ router.use(reportLimiter);
 // Token format: 32-char lowercase hex. Reject anything else immediately.
 const TOKEN_RE = /^[a-f0-9]{32}$/;
 
+// GET /api/reports/project/:token/data — project report JSON for the viewer page
+router.get('/project/:token/data', async (req, res, next) => {
+  if (!TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    const project = await db('projects as p')
+      .where({ 'p.report_token': req.params.token })
+      .leftJoin('customers as c', 'p.customer_id', 'c.id')
+      .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
+      .select(
+        'p.*',
+        'c.first_name', 'c.last_name', 'c.city', 'c.state',
+        't.name as technician_name',
+      )
+      .first();
+    if (!project) return res.status(404).json({ error: 'Report not found' });
+
+    if (!project.report_viewed_at) {
+      await db('projects').where({ id: project.id }).update({ report_viewed_at: db.fn.now() });
+    }
+
+    const photos = await db('project_photos')
+      .where({ project_id: project.id })
+      .orderBy(['visit', 'sort_order', 'created_at']);
+
+    // Build presigned URLs — tokens already gate access, but the S3 objects
+    // themselves are private so the viewer needs signed links.
+    const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+    const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+    const config = require('../config');
+    const s3 = new S3Client({
+      region: config.s3?.region,
+      credentials: config.s3?.accessKeyId
+        ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+        : undefined,
+    });
+    const photosWithUrls = await Promise.all(photos.map(async (ph) => {
+      let url = null;
+      if (config.s3?.bucket && ph.s3_key) {
+        try {
+          url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: 3600 });
+        } catch { /* fall through — photo will render as missing */ }
+      }
+      return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
+    }));
+
+    res.json({
+      projectType: project.project_type,
+      status: project.status,
+      title: project.title,
+      customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
+      cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
+      technicianName: project.technician_name,
+      sentAt: project.sent_at,
+      findings: project.findings,
+      recommendations: project.recommendations,
+      followupDate: project.followup_date,
+      followupFindings: project.followup_findings,
+      followupCompletedAt: project.followup_completed_at,
+      photos: photosWithUrls,
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/reports/:token — public PDF access (no auth)
 router.get('/:token', async (req, res, next) => {
   if (!TOKEN_RE.test(req.params.token || '')) {

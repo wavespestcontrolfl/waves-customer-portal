@@ -77,6 +77,7 @@ const NAV_SECTIONS = [
     { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
     { path: '/admin/timetracking', icon: Clock, label: 'Time Tracking' },
     { path: '/admin/service-library', icon: BookOpen, label: 'Service Library' },
+    { path: '/admin/projects', icon: FileText, label: 'Projects' },
   ]},
   { section: 'Communications', items: [
     { path: '/admin/communications', icon: MessageSquare, label: 'Communications' },

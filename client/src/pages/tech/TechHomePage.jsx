@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
+import CreateProjectModal from '../../components/tech/CreateProjectModal';
 import { etDateString } from '../../lib/timezone';
 
 const DARK = {
@@ -27,7 +28,7 @@ const QUICK_ACTIONS = [
   { icon: '📋', label: 'Field Estimator', path: '/tech/estimate' },
   { icon: '🧾', label: 'Quick Invoice', path: '/tech' },
   { icon: '📖', label: 'Protocols & SOPs', path: '/tech/protocols' },
-  { icon: '📸', label: 'Photo ID Guide', path: '/tech' },
+  { icon: '🗂️', label: 'Project Report', action: 'create-project' },
   { icon: '💬', label: 'Messages', path: '/tech/messages' },
 ];
 
@@ -35,6 +36,7 @@ export default function TechHomePage() {
   const navigate = useNavigate();
   const [schedule, setSchedule] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showCreateProject, setShowCreateProject] = useState(false);
   const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
   const firstName = techName.split(' ')[0];
 
@@ -104,7 +106,10 @@ export default function TechHomePage() {
         {QUICK_ACTIONS.map((action) => (
           <button
             key={action.label}
-            onClick={() => navigate(action.path)}
+            onClick={() => {
+              if (action.action === 'create-project') setShowCreateProject(true);
+              else if (action.path) navigate(action.path);
+            }}
             style={{
               background: DARK.card,
               border: `1px solid ${DARK.border}`,
@@ -180,6 +185,13 @@ export default function TechHomePage() {
             {total === 0 ? 'No services scheduled today' : 'All services completed! 🎉'}
           </p>
         </div>
+      )}
+
+      {showCreateProject && (
+        <CreateProjectModal
+          onClose={() => setShowCreateProject(false)}
+          onCreated={() => setShowCreateProject(false)}
+        />
       )}
     </div>
   );

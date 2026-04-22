@@ -18,6 +18,7 @@ const NAV_SECTIONS = [
     { path: '/admin/schedule', icon: '📅', label: 'Schedule' },
     { path: '/admin/timetracking', icon: '⏱️', label: 'Time Tracking' },
     { path: '/admin/service-library', icon: '📖', label: 'Service Library' },
+    { path: '/admin/projects', icon: '🗂️', label: 'Projects' },
   ]},
   { section: 'Communications', items: [
     { path: '/admin/communications', icon: '📱', label: 'Communications' },
