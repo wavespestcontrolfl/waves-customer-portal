@@ -224,6 +224,10 @@ app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
+const { router: publicTrackRouter, shortRouter: trackShortRouter } = require('./routes/public-track');
+app.use('/api/public/track', publicTrackRouter);
+app.use('/', trackShortRouter);
+app.use('/api/tech', require('./routes/tech-track'));
 // twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
 // /recording-status, /transcription, /outbound-admin-prompt — no path conflicts under same mount.
 app.use('/api/webhooks/twilio', twilioWebhookRoutes);
