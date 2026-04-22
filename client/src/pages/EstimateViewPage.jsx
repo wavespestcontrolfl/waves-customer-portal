@@ -116,20 +116,64 @@ function Header({ customerFirstName, address }) {
   );
 }
 
-function OneTimeCard({ anchorOneTimePrice }) {
+// Segmented toggle between Recurring and One-time views. Only rendered
+// when the estimate has show_one_time_option=true AND oneTimeTotal>0.
+// Tap either to switch mode — slider, add-ons, and price card respond
+// to the mode change (one-time hides slider + add-ons, shows one-time
+// price card content).
+function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
+  const pillBase = {
+    padding: '10px 16px', borderRadius: 999, fontSize: 14, fontWeight: 600,
+    cursor: 'pointer', border: 'none', textAlign: 'center', flex: 1,
+    transition: 'all 150ms ease',
+  };
   return (
     <div style={{
-      background: W.sand, borderRadius: 16, padding: 20,
-      border: `1px solid ${W.border}`, marginBottom: 16,
+      background: W.white, borderRadius: 999, padding: 4,
+      border: `1px solid ${W.border}`, marginBottom: 12,
+      display: 'flex', gap: 4,
     }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-        One-time option
+      <button
+        type="button"
+        onClick={() => onChange('recurring')}
+        style={{
+          ...pillBase,
+          background: mode === 'recurring' ? W.blueBright : 'transparent',
+          color: mode === 'recurring' ? W.white : W.textBody,
+        }}
+      >Recurring</button>
+      <button
+        type="button"
+        onClick={() => onChange('one_time')}
+        style={{
+          ...pillBase,
+          background: mode === 'one_time' ? W.blueBright : 'transparent',
+          color: mode === 'one_time' ? W.white : W.textBody,
+        }}
+      >One-time {fmtMoney(oneTimePrice)}</button>
+    </div>
+  );
+}
+
+function OneTimePriceCard({ oneTimePrice }) {
+  return (
+    <div style={{
+      background: W.white, borderRadius: 16, padding: 24,
+      boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+      borderTop: `4px solid ${W.yellow}`,
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: W.yellow, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+        Single visit
       </div>
-      <div style={{ fontSize: 18, color: W.navy, marginTop: 6 }}>
-        Prefer a single visit? {fmtMoney(anchorOneTimePrice)} one-time.
+      <div style={{ fontSize: 42, fontWeight: 700, color: W.navy, lineHeight: 1.1 }}>
+        {fmtMoney(oneTimePrice)}
+        <span style={{ fontSize: 18, fontWeight: 500, color: W.textBody, marginLeft: 6 }}>one-time</span>
       </div>
-      <div style={{ fontSize: 13, color: W.textCaption, marginTop: 4 }}>
-        Most pest problems come back. Recurring above gets you the lower monthly rate + return-at-no-charge guarantee.
+      <div style={{ fontSize: 14, color: W.textBody, marginTop: 12, lineHeight: 1.55 }}>
+        One visit, pay on service day. No recurring schedule, no tier discount.
+        Most pest problems come back — if this single treatment doesn't resolve it,
+        switch to recurring and we'll credit this visit toward your first month.
       </div>
     </div>
   );
@@ -246,6 +290,11 @@ export default function EstimateViewPage() {
   const [selectedFrequency, setSelectedFrequency] = useState(null);
   const [selectedAddOns, setSelectedAddOns] = useState(new Set());
   const [selectedSlotId, setSelectedSlotId] = useState(null);
+  // serviceMode: 'recurring' | 'one_time'. Only toggleable when the estimate
+  // has show_one_time_option=true (admin-opted-in). Defaults to 'recurring'
+  // so existing estimates keep current behavior; one-time shown as an
+  // opt-in alternative when surfaced.
+  const [serviceMode, setServiceMode] = useState('recurring');
   const [paymentPreference, setPaymentPreference] = useState(null);
   const [ctaPhase, setCtaPhase] = useState('configure');
   const [reservation, setReservation] = useState(null);
@@ -365,6 +414,7 @@ export default function EstimateViewPage() {
         body: JSON.stringify({
           slotId: selectedSlotId,
           paymentMethodPreference: paymentPreference,
+          serviceMode,
         }),
       });
       if (!r.ok) {
@@ -386,7 +436,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('review');
     }
-  }, [token, selectedSlotId, paymentPreference]);
+  }, [token, selectedSlotId, paymentPreference, serviceMode]);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');
@@ -450,31 +500,50 @@ export default function EstimateViewPage() {
         />
       ) : (
         <>
-          {pricing.frequencies && pricing.frequencies.length > 1 ? (
-            <FrequencySlider
-              frequencies={pricing.frequencies}
-              selected={selectedFrequency}
-              onChange={setSelectedFrequency}
+          {/* One-time mode toggle — only rendered when admin opted this
+              estimate into the one-time option AND there's a non-zero
+              one-time price to offer. Default mode is 'recurring' so
+              estimates without the flag behave identically to before. */}
+          {estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
+            <OneTimeModeToggle
+              mode={serviceMode}
+              oneTimePrice={pricing.anchorOneTimePrice}
+              onChange={(m) => {
+                setServiceMode(m);
+                // Reset selection state that doesn't apply in the other mode
+                setSelectedSlotId(null);
+                setPaymentPreference(null);
+              }}
             />
           ) : null}
 
-          <PriceCard
-            frequency={currentFrequency}
-            anchorOneTimePrice={pricing.anchorOneTimePrice}
-            waveGuardTier={pricing.waveGuardTier}
-          />
+          {serviceMode === 'recurring' ? (
+            <>
+              {pricing.frequencies && pricing.frequencies.length > 1 ? (
+                <FrequencySlider
+                  frequencies={pricing.frequencies}
+                  selected={selectedFrequency}
+                  onChange={setSelectedFrequency}
+                />
+              ) : null}
 
-          {pricing.anchorOneTimePrice && (pricing.frequencies?.[0]?.oneTimeTotal === pricing.anchorOneTimePrice) ? (
-            <OneTimeCard anchorOneTimePrice={pricing.anchorOneTimePrice} />
-          ) : null}
+              <PriceCard
+                frequency={currentFrequency}
+                anchorOneTimePrice={pricing.anchorOneTimePrice}
+                waveGuardTier={pricing.waveGuardTier}
+              />
 
-          <IncludedChecklist included={currentFrequency?.included || []} />
+              <IncludedChecklist included={currentFrequency?.included || []} />
 
-          <AddOnsBlock
-            addOns={currentFrequency?.addOns || []}
-            selectedKeys={selectedAddOns}
-            onToggle={onToggleAddOn}
-          />
+              <AddOnsBlock
+                addOns={currentFrequency?.addOns || []}
+                selectedKeys={selectedAddOns}
+                onToggle={onToggleAddOn}
+              />
+            </>
+          ) : (
+            <OneTimePriceCard oneTimePrice={pricing.anchorOneTimePrice} />
+          )}
 
           <SlotPicker
             token={token}
@@ -487,6 +556,7 @@ export default function EstimateViewPage() {
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
               disabled={ctaPhase === 'submitting'}
+              serviceMode={serviceMode}
             />
           ) : null}
 
