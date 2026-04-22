@@ -150,7 +150,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
           background: mode === 'one_time' ? W.blueBright : 'transparent',
           color: mode === 'one_time' ? W.white : W.textBody,
         }}
-      >One-time {fmtMoney(oneTimePrice)}</button>
+      >One-time</button>
     </div>
   );
 }

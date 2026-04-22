@@ -69,30 +69,22 @@ function SlotCard({ slot, isSelected, onSelect }) {
   );
 }
 
+const INITIAL_VISIBLE = 3;
+
 export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSignal }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [showExpander, setShowExpander] = useState(false);
+  const [showMore, setShowMore] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setShowMore(false);
     fetch(`${API_BASE}/public/estimates/${token}/available-slots`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
-      .then((body) => {
-        if (cancelled) return;
-        setData(body);
-        setLoading(false);
-        // Auto-expand when primary is empty but expander has slots — otherwise
-        // the customer sees an empty card with nothing visible, then has to
-        // click "See N more" to reveal anything. Shows slots by default in
-        // that edge case; collapses behavior unchanged when primary has items.
-        if ((body?.primary?.length || 0) === 0 && (body?.expander?.length || 0) > 0) {
-          setShowExpander(true);
-        }
-      })
+      .then((body) => { if (!cancelled) { setData(body); setLoading(false); } })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
   }, [token, refreshSignal]);
@@ -115,10 +107,15 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
     );
   }
 
+  // Merge primary (route-optimal, top 3) + expander (rest) into a single
+  // ordered list. Always show the first 3 by default; rest hide behind
+  // a "See more" toggle. Keeps the card compact and avoids overwhelming
+  // the customer on wide windows with lots of availability.
   const primary = data?.primary || [];
   const expander = data?.expander || [];
+  const allSlots = [...primary, ...expander];
 
-  if (primary.length === 0 && expander.length === 0) {
+  if (allSlots.length === 0) {
     return (
       <div style={{ background: W.white, borderRadius: 16, padding: 24, border: `1px solid ${W.border}`, marginBottom: 16 }}>
         <div style={{ fontSize: 14, color: W.textBody }}>
@@ -128,38 +125,35 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
     );
   }
 
+  const initial = allSlots.slice(0, INITIAL_VISIBLE);
+  const more = allSlots.slice(INITIAL_VISIBLE);
+
   return (
     <div style={{ background: W.white, borderRadius: 16, padding: 24, border: `1px solid ${W.border}`, marginBottom: 16 }}>
       <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
         Pick a time
       </div>
-      {primary.map((slot) => (
+      {initial.map((slot) => (
         <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
       ))}
 
-      {expander.length > 0 ? (
+      {more.length > 0 ? (
         <>
-          {/* Hide the toggle button entirely when primary is empty — slots
-              are auto-expanded above, and "See X more times" is a nonsense
-              label when those ARE the times. Collapse UX only kicks in
-              when there are real primary options to "fall back" from. */}
-          {primary.length > 0 ? (
-            <button
-              type="button"
-              onClick={() => setShowExpander((v) => !v)}
-              style={{
-                marginTop: 8, padding: '10px 16px', background: 'transparent',
-                color: W.blue, border: `1px solid ${W.border}`, borderRadius: 12,
-                cursor: 'pointer', fontSize: 14, fontWeight: 600, width: '100%',
-              }}
-            >
-              {showExpander ? 'Show fewer times' : `See ${expander.length} more times`}
-            </button>
-          ) : null}
-          {showExpander ? (
+          <button
+            type="button"
+            onClick={() => setShowMore((v) => !v)}
+            style={{
+              marginTop: 8, padding: '10px 16px', background: 'transparent',
+              color: W.blue, border: `1px solid ${W.border}`, borderRadius: 12,
+              cursor: 'pointer', fontSize: 14, fontWeight: 600, width: '100%',
+            }}
+          >
+            {showMore ? 'Show fewer times' : `See ${more.length} more times`}
+          </button>
+          {showMore ? (
             <div style={{ marginTop: 14 }}>
-              {expander.map((slot) => (
+              {more.map((slot) => (
                 <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
               ))}
             </div>
