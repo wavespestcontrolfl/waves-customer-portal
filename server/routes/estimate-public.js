@@ -1168,6 +1168,12 @@ async function buildPricingBundle(estimate) {
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice: v1.oneTimeTotal || Number(estimate.onetime_total || 0) || null,
+      // WaveGuard $99 initial fee — recurring pest only. Spec says waived with
+      // annual prepay; we surface it as an informational line for now so the
+      // customer sees it on their estimate. A prepay toggle that actually
+      // applies the waiver is a separate follow-up (accept payload +
+      // estimate-converter + invoice line item changes).
+      setupFee: hasPest ? { amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true } : null,
       source: 'v1_engine_shape',
     };
     pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
