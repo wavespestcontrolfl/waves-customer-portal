@@ -159,14 +159,47 @@ function pickNearbyAnchor(slot) {
   return afterDelta <= beforeDelta ? 'after' : 'before';
 }
 
+// Round a "HH:MM" string to the next full hour. e.g. "08:13" → "09:00",
+// "08:00" → "08:00" (idempotent when already on an hour mark). Used to
+// clean up find-time's minute-precise start times — customers expect
+// hour-rounded service windows ("9:00–10:00", not "8:13–9:13").
+// The slight delay (up to 59 min) from find-time's earliestStart is
+// acceptable: find-time already accounts for latestEnd when computing
+// the candidate, so the rounded window still usually fits the day.
+function roundUpToHour(hhmm) {
+  if (!hhmm || typeof hhmm !== 'string') return hhmm;
+  const parts = hhmm.split(':');
+  const h = Number(parts[0]);
+  const m = Number(parts[1] || 0);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return hhmm;
+  if (m === 0) return `${String(h).padStart(2, '0')}:00`;
+  const nextH = (h + 1) % 24;
+  return `${String(nextH).padStart(2, '0')}:00`;
+}
+
+function addOneHour(hhmm) {
+  const parts = String(hhmm).split(':');
+  const h = Number(parts[0]);
+  const m = Number(parts[1] || 0);
+  if (!Number.isFinite(h)) return hhmm;
+  const nextH = (h + 1) % 24;
+  return `${String(nextH).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 function classifySlot(slot, proximityDriveMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
+  // Round display times to clean hour boundaries. slotId still uses the
+  // rounded start so collisions between two slots that rounded to the
+  // same hour (possible at the edge of find-time's range) don't both
+  // generate identical IDs — techId differentiates.
+  const windowStart = roundUpToHour(slot.start_time);
+  const windowEnd = addOneHour(windowStart);
   return {
-    slotId: `${slot.date}_${slot.start_time.replace(':', '-')}_${slot.technician?.id || 'unassigned'}`,
+    slotId: `${slot.date}_${windowStart.replace(':', '-')}_${slot.technician?.id || 'unassigned'}`,
     date: slot.date,
-    windowStart: slot.start_time,
-    windowEnd: slot.end_time,
+    windowStart,
+    windowEnd,
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,
     routeOptimal,
