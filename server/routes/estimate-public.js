@@ -1038,7 +1038,16 @@ function readV1Shape(estData) {
   if (!estData || typeof estData !== 'object') return null;
   const result = estData.result;
   if (!result || typeof result !== 'object') return null;
-  const pestTiers = Array.isArray(result.pestTiers) ? result.pestTiers : [];
+
+  // pestTiers lives at result.results.pestTiers in the v1 shape (nested
+  // inside `results` plural, alongside `lawn`, `pest`, `lawnMeta`). Fall
+  // back to result.pestTiers for any IB-path or edge shape that puts it
+  // at the top of `result`.
+  const innerResults = result.results && typeof result.results === 'object' ? result.results : null;
+  const pestTiers = Array.isArray(innerResults?.pestTiers)
+    ? innerResults.pestTiers
+    : (Array.isArray(result.pestTiers) ? result.pestTiers : []);
+
   const recurring = result.recurring || {};
   const services = Array.isArray(recurring.services) ? recurring.services : [];
   if (pestTiers.length === 0 && services.length === 0) return null;
