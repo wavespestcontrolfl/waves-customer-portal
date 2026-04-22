@@ -407,21 +407,19 @@ async function createPendingEstimate(input) {
     engineInputs, engineResult, sqftSource, reasoning, assumptions = [], uncertainty = [],
   } = input;
 
-  if (!customerName || !address || !engineResult || typeof engineResult.monthlyTotal !== 'number') {
-    return { error: 'Missing required fields: customerName, address, engineResult.monthlyTotal' };
+  // engineResult is what the agent received from the generate_estimate
+  // tool (a flattened summary). We no longer rely on it for persistence:
+  // the creator re-runs generateEstimate(engineInputs) and reads the
+  // authoritative nested shape (estimate.summary.* + estimate.waveGuard.tier),
+  // which incidentally fixes a latent bug where this file was reading
+  // engineResult.waveguardTier — a field the raw engine never emits —
+  // and silently writing waveguard_tier=null on every agent draft.
+  // engineResult is kept accepted in the input shape for back-compat with
+  // existing agent prompts; buildAgentNotes still uses it for the
+  // structured notes body.
+  if (!customerName || !address || !engineInputs) {
+    return { error: 'Missing required fields: customerName, address, engineInputs' };
   }
-
-  const crypto = require('crypto');
-  const shortId = crypto.randomBytes(4).toString('hex');
-  const nameSlug = String(customerName).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const token = `${nameSlug}-${shortId}`;
-  const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 7);
-
-  const monthly = Number(engineResult.monthlyTotal) || 0;
-  const annual = Number(engineResult.annualTotal) || monthly * 12;
-  const onetime = Number(engineResult.oneTimeTotal) || 0;
-  const tier = engineResult.waveguardTier || engineResult.waveguard_tier || null;
 
   const notes = buildAgentNotes({ engineInputs, engineResult, sqftSource, reasoning, assumptions, uncertainty, address });
 
@@ -431,40 +429,40 @@ async function createPendingEstimate(input) {
         .join(' + ')
     : null;
 
-  const [estimate] = await db('estimates').insert({
-    estimate_data: JSON.stringify({ engineInputs, engineResult, agentDraft: true }),
-    address,
-    customer_name: customerName,
-    customer_phone: customerPhone || null,
-    customer_email: customerEmail || null,
-    monthly_total: monthly,
-    annual_total: annual,
-    onetime_total: onetime,
-    waveguard_tier: tier,
-    token,
-    expires_at: expiresAt,
-    notes,
-    status: 'draft',
+  const { createEstimate } = require('../estimate-creator');
+  const result = await createEstimate({
     source: 'ai_agent',
-    service_interest: serviceInterest,
+    createdById: null,
+    customerName,
+    customerPhone: customerPhone || null,
+    customerEmail: customerEmail || null,
+    address,
     category: 'RESIDENTIAL',
-  }).returning(['id', 'token']);
+    engineInputs,
+    notes,
+    serviceInterest,
+  });
 
-  logger.info(`[intelligence-bar:estimates] Agent created draft ${estimate.id} for ${customerName}`);
+  logger.info(`[intelligence-bar:estimates] Agent created draft ${result.id} for ${customerName}`);
+
+  // Re-read totals for the response so agent prompts don't lose them.
+  // Creator returned id/token/versionId; totals live on the row.
+  const row = await db('estimates').where({ id: result.id })
+    .first('monthly_total', 'annual_total');
 
   const customerViewUrl = await shortenOrPassthrough(
-    `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
-    { kind: 'estimate', entityType: 'estimates', entityId: estimate.id }
+    `https://portal.wavespestcontrol.com/estimate/${result.token}`,
+    { kind: 'estimate', entityType: 'estimates', entityId: result.id }
   );
 
   return {
     success: true,
-    estimate_id: estimate.id,
-    token: estimate.token,
+    estimate_id: result.id,
+    token: result.token,
     admin_url: `https://portal.wavespestcontrol.com/admin/estimates`,
     customer_view_url: customerViewUrl,
-    monthly_total: monthly,
-    annual_total: annual,
+    monthly_total: Number(row?.monthly_total || 0),
+    annual_total: Number(row?.annual_total || 0),
     note_for_admin: 'Draft created. Open admin/estimates → 🤖 to review and send.',
   };
 }
