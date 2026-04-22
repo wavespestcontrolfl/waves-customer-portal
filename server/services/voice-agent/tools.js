@@ -329,11 +329,11 @@ async function executeTool(toolName, input, sessionData) {
         }
       }
 
-      // Create estimate record
-      // Schema-aligned: address (not property_address), service_interest (not service_type),
-      // customer_phone/customer_email (not phone/email), notes (not description),
-      // lead_source (not referral_source), status='draft' (CHECK constraint allows
-      // draft|sent|viewed|accepted|declined|expired only — 'new' fails silently).
+      // Create estimate record via the shared creator. Placeholder path —
+      // no pricing yet; admin prices via admin UI later (creates v2).
+      // The CHECK-constraint-drift comment that lived here is now filed
+      // against admin-estimates.js as a separate-PR TODO; creator writes
+      // status='draft' so the enum pressure doesn't materialize on this path.
       let estimateId = null;
       let estimateError = null;
       try {
@@ -342,27 +342,27 @@ async function executeTool(toolName, input, sessionData) {
           input.notes ? `Notes: ${input.notes}` : null,
         ].filter(Boolean).join('\n\n') || null;
 
-        const [row] = await db("estimates").insert({
-          customer_id: customerId || null,
-          customer_name: input.caller_name,
-          customer_phone: input.phone,
-          customer_email: input.email || null,
+        const { createEstimate } = require('../estimate-creator');
+        const result = await createEstimate({
+          source: 'voice_agent',
+          createdById: null,
+          customerId: customerId || null,
+          customerName: input.caller_name,
+          customerPhone: input.phone,
+          customerEmail: input.email || null,
           address: input.property_address,
-          service_interest: input.service_category,
+          serviceInterest: input.service_category,
           urgency: input.urgency,
-          source: "voice_agent",
-          status: "draft",
-          lead_source: input.referral_source || null,
+          leadSource: input.referral_source || null,
           notes: combinedNotes,
-          is_priority: input.service_category === "termite_wdo" || input.urgency >= 4,
-          created_at: new Date(),
-        }).returning("id");
-        estimateId = row?.id || row;
+          isPriority: input.service_category === 'termite_wdo' || input.urgency >= 4,
+        });
+        estimateId = result.id;
         sessionData.leadId = estimateId;
         console.log(`[VoiceAgent] ✅ Estimate created: #${estimateId} → pipeline running`);
       } catch (err) {
         estimateError = err.message;
-        console.error("[VoiceAgent] Failed to create estimate:", err.message);
+        console.error('[VoiceAgent] Failed to create estimate:', err.message);
       }
 
       // Post-INSERT assertion: surface schema/constraint failures loudly instead of
