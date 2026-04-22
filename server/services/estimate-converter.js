@@ -66,9 +66,16 @@ const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
    * @param {number} estimateId - The ID of the accepted estimate
+   * @param {object} [opts]
+   * @param {'standard'|'prepay_annual'} [opts.billingTerm='standard'] — when
+   *   'prepay_annual', a draft invoice is created for (monthlyRate × 12) and
+   *   the $99 WaveGuard setup fee is WAIVED. When 'standard', a $99 WaveGuard
+   *   setup draft invoice is created. Either way the invoice is 'draft' —
+   *   operator reviews + sends via /admin/invoices. Nothing is auto-charged.
    * @returns {object} Conversion result summary
    */
-  async convertEstimate(estimateId) {
+  async convertEstimate(estimateId, opts = {}) {
+    const billingTerm = opts.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
     const estimate = await db('estimates').where({ id: estimateId }).first();
     if (!estimate) throw new Error(`Estimate ${estimateId} not found`);
     if (estimate.status !== 'accepted') throw new Error(`Estimate ${estimateId} is not accepted (status: ${estimate.status})`);
@@ -161,9 +168,53 @@ const EstimateConverter = {
       }),
     });
 
-    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${monthlyRate}/mo, ${scheduledCount} services scheduled`);
+    // 4. Create draft setup/prepay invoice so Virginia sees it in
+    //    /admin/invoices and can review + send. Nothing auto-charges.
+    //    Scoped to estimates with recurring pest (monthlyRate > 0) — other
+    //    paths (lawn-only, mosquito-only) are left alone for this PR.
+    let draftInvoiceId = null;
+    let draftInvoiceAmount = null;
+    try {
+      if (monthlyRate > 0) {
+        const InvoiceService = require('./invoice');
+        if (billingTerm === 'prepay_annual') {
+          const annualAmount = Math.round(monthlyRate * 12 * 100) / 100;
+          const inv = await InvoiceService.create({
+            customerId,
+            title: `WaveGuard ${tier || 'Bronze'} — Annual Prepay (12 months)`,
+            lineItems: [{
+              description: `WaveGuard Membership — 12 months prepaid (setup fee waived)`,
+              quantity: 1,
+              unit_price: annualAmount,
+            }],
+            notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`,
+          });
+          draftInvoiceId = inv?.id || null;
+          draftInvoiceAmount = annualAmount;
+        } else {
+          const inv = await InvoiceService.create({
+            customerId,
+            title: 'WaveGuard Membership Setup',
+            lineItems: [{
+              description: 'WaveGuard Membership — one-time setup fee',
+              quantity: 1,
+              unit_price: 99,
+            }],
+            notes: `Auto-generated from accepted estimate #${estimateId}. Standard monthly billing — $99 setup fee applies (waivable if customer later switches to annual prepay).`,
+          });
+          draftInvoiceId = inv?.id || null;
+          draftInvoiceAmount = 99;
+        }
+      }
+    } catch (err) {
+      // Don't let an invoice-creation failure block the conversion.
+      // Virginia can manually draft the setup invoice if this misfires.
+      logger.error(`[estimate-converter] Draft invoice creation failed for estimate ${estimateId}: ${err.message}`);
+    }
 
-    return { customerId, tier, discount, monthlyRate, serviceCount, scheduledCount };
+    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${monthlyRate}/mo, ${scheduledCount} services scheduled, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
+
+    return { customerId, tier, discount, monthlyRate, serviceCount, scheduledCount, billingTerm, draftInvoiceId, draftInvoiceAmount };
   },
 };
 
