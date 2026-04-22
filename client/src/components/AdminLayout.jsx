@@ -5,6 +5,7 @@ import GlobalCommandPalette from './admin/GlobalCommandPalette';
 import MobileAdminShell from './admin/MobileAdminShell';
 import { useFeatureFlag, refetchFlags } from '../hooks/useFeatureFlag';
 import useIsMobile from '../hooks/useIsMobile';
+import { consumeSnapshotOnMount } from '../lib/tapToPayReturn';
 
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', blue: '#0A7EC2', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', purple: '#7C3AED', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', input: '#FFFFFF', inputBorder: '#CBD5E1' };
 const SB = { bg: '#04395E', active: 'rgba(255,255,255,0.1)', hover: 'rgba(255,255,255,0.08)', border: 'rgba(255,255,255,0.1)', section: 'rgba(255,255,255,0.4)', text: 'rgba(255,255,255,0.65)' };
@@ -65,6 +66,11 @@ export default function AdminLayout() {
   const mobileShellEnabled = useFeatureFlag('mobile-shell-v2', true);
   const useMobileShell = isMobile && mobileShellEnabled;
   const paletteRef = useRef(null);
+
+  // Restore route if we just returned from WavesPay (iOS often evicts the
+  // tab during the hand-off, reloading the app to its default route).
+  // See lib/tapToPayReturn.js.
+  useEffect(() => { consumeSnapshotOnMount(navigate); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const token = localStorage.getItem('waves_admin_token');
