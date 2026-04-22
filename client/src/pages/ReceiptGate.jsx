@@ -13,7 +13,7 @@ export default function ReceiptGate() {
   const { enabled: v2, ready } = usePairedFeatureFlag(
     'ff_customer_pay_v2',
     'ff_customer_receipt_v2',
-    false,
+    true,
   );
   if (!ready) return null;
   if (!v2) return <Navigate to={`/pay/${token}`} replace />;
