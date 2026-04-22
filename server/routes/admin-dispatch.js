@@ -148,18 +148,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
       if (svc.actual_start_time) {
         updates.service_time_minutes = Math.round((Date.now() - new Date(svc.actual_start_time)) / 60000);
       }
-      // Public tracking — flip the customer-visible state to 'complete'
-      // alongside the dispatch-level status. See services/tracking-phase1.
-      updates.track_state = 'complete';
-      updates.track_completed_at = db.fn.now();
-    }
-    if (status === 'cancelled') {
-      // Public tracking — keep the link visible for 24h so the customer
-      // sees the cancellation message instead of a dead link.
-      updates.track_state = 'cancelled';
-      updates.track_cancelled_at = db.fn.now();
-      updates.track_token_expires_at = db.raw("NOW() + interval '24 hours'");
-      if (notes) updates.track_cancellation_reason = notes;
     }
     await db('scheduled_services').where({ id: svc.id }).update(updates);
 
