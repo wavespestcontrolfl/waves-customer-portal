@@ -4346,6 +4346,89 @@ function NumberStepper({ value, onChange, min = 0, max = 99 }) {
   );
 }
 
+// Service preferences — customer can opt out of interior spraying or
+// exterior eave sweep for their pest control visits. Reads/writes
+// /api/service-preferences; the PUT pings the admin notification bus
+// so the office knows to update the tech's next work order.
+function ServicePrefsSection() {
+  const [prefs, setPrefs] = useState(null);
+  const [busy, setBusy] = useState(null); // which key is currently saving
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    api.getServicePreferences()
+      .then((d) => setPrefs(d.preferences || { interior_spray: true, exterior_sweep: true }))
+      .catch(() => setPrefs({ interior_spray: true, exterior_sweep: true }));
+  }, []);
+
+  async function toggle(key) {
+    if (!prefs) return;
+    const nextVal = !prefs[key];
+    const prev = prefs;
+    setPrefs({ ...prefs, [key]: nextVal });
+    setBusy(key);
+    setError(null);
+    try {
+      const d = await api.updateServicePreferences({ [key]: nextVal });
+      if (d && d.preferences) setPrefs(d.preferences);
+    } catch (e) {
+      setPrefs(prev);
+      setError('Could not save. Please try again.');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!prefs) return null;
+
+  const rows = [
+    { key: 'interior_spray', title: 'Interior spraying', desc: 'Tech treats the inside of the home on each visit. Toggle off for exterior-only service.' },
+    { key: 'exterior_sweep', title: 'Exterior eave sweep', desc: 'Tech sweeps cobwebs from eaves and exterior corners on each visit.' },
+  ];
+
+  return (
+    <PropertySection title="🛠️ Service preferences">
+      <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10, lineHeight: 1.5 }}>
+        Both on by default. Toggle either off if you'd rather skip it — we'll update your next work order and the office will be notified.
+      </div>
+      {rows.map((r) => {
+        const on = prefs[r.key] !== false;
+        return (
+          <div key={r.key} style={{
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
+            gap: 14, padding: '12px 0',
+            borderBottom: `1px solid ${B.grayLight}`,
+          }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{r.title}</div>
+              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2, lineHeight: 1.5 }}>{r.desc}</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => toggle(r.key)}
+              disabled={busy === r.key}
+              aria-label={`${r.title} ${on ? 'enabled' : 'disabled'}`}
+              style={{
+                position: 'relative', width: 46, height: 26, borderRadius: 26,
+                background: on ? B.wavesBlue : B.grayLight,
+                border: 'none', cursor: busy === r.key ? 'wait' : 'pointer',
+                flexShrink: 0, transition: 'background .15s',
+              }}
+            >
+              <span style={{
+                position: 'absolute', top: 3, left: on ? 23 : 3,
+                width: 20, height: 20, borderRadius: '50%', background: '#fff',
+                boxShadow: '0 1px 2px rgba(0,0,0,0.15)', transition: 'left .15s',
+              }} />
+            </button>
+          </div>
+        );
+      })}
+      {error && <div style={{ fontSize: 12, color: B.red || '#c8102e', marginTop: 8 }}>{error}</div>}
+    </PropertySection>
+  );
+}
+
 function PropertyTab({ customer }) {
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4502,6 +4585,9 @@ function PropertyTab({ customer }) {
           )}
         </div>
       </div>
+
+      {/* SECTION 1a — Service preferences (interior spray + exterior sweep) */}
+      <ServicePrefsSection />
 
       {/* SECTION 1 — Access & Gate Codes */}
       <PropertySection title="🔑 Access & Gate Codes">

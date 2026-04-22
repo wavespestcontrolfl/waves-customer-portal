@@ -101,6 +101,7 @@ router.get('/', async (req, res, next) => {
         'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.property_sqft', 'customers.lot_sqft', 'customers.lead_score',
+        'customers.service_preferences',
         'technicians.name as tech_name'
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
@@ -130,6 +131,19 @@ router.get('/', async (req, res, next) => {
       if (cleanedNotes) alerts.push({ type: 'note', text: cleanedNotes });
       // Show "New customer" badge ONLY if genuinely new (no completed service records)
       if (genuinelyNew) alerts.push({ type: 'new_customer', text: 'New customer — first visit' });
+      // Service-preference opt-outs — the customer toggled one of these off
+      // in the estimator or portal. Surface prominently so the tech knows
+      // to skip that part of the visit.
+      let svcPrefs = null;
+      try {
+        svcPrefs = typeof s.service_preferences === 'string'
+          ? JSON.parse(s.service_preferences || '{}')
+          : (s.service_preferences || null);
+      } catch { svcPrefs = null; }
+      if (svcPrefs && /pest/i.test(normalizedType)) {
+        if (svcPrefs.interior_spray === false) alerts.push({ type: 'service_pref', text: 'EXTERIOR ONLY — no interior treatment' });
+        if (svcPrefs.exterior_sweep === false) alerts.push({ type: 'service_pref', text: 'Skip eave/cobweb sweep' });
+      }
 
       const zone = s.zone || getZone(s.city, s.zip);
 

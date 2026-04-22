@@ -66,6 +66,79 @@ function shellTopBar() {
 
 const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
 
+// ── Service-preference pricing modifiers ──────────────────────
+// Customers can opt out of interior spraying or exterior (eave/cobweb)
+// sweeping. Each opt-out saves $10/visit on recurring pest control and
+// $50 on a one-time pest treatment. Applied only when the estimate
+// contains a recurring or one-time pest-control line.
+const SERVICE_PREFS = {
+  interior_spray:  { perVisit: 10, oneTime: 50, label: 'Interior spraying',  offLabel: 'Exterior service only', offDesc: 'No interior treatment — tech sprays and inspects the perimeter only.' },
+  exterior_sweep:  { perVisit: 10, oneTime: 50, label: 'Exterior eave sweep', offLabel: 'Skip eave sweep',       offDesc: 'No eave/cobweb sweep on the exterior. Tech still performs the perimeter treatment.' },
+};
+const SERVICE_PREF_KEYS = Object.keys(SERVICE_PREFS);
+const DEFAULT_PREFS = SERVICE_PREF_KEYS.reduce((a, k) => (a[k] = true, a), {});
+
+// Map a recurring frequency label → visits per year. Used to convert
+// per-visit discount into the monthly-displayed discount so the
+// estimator math stays honest (quarterly customers see $3.33/mo per
+// toggle, monthly customers see $10/mo per toggle, etc.).
+function visitsPerYearFromFrequency(freq) {
+  const f = String(freq || '').toLowerCase().replace(/[-_\s]/g, '');
+  if (f === 'monthly') return 12;
+  if (f === 'bimonthly' || f === 'everyotherweek' || f === 'everyothermonth') return 6;
+  if (f === 'quarterly' || f === '') return 4;
+  if (f === 'semiannual' || f === 'biannual') return 2;
+  if (f === 'annual' || f === 'yearly') return 1;
+  return 4;
+}
+
+// How many pest-control recurring services are in this estimate + the
+// lowest visit frequency among them. Returns null if there's no pest
+// line at all (in which case we hide the prefs toggles entirely).
+function detectPestRecurring(recurring) {
+  const pest = (recurring || []).filter((s) => /pest/i.test(String(s.name || '')));
+  if (!pest.length) return null;
+  const vpy = pest.reduce((acc, s) => Math.max(acc, visitsPerYearFromFrequency(s.frequency || s.billing || s.cadence)), 0) || 4;
+  return { count: pest.length, visitsPerYear: vpy };
+}
+
+function detectPestOneTime(oneTimeItems) {
+  return (oneTimeItems || []).some((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')));
+}
+
+function normalizePrefs(raw) {
+  const out = { ...DEFAULT_PREFS };
+  if (raw && typeof raw === 'object') {
+    for (const k of SERVICE_PREF_KEYS) {
+      if (k in raw) out[k] = raw[k] !== false;
+    }
+  }
+  return out;
+}
+
+// Compute the monthly + one-time discount for a given set of prefs.
+// Returns { monthlyOff, oneTimeOff } in dollars (positive numbers).
+function computePrefDiscount(prefs, pestRecurring, hasPestOneTime) {
+  let monthlyOff = 0;
+  let oneTimeOff = 0;
+  const p = normalizePrefs(prefs);
+  for (const k of SERVICE_PREF_KEYS) {
+    if (p[k] === false) {
+      if (pestRecurring) {
+        // $perVisit × visits/yr ÷ 12 = monthly-equivalent discount
+        monthlyOff += (SERVICE_PREFS[k].perVisit * pestRecurring.visitsPerYear) / 12;
+      }
+      if (hasPestOneTime) {
+        oneTimeOff += SERVICE_PREFS[k].oneTime;
+      }
+    }
+  }
+  return {
+    monthlyOff: Math.round(monthlyOff * 100) / 100,
+    oneTimeOff: Math.round(oneTimeOff * 100) / 100,
+  };
+}
+
 const PERKS = [
   'Priority scheduling — you jump the queue',
   'Re-service between visits at no charge',
@@ -146,14 +219,20 @@ function renderPage(token, estimate, estData) {
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
   const baseMonthly = Number(estData?.baseMonthly || estData?.preDiscountMonthly || (recurring.reduce((s, x) => s + Number(x.mo || x.monthly || 0), 0)) || est.monthlyTotal || 0);
 
+  const pestRecurring = detectPestRecurring(recurring);
+  const hasPestOneTime = detectPestOneTime(oneTimeItems);
+  const showPrefs = !!(pestRecurring || hasPestOneTime);
+  const prefs = normalizePrefs(estData?.preferences);
+  const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime);
+
   const tierPrices = {};
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
-    tierPrices[t] = Math.round(baseMonthly * (1 - TIER_DISCOUNTS[t]) * 100) / 100;
+    tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - TIER_DISCOUNTS[t]) - prefMonthlyOff) * 100) / 100);
   });
 
-  const monthlyTotal = Number(est.monthlyTotal || 0);
-  const annualTotal = Number(est.annualTotal || monthlyTotal * 12);
-  const onetimeTotal = Number(est.onetimeTotal || 0);
+  const monthlyTotal = Math.max(0, Number(est.monthlyTotal || 0) - prefMonthlyOff);
+  const annualTotal = Math.max(0, Number(est.annualTotal || monthlyTotal * 12) - prefMonthlyOff * 12);
+  const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
   const locked = est.status === 'accepted';
 
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
@@ -221,6 +300,44 @@ function renderPage(token, estimate, estData) {
     <div class="ai-attribution">${escapeHtml(aiSourcesLabel)}</div>
   </section>` : '';
 
+  // ── Service-prefs toggle card (only when estimate has a pest line) ────
+  function renderPrefRow(key) {
+    const cfg = SERVICE_PREFS[key];
+    const on = prefs[key] !== false;
+    // Per-row "if you toggle this off, you save …" label
+    let savingsLabel = '';
+    if (pestRecurring && hasPestOneTime) {
+      const rec = (cfg.perVisit * pestRecurring.visitsPerYear) / 12;
+      savingsLabel = `Save ${fmtMoney(Math.round(rec * 100) / 100)}/mo + ${fmtMoney(cfg.oneTime)} on one-time`;
+    } else if (pestRecurring) {
+      const rec = (cfg.perVisit * pestRecurring.visitsPerYear) / 12;
+      savingsLabel = `Save ${fmtMoney(Math.round(rec * 100) / 100)}/mo`;
+    } else if (hasPestOneTime) {
+      savingsLabel = `Save ${fmtMoney(cfg.oneTime)}`;
+    }
+    return `
+    <div class="pref-row${on ? '' : ' off'}" data-pref-row="${key}">
+      <div class="pref-label">
+        <div class="pref-title">${escapeHtml(cfg.label)} included</div>
+        <div class="pref-desc" data-pref-desc>${on ? 'Toggle off if you want to skip this.' : escapeHtml(cfg.offDesc)}</div>
+        <div class="pref-savings${on ? '' : ' none'}" data-pref-savings>${on ? escapeHtml(savingsLabel) : 'Applied to your estimate'}</div>
+      </div>
+      <label class="switch" title="${escapeHtml(cfg.label)}">
+        <input type="checkbox" ${on ? 'checked' : ''} ${locked ? 'disabled' : ''} data-pref-key="${key}"/>
+        <span class="slider"></span>
+      </label>
+    </div>`;
+  }
+  const prefsBlockHtml = showPrefs ? `
+  <section class="card prefs-card">
+    <div class="eyebrow">Customize your visit</div>
+    <h2>Skip parts you don't need</h2>
+    <p class="card-sub">Both are on by default. Toggle off whatever you don't want and the price adjusts instantly.</p>
+    <div class="prefs-list">
+      ${SERVICE_PREF_KEYS.map(renderPrefRow).join('')}
+    </div>
+  </section>` : '';
+
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -270,6 +387,22 @@ function renderPage(token, estimate, estData) {
   .ai-metric-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
   .ai-notes{margin-top:14px;color:#3F4A65;font-size:14px;line-height:1.6;font-style:italic}
   .ai-attribution{margin-top:12px;font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
+  .prefs-card h2{margin-bottom:4px}
+  .prefs-list{margin-top:14px;display:flex;flex-direction:column;gap:10px}
+  .pref-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;transition:all .15s}
+  .pref-row.off{background:#F7F5EE;border-color:#D4CBB8}
+  .pref-row .pref-label{flex:1;min-width:0}
+  .pref-row .pref-title{font-weight:600;font-size:14px;color:#1B2C5B}
+  .pref-row .pref-desc{font-size:12px;color:#6B7280;margin-top:2px;line-height:1.5}
+  .pref-row .pref-savings{font-size:12px;color:${BRAND.green};font-weight:600;margin-top:4px}
+  .pref-row .pref-savings.none{color:#9CA3AF;font-weight:500}
+  .switch{position:relative;display:inline-block;width:42px;height:24px;flex-shrink:0;margin-top:2px}
+  .switch input{opacity:0;width:0;height:0}
+  .switch .slider{position:absolute;cursor:pointer;inset:0;background:#D4CBB8;border-radius:24px;transition:.2s}
+  .switch .slider::before{content:'';position:absolute;height:18px;width:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.15)}
+  .switch input:checked+.slider{background:#1B2C5B}
+  .switch input:checked+.slider::before{transform:translateX(18px)}
+  .switch input:disabled+.slider{opacity:.5;cursor:not-allowed}
   .tier-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}
   @media(max-width:640px){.tier-grid{grid-template-columns:repeat(2,1fr)}}
   .tier-card{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:14px 10px;text-align:center;font:inherit;color:inherit;position:relative;transition:all .15s;cursor:pointer}
@@ -355,6 +488,8 @@ ${shellTopBar()}
   </div>
 
   ${aiBlockHtml}
+
+  ${prefsBlockHtml}
 
   <div class="card">
     <h2>Choose your WaveGuard tier</h2>
@@ -489,6 +624,62 @@ ${shellTopBar()}
       document.querySelectorAll('.tier-card').forEach(el => el.style.opacity = '');
     }
   }
+
+  // Service-preferences toggles — PUT /:token/preferences and refresh totals.
+  document.querySelectorAll('[data-pref-key]').forEach((input) => {
+    input.addEventListener('change', async (ev) => {
+      const key = ev.target.dataset.prefKey;
+      const next = !!ev.target.checked;
+      ev.target.disabled = true;
+      try {
+        const r = await fetch(API + '/preferences', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [key]: next }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Failed');
+        document.getElementById('monthly-display').textContent = fmt(data.monthlyTotal);
+        const annualEl = document.getElementById('annual-display'); if (annualEl) annualEl.textContent = fmt(data.annualTotal);
+        document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(data.monthlyTotal));
+        const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal / 30) * 100) / 100);
+        if (data.tierPrices) {
+          document.querySelectorAll('[data-price-for]').forEach((pel) => {
+            const t = pel.dataset.priceFor;
+            if (data.tierPrices[t] != null) pel.innerHTML = fmt(data.tierPrices[t]) + '<span class="per">/mo</span>';
+          });
+        }
+        const anchor = document.getElementById('anchor-display');
+        const saveRow = document.querySelector('.save-row');
+        const savingsEl = document.getElementById('savings-display');
+        if (data.savingsPerMo > 0) {
+          if (saveRow) saveRow.style.display = '';
+          if (savingsEl) savingsEl.textContent = fmt(data.savingsPerMo);
+          if (anchor) anchor.textContent = fmt(data.baseMonthly) + '/mo';
+        } else if (saveRow) {
+          saveRow.style.display = 'none';
+        }
+        const row = ev.target.closest('[data-pref-row]');
+        if (row) {
+          row.classList.toggle('off', !next);
+          const desc = row.querySelector('[data-pref-desc]');
+          const sav = row.querySelector('[data-pref-savings]');
+          if (desc && data.prefMeta && data.prefMeta[key]) {
+            desc.textContent = next ? 'Toggle off if you want to skip this.' : data.prefMeta[key].offDesc;
+          }
+          if (sav && data.prefMeta && data.prefMeta[key]) {
+            sav.classList.toggle('none', !next);
+            sav.textContent = next ? data.prefMeta[key].savingsLabel : 'Applied to your estimate';
+          }
+        }
+        toast(next ? 'Added back to your plan' : 'Removed — price updated');
+      } catch (e) {
+        ev.target.checked = !next;
+        toast('Could not update. Try again.');
+      } finally {
+        ev.target.disabled = false;
+      }
+    });
+  });
 
   async function acceptEstimate() {
     const btn = document.getElementById('accept-btn');
@@ -763,6 +954,23 @@ router.put('/:token/accept', async (req, res, next) => {
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
       }
 
+      // Copy the estimate's service-preference selections onto the customer
+      // row so tech routes + the customer portal see the same source of truth.
+      // Defensive: skip if the column hasn't been migrated yet (older envs).
+      if (customerId) {
+        try {
+          let parsedData = {};
+          try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+          catch { parsedData = {}; }
+          const prefs = normalizePrefs(parsedData.preferences);
+          if (await trx.schema.hasColumn('customers', 'service_preferences')) {
+            await trx('customers').where({ id: customerId }).update({
+              service_preferences: JSON.stringify(prefs),
+            });
+          }
+        } catch (e) { logger.warn(`[estimate-accept] service_preferences copy skipped: ${e.message}`); }
+      }
+
       // Commit the slot reservation (if one) now that we have customerId.
       // Runs inside the same trx so either everything lands or nothing
       // does — a mid-flight failure here won't leave a committed customer
@@ -956,6 +1164,95 @@ router.put('/:token/select-tier', async (req, res, next) => {
 
     logger.info(`[estimate] ${estimate.customer_name} selected ${selectedTier} tier (was ${previousTier}) — $${monthlyTotal}/mo`);
     res.json({ success: true, tier: selectedTier, monthlyTotal, annualTotal });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/estimates/:token/preferences — customer toggles a service preference
+// (interior_spray / exterior_sweep) on the public estimate page. Persists the
+// new preference to estimate_data.preferences, recomputes monthly / annual /
+// one-time totals, updates the row, and returns a fresh price payload for
+// client-side re-render.
+router.put('/:token/preferences', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Estimate already accepted' });
+
+    // Only accept known pref keys; coerce to boolean.
+    const patch = {};
+    for (const k of SERVICE_PREF_KEYS) {
+      if (k in (req.body || {})) patch[k] = req.body[k] !== false;
+    }
+    if (!Object.keys(patch).length) {
+      return res.status(400).json({ error: 'No valid preference fields provided' });
+    }
+
+    let parsedData = {};
+    try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+    catch { parsedData = {}; }
+
+    const nextPrefs = normalizePrefs({ ...(parsedData.preferences || {}), ...patch });
+
+    const estResult = parsedData.result || parsedData || {};
+    const recurring = estResult?.recurring?.services || [];
+    const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+    const pestRecurring = detectPestRecurring(recurring);
+    const hasPestOneTime = detectPestOneTime(oneTimeItems);
+    const baseMonthly = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || estimate.monthly_total || 0);
+    const currentTier = estimate.waveguard_tier || 'Bronze';
+    const tierDiscount = TIER_DISCOUNTS[currentTier] || 0;
+
+    const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime);
+    const monthlyTotal = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount) - monthlyOff) * 100) / 100);
+    const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
+    const onetimeBase = Number(parsedData.onetimeTotalBase || estimate.onetime_total || 0);
+    const onetimeTotal = Math.max(0, Math.round((onetimeBase - oneTimeOff) * 100) / 100);
+    const tierPrices = {};
+    ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
+      tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - TIER_DISCOUNTS[t]) - monthlyOff) * 100) / 100);
+    });
+
+    // Persist — merge new prefs back onto the JSON blob, update totals.
+    parsedData.preferences = nextPrefs;
+    await db('estimates').where({ id: estimate.id }).update({
+      estimate_data: JSON.stringify(parsedData),
+      monthly_total: monthlyTotal,
+      annual_total: annualTotal,
+      onetime_total: onetimeTotal,
+      updated_at: db.fn.now(),
+    });
+
+    // Per-row metadata for client re-render (off-desc + savings label)
+    const prefMeta = {};
+    for (const k of SERVICE_PREF_KEYS) {
+      const cfg = SERVICE_PREFS[k];
+      let savingsLabel = '';
+      if (pestRecurring && hasPestOneTime) {
+        const rec = Math.round(((cfg.perVisit * pestRecurring.visitsPerYear) / 12) * 100) / 100;
+        savingsLabel = `Save $${rec.toFixed(rec % 1 ? 2 : 0)}/mo + $${cfg.oneTime} on one-time`;
+      } else if (pestRecurring) {
+        const rec = Math.round(((cfg.perVisit * pestRecurring.visitsPerYear) / 12) * 100) / 100;
+        savingsLabel = `Save $${rec.toFixed(rec % 1 ? 2 : 0)}/mo`;
+      } else if (hasPestOneTime) {
+        savingsLabel = `Save $${cfg.oneTime}`;
+      }
+      prefMeta[k] = { offDesc: cfg.offDesc, savingsLabel };
+    }
+
+    const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
+
+    logger.info(`[estimate] ${estimate.customer_name} toggled ${Object.keys(patch).join(', ')} -> ${JSON.stringify(patch)} ($${monthlyTotal}/mo)`);
+    res.json({
+      success: true,
+      preferences: nextPrefs,
+      baseMonthly,
+      monthlyTotal,
+      annualTotal,
+      onetimeTotal,
+      tierPrices,
+      savingsPerMo,
+      prefMeta,
+    });
   } catch (err) { next(err); }
 });
 

@@ -286,6 +286,18 @@ class ApiClient {
     });
   }
 
+  // ---- Service Preferences (interior spray / exterior sweep toggles) ----
+  getServicePreferences() {
+    return this.request('/service-preferences');
+  }
+
+  updateServicePreferences(data) {
+    return this.request('/service-preferences', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
   // ---- Referrals ----
   getReferrals() {
     return this.request('/referrals');
