@@ -210,8 +210,41 @@ async function commitReservation({ scheduledServiceId, customerId, paymentMethod
   return updated;
 }
 
+/**
+ * Reclaim scheduled_services rows where reservation_expires_at has passed.
+ *
+ * Abandoned reservations accumulate when:
+ *   - Customer picks a slot but closes the tab before accepting
+ *   - Network failure between POST /:token/reserve and PUT /:token/accept
+ *   - Customer sits on the confirm screen past the 15-min window and
+ *     re-picks, leaving the original reservation dangling
+ *
+ * Deletes the row outright (not a soft-delete) because reservations are
+ * inherently ephemeral — no audit value in keeping them. The
+ * idx_scheduled_services_reservation_cleanup partial index (only rows
+ * where reservation_expires_at IS NOT NULL) makes this scan narrow.
+ *
+ * Function exported and callable today but NOT wired to a cron in
+ * PR B.1. Callers that need it today (admin debug, tests) can invoke
+ * directly; scheduled cleanup wiring lands in a later PR alongside the
+ * other reservation-adjacent operational work.
+ *
+ * Returns: { released: number }
+ */
+async function releaseExpiredReservations() {
+  const now = new Date();
+  const released = await db('scheduled_services')
+    .where('reservation_expires_at', '<', now)
+    .del();
+  if (released > 0) {
+    logger.info(`[slot-reservation] released ${released} expired reservation(s)`);
+  }
+  return { released };
+}
+
 module.exports = {
   reserveSlot,
   commitReservation,
+  releaseExpiredReservations,
   _internals: { parseSlotId, addMinutesToTime },
 };
