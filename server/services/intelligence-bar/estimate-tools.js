@@ -144,6 +144,19 @@ NEVER call this without first calling compute_estimate. NEVER call this if the e
       required: ['customerName', 'address', 'engineInputs', 'engineResult', 'sqftSource', 'reasoning'],
     },
   },
+  {
+    name: 'toggle_estimate_v2_view',
+    description: `Flip the estimates.use_v2_view flag on a single estimate. When true, the customer opening /estimate/{token} sees the React redesign (PR B.2); false serves the legacy server-rendered HTML. Use when the operator says "enable v2 view for the Smith estimate", "flip the new estimate view on for estimate abc-123", or "turn off v2 for Sarah's quote". Accept UUID, token, or customer phone (last-matched estimate). When enabled is omitted, toggles the current value.
+Use for: per-estimate v2 rollout during Virginia's UAT. Reversible — flipping off restores the legacy HTML view with no state loss.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        estimate_identifier: { type: 'string', description: 'Estimate UUID, token, or customer phone (phone resolves to their most recent estimate)' },
+        enabled: { type: 'boolean', description: 'Optional. If omitted, toggle current value. Pass true/false to set explicitly.' },
+      },
+      required: ['estimate_identifier'],
+    },
+  },
 ];
 
 // ─── EXECUTION ──────────────────────────────────────────────────
@@ -159,6 +172,7 @@ async function executeEstimateTool(toolName, input) {
       case 'match_existing_customer': return await matchExistingCustomer(input);
       case 'get_waveguard_tiers': return await getWaveGuardTiers();
       case 'create_pending_estimate': return await createPendingEstimate(input);
+      case 'toggle_estimate_v2_view': return await toggleEstimateV2View(input);
       default: return { error: `Unknown estimate tool: ${toolName}` };
     }
   } catch (err) {
@@ -466,6 +480,60 @@ async function createPendingEstimate(input) {
     monthly_total: monthly,
     annual_total: annual,
     note_for_admin: 'Draft created. Open admin/estimates → 🤖 to review and send.',
+  };
+}
+
+// ─── toggle_estimate_v2_view ───────────────────────────────────
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function resolveEstimateByIdentifier(identifier) {
+  const id = String(identifier || '').trim();
+  if (!id) return null;
+
+  // UUID → direct lookup
+  if (UUID_RE.test(id)) {
+    return db('estimates').where({ id }).first();
+  }
+
+  // Treat as token first (most common when Virginia says "estimate abc-123")
+  const byToken = await db('estimates').where({ token: id }).first();
+  if (byToken) return byToken;
+
+  // Fall back to phone → most recent non-terminal estimate
+  const digits = id.replace(/\D/g, '');
+  if (digits.length >= 10) {
+    const normalized = digits.length === 11 && digits.startsWith('1') ? `+${digits}` : `+1${digits.slice(-10)}`;
+    const byPhone = await db('estimates')
+      .where((q) => q.where('customer_phone', normalized).orWhere('customer_phone', digits).orWhere('customer_phone', `+${digits}`))
+      .orderBy('created_at', 'desc')
+      .first();
+    if (byPhone) return byPhone;
+  }
+
+  return null;
+}
+
+async function toggleEstimateV2View({ estimate_identifier, enabled }) {
+  if (!estimate_identifier) {
+    return { error: 'estimate_identifier required (UUID, token, or phone)' };
+  }
+
+  const estimate = await resolveEstimateByIdentifier(estimate_identifier);
+  if (!estimate) {
+    return { error: `No estimate found matching "${estimate_identifier}" (try a token, UUID, or phone)` };
+  }
+
+  const next = typeof enabled === 'boolean' ? enabled : !estimate.use_v2_view;
+  await db('estimates').where({ id: estimate.id }).update({ use_v2_view: next });
+
+  logger.info(`[estimate-v2] Toggled use_v2_view for estimate ${estimate.id} → ${next}`);
+
+  return {
+    estimateId: estimate.id,
+    customerName: estimate.customer_name,
+    token: estimate.token,
+    useV2View: next,
+    previewUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
   };
 }
 
