@@ -7,6 +7,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { shortenOrPassthrough } = require('../services/short-url');
+const slotReservation = require('../services/slot-reservation');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -560,6 +561,14 @@ async function handleEstimateView(req, res, next) {
 router.get('/:token', handleEstimateView);
 
 // PUT /api/estimates/:token/accept — customer accepts
+// Body (backward compatible — both optional):
+//   { slotId?: string, paymentMethodPreference?: 'deposit_now' | 'pay_at_visit' }
+// When slotId is present, a prior POST /:token/reserve call must have
+// created a scheduled_services reservation row for the same estimate.
+// The accept handler commits that reservation inside the existing
+// transaction — customer_id gets linked, reservation_expires_at cleared.
+// Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
+// creates scheduled_services post-transaction).
 router.put('/:token/accept', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
@@ -567,6 +576,41 @@ router.put('/:token/accept', async (req, res, next) => {
     if (estimate.status === 'accepted') return res.json({ success: true, alreadyAccepted: true });
 
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
+
+    // Slot commit inputs. Validate early so we can reject before opening
+    // a transaction if the payload is malformed.
+    const slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
+    const paymentMethodPreference = (() => {
+      const raw = req.body?.paymentMethodPreference;
+      if (raw === 'deposit_now' || raw === 'pay_at_visit') return raw;
+      return null;
+    })();
+
+    let reservationRow = null;
+    if (slotId) {
+      const parsed = slotReservation._internals.parseSlotId(slotId);
+      if (!parsed) return res.status(400).json({ error: 'invalid slotId format' });
+
+      // Find the reservation row for THIS estimate matching the requested
+      // slot. Prevents a malicious client from passing a slotId reserved
+      // for someone else's estimate.
+      reservationRow = await db('scheduled_services')
+        .where({
+          source_estimate_id: estimate.id,
+          scheduled_date: parsed.date,
+          window_start: parsed.windowStart,
+        })
+        .modify((q) => { if (parsed.techId) q.where('technician_id', parsed.techId); })
+        .whereNotNull('reservation_expires_at')
+        .first();
+
+      if (!reservationRow) {
+        return res.status(409).json({ error: 'no active reservation for this slot — re-pick and try again' });
+      }
+      if (new Date(reservationRow.reservation_expires_at) < new Date()) {
+        return res.status(409).json({ error: 'reservation expired — re-pick a slot' });
+      }
+    }
 
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
@@ -606,6 +650,31 @@ router.put('/:token/accept', async (req, res, next) => {
           await trx('notification_prefs').insert({ customer_id: customerId });
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+      }
+
+      // Commit the slot reservation (if one) now that we have customerId.
+      // Runs inside the same trx so either everything lands or nothing
+      // does — a mid-flight failure here won't leave a committed customer
+      // paired with an un-committed reservation (or vice versa).
+      if (reservationRow && customerId) {
+        try {
+          await slotReservation.commitReservation({
+            scheduledServiceId: reservationRow.id,
+            customerId,
+            paymentMethodPreference,
+            trx,
+          });
+        } catch (commitErr) {
+          // Only RESERVATION_EXPIRED is interesting here — race between
+          // our 15-min window and the final tap. Let the outer catch
+          // translate it into a user-facing 409.
+          if (commitErr.code === 'RESERVATION_EXPIRED') {
+            const err = new Error('reservation expired during commit');
+            err.status = 409;
+            throw err;
+          }
+          throw commitErr;
+        }
       }
 
       let onboardingToken = null;
@@ -716,7 +785,14 @@ router.put('/:token/accept', async (req, res, next) => {
     }
 
     res.json({ success: true, onboardingToken });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Translate user-visible 4xx errors thrown from inside the transaction
+    // (e.g. reservation expiring between the pre-tx check and the commit).
+    if (err && err.status >= 400 && err.status < 500) {
+      return res.status(err.status).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier
