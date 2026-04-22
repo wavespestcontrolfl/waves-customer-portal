@@ -695,13 +695,6 @@ export default function CustomersPageV2() {
             <div className="mt-3 flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setShowAddModal(true)}
-                className="inline-flex items-center justify-center u-label px-3 h-11 bg-zinc-900 text-white border-hairline border-zinc-900 rounded-sm transition-colors u-focus-ring"
-              >
-                + Add Customer
-              </button>
-              <button
-                type="button"
                 onClick={() => setShowFilters(true)}
                 className="inline-flex items-center justify-center gap-1.5 u-label px-3 h-11 bg-white text-ink-secondary border-hairline border-zinc-300 rounded-sm transition-colors u-focus-ring"
               >
