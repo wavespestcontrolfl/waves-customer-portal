@@ -49,9 +49,24 @@ export default function RatePage() {
 
   const handleScore = (s) => {
     setScore(s);
-    if (s >= 8) setScreen('highlights');
-    else if (s >= 4) setScreen('feedback');
-    else setScreen('feedback');
+    // 8–10 goes straight to the chip + AI draft screen. Submit the NPS score
+    // up-front (fire-and-forget) so the record is saved even if the customer
+    // bounces before generating a draft.
+    if (s >= 8) {
+      setScreen('ai-review');
+      // Pre-seed selected service from server context so the customer doesn't
+      // re-pick what we already know.
+      if (data?.serviceType) {
+        const match = SERVICE_OPTIONS.find((x) => data.serviceType.toLowerCase().includes(x.toLowerCase()));
+        if (match) setSelectedServices([match]);
+      }
+      fetch(`${API_BASE}/rate/${token}/submit`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ score: s, feedback: '', highlights: [] }),
+      }).catch(() => {});
+    } else {
+      setScreen('feedback');
+    }
   };
 
   const toggleHighlight = (h) => {
@@ -132,13 +147,18 @@ export default function RatePage() {
     navigator.clipboard.writeText(generatedReview).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
-    });
+    }).catch(() => {});
   };
 
-  const handleGoToGoogle = () => {
-    if (data?.googleReviewUrl) {
-      window.location.href = data.googleReviewUrl;
-    }
+  // Single-action "Post on Google" — copy the draft and immediately redirect
+  // to the closest GBP review URL in the same tab. New tabs get orphaned on
+  // mobile Safari, which is the main browser these review links open on.
+  const handlePostOnGoogle = () => {
+    if (!data?.googleReviewUrl) return;
+    try {
+      if (generatedReview) navigator.clipboard.writeText(generatedReview).catch(() => {});
+    } catch { /* clipboard API can fail on iOS in-app browsers; still redirect */ }
+    window.location.href = data.googleReviewUrl;
   };
 
   const handleSkipToGoogle = () => {
@@ -309,44 +329,49 @@ export default function RatePage() {
             </button>
           )}
 
-          {/* Generated review display */}
+          {/* Generated review — editable textarea so the customer can tweak
+              before one-tap post. Single action: copies + redirects. */}
           {generatedReview && (
             <div style={{ marginTop: 4 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#1B2C5B', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Your Review</div>
-              <div style={{
-                background: '#E3F5FD', border: '2px solid #E3F5FD', borderRadius: 14, padding: 16,
-                fontSize: 15, color: '#1B2C5B', lineHeight: 1.65, marginBottom: 14,
-                position: 'relative',
-              }}>
-                <div style={{ position: 'absolute', top: -6, left: 16, background: '#E3F5FD', padding: '0 6px', fontSize: 10, color: '#065A8C', fontWeight: 700, letterSpacing: 0.5 }}>READY TO PASTE</div>
-                {generatedReview}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#1B2C5B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  Your Review <span style={{ fontWeight: 400, color: '#64748B', textTransform: 'none', letterSpacing: 0 }}>— edit if you want</span>
+                </div>
               </div>
-
-              <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-                <button onClick={handleCopyReview} style={{
-                  flex: 1, padding: 14, border: 'none', borderRadius: 12, fontSize: 15, fontWeight: 800,
-                  color: '#fff', cursor: 'pointer',
-                  background: copied ? '#16A34A' : '#009CDE',
-                  transition: 'background 0.2s',
-                }}>
-                  {copied ? 'Copied!' : 'Copy to Clipboard'}
-                </button>
-              </div>
+              <textarea
+                value={generatedReview}
+                onChange={(e) => setGeneratedReview(e.target.value)}
+                rows={5}
+                style={{
+                  width: '100%', background: '#E3F5FD', border: '2px solid #BAE0F1', borderRadius: 14,
+                  padding: 14, fontSize: 15, color: '#1B2C5B', lineHeight: 1.6, marginBottom: 12,
+                  fontFamily: 'inherit', resize: 'vertical', outline: 'none', boxSizing: 'border-box',
+                }}
+              />
 
               <Button
                 variant="primary"
-                onClick={handleGoToGoogle}
+                onClick={handlePostOnGoogle}
                 style={{ width: '100%', fontSize: 16 }}
               >
-                Go to Google Reviews
+                Post on Google
               </Button>
 
-              <button onClick={handleGenerateReview} disabled={generating} style={{
-                display: 'block', margin: '12px auto 0', fontSize: 13, color: '#009CDE', background: 'none',
-                border: 'none', cursor: 'pointer', fontWeight: 600,
-              }}>
-                {generating ? 'Rewriting...' : 'Regenerate review'}
-              </button>
+              <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 12 }}>
+                <button onClick={handleGenerateReview} disabled={generating} style={{
+                  fontSize: 13, color: '#009CDE', background: 'none', border: 'none',
+                  cursor: 'pointer', fontWeight: 600,
+                }}>
+                  {generating ? 'Rewriting…' : 'Regenerate'}
+                </button>
+                <span style={{ fontSize: 13, color: '#CBD5E1' }}>·</span>
+                <button onClick={handleCopyReview} style={{
+                  fontSize: 13, color: copied ? '#16A34A' : '#64748B', background: 'none',
+                  border: 'none', cursor: 'pointer', fontWeight: 600,
+                }}>
+                  {copied ? 'Copied' : 'Copy only'}
+                </button>
+              </div>
             </div>
           )}
 

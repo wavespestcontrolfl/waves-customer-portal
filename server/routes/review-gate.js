@@ -2,8 +2,24 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { WAVES_LOCATIONS } = require('../config/locations');
+const { WAVES_LOCATIONS, nearestLocation } = require('../config/locations');
 const MODELS = require('../config/models');
+
+// Nearest GBP to the customer's geocoded address, with fallbacks. Prefers the
+// haversine winner when the customer has a lat/lng; otherwise falls back to
+// whatever location the review request was tagged with at creation time
+// (review-request.js already city-routes on create).
+function resolveReviewLocation(request, customer) {
+  if (customer && customer.latitude != null && customer.longitude != null) {
+    const hit = nearestLocation(customer.latitude, customer.longitude);
+    if (hit) return hit;
+  }
+  if (request && request.location_id) {
+    const byId = WAVES_LOCATIONS.find((l) => l.id === request.location_id);
+    if (byId) return byId;
+  }
+  return WAVES_LOCATIONS[0];
+}
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
@@ -28,12 +44,18 @@ router.get('/:token', async (req, res, next) => {
       return res.status(200).json({ alreadySubmitted: true, message: 'You already submitted feedback — thank you!' });
     }
 
-    // Look up customer name
+    // Look up customer name — prefer the beneficiary (service contact) when
+    // set so the review page greets the right person. Closest-GBP routing
+    // uses the customer's geocoded lat/lng (spec ask: "paired with the
+    // closest Google Business Profile"), falling back to the location tagged
+    // at request creation.
     const customer = await db('customers').where({ id: request.customer_id }).first();
-    const loc = WAVES_LOCATIONS.find(l => l.id === request.location_id) || WAVES_LOCATIONS[0];
+    const { getServiceContact } = require('../services/customer-contact');
+    const contact = getServiceContact(customer);
+    const loc = resolveReviewLocation(request, customer);
 
     res.json({
-      firstName: customer?.first_name || 'there',
+      firstName: contact.name || customer?.first_name || 'there',
       techName: request.tech_name || 'your technician',
       serviceType: request.service_type || 'pest control service',
       serviceDate: request.service_date,
@@ -92,8 +114,10 @@ router.post('/:token/submit', async (req, res, next) => {
       metadata: JSON.stringify({ score, category, feedback: (feedback || '').slice(0, 200), highlights }),
     });
 
-    // Look up location for Google review URL
-    const loc = WAVES_LOCATIONS.find(l => l.id === request.location_id) || WAVES_LOCATIONS[0];
+    // Look up location for Google review URL — closest-GBP by customer
+    // geocode, fallback to the request's tagged location.
+    const customerForLoc = await db('customers').where({ id: request.customer_id }).first();
+    const loc = resolveReviewLocation(request, customerForLoc);
 
     // Handle by category
     if (category === 'promoter') {
@@ -215,36 +239,57 @@ router.post('/:token/generate-review', async (req, res, next) => {
 
     const personalDetail = personalNote ? personalNote.trim() : '';
 
-    const prompt = `Write a Google review for a pest control company called Waves Pest Control in Southwest Florida. Write it as if you are the customer named ${firstName}. Use a natural, conversational tone that sounds like a real person wrote it.
+    // Vary opening style so Google's dup-detection doesn't flag a pattern
+    // of "Adam was…" across every generated review. One is sampled per call.
+    const OPENING_STYLES = [
+      'start mid-thought, as if the customer is finishing a conversation',
+      'lead with the specific result they got',
+      'lead with the technician\'s behavior',
+      'lead with a short reaction word (e.g. "Really happy", "Super impressed", "Honestly great")',
+      'lead with how the experience compared to expectations',
+      'lead with the service type',
+    ];
+    const style = OPENING_STYLES[Math.floor(Math.random() * OPENING_STYLES.length)];
 
-Details to include:
+    const prompt = `Write a genuine Google review for Waves Pest Control (Southwest Florida) from the customer's perspective. Sound like a real SWFL homeowner wrote it on their phone — casual, short, specific.
+
+Context:
+- Customer first name: ${firstName}
 - Services received: ${serviceList}
 ${highlightList ? `- What stood out: ${highlightList}` : ''}
-${personalDetail ? `- Customer's personal note: "${personalDetail}"` : ''}
-${request.tech_name ? `- Technician name: ${request.tech_name}` : ''}
+${personalDetail ? `- Customer's own words: "${personalDetail}"` : ''}
+${request.tech_name ? `- Technician: ${request.tech_name}` : ''}
+
+Opening style for this review: ${style}
 
 Rules:
-- Write 2-4 sentences only
-- No emojis
-- Sound genuine and specific, not generic
-- Mention specific services or what they liked
-- Do not use exclamation marks more than once
-- Do not start with "I"
-- Do not mention star ratings`;
+- 2 to 4 sentences. Vary the length between reviews — sometimes tight, sometimes chattier.
+- No emojis, no hashtags, no star ratings.
+- Do NOT start with "I", "My", "We", or the technician's name.
+- At most one exclamation mark in the whole review; preferably zero.
+- Weave in at least one specific trait or detail; avoid generic filler like "great service" or "highly recommend".
+- Don't say "Waves Pest Control" more than once; never use "WPC" or other abbreviations.
+- No marketing phrases like "5 stars" or "best company ever".
 
-    // Call Claude API
+Return ONLY the review body. No quotes, no preamble, no sign-off.`;
+
+    // Call Claude API — FAST tier is plenty for 256-token review body; high
+    // temperature keeps wording varied across customers.
     let reviewText = '';
     try {
       const Anthropic = require('@anthropic-ai/sdk');
       const anthropic = new Anthropic();
 
       const message = await anthropic.messages.create({
-        model: MODELS.FLAGSHIP,
+        model: MODELS.FAST,
         max_tokens: 256,
+        temperature: 0.95,
         messages: [{ role: 'user', content: prompt }],
       });
 
       reviewText = message.content[0]?.text?.trim() || '';
+      // Strip accidental quotes or "Review:" preambles
+      reviewText = reviewText.replace(/^["']+|["']+$/g, '').replace(/^(Review|My review):\s*/i, '').trim();
     } catch (aiErr) {
       logger.error(`[review-gate] AI review generation failed: ${aiErr.message}`);
       // Fallback: generate a simple template
@@ -255,6 +300,18 @@ Rules:
       if (personalDetail) parts.push(personalDetail);
       parts.push('Would definitely recommend them to anyone in Southwest Florida.');
       reviewText = parts.join('. ') + (parts[parts.length - 1].endsWith('.') ? '' : '.');
+    }
+
+    // Persist so we can audit variation + iterate the prompt. Soft-fail:
+    // if the column isn't present yet (pre-migration env) the API still
+    // returns the draft.
+    try {
+      await db('review_requests').where({ id: request.id }).update({
+        generated_review_text: reviewText.slice(0, 2000),
+        generated_at: db.fn.now(),
+      });
+    } catch (persistErr) {
+      logger.warn(`[review-gate] generated_review_text persist skipped: ${persistErr.message}`);
     }
 
     res.json({ review: reviewText });
