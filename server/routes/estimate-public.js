@@ -509,6 +509,20 @@ async function handleEstimateView(req, res, next) {
       });
     } catch (e) { logger.error(`[estimate-view] view tracking failed: ${e.message}`); }
 
+    // Per-open log (Estimates v2 spec §4) — one row per open with ip + UA.
+    // Wrapped so a schema drift can't break the public estimate page.
+    try {
+      const ip = (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
+        .toString().split(',')[0].trim().slice(0, 64);
+      const ua = (req.get('user-agent') || '').slice(0, 1000);
+      await db('estimate_views').insert({
+        estimate_id: estimate.id,
+        viewed_at: db.fn.now(),
+        ip: ip || null,
+        user_agent: ua || null,
+      });
+    } catch (e) { logger.warn(`[estimate-view] estimate_views insert skipped: ${e.message}`); }
+
     // First-view actions: set viewed_at/status, notify admin + SMS office
     if (!estimate.viewed_at) {
       await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
