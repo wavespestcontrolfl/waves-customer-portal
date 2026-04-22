@@ -579,7 +579,20 @@ router.put('/:token/accept', async (req, res, next) => {
     // half-created customer without an onboarding session (or vice versa).
     // SMS / notifications / auto-conversion are fired AFTER the commit below.
     const txResult = await db.transaction(async (trx) => {
-      await trx('estimates').where({ id: estimate.id }).update({ status: 'accepted', accepted_at: trx.fn.now() });
+      // Capture accepted_version_id so "what the customer agreed to" is
+      // stable even if estimate_data is later revised server-side. Defensive:
+      // if current_version_id is somehow null (shouldn't happen post-backfill
+      // — the column is NOT NULL — but a migration quirk could theoretically
+      // surface), log and skip the version stamp rather than crash accept.
+      const acceptUpdates = { status: 'accepted', accepted_at: trx.fn.now() };
+      if (estimate.current_version_id) {
+        acceptUpdates.accepted_version_id = estimate.current_version_id;
+      } else {
+        logger.warn('[estimate-accept] current_version_id null on accept', {
+          estimateId: estimate.id,
+        });
+      }
+      await trx('estimates').where({ id: estimate.id }).update(acceptUpdates);
 
       let customerId = estimate.customer_id;
       if (!customerId && estimate.customer_phone) {
