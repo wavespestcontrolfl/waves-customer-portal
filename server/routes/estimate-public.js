@@ -65,8 +65,8 @@ const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
 // $50 on a one-time pest treatment. Applied only when the estimate
 // contains a recurring or one-time pest-control line.
 const SERVICE_PREFS = {
-  interior_spray:  { perVisit: 10, oneTime: 50, label: 'Interior spraying',  offLabel: 'Exterior service only', offDesc: 'No interior treatment — tech sprays and inspects the perimeter only.' },
-  exterior_sweep:  { perVisit: 10, oneTime: 50, label: 'Exterior eave sweep', offLabel: 'Skip eave sweep',       offDesc: 'No eave/cobweb sweep on the exterior. Tech still performs the perimeter treatment.' },
+  interior_spray:  { perVisit: 10, oneTime: 50, label: 'Interior spraying',  offDesc: 'No interior treatment — tech sprays and inspects the perimeter only.' },
+  exterior_sweep:  { perVisit: 10, oneTime: 50, label: 'Exterior eave sweep', offDesc: 'No eave/cobweb sweep on the exterior. Tech still performs the perimeter treatment.' },
 };
 const SERVICE_PREF_KEYS = Object.keys(SERVICE_PREFS);
 const DEFAULT_PREFS = SERVICE_PREF_KEYS.reduce((a, k) => (a[k] = true, a), {});
@@ -149,10 +149,10 @@ const PERKS = [
 // server/config/locations.js but kept inline so the SSR estimate page
 // stays self-contained (no require cycle at render time).
 const LOCATIONS = [
-  { name: 'Lakewood Ranch', area: 'Bradenton / Lakewood Ranch', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612', phoneRaw: '+19413187612', slug: 'pest-control-bradenton-fl', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
-  { name: 'Parrish',        area: 'Parrish / Palmetto / Ellenton',    address: '5155 115th Dr E, Parrish, FL 34219',          phone: '(941) 297-2817', phoneRaw: '+19412972817', slug: 'pest-control-parrish-fl',   placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
-  { name: 'Sarasota',       area: 'Sarasota / Siesta Key',              address: '1450 Pine Warbler Pl, Sarasota, FL 34240',   phone: '(941) 297-2606', phoneRaw: '+19412972606', slug: 'pest-control-sarasota-fl',  placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
-  { name: 'Venice',         area: 'Venice / North Port / Englewood',    address: '1978 S Tamiami Trl #10, Venice, FL 34293',    phone: '(941) 297-3337', phoneRaw: '+19412973337', slug: 'pest-control-venice-fl',    placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
+  { name: 'Lakewood Ranch', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612', phoneRaw: '+19413187612', slug: 'pest-control-bradenton-fl', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
+  { name: 'Parrish',        address: '5155 115th Dr E, Parrish, FL 34219',       phone: '(941) 297-2817', phoneRaw: '+19412972817', slug: 'pest-control-parrish-fl',   placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
+  { name: 'Sarasota',       address: '1450 Pine Warbler Pl, Sarasota, FL 34240', phone: '(941) 297-2606', phoneRaw: '+19412972606', slug: 'pest-control-sarasota-fl',  placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
+  { name: 'Venice',         address: '1978 S Tamiami Trl #10, Venice, FL 34293', phone: '(941) 297-3337', phoneRaw: '+19412973337', slug: 'pest-control-venice-fl',    placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
 ];
 
 // Footer — company contact + social profiles. Kept in one place so the
@@ -370,7 +370,6 @@ function renderPage(token, estimate, estData) {
   .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#6B7280;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
-  .logo-wrap{display:inline-flex;align-items:center}
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
   .top-phone:hover{color:${BRAND.blueDark}}
   .top-logo{height:28px;display:block}
@@ -450,12 +449,6 @@ function renderPage(token, estimate, estData) {
   .upsell .txt{flex:1;min-width:200px}
   .upsell h3{color:#1B2C5B;margin:0 0 4px}
   .upsell-btn{background:#1B2C5B;color:#fff;padding:10px 16px;border-radius:8px;border:none;font-weight:500;cursor:pointer;font-size:14px}
-  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-  @media(max-width:640px){.steps{grid-template-columns:1fr}}
-  .step{background:#F7F5EE;border-radius:10px;padding:16px;text-align:center;border:1px solid #E7E2D7}
-  .step .num{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#1B2C5B;line-height:1;font-weight:500}
-  .step h4{margin:6px 0 4px;font-size:14px;font-weight:600;color:#1B2C5B}
-  .step p{font-size:13px;margin:0;color:#6B7280}
   .perks-list{list-style:none;padding:0;margin:0;columns:2;column-gap:20px}
   @media(max-width:640px){.perks-list{columns:1}}
   .perks-list li{padding:6px 0 6px 24px;position:relative;break-inside:avoid;font-size:14px;color:#3F4A65}
@@ -902,20 +895,6 @@ ${shellTopBar()}
     loadSlots();
   }
 
-  async function acceptEstimate() {
-    const btn = document.getElementById('accept-btn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Accepting\u2026'; }
-    try {
-      const r = await fetch(API + '/accept', { method: 'PUT' });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'Failed');
-      if (data.onboardingToken) window.location.href = '/onboard/' + data.onboardingToken;
-      else { toast('Accepted! We\u2019ll be in touch shortly.'); setTimeout(() => location.reload(), 1200); }
-    } catch (e) {
-      toast('Could not accept. Call (941) 297-5749 if this keeps happening.');
-      if (btn) { btn.disabled = false; btn.textContent = 'Accept this estimate \u2192'; }
-    }
-  }
 
   async function declineEstimate() {
     if (!confirm('Are you sure you want to decline this estimate?')) return;
