@@ -1,10 +1,8 @@
 /**
- * Service Type Normalizer & Legacy Notes Cleaner
+ * Service Type Normalizer
  * server/utils/service-normalizer.js
  *
- * Normalizes raw service type labels to clean Waves service names,
- * and strips legacy boilerplate from historical appointment notes that
- * were imported from the prior Square Appointments system.
+ * Normalizes raw service type labels to clean Waves service names.
  */
 
 const { etDateString } = require('./datetime-et');
@@ -12,7 +10,7 @@ const { etDateString } = require('./datetime-et');
 // ─── SERVICE TYPE NORMALIZATION ──────────────────────────────────
 
 /**
- * Maps raw Square service names (e.g. "Pest Control Service - 1 hour - $117")
+ * Maps raw service names (e.g. "Pest Control Service - 1 hour - $117")
  * to clean Waves service type labels.
  */
 const SERVICE_TYPE_MAP = [
@@ -72,8 +70,8 @@ const SERVICE_TYPE_MAP = [
 ];
 
 /**
- * Normalize a raw service type string from Square into a clean Waves label.
- * Strips pricing, duration, and Square formatting.
+ * Normalize a raw service type string into a clean Waves label.
+ * Strips pricing, duration, and common suffix formatting.
  *
  * Examples:
  *   "Pest Control Service - 1 hour - $117" → "Pest Control Service"
@@ -83,7 +81,7 @@ const SERVICE_TYPE_MAP = [
 function normalizeServiceType(raw) {
   if (!raw) return 'General Service';
 
-  // Strip common Square suffixes: " - 1 hour", " - $117", " - 45 min"
+  // Strip duration/price suffixes: " - 1 hour", " - $117", " - 45 min"
   let cleaned = raw
     .replace(/\s*[-–]\s*\d+\s*(hour|hr|min|minute)s?\b/gi, '')
     .replace(/\s*[-–]\s*\$[\d,.]+/g, '')
@@ -143,50 +141,10 @@ function serviceColor(category) {
 }
 
 
-// ─── SQUARE NOTES CLEANING ──────────────────────────────────────
-
-/**
- * Square appointment notes often contain boilerplate admin text.
- * Strip it out and return only the meaningful content.
- */
-const SQUARE_BOILERPLATE_PATTERNS = [
-  /\*{3}\s*Please make changes.*?(?:\*{3}|$)/gis,
-  /Please make changes to this appointment in the Square Appointments calendar[\s\S]*?next sync\./gi,
-  /\*{3}.*?Square\s*Appointments.*?(?:\*{3}|$)/gis,
-  /Any changes made here will be overwritten.*$/gim,
-  /https?:\/\/app\.squareup\.com\S*/g,
-  /https?:\/\/squareup\.com\S*/g,
-  /Booked via Square Online/gi,
-  /Booked online/gi,
-  /Created by Square/gi,
-  /This appointment was booked/gi,
-  /New customer\s*[-–—]\s*first visit/gi,
-  /New customer\s*[-–—]\s*first time/gi,
-  /First[-\s]time customer/gi,
-];
-
-function cleanSquareNotes(notes) {
-  if (!notes) return '';
-  let cleaned = notes;
-  for (const pattern of SQUARE_BOILERPLATE_PATTERNS) {
-    cleaned = cleaned.replace(pattern, '');
-  }
-  // Clean up residual whitespace, pipe separators, orphaned contact info lines
-  cleaned = cleaned
-    .replace(/\|\s*$/g, '').replace(/^\s*\|/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-  return cleaned;
-}
-
-
 // ─── NEW CUSTOMER DETECTION ─────────────────────────────────────
 
 /**
- * Determine if a customer is actually new (no completed service records)
- * rather than relying on Square's notes field which may say "new customer"
- * even for returning customers who booked through the website.
+ * Determine if a customer is actually new (no completed service records).
  *
  * @param {Object} db - Knex database instance
  * @param {string} customerId - Customer UUID
@@ -233,7 +191,6 @@ module.exports = {
   detectServiceCategory,
   serviceIcon,
   serviceColor,
-  cleanSquareNotes,
   isNewCustomer,
   safeDate,
   safeDateLabel,

@@ -7,7 +7,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
-  cleanSquareNotes, isNewCustomer, safeDate,
+  isNewCustomer, safeDate,
 } = require('../utils/service-normalizer');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 
@@ -117,7 +117,7 @@ router.get('/', async (req, res, next) => {
       const normalizedType = normalizeServiceType(s.service_type);
       const category = detectServiceCategory(normalizedType);
 
-      const cleanedNotes = cleanSquareNotes(s.notes);
+      const cleanedNotes = (s.notes || '').trim();
 
       const alerts = [];
       if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });

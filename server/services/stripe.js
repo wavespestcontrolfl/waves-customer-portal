@@ -527,8 +527,7 @@ const StripeService = {
 
     // One-off charge via the public pay link. Intentionally does NOT attach
     // a Stripe customer — Waves admin is the source of truth; we link the
-    // charge back via waves_customer_id in metadata. Immune to stale
-    // stripe_customer_id values left over from Square → Stripe migration.
+    // charge back via waves_customer_id in metadata.
     const baseAmount = parseFloat(invoice.total);
     const amountCents = Math.round(baseAmount * 100);
 

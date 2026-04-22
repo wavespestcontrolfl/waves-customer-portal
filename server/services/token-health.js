@@ -682,7 +682,7 @@ const TokenHealthService = {
 
   /**
    * Get all credential statuses from the database (no live checks).
-   * Purges deprecated platforms (e.g. 'square') and dedupes any duplicate
+   * Purges any deprecated platforms not in KNOWN, and dedupes duplicate
    * rows per platform before returning.
    */
   async getAll() {

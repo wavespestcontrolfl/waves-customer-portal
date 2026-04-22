@@ -319,7 +319,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // When the tech completes with both "send report" and "ask for review" on,
     // mint the review row now and bundle its short URL into the one completion
     // SMS instead of firing a second message 90-180 min later. Single message
-    // lands higher read-rates than two and matches the Square-style flow.
+    // lands higher read-rates than two.
     let bundledReviewUrl = null;
     if (sendCompletionSms && requestReview && svc.cust_phone) {
       try {

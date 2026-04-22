@@ -103,10 +103,9 @@ const CalendarSync = {
           const startRaw = ev.start?.dateTime || ev.start?.date;
           if (!startRaw) { results.google.skipped++; continue; }
 
-          // Deduplicate by google event ID (stored in legacy square_booking_id column)
           const gcalId = `gcal_${ev.id}`;
           try {
-            const existing = await db('scheduled_services').where({ square_booking_id: gcalId }).first();
+            const existing = await db('scheduled_services').where({ external_booking_id: gcalId }).first();
             if (existing) { results.google.skipped++; continue; }
           } catch { /* column may not exist yet — skip dedup */ }
 
@@ -134,7 +133,7 @@ const CalendarSync = {
             notes: ev.description ? ev.description.substring(0, 500) : null,
           };
           try {
-            await db('scheduled_services').insert({ ...ins, square_booking_id: gcalId, source: 'calendar', zone: getZone(customer?.city || ev.location), time_window: hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening', estimated_duration_minutes: durationMin });
+            await db('scheduled_services').insert({ ...ins, external_booking_id: gcalId, source: 'calendar', zone: getZone(customer?.city || ev.location), time_window: hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening', estimated_duration_minutes: durationMin });
           } catch {
             await db('scheduled_services').insert(ins);
           }

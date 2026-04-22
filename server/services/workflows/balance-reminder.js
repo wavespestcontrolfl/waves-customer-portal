@@ -19,7 +19,7 @@ class BalanceReminder {
       .whereNotNull('customers.waveguard_tier')
       .select('scheduled_services.*', 'customers.id as cust_id', 'customers.first_name',
         'customers.last_name', 'customers.phone', 'customers.waveguard_tier',
-        'customers.monthly_rate', 'customers.square_customer_id', 'customers.nearest_location_id');
+        'customers.monthly_rate', 'customers.nearest_location_id');
 
     let sent = 0;
     for (const service of upcoming) {

@@ -42,46 +42,6 @@ The WaveGuard Bronze/Silver/Gold/Platinum ladder is a Hormozi-style Grand Slam O
 
 ## Related
 - [[wiki/business-strategy/route-density-economics.md|Route density and why it drives profit]]
-- [[wiki/business-strategy/stripe-discount-model.md|Why discounts run through Stripe, not Square]]
-
-## Sources
-- Founder notes, April 2026
-`,
-  },
-  {
-    path: 'wiki/business-strategy/stripe-discount-model.md',
-    title: 'Why We Moved From Square to Stripe (and the Discount Model)',
-    summary: 'Square was a payment terminal; Stripe is a programmable revenue layer. The move unlocked WaveGuard member discounts, ACH for larger invoices, and programmatic refunds. All customer and billing state now lives in PostgreSQL — Stripe is the processor, not the system of record.',
-    category: 'business-strategy',
-    tags: ['stripe', 'payments', 'pricing', 'strategy'],
-    content: `# Why We Moved From Square to Stripe
-
-## Summary
-Square was fine as a payment terminal but couldn't support the business model we were building. Stripe is a programmable revenue layer: Payment Element, ACH, programmatic refunds, webhook-driven automation, and — critically — discount codes that can be wired to WaveGuard membership logic sitting in our own database.
-
-## What Square Could Not Do
-
-- Membership-aware discounts (we'd have had to hand-key them)
-- ACH at reasonable fees for larger invoices (tree & shrub, termite)
-- Programmatic refunds and partial refunds on tech corrections
-- Webhook-driven state sync with our portal (appointments, invoices, receipts)
-- Apple Pay / Google Pay / card-on-file in one UI element
-
-## What The Move Unlocked
-
-1. **Discount model lives in our code.** WaveGuard discount % is computed from the customer's tier in PostgreSQL. Stripe is told the final amount. This means we can change the discount logic without touching the processor.
-2. **Single source of truth is PostgreSQL.** No Stripe customer records are used for business logic — customers exist in our DB, Stripe just has payment methods attached.
-3. **ACH opens bigger invoices.** Termite warranties, tree injections, and commercial accounts now go through ACH — card fees on a $2,400 termite job would have been punishing.
-4. **Automation compounds.** Webhook → invoice state → SMS follow-up → dashboard KPI — none of that existed on Square.
-
-## Hard Rules Going Forward
-
-- **Never reference Square in new code.** It is fully phased out.
-- **Stripe is the payment processor only.** All business state (customer tier, service history, discount eligibility, loyalty credits) lives in our DB.
-- **All automation is native.** No Zapier, no Make, no third-party glue. If the portal needs to do something when a payment succeeds, write it in the Stripe webhook handler.
-
-## Related
-- [[wiki/business-strategy/waveguard-tier-logic.md|WaveGuard tier structure]]
 
 ## Sources
 - Founder notes, April 2026

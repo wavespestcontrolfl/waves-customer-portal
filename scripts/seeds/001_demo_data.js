@@ -57,7 +57,7 @@ exports.seed = async function (knex) {
     waveguard_tier: 'Gold',
     monthly_rate: 189.00,
     member_since: '2025-03-01',
-    square_customer_id: 'SQ_CUST_DEMO_001',
+    stripe_customer_id: 'cus_DEMO_001',
     referral_code: 'WAVES-J4KM',
   });
 
@@ -131,7 +131,7 @@ exports.seed = async function (knex) {
   const pmId = uuidv4();
   await knex('payment_methods').insert({
     id: pmId, customer_id: customerId,
-    square_card_id: 'SQ_CARD_DEMO_001',
+    stripe_payment_method_id: 'pm_DEMO_001',
     card_brand: 'VISA', last_four: '4821',
     exp_month: '08', exp_year: '2028',
     is_default: true, autopay_enabled: true,
@@ -140,10 +140,10 @@ exports.seed = async function (knex) {
   // ---- Payments ----
   await knex('payments').insert([
     { customer_id: customerId, payment_method_id: pmId, payment_date: '2026-04-01', amount: 189.00, status: 'upcoming', description: 'WaveGuard Gold Monthly' },
-    { customer_id: customerId, payment_method_id: pmId, square_payment_id: 'SQ_PAY_004', payment_date: '2026-03-01', amount: 189.00, status: 'paid', description: 'WaveGuard Gold Monthly' },
-    { customer_id: customerId, payment_method_id: pmId, square_payment_id: 'SQ_PAY_003', payment_date: '2026-02-01', amount: 189.00, status: 'paid', description: 'WaveGuard Gold Monthly' },
-    { customer_id: customerId, payment_method_id: pmId, square_payment_id: 'SQ_PAY_002', payment_date: '2026-01-01', amount: 189.00, status: 'paid', description: 'WaveGuard Gold Monthly' },
-    { customer_id: customerId, payment_method_id: pmId, square_payment_id: 'SQ_PAY_001', payment_date: '2025-12-15', amount: 250.00, status: 'paid', description: 'One-Time Mosquito Event' },
+    { customer_id: customerId, payment_method_id: pmId, stripe_payment_intent_id: 'pi_DEMO_004', payment_date: '2026-03-01', amount: 189.00, status: 'paid', description: 'WaveGuard Gold Monthly' },
+    { customer_id: customerId, payment_method_id: pmId, stripe_payment_intent_id: 'pi_DEMO_003', payment_date: '2026-02-01', amount: 189.00, status: 'paid', description: 'WaveGuard Gold Monthly' },
+    { customer_id: customerId, payment_method_id: pmId, stripe_payment_intent_id: 'pi_DEMO_002', payment_date: '2026-01-01', amount: 189.00, status: 'paid', description: 'WaveGuard Gold Monthly' },
+    { customer_id: customerId, payment_method_id: pmId, stripe_payment_intent_id: 'pi_DEMO_001', payment_date: '2025-12-15', amount: 250.00, status: 'paid', description: 'One-Time Mosquito Event' },
   ]);
 
   // ---- Lawn Health Scores ----
