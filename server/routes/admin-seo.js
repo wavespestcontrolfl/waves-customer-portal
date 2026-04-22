@@ -184,6 +184,85 @@ router.get('/gbp', async (req, res, next) => {
 // SEO ADVISOR
 // =========================================================================
 
+// GET /api/admin/seo/sync-health — diagnostics for why the Advisor is empty.
+// Surfaces env config + row counts + last-sync timestamps for GSC and each
+// GBP location so admins don't have to shell into Railway to debug.
+router.get('/sync-health', async (req, res, next) => {
+  try {
+    const { WAVES_LOCATIONS } = require('../config/locations');
+
+    // Safe table probes: if a table doesn't exist (fresh env), swallow the
+    // error and report as "unavailable" instead of 500'ing the whole card.
+    const probe = async (table, dateCol = 'date') => {
+      try {
+        const [{ count }] = await db(table).count('* as count');
+        const latest = await db(table).max(`${dateCol} as max`).first();
+        return { ok: true, count: parseInt(count || 0, 10), lastDate: latest?.max || null };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    };
+
+    const gscDaily = await probe('gsc_performance_daily', 'date');
+    const gscQueries = await probe('gsc_queries', 'date');
+    const gbpDaily = await probe('gbp_performance_daily', 'date');
+
+    // Per-location GBP: env token presence + last synced row.
+    const gbpLocations = await Promise.all(WAVES_LOCATIONS.map(async (loc) => {
+      const envVar = loc.googleRefreshTokenEnv;
+      const configured = !!(envVar && process.env[envVar]);
+      let lastDate = null;
+      let rowCount = 0;
+      if (gbpDaily.ok) {
+        try {
+          const row = await db('gbp_performance_daily')
+            .where({ location_id: loc.googleLocationId })
+            .max('date as max')
+            .first();
+          lastDate = row?.max || null;
+          const [{ count }] = await db('gbp_performance_daily')
+            .where({ location_id: loc.googleLocationId })
+            .count('* as count');
+          rowCount = parseInt(count || 0, 10);
+        } catch { /* ignore */ }
+      }
+      return {
+        id: loc.id,
+        name: loc.name,
+        envVar,
+        configured,
+        rowCount,
+        lastDate,
+      };
+    }));
+
+    // GSC service-account env check
+    const gscConfigured = !!process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+
+    // Stale-days helper — how old is the most recent row?
+    const staleDays = (dateStr) => {
+      if (!dateStr) return null;
+      const d = new Date(dateStr);
+      if (Number.isNaN(d.getTime())) return null;
+      return Math.floor((Date.now() - d.getTime()) / 86400000);
+    };
+
+    res.json({
+      gsc: {
+        configured: gscConfigured,
+        daily: gscDaily,
+        queries: gscQueries,
+        staleDays: staleDays(gscDaily.lastDate),
+      },
+      gbp: {
+        locations: gbpLocations,
+        anyConfigured: gbpLocations.some((l) => l.configured),
+      },
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/seo/advisor — latest report
 router.get('/advisor', async (req, res, next) => {
   try {
