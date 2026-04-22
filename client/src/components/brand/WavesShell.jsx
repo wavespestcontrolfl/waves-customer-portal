@@ -5,8 +5,8 @@ import { WavesShellContext } from './WavesShellContext';
 
 // Page chrome for customer + admin surfaces.
 //
-// Top bar layout: phone on the LEFT, full Waves logo (PNG wordmark,
-// shared with the admin shell) on the RIGHT.
+// Top bar layout: full Waves logo (PNG wordmark, shared with the admin
+// shell) on the LEFT, phone CTA on the RIGHT.
 //
 // variant="customer" → standard top bar, trust footer, guarantee line.
 // variant="admin"    → neutral tone, stripped footer ("Internal system ...").
@@ -51,12 +51,12 @@ export default function WavesShell({
         }}
       >
         <header style={topBarStyle}>
-          <HelpPhoneLink tone={phoneTone} />
           <img
             src="/waves-logo.png"
             alt="Waves"
             style={{ height: 28, display: 'block', filter: isTransparent ? 'brightness(0) invert(1)' : 'none' }}
           />
+          <HelpPhoneLink tone={phoneTone} />
         </header>
         <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
           {children}
