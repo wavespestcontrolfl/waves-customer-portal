@@ -322,24 +322,24 @@ router.post('/', async (req, res) => {
       }
     } catch (e) { logger.error(`Lead Beehiiv failed: ${e.message}`); }
 
-    // Create estimate/quote record so it appears in Pipeline → Quotes tab
+    // Create estimate/quote record so it appears in Pipeline → Quotes tab.
+    // Placeholder path: no engineInputs / no prebuiltData — creator writes
+    // pricing_source='placeholder', reason='lead_webhook_placeholder'.
     try {
       const serviceInterest = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
-      const crypto = require('crypto');
-      const estimateToken = crypto.randomBytes(16).toString('hex');
+      const { createEstimate } = require('../services/estimate-creator');
 
-      await db('estimates').insert({
-        customer_id: customer.id,
-        customer_name: `${firstName} ${lastName}`,
-        customer_phone: phoneFormatted,
-        customer_email: email || null,
-        address: address || '',
-        status: 'draft',
+      await createEstimate({
         source: 'lead_webhook',
-        service_interest: serviceInterest || null,
-        lead_source: leadSource.source,
-        lead_source_detail: leadSource.detail,
-        token: estimateToken,
+        createdById: null,
+        customerId: customer.id,
+        customerName: `${firstName} ${lastName}`,
+        customerPhone: phoneFormatted,
+        customerEmail: email || null,
+        address: address || '',
+        serviceInterest: serviceInterest || null,
+        leadSource: leadSource.source,
+        leadSourceDetail: leadSource.detail,
         notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}.`,
       });
     } catch (estErr) {
