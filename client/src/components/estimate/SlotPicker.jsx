@@ -81,7 +81,18 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
     setError(null);
     fetch(`${API_BASE}/public/estimates/${token}/available-slots`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
-      .then((body) => { if (!cancelled) { setData(body); setLoading(false); } })
+      .then((body) => {
+        if (cancelled) return;
+        setData(body);
+        setLoading(false);
+        // Auto-expand when primary is empty but expander has slots — otherwise
+        // the customer sees an empty card with nothing visible, then has to
+        // click "See N more" to reveal anything. Shows slots by default in
+        // that edge case; collapses behavior unchanged when primary has items.
+        if ((body?.primary?.length || 0) === 0 && (body?.expander?.length || 0) > 0) {
+          setShowExpander(true);
+        }
+      })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
   }, [token, refreshSignal]);
@@ -129,17 +140,23 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
 
       {expander.length > 0 ? (
         <>
-          <button
-            type="button"
-            onClick={() => setShowExpander((v) => !v)}
-            style={{
-              marginTop: 8, padding: '10px 16px', background: 'transparent',
-              color: W.blue, border: `1px solid ${W.border}`, borderRadius: 12,
-              cursor: 'pointer', fontSize: 14, fontWeight: 600, width: '100%',
-            }}
-          >
-            {showExpander ? 'Show fewer times' : `See ${expander.length} more times`}
-          </button>
+          {/* Hide the toggle button entirely when primary is empty — slots
+              are auto-expanded above, and "See X more times" is a nonsense
+              label when those ARE the times. Collapse UX only kicks in
+              when there are real primary options to "fall back" from. */}
+          {primary.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setShowExpander((v) => !v)}
+              style={{
+                marginTop: 8, padding: '10px 16px', background: 'transparent',
+                color: W.blue, border: `1px solid ${W.border}`, borderRadius: 12,
+                cursor: 'pointer', fontSize: 14, fontWeight: 600, width: '100%',
+              }}
+            >
+              {showExpander ? 'Show fewer times' : `See ${expander.length} more times`}
+            </button>
+          ) : null}
           {showExpander ? (
             <div style={{ marginTop: 14 }}>
               {expander.map((slot) => (
