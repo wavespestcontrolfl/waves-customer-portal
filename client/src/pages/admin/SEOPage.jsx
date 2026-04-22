@@ -120,6 +120,88 @@ function DashboardTab({ domain }) {
 }
 
 // ── Stub tabs that fetch from existing endpoints ──
+function SyncHealthCard() {
+  const [health, setHealth] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    adminFetch('/admin/seo/sync-health')
+      .then((d) => { setHealth(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+  if (loading) return null;
+  if (!health) return null;
+  const { gsc, gbp } = health;
+  const gscOk = gsc.configured && gsc.daily?.count > 0;
+  const gbpOk = gbp.anyConfigured && gbp.locations.some((l) => l.rowCount > 0);
+  const anyIssue = !gscOk || !gbpOk;
+  if (!anyIssue) return null; // Only surface when there's something to fix
+
+  const StatusDot = ({ ok, warn }) => (
+    <span style={{
+      display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
+      background: ok ? D.green : warn ? D.amber : D.red, marginRight: 8,
+    }} />
+  );
+
+  const section = (label, children) => (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: D.heading, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 13, color: D.text, lineHeight: 1.6 }}>{children}</div>
+    </div>
+  );
+
+  return (
+    <Card style={{ borderLeft: `3px solid ${D.amber}` }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 8 }}>
+        SEO sync health
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
+        The Advisor runs on data from <code>gsc_performance_daily</code> + <code>gbp_performance_daily</code>. Below is what's actually present in the DB right now.
+      </div>
+
+      {section('Google Search Console', (
+        <>
+          <div><StatusDot ok={gsc.configured} />
+            <strong>{gsc.configured ? 'Configured' : 'Not configured'}</strong>
+            {!gsc.configured && <span style={{ color: D.muted }}> — set <code>GOOGLE_SERVICE_ACCOUNT_JSON</code> on Railway</span>}
+          </div>
+          <div><StatusDot ok={gsc.daily?.count > 0} warn={gsc.daily?.count === 0} />
+            <strong>{gsc.daily?.count || 0} daily rows</strong>
+            {gsc.daily?.lastDate && <span style={{ color: D.muted }}> · last sync {String(gsc.daily.lastDate).slice(0, 10)}{gsc.staleDays != null && gsc.staleDays > 2 ? ` (${gsc.staleDays}d old)` : ''}</span>}
+          </div>
+          <div style={{ color: D.muted }}>
+            {gsc.queries?.count || 0} query rows in <code>gsc_queries</code>
+          </div>
+        </>
+      ))}
+
+      {section('Google Business Profile (per location)', (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          {gbp.locations.map((l) => (
+            <div key={l.id}>
+              <StatusDot ok={l.configured && l.rowCount > 0} warn={l.configured && l.rowCount === 0} />
+              <strong>{l.name}</strong>
+              <div style={{ fontSize: 11, color: D.muted, marginLeft: 16 }}>
+                {!l.configured ? (
+                  <>env <code>{l.envVar}</code> missing</>
+                ) : l.rowCount === 0 ? (
+                  <>token set, 0 rows</>
+                ) : (
+                  <>{l.rowCount} rows · last {String(l.lastDate).slice(0, 10)}</>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+
+      <div style={{ fontSize: 11, color: D.muted, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${D.border}` }}>
+        Sync runs daily at 6am ET (see <code>scheduler.js</code>). If rows stay at 0 after 24h, grep Railway logs for <code>[GSC]</code> and <code>[GBP]</code> to see init errors.
+      </div>
+    </Card>
+  );
+}
+
 function AdvisorTab() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -136,17 +218,21 @@ function AdvisorTab() {
     setGenerating(false);
   };
   if (!report) return (
-    <Card style={{ padding: 40, textAlign: 'center' }}>
-      <div style={{ color: D.muted, marginBottom: 16 }}>No SEO reports yet.</div>
-      <button onClick={generate} disabled={generating} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, opacity: generating ? 0.7 : 1 }}>
-        {generating ? 'Syncing & generating...' : 'Sync GSC & Generate Report'}
-      </button>
-    </Card>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <SyncHealthCard />
+      <Card style={{ padding: 40, textAlign: 'center' }}>
+        <div style={{ color: D.muted, marginBottom: 16 }}>No SEO reports yet.</div>
+        <button onClick={generate} disabled={generating} style={{ padding: '10px 20px', borderRadius: 8, border: 'none', cursor: 'pointer', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, opacity: generating ? 0.7 : 1 }}>
+          {generating ? 'Syncing & generating...' : 'Sync GSC & Generate Report'}
+        </button>
+      </Card>
+    </div>
   );
   const data = report.report_data || {};
   const gradeColor = (g) => !g ? D.muted : g.startsWith('A') ? D.green : g.startsWith('B') ? D.teal : g.startsWith('C') ? D.amber : D.red;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <SyncHealthCard />
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
           <div style={{ width: 72, height: 72, borderRadius: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, fontFamily: MONO, background: gradeColor(data.grade) + '22', color: gradeColor(data.grade), border: `2px solid ${gradeColor(data.grade)}44` }}>{data.grade || '?'}</div>
