@@ -174,6 +174,8 @@ async function createEstimate({
   urgency,
   isPriority,
   leadSourceId,
+  leadSource,         // attribution varchar (estimates.lead_source)
+  leadSourceDetail,   // attribution varchar (estimates.lead_source_detail)
   expiresInDays,
 }) {
   validate({ source, engineInputs, prebuiltData, customerId, customerPhone });
@@ -215,6 +217,8 @@ async function createEstimate({
     notes: notes || null,
     satellite_url: satelliteUrl || null,
     lead_source_id: leadSourceId || null,
+    lead_source: leadSource || null,
+    lead_source_detail: leadSourceDetail || null,
     expires_at: expiresAt,
   };
   // Only stamp pricing_version when the engine reported one — otherwise
