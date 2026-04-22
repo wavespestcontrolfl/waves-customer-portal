@@ -26,7 +26,7 @@ class PageErrorBoundary extends Component {
     return this.props.children;
   }
 }
-import LoginPage from './pages/LoginPage';
+import LoginGate from './pages/LoginGate';
 import PortalPage from './pages/PortalPage';
 import OnboardingPage from './pages/OnboardingPage';
 import AdminLoginPage from './pages/AdminLoginPage';
@@ -160,7 +160,7 @@ export default function App() {
       <BrowserRouter>
         <InstallPrompt />
         <Routes>
-          <Route path="/login" element={<LoginPage />} />
+          <Route path="/login" element={<LoginGate />} />
           <Route path="/onboard/:token" element={<OnboardingPage />} />
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/:token" element={<ReportViewPage />} />
