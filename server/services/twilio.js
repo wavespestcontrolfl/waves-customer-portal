@@ -78,6 +78,39 @@ const TwilioService = {
         return { success: true, sid: 'gate-blocked', gateBlocked: true };
       }
 
+      // Pre-send guard — rejects messages that look like a template
+      // rendering bug (stale month, unsubstituted variables, "undefined",
+      // etc.) before they ship to customers. See services/sms-guard.js.
+      try {
+        const { validateOutbound } = require('./sms-guard');
+        const guard = validateOutbound(body, { messageType: options.messageType });
+        if (!guard.ok) {
+          logger.warn(`[SMS-GUARD BLOCKED] to=${to} reason=${guard.reason} body="${body.substring(0, 120)}"`);
+          // Best-effort alert to Virginia so a blocked send gets human eyes.
+          // Non-blocking — if the alert path breaks we still refuse the send.
+          (async () => {
+            try {
+              const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+              if (to !== ownerPhone) {
+                const c = getClient();
+                if (c) {
+                  await c.messages.create({
+                    to: ownerPhone,
+                    from: options.fromNumber || ownerPhone,
+                    body: `[SMS-GUARD] Blocked outbound to ${to}\nReason: ${guard.reason}\nPreview: "${body.substring(0, 120)}"`,
+                  }).catch(() => {});
+                }
+              }
+            } catch { /* alert is best-effort */ }
+          })();
+          return { success: false, sid: null, guardBlocked: true, error: guard.reason };
+        }
+      } catch (gErr) {
+        // If the guard itself blows up, fail open — missing a legit send is
+        // worse than shipping a message the guard would've rejected.
+        logger.warn(`[sms-guard] validator failed (failing open): ${gErr.message}`);
+      }
+
       // Check if this message type has been disabled via SMS Templates admin
       if (options.messageType && options.messageType !== 'internal_alert') {
         try {

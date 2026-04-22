@@ -278,7 +278,16 @@ router.post('/sms', async (req, res) => {
         } catch { /* ignore */ }
       }
     }
-    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn) {
+    // Scheduling-intent gate — high-stakes scheduling questions must not be
+    // auto-answered. A real failure motivated this: a customer asked "are we
+    // on the schedule for tomorrow?" and the canned AI reply said "fully
+    // booked, call us" while the customer actually had an appointment. Any
+    // scheduling-intent inbound skips the auto-reply entirely and falls
+    // through to Virginia's inbox (legacy ai-draft block below still runs).
+    const { hasSchedulingIntent } = require('../services/sms-intent');
+    const schedulingIntent = Body ? hasSchedulingIntent(Body) : false;
+
+    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent) {
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({
@@ -300,6 +309,9 @@ router.post('/sms', async (req, res) => {
 
         logger.info(`AI Assistant processed: ${From} escalated=${aiResult.escalated} conv=${aiResult.conversationId}`);
       } catch (e) { logger.error(`AI Assistant failed: ${e.message}`); }
+    } else if (schedulingIntent && aiAutoReplyOn) {
+      // Log the intentional skip so we can audit the gate and see volume.
+      logger.info(`[sms-intent] scheduling-intent detected from ${From}; skipping auto-reply, routing to human inbox`);
     }
 
     // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
