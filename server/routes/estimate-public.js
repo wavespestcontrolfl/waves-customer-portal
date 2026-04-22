@@ -144,11 +144,33 @@ const PERKS = [
   'Owner-operator accountability on every visit',
 ];
 
+// Canonical SWFL stores — name, physical address, ZIPs, spoke page slug
+// on wavespestcontrol.com, and Google Place ID for map links. Mirrors
+// server/config/locations.js but kept inline so the SSR estimate page
+// stays self-contained (no require cycle at render time).
 const LOCATIONS = [
-  { name: 'Lakewood Ranch', zips: '34202 · 34211 · 34212' },
-  { name: 'Parrish / Palmetto', zips: '34219 · 34221' },
-  { name: 'Sarasota', zips: '34231 · 34233 · 34238 · 34240 · 34241' },
-  { name: 'Venice / North Port', zips: '34285 · 34287 · 34288 · 34293' },
+  { name: 'Lakewood Ranch', area: 'Bradenton / Lakewood Ranch', address: '13649 Luxe Ave #110, Bradenton, FL 34211', zips: '34202 · 34211 · 34212', slug: 'pest-control-bradenton-fl', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
+  { name: 'Parrish', area: 'Parrish / Palmetto / Ellenton', address: '5155 115th Dr E, Parrish, FL 34219', zips: '34219 · 34221', slug: 'pest-control-parrish-fl', placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
+  { name: 'Sarasota', area: 'Sarasota / Siesta Key', address: '1450 Pine Warbler Pl, Sarasota, FL 34240', zips: '34231 · 34233 · 34238 · 34240 · 34241', slug: 'pest-control-sarasota-fl', placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
+  { name: 'Venice', area: 'Venice / North Port / Englewood', address: '1978 S Tamiami Trl #10, Venice, FL 34293', zips: '34285 · 34287 · 34288 · 34293', slug: 'pest-control-venice-fl', placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
+];
+
+// Footer — company contact + social profiles. Kept in one place so the
+// estimate footer and (future) other SSR customer surfaces share exactly
+// one source.
+const COMPANY = {
+  legalName: 'Waves Pest Control, LLC',
+  phone: '(941) 297-5749',
+  phoneRaw: '+19412975749',
+  email: 'contact@wavespestcontrol.com',
+};
+
+const SOCIAL_LINKS = [
+  { name: 'Facebook',  url: 'https://facebook.com/wavespestcontrol',  path: 'M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z' },
+  { name: 'Instagram', url: 'https://instagram.com/wavespestcontrol', path: 'M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12s.014 3.668.072 4.948c.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24s3.668-.014 4.948-.072c4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948s-.014-3.667-.072-4.947c-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z' },
+  { name: 'YouTube',   url: 'https://youtube.com/@wavespestcontrol',  path: 'M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z' },
+  { name: 'TikTok',    url: 'https://tiktok.com/@wavespestcontrol',   path: 'M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.15 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02-12.07z' },
+  { name: 'X',         url: 'https://x.com/wavespest',                path: 'M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z' },
 ];
 
 function escapeHtml(s) {
@@ -189,17 +211,6 @@ ${shellTopBar()}
 </body></html>`;
 }
 
-function renderTierCard(tier, isSelected, monthlyForTier, locked) {
-  const color = tier === 'Platinum' ? BRAND.blueDeeper : tier === 'Gold' ? BRAND.yellow : tier === 'Silver' ? '#94a3b8' : '#c8926c';
-  const disc = Math.round((TIER_DISCOUNTS[tier] || 0) * 100);
-  const cursor = locked ? 'default' : 'pointer';
-  return `<button data-tier="${tier}" class="tier-card${isSelected ? ' selected' : ''}" ${locked ? 'disabled' : ''} style="cursor:${cursor}">
-    <div class="tier-name" style="color:${color}">${tier}</div>
-    <div class="tier-disc">${disc === 0 ? 'Base pricing' : disc + '% off'}</div>
-    <div class="tier-price" data-price-for="${tier}">${fmtMoney(monthlyForTier)}<span class="per">/mo</span></div>
-    ${isSelected ? '<div class="tier-badge">Selected</div>' : ''}
-  </button>`;
-}
 
 function renderPage(token, estimate, estData) {
   const est = estimate;
@@ -258,40 +269,38 @@ function renderPage(token, estimate, estData) {
     return `<tr><td>${escapeHtml(it.name)}${it.detail ? `<div class="sub">${escapeHtml(it.detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
   }).filter(Boolean).join('');
 
-  const tierCardsHtml = ['Bronze', 'Silver', 'Gold', 'Platinum']
-    .map((t) => renderTierCard(t, t === tier, tierPrices[t], locked)).join('');
-
   const perksHtml = PERKS.map((p) => `<li>${escapeHtml(p)}</li>`).join('');
-  const locationsHtml = LOCATIONS.map((l) => `<div class="loc"><strong>${escapeHtml(l.name)}</strong><div class="zips">${escapeHtml(l.zips)}</div></div>`).join('');
+  const locationsHtml = LOCATIONS.map((l) => {
+    const sitePage = `https://www.wavespestcontrol.com/${l.slug}/`;
+    const mapsUrl = `https://www.google.com/maps/place/?q=place_id:${l.placeId}`;
+    return `<div class="loc">
+      <a class="loc-name" href="${sitePage}" target="_blank" rel="noopener">${escapeHtml(l.name)}</a>
+      <a class="loc-addr" href="${mapsUrl}" target="_blank" rel="noopener">${escapeHtml(l.address)}</a>
+      <div class="loc-hours">Open 24 hours</div>
+      <div class="loc-zips">${escapeHtml(l.zips)}</div>
+    </div>`;
+  }).join('');
+  const socialsHtml = SOCIAL_LINKS.map((s) => `<a class="soc" href="${s.url}" target="_blank" rel="noopener" aria-label="${escapeHtml(s.name)}"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="${s.path}"/></svg></a>`).join('');
 
-  // ── Waves AI analysis block (optional — only renders if we have data) ──
-  const ai = estData?.aiAnalysis || estResult?.aiAnalysis || {};
-  const aiPalmCount = Number(ai.palm_count) || Number(inputs.palmCount) || null;
-  const aiTreeCount = Number(ai.tree_count) || Number(inputs.treeCount) || null;
-  const aiShrubDensity = ai.shrub_density || null;
-  const aiNotes = (ai.notes || '').trim() || null;
-  const aiSources = Array.isArray(ai._sources) ? ai._sources : (Array.isArray(ai.sources) ? ai.sources : null);
-  const hasAiBlock = !!(homeSqFt || lotSqFt || lawnSqFt || aiPalmCount || aiTreeCount || aiShrubDensity || aiNotes);
+  // ── Waves AI analysis block ────────────────────────────────────
+  // Shows satellite image of the home plus three property measurements:
+  // home sq ft, lot sq ft, and the treatable lawn area (lawn only). Only
+  // renders if we have at least the satellite image OR one measurement.
+  const satelliteUrl = est.satelliteUrl || null;
   const aiMetricsArr = [
     homeSqFt ? { label: 'Home', val: `${Math.round(homeSqFt).toLocaleString()} sq ft` } : null,
     lotSqFt ? { label: 'Lot', val: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
     lawnSqFt ? { label: 'Treatable lawn', val: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
-    aiPalmCount != null ? { label: 'Palms', val: String(aiPalmCount) } : null,
-    aiTreeCount != null ? { label: 'Trees', val: String(aiTreeCount) } : null,
-    aiShrubDensity ? { label: 'Shrub density', val: String(aiShrubDensity).toLowerCase() } : null,
   ].filter(Boolean);
-  const aiSourcesLabel = aiSources && aiSources.length
-    ? `Analyzed with Waves AI · ${aiSources.join(' + ')}${aiSources.length > 1 ? ' (dual-vision)' : ''}`
-    : 'Analyzed with Waves AI · satellite + property records';
+  const hasAiBlock = !!(satelliteUrl || aiMetricsArr.length);
   const aiBlockHtml = hasAiBlock ? `
   <section class="card ai-card">
     <div class="eyebrow">Waves AI analysis</div>
     <h2>Here's what we found at your property</h2>
-    <div class="ai-grid">
+    ${satelliteUrl ? `<img class="ai-satellite" src="${escapeHtml(satelliteUrl)}" alt="Satellite view of ${address}" loading="lazy"/>` : ''}
+    ${aiMetricsArr.length ? `<div class="ai-grid">
       ${aiMetricsArr.map((m) => `<div class="ai-metric"><div class="ai-metric-label">${escapeHtml(m.label)}</div><div class="ai-metric-val">${escapeHtml(m.val)}</div></div>`).join('')}
-    </div>
-    ${aiNotes ? `<p class="ai-notes">${escapeHtml(aiNotes)}</p>` : ''}
-    <div class="ai-attribution">${escapeHtml(aiSourcesLabel)}</div>
+    </div>` : ''}
   </section>` : '';
 
   // ── Service-prefs toggle card (only when estimate has a pest line) ────
@@ -369,19 +378,17 @@ function renderPage(token, estimate, estData) {
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
   .day-price{margin-top:8px;font-size:14px;color:#6B7280}
   .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
-  .lock-note{margin-top:10px;color:#6B7280;font-size:13px}
   .card{background:#fff;border-radius:14px;padding:24px;margin-bottom:16px;border:1px solid #E7E2D7}
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
   .card-sub{color:#6B7280;font-size:14px;margin:0 0 14px}
   .ai-card{background:linear-gradient(180deg,#F5F1E6 0%,#fff 100%)}
+  .ai-satellite{display:block;width:100%;max-height:320px;object-fit:cover;border-radius:10px;border:1px solid #E7E2D7;margin-top:14px;background:#F7F5EE}
   .ai-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
   @media(max-width:560px){.ai-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .ai-metric{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
   .ai-metric-label{font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-metric-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
-  .ai-notes{margin-top:14px;color:#3F4A65;font-size:14px;line-height:1.6;font-style:italic}
-  .ai-attribution{margin-top:12px;font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
   .prefs-card h2{margin-bottom:4px}
   .prefs-list{margin-top:14px;display:flex;flex-direction:column;gap:10px}
   .pref-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;transition:all .15s}
@@ -398,16 +405,6 @@ function renderPage(token, estimate, estData) {
   .switch input:checked+.slider{background:#1B2C5B}
   .switch input:checked+.slider::before{transform:translateX(18px)}
   .switch input:disabled+.slider{opacity:.5;cursor:not-allowed}
-  .tier-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}
-  @media(max-width:640px){.tier-grid{grid-template-columns:repeat(2,1fr)}}
-  .tier-card{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:14px 10px;text-align:center;font:inherit;color:inherit;position:relative;transition:all .15s;cursor:pointer}
-  .tier-card:not([disabled]):hover{border-color:${BRAND.blueDark}}
-  .tier-card.selected{border-color:#1B2C5B;background:#F7F5EE}
-  .tier-name{font-weight:600;letter-spacing:.04em;font-size:13px;text-transform:uppercase;margin-bottom:4px;color:#1B2C5B}
-  .tier-disc{font-size:11px;color:#6B7280;margin-bottom:8px}
-  .tier-price{font-family:'Source Serif 4',Georgia,serif;font-size:22px;font-weight:500;color:#1B2C5B}
-  .tier-price .per{font-size:11px;color:#6B7280}
-  .tier-badge{position:absolute;top:-8px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;font-size:9px;padding:3px 8px;border-radius:6px;letter-spacing:.08em;text-transform:uppercase;font-weight:700}
   table{width:100%;border-collapse:collapse}
   td{padding:10px 0;border-bottom:1px solid #E7E2D7;vertical-align:top;font-size:14px}
   tr:last-child td{border-bottom:0}
@@ -440,18 +437,32 @@ function renderPage(token, estimate, estData) {
   .review-dots button.active{background:#1B2C5B;width:18px;border-radius:4px}
   .review-slide{transition:opacity .3s}
   .review-slide.fade{opacity:0}
-  .locs{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
-  @media(max-width:640px){.locs{grid-template-columns:repeat(2,1fr)}}
-  .loc{background:#F7F5EE;border:1px solid #E7E2D7;border-radius:8px;padding:12px;text-align:center}
-  .loc strong{color:#1B2C5B;font-size:13px;display:block}
-  .zips{font-size:11px;color:#6B7280;margin-top:4px}
+  .reviews-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;color:#1B2C5B;font-weight:600}
+  .reviews-header .stars{color:${BRAND.yellow};letter-spacing:1px;font-size:14px}
+  .locs{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:14px}
+  @media(max-width:560px){.locs{grid-template-columns:1fr}}
+  .loc{background:#F7F5EE;border:1px solid #E7E2D7;border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:4px}
+  .loc .loc-name{color:#1B2C5B;font-size:14px;font-weight:600;text-decoration:none}
+  .loc .loc-name:hover{text-decoration:underline}
+  .loc .loc-addr{color:#3F4A65;font-size:12px;text-decoration:none;line-height:1.4}
+  .loc .loc-addr:hover{text-decoration:underline}
+  .loc .loc-hours{color:${BRAND.green};font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
+  .loc .loc-zips{color:#6B7280;font-size:11px}
   .final{background:#1B2C5B;color:#fff;text-align:center;padding:32px 24px;border-radius:14px;border:1px solid #1B2C5B}
   .final h2{color:#fff;margin:0 0 8px}
   .final p{color:rgba(255,255,255,.8);font-size:14px}
   .decline{text-align:center;margin-top:12px}
   .decline a{color:#6B7280;font-size:13px;text-decoration:underline}
   .accepted-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:${BRAND.green};text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
-  .footer{text-align:center;padding:32px 20px;color:#6B7280;font-size:12px}
+  .site-footer{text-align:center;padding:40px 20px 32px;color:#6B7280;font-size:12px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
+  .site-footer-socials{display:flex;justify-content:center;gap:12px;margin-bottom:16px}
+  .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
+  .site-footer-socials .soc:hover{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
+  .site-footer-contact{margin-bottom:10px;font-size:13px;color:#3F4A65}
+  .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500}
+  .site-footer-contact a:hover{text-decoration:underline}
+  .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
+  .site-footer-legal{font-size:11px;color:#6B7280}
   #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
   #toast.show{opacity:1}
 </style>
@@ -464,7 +475,7 @@ ${shellTopBar()}
   ${locked ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
 
   <div class="hero">
-    <div class="eyebrow">Your estimate · ${escapeHtml(tier)} WaveGuard</div>
+    <div class="eyebrow">Your estimate · WaveGuard ${escapeHtml(tier)}</div>
     <h1>Hey ${firstName}, here\u2019s your custom plan.</h1>
     <div class="addr">${address}</div>
     ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
@@ -472,25 +483,18 @@ ${shellTopBar()}
       ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(baseMonthly)}/mo</span>` : ''}
       <span class="num" id="monthly-display">${fmtMoney(monthlyTotal)}</span>
       <span class="per">/mo</span>
-      <span class="tier-lbl" id="tier-display">${escapeHtml(tier)} WaveGuard</span>
+      <span class="tier-lbl" id="tier-display">WaveGuard ${escapeHtml(tier)}</span>
     </div>
     <div class="save-row"${savingsPerMo > 0 ? '' : ' style="display:none"'}>
-      <span class="save-pill">You save <span id="savings-display">${fmtMoney(savingsPerMo)}</span>/mo with <span id="savings-tier">${escapeHtml(tier)}</span></span>
+      <span class="save-pill">You save <span id="savings-display">${fmtMoney(savingsPerMo)}</span>/mo with WaveGuard <span id="savings-tier">${escapeHtml(tier)}</span></span>
     </div>
     <div class="day-price">That\u2019s just <span id="day-price">${fmtMoney(dayPrice)}</span>/day for complete home protection.</div>
     <div class="mini-guarantee">Try us risk-free \u2014 90-day money-back guarantee.</div>
-    ${annualTotal ? `<div class="lock-note">Locked in for 24 months \u2014 <span id="annual-display">${fmtMoney(annualTotal)}</span>/yr</div>` : ''}
   </div>
 
   ${aiBlockHtml}
 
   ${prefsBlockHtml}
-
-  <div class="card">
-    <h2>Choose your WaveGuard tier</h2>
-    <p class="card-sub">Every qualifying service you bundle unlocks a bigger discount. Tap a tier to re-price.</p>
-    <div class="tier-grid">${tierCardsHtml}</div>
-  </div>
 
   ${showUpsell ? `
   <div class="upsell">
@@ -542,23 +546,32 @@ ${shellTopBar()}
   </div>
 
   <div class="card">
+    <div class="reviews-header">
+      <span class="stars">&#9733;&#9733;&#9733;&#9733;&#9733;</span>
+      <span>5-star rated across every local Google profile</span>
+    </div>
     <h3>We serve the whole Suncoast</h3>
     <div class="locs">${locationsHtml}</div>
   </div>
 
   <div class="final">
     <h2>Ready to lock in <span data-monthly-echo>${fmtMoney(monthlyTotal)}</span>/mo?</h2>
-    <p>This rate is yours for the next 24 months. No surprise increases, no hidden fees.</p>
+    <p>No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button class="cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B" onclick="acceptEstimate()">Accept &amp; get started</button>`}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:+19412975749" style="color:#fff;font-weight:700">(941) 297-5749</a>
     </div>
   </div>
 
-  <div class="footer">
-    Waves Pest Control &amp; Lawn Care \u2014 Family-owned, SW Florida<br>
-    Licensed &amp; insured \u2022 JE Certified \u2022 Manatee / Sarasota / Charlotte counties
-  </div>
+  <footer class="site-footer">
+    <div class="site-footer-socials">${socialsHtml}</div>
+    <div class="site-footer-contact">
+      <a href="mailto:${COMPANY.email}">${COMPANY.email}</a>
+      <span class="dot">&middot;</span>
+      <a href="tel:${COMPANY.phoneRaw}">${COMPANY.phone}</a>
+    </div>
+    <div class="site-footer-legal">&copy; ${new Date().getFullYear()} ${COMPANY.legalName}. All rights reserved.</div>
+  </footer>
 </div>
 
 <div id="toast"></div>
@@ -568,57 +581,6 @@ ${shellTopBar()}
   const API = '/api/estimates/' + TOKEN;
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
-
-  document.querySelectorAll('.tier-card').forEach((el) => {
-    if (el.disabled) return;
-    el.addEventListener('click', () => selectTier(el.dataset.tier));
-  });
-
-  async function selectTier(newTier) {
-    document.querySelectorAll('.tier-card').forEach(el => el.style.opacity = '.5');
-    try {
-      const r = await fetch(API + '/select-tier', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selectedTier: newTier })
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'Failed');
-      document.getElementById('monthly-display').textContent = fmt(data.monthlyTotal);
-      document.getElementById('tier-display').textContent = newTier + ' WaveGuard';
-      const annualEl = document.getElementById('annual-display'); if (annualEl) annualEl.textContent = fmt(data.annualTotal);
-      document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(data.monthlyTotal));
-      const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal / 30) * 100) / 100);
-      const savings = Math.max(0, Math.round((${baseMonthly} - data.monthlyTotal) * 100) / 100);
-      const saveRow = document.querySelector('.save-row');
-      const savingsEl = document.getElementById('savings-display');
-      const savingsTierEl = document.getElementById('savings-tier');
-      if (savings > 0) {
-        if (savingsEl) savingsEl.textContent = fmt(savings);
-        if (savingsTierEl) savingsTierEl.textContent = newTier;
-        if (saveRow) saveRow.style.display = '';
-        let anchor = document.getElementById('anchor-display');
-        if (!anchor) {
-          anchor = document.createElement('span');
-          anchor.id = 'anchor-display'; anchor.className = 'anchor';
-          document.querySelector('.big-price').prepend(anchor);
-        }
-        anchor.textContent = fmt(${baseMonthly}) + '/mo';
-      } else {
-        if (saveRow) saveRow.style.display = 'none';
-        const anchor = document.getElementById('anchor-display'); if (anchor) anchor.remove();
-      }
-      document.querySelectorAll('.tier-card').forEach((el) => {
-        el.classList.toggle('selected', el.dataset.tier === newTier);
-        const badge = el.querySelector('.tier-badge'); if (badge) badge.remove();
-        if (el.dataset.tier === newTier) { const b = document.createElement('div'); b.className='tier-badge'; b.textContent='Selected'; el.appendChild(b); }
-      });
-      toast('Updated to ' + newTier + ' \u2014 ' + fmt(data.monthlyTotal) + '/mo');
-    } catch (e) {
-      toast('Could not update tier. Try again.');
-    } finally {
-      document.querySelectorAll('.tier-card').forEach(el => el.style.opacity = '');
-    }
-  }
 
   // Service-preferences toggles — PUT /:token/preferences and refresh totals.
   document.querySelectorAll('[data-pref-key]').forEach((input) => {
@@ -634,7 +596,6 @@ ${shellTopBar()}
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || 'Failed');
         document.getElementById('monthly-display').textContent = fmt(data.monthlyTotal);
-        const annualEl = document.getElementById('annual-display'); if (annualEl) annualEl.textContent = fmt(data.annualTotal);
         document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(data.monthlyTotal));
         const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal / 30) * 100) / 100);
         if (data.tierPrices) {
@@ -831,6 +792,7 @@ async function handleEstimateView(req, res, next) {
       tier: estimate.waveguard_tier,
       createdAt: estimate.created_at,
       expiresAt: estimate.expires_at,
+      satelliteUrl: estimate.satellite_url || null,
     }, estData);
   } catch (err) { next(err); }
 }
