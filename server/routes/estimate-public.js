@@ -51,8 +51,8 @@ const BRAND = {
 function shellTopBar() {
   return `<header class="top-bar">
     <div class="top-bar-inner">
-      <a href="tel:+19412975749" class="top-phone">(941) 297-5749</a>
       <img src="/waves-logo.png" alt="Waves" class="top-logo"/>
+      <a href="tel:+19412975749" class="top-phone">(941) 297-5749</a>
     </div>
   </header>`;
 }
@@ -274,29 +274,37 @@ function renderPage(token, estimate, estData) {
     const sitePage = `https://www.wavespestcontrol.com/${l.slug}/`;
     const mapsUrl = `https://www.google.com/maps/place/?q=place_id:${l.placeId}`;
     return `<div class="loc">
-      <a class="loc-name" href="${sitePage}" target="_blank" rel="noopener">${escapeHtml(l.name)}</a>
+      <a class="loc-name" href="${sitePage}" target="_blank" rel="noopener">Waves Pest Control ${escapeHtml(l.name)}</a>
       <a class="loc-addr" href="${mapsUrl}" target="_blank" rel="noopener">${escapeHtml(l.address)}</a>
       <div class="loc-hours">Open 24 hours</div>
-      <div class="loc-zips">${escapeHtml(l.zips)}</div>
     </div>`;
   }).join('');
   const socialsHtml = SOCIAL_LINKS.map((s) => `<a class="soc" href="${s.url}" target="_blank" rel="noopener" aria-label="${escapeHtml(s.name)}"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="${s.path}"/></svg></a>`).join('');
 
   // ── Waves AI analysis block ────────────────────────────────────
-  // Shows satellite image of the home plus three property measurements:
-  // home sq ft, lot sq ft, and the treatable lawn area (lawn only). Only
-  // renders if we have at least the satellite image OR one measurement.
+  // Shows satellite image of the home plus four property measurements:
+  // home sq ft, lot sq ft, treatable lawn area (lawn only), and landscape
+  // complexity. The complexity signal comes from the AI vision analyzer
+  // (SIMPLE / MODERATE / COMPLEX) and falls back to property inputs.
   const satelliteUrl = est.satelliteUrl || null;
+  const aiAnalysis = estData?.aiAnalysis || estResult?.aiAnalysis || {};
+  const complexityRaw = aiAnalysis.landscape_complexity || estResult?.property?.landscapeComplexity || inputs.landscapeComplexity || null;
+  const complexityPretty = complexityRaw
+    ? String(complexityRaw).charAt(0).toUpperCase() + String(complexityRaw).slice(1).toLowerCase()
+    : null;
   const aiMetricsArr = [
     homeSqFt ? { label: 'Home', val: `${Math.round(homeSqFt).toLocaleString()} sq ft` } : null,
     lotSqFt ? { label: 'Lot', val: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
     lawnSqFt ? { label: 'Treatable lawn', val: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
+    complexityPretty ? { label: 'Complexity', val: complexityPretty } : null,
   ].filter(Boolean);
   const hasAiBlock = !!(satelliteUrl || aiMetricsArr.length);
+  const aiEngineBlurb = "Our estimator reads your property from satellite, cross-checks it against public records, and tunes your quote to the exact footprint we see — so what you pay matches what we actually treat.";
   const aiBlockHtml = hasAiBlock ? `
   <section class="card ai-card">
     <div class="eyebrow">Waves AI analysis</div>
     <h2>Here's what we found at your property</h2>
+    <p class="ai-blurb">${escapeHtml(aiEngineBlurb)}</p>
     ${satelliteUrl ? `<img class="ai-satellite" src="${escapeHtml(satelliteUrl)}" alt="Satellite view of ${address}" loading="lazy"/>` : ''}
     ${aiMetricsArr.length ? `<div class="ai-grid">
       ${aiMetricsArr.map((m) => `<div class="ai-metric"><div class="ai-metric-label">${escapeHtml(m.label)}</div><div class="ai-metric-val">${escapeHtml(m.val)}</div></div>`).join('')}
@@ -383,9 +391,10 @@ function renderPage(token, estimate, estData) {
   .card h3{margin:0 0 10px}
   .card-sub{color:#6B7280;font-size:14px;margin:0 0 14px}
   .ai-card{background:linear-gradient(180deg,#F5F1E6 0%,#fff 100%)}
-  .ai-satellite{display:block;width:100%;max-height:320px;object-fit:cover;border-radius:10px;border:1px solid #E7E2D7;margin-top:14px;background:#F7F5EE}
-  .ai-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
-  @media(max-width:560px){.ai-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .ai-blurb{margin:0 0 14px;color:#3F4A65;font-size:14px;line-height:1.55}
+  .ai-satellite{display:block;width:100%;max-height:320px;object-fit:cover;border-radius:10px;border:1px solid #E7E2D7;margin-top:0;background:#F7F5EE}
+  .ai-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}
+  @media(max-width:720px){.ai-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .ai-metric{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
   .ai-metric-label{font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-metric-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
@@ -562,15 +571,6 @@ ${shellTopBar()}
   </div>` : ''}
 
   <div class="card">
-    <h2>How it works</h2>
-    <div class="steps">
-      <div class="step"><div class="num">1</div><h4>Accept</h4><p>Tap Accept above. We lock in your tier and rate.</p></div>
-      <div class="step"><div class="num">2</div><h4>Schedule</h4><p>We call within 24 hours to pick your first visit.</p></div>
-      <div class="step"><div class="num">3</div><h4>Relax</h4><p>Recurring service runs on autopilot \u2014 you never lift a finger.</p></div>
-    </div>
-  </div>
-
-  <div class="card">
     <h2>What WaveGuard members get</h2>
     <ul class="perks-list">${perksHtml}</ul>
   </div>
@@ -592,7 +592,6 @@ ${shellTopBar()}
       <span class="stars">&#9733;&#9733;&#9733;&#9733;&#9733;</span>
       <span>5-star rated across every local Google profile</span>
     </div>
-    <h3>We serve the whole Suncoast</h3>
     <div class="locs">${locationsHtml}</div>
   </div>
 
