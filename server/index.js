@@ -223,6 +223,7 @@ app.use('/api/public/newsletter', require('./routes/public-newsletter'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/public/track', require('./routes/track-public'));
+app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
