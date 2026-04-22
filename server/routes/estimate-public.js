@@ -1020,6 +1020,85 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   };
 }
 
+// v1 client-engine shape — the admin UI's deprecated estimateEngine.js
+// stores results under estimate_data.result with pre-computed pestTiers
+// for all three frequencies. When present, use those directly instead of
+// trying to re-run the modular server engine (whose input shape is
+// incompatible with v1's flat `svcPest:true, pestFreq:"4"` flags).
+//
+// Returns null if this isn't a v1-shape estimate. Caller falls back to
+// engine-invocation path (modular engine / IB path / etc).
+const V1_LABEL_TO_LADDER = {
+  'Quarterly':  { key: 'quarterly',  label: 'Quarterly' },
+  'Bi-Monthly': { key: 'bi_monthly', label: 'Bi-monthly' },
+  'Monthly':    { key: 'monthly',    label: 'Monthly' },
+};
+
+function readV1Shape(estData) {
+  if (!estData || typeof estData !== 'object') return null;
+  const result = estData.result;
+  if (!result || typeof result !== 'object') return null;
+  const pestTiers = Array.isArray(result.pestTiers) ? result.pestTiers : [];
+  const recurring = result.recurring || {};
+  const services = Array.isArray(recurring.services) ? recurring.services : [];
+  if (pestTiers.length === 0 && services.length === 0) return null;
+  return {
+    pestTiers,
+    services,
+    discount: Number(recurring.discount) || 0,
+    waveGuardTier: recurring.waveGuardTier || recurring.tier || null,
+    oneTimeTotal: Number(result.oneTime?.total) || 0,
+    recurringMonthlyTotal: Number(recurring.monthlyTotal) || 0,
+    recurringAnnualAfter: Number(recurring.annualAfterDiscount) || 0,
+  };
+}
+
+function shapeFromV1(v1, ladder, pestTier) {
+  // pestTier may be null if pest isn't in this estimate. In that case
+  // the frequency entry shows the recurring total regardless of freq key
+  // (lawn-only / mosquito-only estimates — slider position doesn't
+  // actually matter).
+  const pestMoBefore = pestTier ? Number(pestTier.mo || 0) : 0;
+  const pestAnnBefore = pestTier ? Number(pestTier.ann || 0) : 0;
+  const nonPestMoBefore = v1.services.reduce((sum, svc) => {
+    if (svc?.name === 'Pest Control') return sum;
+    return sum + (Number(svc?.mo || svc?.monthly || 0));
+  }, 0);
+
+  const totalMoBefore = pestMoBefore + nonPestMoBefore;
+  // v1 applies the tier discount on the summed monthly (verified against
+  // the recurring.monthlyTotal = (pest + lawn) * (1 - discount) relation).
+  const totalMoAfter = Math.round(totalMoBefore * (1 - v1.discount) * 100) / 100;
+  const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
+
+  // Included items: full recurring services list. These don't change with
+  // pest frequency (changing quarterly → monthly doesn't add or remove
+  // lawn care; only pest's visit cadence changes).
+  const included = v1.services.map((svc) => ({
+    key: (svc?.name || '').toLowerCase().replace(/\s+/g, '_') || 'service',
+    label: svc?.name || 'Service',
+    detail: null,
+    includedAtThisFrequency: true,
+  }));
+
+  const preCheckedKeys = new Set(addonDefaults[ladder.key] || []);
+  const addOns = included.map((item) => ({
+    ...item,
+    preChecked: preCheckedKeys.has(item.key),
+  }));
+
+  return {
+    key: ladder.key,
+    label: ladder.label,
+    monthly: totalMoAfter,
+    annual: totalAnnAfter,
+    perVisit: pestTier ? (Number(pestTier.pa) || null) : null,
+    oneTimeTotal: v1.oneTimeTotal || null,
+    included,
+    addOns,
+  };
+}
+
 async function buildPricingBundle(estimate) {
   pricingCacheCleanup();
   const cached = pricingCache.get(estimate.id);
@@ -1030,6 +1109,35 @@ async function buildPricingBundle(estimate) {
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
+
+  // v1 shape (admin UI estimates) — read pre-computed pestTiers directly.
+  // This is the dominant path until Session 11 retires the client engine.
+  const v1 = readV1Shape(estData);
+  if (v1) {
+    const frequencies = [];
+    for (const [v1Label, ladder] of Object.entries(V1_LABEL_TO_LADDER)) {
+      const pestTier = v1.pestTiers.find((t) => t?.label === v1Label) || null;
+      frequencies.push(shapeFromV1(v1, ladder, pestTier));
+    }
+
+    // If no pest at all, drop the extra two entries — slider is meaningless
+    // without a pest cadence to vary. Keep Quarterly as the single surface.
+    const hasPest = v1.pestTiers.length > 0;
+    const finalFreqs = hasPest ? frequencies : frequencies.slice(0, 1);
+
+    const payload = {
+      frequencies: finalFreqs,
+      waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
+      anchorOneTimePrice: v1.oneTimeTotal || Number(estimate.onetime_total || 0) || null,
+      source: 'v1_engine_shape',
+    };
+    pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
+    return payload;
+  }
+
+  // Otherwise: engine-invocation path (modular-engine inputs / IB-sourced
+  // estimates with engineInputs.services.pest shape). Runs generateEstimate
+  // 3x with varied pest frequency.
   const engineInputs = extractEngineInputs(estData);
 
   // No engine inputs saved → fall back to the single-frequency view using
@@ -1092,6 +1200,7 @@ async function buildPricingBundle(estimate) {
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,
+    source: 'engine_invocation',
   };
   pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
   return payload;
