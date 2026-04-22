@@ -25,6 +25,13 @@
  *     + 1 day (end-of-day fallback when window_end is NULL).
  */
 exports.up = async function (knex) {
+  // 0. Ensure pgcrypto is installed before any statement that uses
+  // gen_random_bytes(). Belt-and-suspenders idempotent — no-op if
+  // already installed, harmless on fresh DBs, fixes the specific
+  // crash loop where prod's pgcrypto extension was missing post
+  // some DB reprovision. Must run before the backfill UPDATE below.
+  await knex.raw('CREATE EXTENSION IF NOT EXISTS pgcrypto');
+
   // 1. Drop orphaned PR #52 artifacts if present. All idempotent — no-op
   // on a clean DB.
   await knex.raw('DROP INDEX IF EXISTS idx_scheduled_services_track_state_window');
