@@ -256,7 +256,7 @@ export default function OnboardingPage() {
       const result = await apiFetch(`/onboarding/${token}/available-slots`);
       setSlotDays(result.days || []);
       if (!result.days || result.days.length === 0) {
-        setSlotsError('No open slots in your area right now — call (941) 318-7612 and we\'ll sort it out.');
+        setSlotsError('No open slots in your area right now — call (941) 297-5749 and we\'ll sort it out.');
       }
     } catch (e) { setSlotsError(e.message || 'Could not load available days'); }
     setSlotsLoading(false);
@@ -324,7 +324,7 @@ export default function OnboardingPage() {
       <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
         <div style={{ fontSize: 32 }}>😕</div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>{error}</div>
-        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 318-7612</a>
+        <a href="tel:+19412975749" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 297-5749</a>
       </div>
     </div>
   );
@@ -745,7 +745,7 @@ export default function OnboardingPage() {
             </div>
 
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 20 }}>
-              Questions? Call or text <a href="tel:+19413187612" style={{ color: '#fff', textDecoration: 'none', fontWeight: 600 }}>(941) 318-7612</a>
+              Questions? Call or text <a href="tel:+19412975749" style={{ color: '#fff', textDecoration: 'none', fontWeight: 600 }}>(941) 297-5749</a>
             </div>
           </div>
         )}

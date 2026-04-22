@@ -90,7 +90,7 @@ export default function ReviewPage() {
       <div style={{ textAlign: 'center' }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}>🌊</div>
         <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 18, color: W.blueDeeper, letterSpacing: '-0.01em' }}>Link Expired</div>
-        <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>This review link is no longer available. Call us at <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a>.</div>
+        <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>This review link is no longer available. Call us at <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a>.</div>
       </div>
     </div>
   );

@@ -240,7 +240,7 @@ export default function LoginPage() {
             background: '#FFEBEE', color: B.red, fontSize: 13, fontWeight: 500, lineHeight: 1.5,
           }}>
             {error === 'No account found for this phone number'
-              ? "Hmm, we don't have that number on file. Give us a call at (941) 318-7612 and we'll get you set up."
+              ? "Hmm, we don't have that number on file. Give us a call at (941) 297-5749 and we'll get you set up."
               : error === 'Failed to fetch'
               ? "Can't reach the server right now. Check your connection or try again in a moment."
               : error}
@@ -259,8 +259,8 @@ export default function LoginPage() {
         </div>
         <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginTop: 12, fontFamily: FONTS.heading }}>
           Need help?{' '}
-          <a href="tel:+19413187612" style={{ color: B.yellow, fontWeight: 800, textDecoration: 'none' }}>
-            Call (941) 318-7612
+          <a href="tel:+19412975749" style={{ color: B.yellow, fontWeight: 800, textDecoration: 'none' }}>
+            Call (941) 297-5749
           </a>
         </div>
       {/* Social icons */}

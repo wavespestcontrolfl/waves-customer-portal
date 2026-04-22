@@ -101,7 +101,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
     return (
       <div style={{ background: W.white, borderRadius: 16, padding: 24, border: `1px solid ${W.border}`, marginBottom: 16 }}>
         <div style={{ fontSize: 14, color: W.textBody }}>
-          Couldn't load times right now. <a href="tel:+19413187612" style={{ color: W.blue }}>Call (941) 318-7612</a> and we'll get you scheduled.
+          Couldn't load times right now. <a href="tel:+19412975749" style={{ color: W.blue }}>Call (941) 297-5749</a> and we'll get you scheduled.
         </div>
       </div>
     );
@@ -119,7 +119,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
     return (
       <div style={{ background: W.white, borderRadius: 16, padding: 24, border: `1px solid ${W.border}`, marginBottom: 16 }}>
         <div style={{ fontSize: 14, color: W.textBody }}>
-          No open slots in the next 14 days. <a href="tel:+19413187612" style={{ color: W.blue }}>Call us</a> and we'll fit you in.
+          No open slots in the next 14 days. <a href="tel:+19412975749" style={{ color: W.blue }}>Call us</a> and we'll fit you in.
         </div>
       </div>
     );

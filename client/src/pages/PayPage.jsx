@@ -339,7 +339,7 @@ export default function PayPage() {
   useEffect(() => {
     if (!data || data.invoice.status === 'paid' || paymentState === 'success') return;
     if (!data.stripe?.available || !data.stripe?.publishableKey) {
-      setPaymentError('Payment processing is temporarily unavailable. Please call (941) 318-7612.');
+      setPaymentError('Payment processing is temporarily unavailable. Please call (941) 297-5749.');
       return;
     }
 
@@ -372,7 +372,7 @@ export default function PayPage() {
     const timeout = setTimeout(() => {
       if (paymentState === 'setup') {
         setPaymentState('error');
-        setPaymentError('Payment form failed to load. Please refresh the page or call (941) 318-7612.');
+        setPaymentError('Payment form failed to load. Please refresh the page or call (941) 297-5749.');
       }
     }, 15000);
     return () => clearTimeout(timeout);
@@ -421,7 +421,7 @@ export default function PayPage() {
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center', maxWidth: 400 }}>
         <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 20, fontWeight: 700, color: W.blueDeeper, marginBottom: 8, letterSpacing: '-0.01em' }}>Invoice Not Found</div>
-        <div style={{ fontFamily: "'Inter', system-ui, sans-serif", fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a> if you need help.</div>
+        <div style={{ fontFamily: "'Inter', system-ui, sans-serif", fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a> if you need help.</div>
       </div>
     </div>
   );
@@ -671,7 +671,7 @@ export default function PayPage() {
             </div>
             <div style={{ fontSize: 13, color: W.textBody, lineHeight: 1.5 }}>
               Upgrade to <strong style={{ color: '#F9A825' }}>Gold WaveGuard</strong> and save 15% on all services — that's ${(invoice.subtotal * 0.15).toFixed(2)} off today's service alone.
-              Reply to the text from Waves or call <a href="tel:+19413187612" style={{ color: W.blue }}>(941) 318-7612</a>.
+              Reply to the text from Waves or call <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a>.
             </div>
           </div>
         )}
@@ -686,7 +686,7 @@ export default function PayPage() {
         primaryAction={() => payNowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
         priceDisplay={invoice ? `$${invoice.total.toFixed(2)} due` : ''}
         secondaryLabel="Questions? Text us"
-        secondaryAction={() => { window.location.href = 'sms:+19413187612'; }}
+        secondaryAction={() => { window.location.href = 'sms:+19412975749'; }}
       />
     </div>
   );

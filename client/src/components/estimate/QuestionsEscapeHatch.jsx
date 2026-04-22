@@ -8,7 +8,7 @@ const W = {
   white: '#FFFFFF', border: '#CBD5E1',
 };
 
-const BUSINESS_LINE = '+19413187612';
+const BUSINESS_LINE = '+19412975749';
 const BUSINESS_EMAIL = 'contact@wavespestcontrol.com';
 
 function isLikelyMobile() {

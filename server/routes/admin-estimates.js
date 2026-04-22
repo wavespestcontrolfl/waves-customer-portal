@@ -147,7 +147,7 @@ async function sendEstimateNow(estimate, sendMethod) {
               <p>Your customized service estimate is ready for review.</p>
               ${priceLine ? `<p style="font-size: 18px; font-weight: bold; color: #10b981;">${priceLine}</p>` : ''}
               <p><a href="${viewUrl}" style="display: inline-block; padding: 14px 28px; background: #0ea5e9; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">View Your Estimate</a></p>
-              <p style="color: #666; font-size: 14px;">Questions? Call us at (941) 318-7612 or reply to this email.</p>
+              <p style="color: #666; font-size: 14px;">Questions? Call us at (941) 297-5749 or reply to this email.</p>
               <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
               <p style="color: #999; font-size: 12px;">Waves Pest Control, LLC | Lakewood Ranch, FL</p>
               <p style="color: #999; font-size: 11px;">contact@wavespestcontrol.com</p>
@@ -237,7 +237,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const msg = req.body.message || (
       `Hey ${firstName}! Just following up on your Waves Pest Control estimate 🌊\n\n` +
       `You can review it anytime here: ${viewUrl}\n\n` +
-      `We'd love to help protect your home. Reply here or call (941) 318-7612 with any questions!`
+      `We'd love to help protect your home. Reply here or call (941) 297-5749 with any questions!`
     );
 
     await TwilioService.sendSMS(estimate.customer_phone, msg);

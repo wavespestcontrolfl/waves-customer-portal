@@ -327,7 +327,7 @@ export default function PayPageV2() {
   useEffect(() => {
     if (!data || data.invoice.status === 'paid') return;
     if (!data.stripe?.available || !data.stripe?.publishableKey) {
-      setPaymentError('Payment processing is temporarily unavailable. Please call (941) 318-7612.');
+      setPaymentError('Payment processing is temporarily unavailable. Please call (941) 297-5749.');
       return;
     }
     setPaymentState('setup');

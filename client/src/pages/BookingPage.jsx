@@ -331,7 +331,7 @@ export default function BookingPage() {
                   No availability this period
                 </div>
                 <div style={{ fontSize: 13, color: BRAND.gray400, lineHeight: 1.5 }}>
-                  We don't have techs routed near {city} in the next 2 weeks. Call us at (941) 318-7612 and we'll get you scheduled.
+                  We don't have techs routed near {city} in the next 2 weeks. Call us at (941) 297-5749 and we'll get you scheduled.
                 </div>
               </div>
             ) : (

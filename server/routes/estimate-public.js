@@ -45,21 +45,14 @@ const BRAND = {
   sand: '#FDF6EC', sandDark: '#F5EBD7',
 };
 
-// Inline SVG for the wave-mark tile — mirrors client/src/components/brand/WavesMark.jsx
-// so the SSR estimate page uses the same logo as PayPageV2 / ReceiptPage.
-function wavesMarkSvg(size = 28, fill = BRAND.blueDeeper) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 28 28" role="img" aria-label="Waves" style="display:block">
-    <rect width="28" height="28" rx="6" fill="${fill}"/>
-    <path d="M5 17.5c1.7 0 1.7-1.6 3.5-1.6s1.8 1.6 3.5 1.6 1.8-1.6 3.5-1.6 1.8 1.6 3.5 1.6 1.8-1.6 3.5-1.6" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M5 13c1.7 0 1.7-1.6 3.5-1.6s1.8 1.6 3.5 1.6 1.8-1.6 3.5-1.6 1.8 1.6 3.5 1.6 1.8-1.6 3.5-1.6" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.65"/>
-  </svg>`;
-}
-
+// SSR top bar — phone on the LEFT, full Waves logo on the RIGHT. The
+// logo is /waves-logo.png served from client/public so the static and
+// React surfaces share the exact same artwork (and cache line).
 function shellTopBar() {
   return `<header class="top-bar">
     <div class="top-bar-inner">
-      <div class="logo-wrap">${wavesMarkSvg(28, BRAND.blueDeeper)}</div>
-      <a href="tel:+19413187612" class="top-phone">(941) 318-7612</a>
+      <a href="tel:+19412975749" class="top-phone">(941) 297-5749</a>
+      <img src="/waves-logo.png" alt="Waves" class="top-logo"/>
     </div>
   </header>`;
 }
@@ -179,6 +172,7 @@ function renderExpiredPage(estimate) {
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
+  .top-logo{height:28px;display:block}
   .wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 24px}
   .box{max-width:560px;background:#fff;border-radius:14px;padding:40px;text-align:center;border:1px solid #E7E2D7}
   h1{font-family:'Source Serif 4','Source Serif Pro',Georgia,serif;font-weight:500;letter-spacing:-0.01em;font-size:32px;margin:0 0 12px;color:#1B2C5B}
@@ -190,7 +184,7 @@ ${shellTopBar()}
 <div class="wrap"><div class="box">
   <h1>This estimate has expired</h1>
   <p>Hi ${escapeHtml((estimate.customerName || '').split(' ')[0] || 'there')} — the estimate for <strong>${escapeHtml(estimate.address || 'your property')}</strong> is no longer active. Give us a call and we'll put together a fresh one.</p>
-  <a class="btn" href="tel:+19413187612">Call (941) 318-7612</a>
+  <a class="btn" href="tel:+19412975749">Call (941) 297-5749</a>
 </div></div>
 </body></html>`;
 }
@@ -361,6 +355,7 @@ function renderPage(token, estimate, estData) {
   .logo-wrap{display:inline-flex;align-items:center}
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
   .top-phone:hover{color:${BRAND.blueDark}}
+  .top-logo{height:28px;display:block}
   .wrap{flex:1;max-width:720px;width:100%;margin:0 auto;padding:32px 20px 64px}
   .hero{padding:8px 0 24px}
   .hero .addr{color:#3F4A65;font-size:15px;margin-top:4px}
@@ -556,7 +551,7 @@ ${shellTopBar()}
     <p>This rate is yours for the next 24 months. No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button class="cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B" onclick="acceptEstimate()">Accept &amp; get started</button>`}
     <div style="margin-top:20px;font-size:14px">
-      Questions? Call <a href="tel:+19413187612" style="color:#fff;font-weight:700">(941) 318-7612</a>
+      Questions? Call <a href="tel:+19412975749" style="color:#fff;font-weight:700">(941) 297-5749</a>
     </div>
   </div>
 
@@ -691,7 +686,7 @@ ${shellTopBar()}
       if (data.onboardingToken) window.location.href = '/onboard/' + data.onboardingToken;
       else { toast('Accepted! We\u2019ll be in touch shortly.'); setTimeout(() => location.reload(), 1200); }
     } catch (e) {
-      toast('Could not accept. Call (941) 318-7612 if this keeps happening.');
+      toast('Could not accept. Call (941) 297-5749 if this keeps happening.');
       if (btn) { btn.disabled = false; btn.textContent = 'Accept this estimate \u2192'; }
     }
   }
@@ -751,7 +746,7 @@ ${shellTopBar()}
         body: JSON.stringify({ suggestedService: svc })
       });
       toast('Got it \u2014 we\u2019ll text you a bundle quote shortly.');
-    } catch (e) { toast('Could not send. Call (941) 318-7612.'); }
+    } catch (e) { toast('Could not send. Call (941) 297-5749.'); }
   }
 </script>
 </body></html>`;
@@ -766,7 +761,7 @@ async function handleEstimateView(req, res, next) {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) {
       return res.status(404).set('Content-Type', 'text/html').send(
-        `<!doctype html><html><head><meta charset="utf-8"><title>Not Found</title></head><body style="font-family:system-ui;padding:40px;text-align:center"><h1>Estimate Not Found</h1><p>This link may have expired. Call <a href="tel:+19413187612">(941) 318-7612</a>.</p></body></html>`
+        `<!doctype html><html><head><meta charset="utf-8"><title>Not Found</title></head><body style="font-family:system-ui;padding:40px;text-align:center"><h1>Estimate Not Found</h1><p>This link may have expired. Call <a href="tel:+19412975749">(941) 297-5749</a>.</p></body></html>`
       );
     }
 

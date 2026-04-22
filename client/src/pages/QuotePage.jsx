@@ -562,8 +562,8 @@ export default function QuotePage() {
           <p style={sHeroSub}>
             Tell us about your property — we'll analyze it with satellite + records and send a price same-day. Serving Manatee, Sarasota, and Charlotte counties.
           </p>
-          <Button variant="primary" as="a" href="tel:+19413187612" style={{ fontSize: 16 }}>
-            Call (941) 318-7612
+          <Button variant="primary" as="a" href="tel:+19412975749" style={{ fontSize: 16 }}>
+            Call (941) 297-5749
           </Button>
           <p style={{ fontSize: 14, marginTop: 12, color: COLORS.white, opacity: 0.85 }}>
             Prefer to call? Most quotes go out same-day.
@@ -951,7 +951,7 @@ export default function QuotePage() {
                 </div>
 
                 <div style={{ marginTop: 24, display: 'grid', gap: 12 }}>
-                  <Button variant="primary" as="a" href="tel:+19413187612" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', textTransform: 'none' }}>Call (941) 318-7612</Button>
+                  <Button variant="primary" as="a" href="tel:+19412975749" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', textTransform: 'none' }}>Call (941) 297-5749</Button>
                   <Button variant="secondary" onClick={resetAll} style={{ fontSize: 16, textTransform: 'none' }}>Start a New Quote</Button>
                 </div>
               </div>
@@ -1039,7 +1039,7 @@ export default function QuotePage() {
                   )}
 
                   <div style={{ marginTop: 24, display: 'grid', gap: 12 }}>
-                    <Button variant="primary" as="a" href="tel:+19413187612" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', textTransform: 'none' }}>Call (941) 318-7612</Button>
+                    <Button variant="primary" as="a" href="tel:+19412975749" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', textTransform: 'none' }}>Call (941) 297-5749</Button>
                     <Button variant="secondary" onClick={resetAll} style={{ fontSize: 16, textTransform: 'none' }}>Start a New Request</Button>
                   </div>
                 </div>
