@@ -243,18 +243,40 @@ const TwilioService = {
   /**
    * Send "tech en route" notification
    * Called when tech marks job as started in the field
+   *
+   * trackToken (optional): when present, body includes the /track/:token
+   * link so the customer can tap through to the live tracking page.
+   * Phase 1 callers always pass a token (minted by migration backfill);
+   * legacy callers that pass nothing still get a sensible bodyless message.
    */
-  async sendTechEnRoute(customerId, techName, etaMinutes) {
+  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null) {
     const customer = await db('customers').where({ id: customerId }).first();
     const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
     if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
 
-    const body = `🌊 Waves Pest Control\n\n` +
-      `${techName} is on the way to your property! ` +
-      `Estimated arrival: ${etaMinutes} minutes.\n\n` +
-      `Please ensure gates are unlocked and pets are secured.`;
+    const firstName = customer.first_name || '';
+    const eta = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n\n` : '';
 
-    return this.sendSMS(customer.phone, body);
+    let body;
+    if (trackToken) {
+      const origin = process.env.CLIENT_URL
+        || process.env.PUBLIC_PORTAL_URL
+        || 'https://portal.wavespestcontrol.com';
+      const trackUrl = `${origin}/track/${trackToken}`;
+      body = `Hi ${firstName} — ${techName} is on the way.\n${eta}` +
+        `Track live: ${trackUrl}\n\n` +
+        `Reply STOP to opt out.`;
+    } else {
+      body = `🌊 Waves Pest Control\n\n` +
+        `${techName} is on the way to your property! ` +
+        `${eta}` +
+        `Please ensure gates are unlocked and pets are secured.`;
+    }
+
+    return this.sendSMS(customer.phone, body, {
+      customerId,
+      messageType: 'tech_en_route',
+    });
   },
 
   /**

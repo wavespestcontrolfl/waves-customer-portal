@@ -309,6 +309,7 @@ app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));
 app.use('/api/webhooks/bouncie', require('./routes/webhooks-bouncie'));
 app.use('/api/tech/notifications', require('./routes/tech-notifications'));
+app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
 app.use('/api/newsletter', require('./routes/newsletter'));
 
