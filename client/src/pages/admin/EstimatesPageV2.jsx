@@ -33,7 +33,7 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
   Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, SlidersHorizontal,
-  Check, X, ArrowLeft, FilePlus, Plus,
+  Check, X, ArrowLeft, Plus,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -947,7 +947,7 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, v3Flag = false }) {
   const isDraftMuted = v3Flag && estimate.status === 'draft';
   return (
     <div
-      onClick={() => { /* row action sheet — follow-up PR */ }}
+      onClick={() => { if (customerHref) window.location.href = customerHref; }}
       className={cn(
         'bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5 cursor-pointer hover:bg-zinc-50',
         isDraftMuted && 'opacity-60',
@@ -1012,17 +1012,6 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, v3Flag = false }) {
         >
           <MessageSquare size={16} strokeWidth={1.75} />
         </a>
-      )}
-      {estimate.address && onCreateFromAddress && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onCreateFromAddress(estimate.address); }}
-          aria-label={`New estimate at ${estimate.address}`}
-          title="New estimate at this address"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-        >
-          <FilePlus size={16} strokeWidth={1.75} />
-        </button>
       )}
     </div>
   );
@@ -1121,17 +1110,15 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
         <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
           Estimates
         </h1>
-        {v3Flag && (
-          <button
-            type="button"
-            onClick={onNew}
-            aria-label="Add estimate"
-            className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring hover:bg-zinc-800"
-            style={{ width: 36, height: 36 }}
-          >
-            <Plus size={20} strokeWidth={2} />
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={onNew}
+          aria-label="Add estimate"
+          className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring hover:bg-zinc-800"
+          style={{ width: 36, height: 36 }}
+        >
+          <Plus size={20} strokeWidth={2} />
+        </button>
       </div>
 
       {/* Labeled search + Add/filter row — mirrors Customers mobile block. */}
@@ -1149,15 +1136,6 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
           className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
         />
         <div className="mt-3 flex items-center gap-2 flex-wrap">
-          {!v3Flag && (
-            <button
-              type="button"
-              onClick={onNew}
-              className="inline-flex items-center justify-center u-label px-3 h-11 bg-zinc-900 text-white border-hairline border-zinc-900 rounded-sm transition-colors u-focus-ring"
-            >
-              + Add Estimate
-            </button>
-          )}
           <MobileChipSheet
             label="Filter"
             value={filter}
