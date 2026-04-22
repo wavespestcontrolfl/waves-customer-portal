@@ -29,10 +29,11 @@ import {
   DeclineModalV2,
 } from '../../components/admin/EstimateModalsV2';
 import useIsMobile from '../../hooks/useIsMobile';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
   Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, SlidersHorizontal,
-  Check, X, ArrowLeft, FilePlus,
+  Check, X, ArrowLeft, FilePlus, Plus,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -60,6 +61,107 @@ function StatusBadgeV2({ status }) {
       {cfg.label}
     </Badge>
   );
+}
+
+// Estimates v2 status pills (spec §6). Monochrome-professional; red is
+// reserved strictly for `expired` so Virginia can scan "what needs attention
+// today" in under 5 seconds. Gated by the `estimates_v2_status_pills` flag.
+function StatusPillV3({ status }) {
+  const label = (STATUS_CONFIG[status] || STATUS_CONFIG.draft).label;
+  // Common base for the filled-pill variants.
+  const filled = 'inline-flex items-center gap-1 h-5 px-2 rounded-full text-11 font-medium whitespace-nowrap';
+  switch (status) {
+    case 'expired':
+      return (
+        <span className={cn(filled, 'bg-alert-fg text-white')}>{label}</span>
+      );
+    case 'viewed':
+      return (
+        <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>
+          <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-zinc-900" />
+          {label}
+        </span>
+      );
+    case 'accepted':
+      return (
+        <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>
+          <Check size={10} strokeWidth={2.5} aria-hidden />
+          {label}
+        </span>
+      );
+    case 'sent':
+      return (
+        <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>{label}</span>
+      );
+    case 'declined':
+      return (
+        <span className="inline-flex items-center h-5 px-2 rounded-full text-11 font-normal whitespace-nowrap border-hairline border-zinc-300 text-ink-tertiary bg-white">
+          {label}
+        </span>
+      );
+    case 'draft':
+    default:
+      return (
+        <span className="inline-flex items-center h-5 px-2 rounded-full text-11 font-normal whitespace-nowrap border-hairline border-zinc-300 text-ink-tertiary bg-white">
+          {label}
+        </span>
+      );
+  }
+}
+
+// Estimates v2 default sort (spec §7):
+//   expired → viewed → sent → accepted/declined → drafts last
+// Within a rank, tie-break by most-recent activity (updatedAt || createdAt).
+const V3_STATUS_RANK = {
+  expired: 0,
+  viewed: 1,
+  sent: 2,
+  accepted: 3,
+  declined: 3,
+  draft: 4,
+};
+
+function v3SortFn(a, b) {
+  const ra = V3_STATUS_RANK[a.status] ?? 5;
+  const rb = V3_STATUS_RANK[b.status] ?? 5;
+  if (ra !== rb) return ra - rb;
+  const ta = new Date(a.updatedAt || a.createdAt || 0).getTime();
+  const tb = new Date(b.updatedAt || b.createdAt || 0).getTime();
+  return tb - ta;
+}
+
+// Estimates v2 filter chips (spec §7). Action Required = expired plus viewed
+// sitting idle (viewed > 48h). Open = sent+viewed. Closed = accepted+declined.
+const V3_CHIPS = [
+  { key: 'all', label: 'All' },
+  { key: 'action', label: 'Action Required' },
+  { key: 'open', label: 'Open' },
+  { key: 'closed', label: 'Closed' },
+  { key: 'drafts', label: 'Drafts' },
+];
+
+function v3ChipMatches(e, chip) {
+  if (chip === 'all') return true;
+  if (chip === 'drafts') return e.status === 'draft';
+  if (chip === 'open') return e.status === 'sent' || e.status === 'viewed';
+  if (chip === 'closed') return e.status === 'accepted' || e.status === 'declined';
+  if (chip === 'action') {
+    if (e.status === 'expired') return true;
+    if (e.status === 'viewed' && e.viewedAt) {
+      const hrs = (Date.now() - new Date(e.viewedAt).getTime()) / 3.6e6;
+      return hrs >= 48;
+    }
+    return false;
+  }
+  return true;
+}
+
+function v3ChipCounts(estimates) {
+  const out = {};
+  for (const c of V3_CHIPS) {
+    out[c.key] = estimates.filter((e) => v3ChipMatches(e, c.key)).length;
+  }
+  return out;
 }
 
 // Urgency indicator — "Going cold" / "Final follow-up" get alert tone,
@@ -251,6 +353,7 @@ const SOURCE_ICON = {
 };
 
 function EstimatePipelineViewV2() {
+  const v3Flag = useFeatureFlag('estimates_v2_status_pills');
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
@@ -453,14 +556,26 @@ function EstimatePipelineViewV2() {
                   </div>
                 )}
 
-                <StatusBadgeV2 status={e.status} />
+                {v3Flag
+                  ? <StatusPillV3 status={e.status} />
+                  : <StatusBadgeV2 status={e.status} />}
 
                 {/* Customer info */}
                 <div className="flex-1 min-w-[150px]">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-14 sm:text-14 font-medium text-zinc-900">
-                      {e.customerName || 'Unknown'}
-                    </span>
+                    {v3Flag && e.customerId ? (
+                      <a
+                        href={`/admin/customers?customerId=${encodeURIComponent(e.customerId)}`}
+                        onClick={(evt) => evt.stopPropagation()}
+                        className="text-14 sm:text-14 font-medium text-zinc-900 no-underline hover:underline"
+                      >
+                        {e.customerName || 'Unknown'}
+                      </a>
+                    ) : (
+                      <span className="text-14 sm:text-14 font-medium text-zinc-900">
+                        {e.customerName || 'Unknown'}
+                      </span>
+                    )}
                     {source && (
                       <span title={source.title} className="inline-flex text-ink-tertiary">
                         <source.Icon size={14} strokeWidth={1.75} aria-hidden />
@@ -822,26 +937,50 @@ function mobileStatusClass(status) {
 // present. Row tap is currently a no-op — action sheet will land in a
 // follow-up PR so this PR stays scoped to the list-view redesign per
 // CLAUDE.md Rule 1/2.
-function MobileEstimateRow({ estimate, onCreateFromAddress }) {
+function MobileEstimateRow({ estimate, onCreateFromAddress, v3Flag = false }) {
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
   const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
+  const customerName = estimate.customerName || 'Unknown';
+  const customerHref = estimate.customerId
+    ? `/admin/customers?customerId=${encodeURIComponent(estimate.customerId)}`
+    : null;
+  const isDraftMuted = v3Flag && estimate.status === 'draft';
   return (
     <div
       onClick={() => { /* row action sheet — follow-up PR */ }}
-      className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5 cursor-pointer hover:bg-zinc-50"
+      className={cn(
+        'bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5 cursor-pointer hover:bg-zinc-50',
+        isDraftMuted && 'opacity-60',
+      )}
       style={{ height: 64 }}
     >
       <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-        <div className="text-14 font-medium text-ink-primary truncate">
-          {estimate.customerName || 'Unknown'}
-        </div>
-        <div className="text-11 text-ink-tertiary truncate">
-          <span className="u-nums">{amount}</span>
-          <span className={cn('ml-2 font-medium', mobileStatusClass(estimate.status))}>
-            {cfg.label}
-          </span>
-          <span className="ml-2 u-nums">#{shortEstimateRef(estimate.id)}</span>
-        </div>
+        {customerHref ? (
+          <a
+            href={customerHref}
+            onClick={(e) => e.stopPropagation()}
+            className="text-14 font-medium text-ink-primary truncate no-underline hover:underline"
+          >
+            {customerName}
+          </a>
+        ) : (
+          <div className="text-14 font-medium text-ink-primary truncate">{customerName}</div>
+        )}
+        {v3Flag ? (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="u-nums text-11 text-ink-tertiary">{amount}</span>
+            <StatusPillV3 status={estimate.status} />
+            <span className="u-nums text-11 text-ink-tertiary">#{shortEstimateRef(estimate.id)}</span>
+          </div>
+        ) : (
+          <div className="text-11 text-ink-tertiary truncate">
+            <span className="u-nums">{amount}</span>
+            <span className={cn('ml-2 font-medium', mobileStatusClass(estimate.status))}>
+              {cfg.label}
+            </span>
+            <span className="ml-2 u-nums">#{shortEstimateRef(estimate.id)}</span>
+          </div>
+        )}
       </div>
       {estimate.customerPhone && (
         <button
@@ -893,12 +1032,15 @@ function MobileEstimateRow({ estimate, onCreateFromAddress }) {
 // (GET /admin/estimates) with EstimatePipelineViewV2. KPI bar, Leads tab,
 // and Pricing Logic tab are desktop-only by design.
 function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
+  const v3Flag = useFeatureFlag('estimates_v2_status_pills');
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
-  const [sort, setSort] = useState('newest');
+  // Spec §7 default sort is the v3 status-rank; keep the old newest/oldest
+  // options available when the flag is off.
+  const [sort, setSort] = useState(v3Flag ? 'v3' : 'newest');
 
   useEffect(() => {
     adminFetch('/admin/estimates')
@@ -911,7 +1053,11 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     const q = search.trim().toLowerCase();
     const classified = estimates.map((e) => ({ ...e, _class: classifyEstimate(e) }));
     let list = classified;
-    if (filter !== 'all') list = list.filter((e) => e._class === filter);
+    if (v3Flag) {
+      list = list.filter((e) => v3ChipMatches(e, filter));
+    } else if (filter !== 'all') {
+      list = list.filter((e) => e._class === filter);
+    }
     if (dateFilter !== 'all') {
       list = list.filter((e) => mobileMatchesDate(e.createdAt, dateFilter, now));
     }
@@ -922,9 +1068,14 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
         return name.includes(q) || ref.includes(q);
       });
     }
-    list = [...list].sort(mobileSortFn(sort));
+    const useV3Sort = v3Flag && sort === 'v3';
+    list = useV3Sort ? [...list].sort(v3SortFn) : [...list].sort(mobileSortFn(sort));
 
-    // Always group by createdAt day; sort=oldest reverses group order.
+    // v3 sort breaks day-grouping (status rank wins, not date), so collapse
+    // to a single group preserving the sorted order.
+    if (useV3Sort) return [[0, list]];
+
+    // Otherwise group by createdAt day; sort=oldest reverses group order.
     const byDay = new Map();
     for (const e of list) {
       const d = e.createdAt ? new Date(e.createdAt) : null;
@@ -938,16 +1089,25 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
       sort === 'oldest' ? a[0] - b[0] : b[0] - a[0],
     );
     return sortedGroups;
-  }, [estimates, search, filter, dateFilter, sort]);
+  }, [estimates, search, filter, dateFilter, sort, v3Flag]);
 
   const filterCounts = useMemo(() => {
+    if (v3Flag) return v3ChipCounts(estimates);
     const counts = { all: estimates.length };
     for (const f of PIPELINE_FILTERS) {
       if (f.key === 'all') continue;
       counts[f.key] = estimates.filter((e) => classifyEstimate(e) === f.key).length;
     }
     return counts;
-  }, [estimates]);
+  }, [estimates, v3Flag]);
+
+  // Reset filter + default sort when the v3 flag flips (flags load async
+  // after initial render; useState seed can't see the resolved value).
+  useEffect(() => {
+    setFilter('all');
+    if (v3Flag) setSort((s) => (s === 'newest' ? 'v3' : s));
+    else setSort((s) => (s === 'v3' ? 'newest' : s));
+  }, [v3Flag]);
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
   const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
@@ -956,11 +1116,22 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
     // edge-to-edge overrides, list rows are cards (not hairlined rows).
     <div>
-      {/* Title row — matches Customers header: h1 + labeled pill buttons. */}
+      {/* Title row — matches Customers header: h1 + round FAB when v3 flag on. */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
           Estimates
         </h1>
+        {v3Flag && (
+          <button
+            type="button"
+            onClick={onNew}
+            aria-label="Add estimate"
+            className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring hover:bg-zinc-800"
+            style={{ width: 36, height: 36 }}
+          >
+            <Plus size={20} strokeWidth={2} />
+          </button>
+        )}
       </div>
 
       {/* Labeled search + Add/filter row — mirrors Customers mobile block. */}
@@ -978,18 +1149,20 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
           className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
         />
         <div className="mt-3 flex items-center gap-2 flex-wrap">
-          <button
-            type="button"
-            onClick={onNew}
-            className="inline-flex items-center justify-center u-label px-3 h-11 bg-zinc-900 text-white border-hairline border-zinc-900 rounded-sm transition-colors u-focus-ring"
-          >
-            + Add Estimate
-          </button>
+          {!v3Flag && (
+            <button
+              type="button"
+              onClick={onNew}
+              className="inline-flex items-center justify-center u-label px-3 h-11 bg-zinc-900 text-white border-hairline border-zinc-900 rounded-sm transition-colors u-focus-ring"
+            >
+              + Add Estimate
+            </button>
+          )}
           <MobileChipSheet
             label="Filter"
             value={filter}
             onChange={setFilter}
-            options={PIPELINE_FILTERS.map((f) => ({
+            options={(v3Flag ? V3_CHIPS : PIPELINE_FILTERS).map((f) => ({
               ...f,
               label: f.key === 'all'
                 ? `All (${filterCounts.all || 0})`
@@ -1008,7 +1181,9 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
             label="Sort"
             value={sort}
             onChange={setSort}
-            options={MOBILE_SORT_OPTIONS}
+            options={v3Flag
+              ? [{ key: 'v3', label: 'Action Priority' }, ...MOBILE_SORT_OPTIONS]
+              : MOBILE_SORT_OPTIONS}
             title="Sort estimates"
           />
         </div>
@@ -1040,7 +1215,12 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
       ) : (
         <div className="flex flex-col gap-2">
           {flat.map((e) => (
-            <MobileEstimateRow key={e.id} estimate={e} onCreateFromAddress={onCreateFromAddress} />
+            <MobileEstimateRow
+              key={e.id}
+              estimate={e}
+              onCreateFromAddress={onCreateFromAddress}
+              v3Flag={v3Flag}
+            />
           ))}
         </div>
       )}

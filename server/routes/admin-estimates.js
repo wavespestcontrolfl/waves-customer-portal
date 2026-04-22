@@ -196,7 +196,9 @@ router.get('/', async (req, res, next) => {
     res.json({
       estimates: estimates.map(e => ({
         id: e.id, status: e.status, customerName: e.customer_name,
+        customerId: e.customer_id,
         customerPhone: e.customer_phone, address: e.address,
+        updatedAt: e.updated_at,
         monthlyTotal: parseFloat(e.monthly_total || 0),
         tier: e.waveguard_tier, createdBy: e.created_by_name,
         sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,

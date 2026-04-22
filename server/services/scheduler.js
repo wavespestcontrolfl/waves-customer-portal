@@ -612,6 +612,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6AM ET — Estimate expiration (Estimates v2 spec §5)
+  // Flips sent/viewed estimates past ESTIMATE_EXPIRATION_DAYS (default 7) to
+  // expired; also flips anything past explicit expires_at.
+  // =========================================================================
+  cron.schedule('0 6 * * *', async () => {
+    logger.info('Running: Estimate expiration sweep');
+    try {
+      const { runEstimateExpiration } = require('./estimate-expiration');
+      await runEstimateExpiration();
+    } catch (err) {
+      logger.error(`Estimate expiration sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:30AM — Sync Google Business Profile performance metrics
   // =========================================================================
   cron.schedule('30 6 * * *', async () => {
