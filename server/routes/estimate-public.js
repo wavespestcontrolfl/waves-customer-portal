@@ -477,8 +477,6 @@ function renderPage(token, estimate, estData) {
   .final{background:#1B2C5B;color:#fff;text-align:center;padding:32px 24px;border-radius:14px;border:1px solid #1B2C5B}
   .final h2{color:#fff;margin:0 0 8px}
   .final p{color:rgba(255,255,255,.8);font-size:14px}
-  .decline{text-align:center;margin-top:12px}
-  .decline a{color:#6B7280;font-size:13px;text-decoration:underline}
   .accepted-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:${BRAND.green};text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
   .site-footer{text-align:center;padding:40px 20px 32px;color:#6B7280;font-size:12px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
   .site-footer-socials{display:flex;justify-content:center;gap:12px;margin-bottom:16px}
@@ -553,7 +551,6 @@ ${shellTopBar()}
       </div>
     </div>
   </section>
-  <div class="decline"><a href="#" onclick="declineEstimate();return false">No thanks, decline this estimate</a></div>
   `}
 
   ${oneTimeRows ? `
@@ -896,13 +893,6 @@ ${shellTopBar()}
   }
 
 
-  async function declineEstimate() {
-    if (!confirm('Are you sure you want to decline this estimate?')) return;
-    try {
-      await fetch(API + '/decline', { method: 'PUT' });
-      toast('Got it \u2014 no worries. Call us if anything changes.');
-    } catch (e) { toast('Something went wrong.'); }
-  }
 
   // Rotating Google reviews from /api/reviews/featured (same pool as wavespestcontrol.com)
   (async function initReviews() {
