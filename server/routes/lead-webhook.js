@@ -429,11 +429,10 @@ router.post('/', async (req, res) => {
       metadata: JSON.stringify({ leadSource, phone: phoneFormatted }),
     });
 
-    // In-app notification for new lead
-    try {
-      const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('new_lead', `New lead: ${firstName} ${lastName}`, `${leadSource.detail || leadSource.source} \u2014 ${address || 'no address'}`, { icon: '\u{1F514}', link: '/admin/customers', metadata: { customerId: customer.id } });
-    } catch (e) { logger.error(`[notifications] New lead notification failed: ${e.message}`); }
+    // Bell + push for new leads are already fired earlier in this handler
+    // via triggerNotification('new_lead', …). The legacy direct notifyAdmin
+    // call that used to live here caused every lead to ring the bell twice.
+    // Removed intentionally; do NOT re-add without deduping upstream.
 
     // Ad service attribution — track the full funnel from lead onward
     try {

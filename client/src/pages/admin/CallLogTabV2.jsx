@@ -65,6 +65,14 @@ export default function CallLogTabV2() {
   const [callResult, setCallResult] = useState(null);
   const [callFilter, setCallFilter] = useState('all');
   const [callLogSearch, setCallLogSearch] = useState('');
+  // Transcript expand/collapse per call id. Collapsed by default because
+  // transcripts are noisy; tap the row to expand.
+  const [expandedTranscripts, setExpandedTranscripts] = useState(() => new Set());
+  const toggleTranscript = (id) => setExpandedTranscripts((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
 
   const loadCalls = (search = '') => {
     const q = search
@@ -109,10 +117,20 @@ export default function CallLogTabV2() {
 
   if (loading) return <div className="p-10 text-center text-ink-tertiary text-13">Loading calls…</div>;
 
+  // A call is only "missed" if Twilio didn't classify it AND nothing was
+  // captured — no duration, no recording, no transcript. Otherwise a real
+  // conversation happened and it should show as "Discussion".
+  const hadConversation = (c) => (
+    Number(c.duration_seconds) > 5
+    || !!c.recording_url
+    || !!c.transcription
+    || !!c.voice_agent_outcome
+  );
+  const isReallyMissed = (c) => (!c.answered_by || c.answered_by === 'missed') && !hadConversation(c);
   const answered = calls.filter((c) => c.answered_by === 'human').length;
   const aiHandled = calls.filter((c) => c.answered_by === 'voice_agent').length;
   const voicemail = calls.filter((c) => c.answered_by === 'voicemail').length;
-  const missed = calls.filter((c) => !c.answered_by || c.answered_by === 'missed').length;
+  const missed = calls.filter(isReallyMissed).length;
 
   const now = new Date();
   const thisMonthCalls = calls.filter((c) => {
@@ -132,7 +150,7 @@ export default function CallLogTabV2() {
     if (callFilter === 'answered') return c.answered_by === 'human';
     if (callFilter === 'ai_agent') return c.answered_by === 'voice_agent';
     if (callFilter === 'voicemail') return c.answered_by === 'voicemail';
-    if (callFilter === 'missed') return !c.answered_by || c.answered_by === 'missed';
+    if (callFilter === 'missed') return isReallyMissed(c);
     return true;
   });
 
@@ -273,11 +291,17 @@ export default function CallLogTabV2() {
           ) : (
             <div className="md:max-h-[600px] md:overflow-y-auto">
               {filteredCalls.map((c) => {
-                const isMissed = !c.answered_by || c.answered_by === 'missed';
+                const conversed = hadConversation(c);
+                const isMissed = (!c.answered_by || c.answered_by === 'missed') && !conversed;
                 const answeredLabel = c.answered_by === 'human' ? 'Answered'
                   : c.answered_by === 'voice_agent' ? 'AI Agent'
-                  : c.answered_by === 'voicemail' ? 'Voicemail' : 'Missed';
-                const badgeTone = isMissed ? 'alert' : c.answered_by === 'human' ? 'strong' : 'neutral';
+                  : c.answered_by === 'voicemail' ? 'Voicemail'
+                  : conversed ? 'Discussion'
+                  : 'Missed';
+                const badgeTone = isMissed ? 'alert'
+                  : c.answered_by === 'human' ? 'strong'
+                  : conversed ? 'strong'
+                  : 'neutral';
                 const dur = c.duration_seconds
                   ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, '0')}`
                   : '--';
@@ -337,13 +361,32 @@ export default function CallLogTabV2() {
                       </div>
                     )}
 
-                    {/* Transcription */}
-                    {c.transcription && (
-                      <div className="mt-1.5 ml-8 p-2 bg-zinc-50 border-hairline rounded-md">
-                        <div className="text-13 md:text-11 text-ink-tertiary font-medium mb-0.5">Transcription</div>
-                        <div className="text-14 md:text-12 text-ink-secondary italic leading-relaxed">"{c.transcription}"</div>
-                      </div>
-                    )}
+                    {/* Transcription — collapsible. Transcripts are noisy,
+                        keep them out of the way until the admin wants them. */}
+                    {c.transcription && (() => {
+                      const open = expandedTranscripts.has(c.id);
+                      const preview = c.transcription.length > 120
+                        ? c.transcription.slice(0, 120).trim() + '…'
+                        : c.transcription;
+                      return (
+                        <div className="mt-1.5 ml-8 bg-zinc-50 border-hairline rounded-md">
+                          <button
+                            type="button"
+                            onClick={() => toggleTranscript(c.id)}
+                            className="w-full flex items-center justify-between gap-2 p-2 text-left u-focus-ring"
+                            aria-expanded={open}
+                          >
+                            <span className="text-13 md:text-11 text-ink-tertiary font-medium">
+                              Transcription{c.transcription.length > 120 ? ` · ${c.transcription.length} chars` : ''}
+                            </span>
+                            <span aria-hidden className="text-12 text-ink-tertiary">{open ? '▾' : '▸'}</span>
+                          </button>
+                          <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
+                            "{open ? c.transcription : preview}"
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
