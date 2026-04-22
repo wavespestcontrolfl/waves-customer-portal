@@ -61,9 +61,10 @@ export default function FrequencySlider({ frequencies, selected, onChange }) {
       }}
     >
       <div style={{
-        fontSize: 14, fontWeight: 600, color: W.navy, marginBottom: 14,
+        fontSize: 13, fontWeight: 600, color: W.textCaption,
+        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14,
       }}>
-        {active?.label || 'Service frequency'}
+        How often?
       </div>
 
       {/* Rail wrapper — relative anchor for the fill + handle + labels. */}

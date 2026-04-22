@@ -1014,15 +1014,19 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       includedAtThisFrequency: true,
     }));
 
-  // Add-ons surface = same line-item shape with preChecked decided by
-  // the per-frequency defaults config. Keep the list identical to
-  // included for now; UI can filter by key match against the estimate's
-  // add-on catalog. Simpler than inventing a second surface.
+  // Add-ons: treat line items as add-ons ONLY if the defaults config
+  // explicitly marks any for pre-check. If nothing's pre-checked for this
+  // frequency, return an empty list so the customer-facing AddOnsBlock
+  // hides entirely (avoids surfacing already-included services as fake
+  // "toggles"). True add-on catalog for v1 estimates is a follow-up.
   const preCheckedKeys = new Set(addonDefaults[ladder.key] || []);
-  const addOns = included.map((item) => ({
-    ...item,
-    preChecked: preCheckedKeys.has(item.key),
-  }));
+  const hasPreChecked = included.some((item) => preCheckedKeys.has(item.key));
+  const addOns = hasPreChecked
+    ? included.map((item) => ({
+        ...item,
+        preChecked: preCheckedKeys.has(item.key),
+      }))
+    : [];
 
   const monthly = summary.recurringMonthlyAfterDiscount ?? null;
   const annual = summary.recurringAnnualAfterDiscount ?? null;
@@ -1110,11 +1114,17 @@ function shapeFromV1(v1, ladder, pestTier) {
     includedAtThisFrequency: true,
   }));
 
+  // Same logic as engine-invocation path — only surface add-ons when the
+  // defaults config pre-checks at least one. Hides the "Customize your
+  // plan" block entirely for v1 estimates with no real add-on catalog.
   const preCheckedKeys = new Set(addonDefaults[ladder.key] || []);
-  const addOns = included.map((item) => ({
-    ...item,
-    preChecked: preCheckedKeys.has(item.key),
-  }));
+  const hasPreChecked = included.some((item) => preCheckedKeys.has(item.key));
+  const addOns = hasPreChecked
+    ? included.map((item) => ({
+        ...item,
+        preChecked: preCheckedKeys.has(item.key),
+      }))
+    : [];
 
   return {
     key: ladder.key,
