@@ -1,0 +1,510 @@
+/**
+ * Customer-facing estimate view — React redesign (PR B.2), feature-flagged
+ * behind estimates.use_v2_view. Server-HTML path remains default; IB tool
+ * toggle_estimate_v2_view opts individual estimates into this surface.
+ *
+ * Fetches GET /api/estimates/:token/data on mount. Renders slider +
+ * price card + checklist + add-ons + slot picker + payment preference
+ * + guarantee strip. Handles the /reserve → confirm → /accept flow
+ * with a 15-min countdown between reserve and final commit.
+ *
+ * State shape (kept in this one component — the subcomponents are
+ * presentational):
+ *   data, loading, error
+ *   selectedFrequency    — one of { quarterly | bi_monthly | monthly }
+ *   selectedAddOns       — Set of addon keys
+ *   selectedSlotId       — string | null
+ *   ctaPhase             — 'configure' | 'review' | 'submitting' | 'success' | 'slot_conflict'
+ *   reservation          — { scheduledServiceId, expiresAt } | null
+ *   paymentPreference    — 'deposit_now' | 'pay_at_visit' | null
+ *   countdownSeconds     — derived from reservation.expiresAt
+ *
+ * Matches PayPage / TrackPage convention: inline styles + W palette,
+ * mobile-first stacked layout, two-column desktop via grid.
+ */
+import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { useParams } from 'react-router-dom';
+import BrandFooter from '../components/BrandFooter';
+import FrequencySlider from '../components/estimate/FrequencySlider';
+import PriceCard from '../components/estimate/PriceCard';
+import IncludedChecklist from '../components/estimate/IncludedChecklist';
+import AddOnsBlock from '../components/estimate/AddOnsBlock';
+import SlotPicker from '../components/estimate/SlotPicker';
+import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
+import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
+import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
+import TerminalStateCard from '../components/estimate/TerminalStateCard';
+
+const W = {
+  blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
+  bluePale: '#E3F5FD', sky: '#4DC9F6', red: '#C8102E',
+  yellow: '#FFD700', green: '#16A34A', greenLight: '#DCFCE7',
+  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
+  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0',
+  border: '#CBD5E1', borderLight: '#F1F5F9',
+};
+
+const FONT_BODY = "'Inter', system-ui, sans-serif";
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const WAVES_PHONE_DISPLAY = '(941) 318-7612';
+const WAVES_PHONE_TEL = '+19413187612';
+
+function fmtMoney(n) {
+  if (n == null) return '—';
+  const v = Math.round(Number(n) * 100) / 100;
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+}
+
+function Page({ children }) {
+  return (
+    <div style={{
+      minHeight: '100vh', background: W.offWhite,
+      fontFamily: FONT_BODY, color: W.navy,
+      display: 'flex', flexDirection: 'column',
+    }}>
+      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 780, width: '100%', margin: '0 auto' }}>
+        {children}
+      </div>
+      <BrandFooter />
+    </div>
+  );
+}
+
+function SkeletonBlock() {
+  return (
+    <div style={{
+      background: W.white, borderRadius: 16, padding: 24,
+      border: `1px solid ${W.border}`, marginBottom: 16,
+    }}>
+      <div style={{ height: 12, width: 120, background: W.borderLight, borderRadius: 4 }} />
+      <div style={{ height: 32, width: '60%', background: W.borderLight, borderRadius: 4, marginTop: 14 }} />
+      <div style={{ height: 14, width: '40%', background: W.borderLight, borderRadius: 4, marginTop: 10 }} />
+    </div>
+  );
+}
+
+function NotFoundCard() {
+  return (
+    <div style={{
+      background: W.white, borderRadius: 16, padding: 32, textAlign: 'center',
+      border: `1px solid ${W.border}`, marginTop: 40,
+    }}>
+      <div style={{ fontSize: 32 }}>🌊</div>
+      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
+      <div style={{ fontSize: 14, color: W.textBody, marginTop: 12, lineHeight: 1.55 }}>
+        This link may have expired or isn't valid. Call us at{' '}
+        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE_DISPLAY}</a>{' '}
+        and we'll get you sorted.
+      </div>
+    </div>
+  );
+}
+
+function Header({ customerFirstName, address }) {
+  return (
+    <div style={{ marginBottom: 20, textAlign: 'center' }}>
+      <div style={{ fontSize: 14, color: W.textCaption, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+        Waves Pest Control
+      </div>
+      <div style={{ fontSize: 28, fontWeight: 700, color: W.blueDeeper, marginTop: 8 }}>
+        {customerFirstName ? `Hi ${customerFirstName}` : 'Your estimate'}
+      </div>
+      {address ? (
+        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 4 }}>{address}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function OneTimeCard({ anchorOneTimePrice }) {
+  return (
+    <div style={{
+      background: W.sand, borderRadius: 16, padding: 20,
+      border: `1px solid ${W.border}`, marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+        One-time option
+      </div>
+      <div style={{ fontSize: 18, color: W.navy, marginTop: 6 }}>
+        Prefer a single visit? {fmtMoney(anchorOneTimePrice)} one-time.
+      </div>
+      <div style={{ fontSize: 13, color: W.textCaption, marginTop: 4 }}>
+        Most pest problems come back. Recurring above gets you the lower monthly rate + return-at-no-charge guarantee.
+      </div>
+    </div>
+  );
+}
+
+function CountdownLine({ secondsRemaining }) {
+  const m = Math.max(0, Math.floor(secondsRemaining / 60));
+  const s = Math.max(0, secondsRemaining % 60);
+  return (
+    <div style={{ fontSize: 13, color: W.textCaption, textAlign: 'center' }}>
+      Slot held for {m}:{String(s).padStart(2, '0')}
+    </div>
+  );
+}
+
+function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, onCancel }) {
+  return (
+    <div style={{
+      background: W.white, borderRadius: 16, padding: 24,
+      borderTop: `4px solid ${W.blueBright}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: W.blueBright, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+        Confirm your booking
+      </div>
+      <div style={{ fontSize: 18, color: W.navy, marginTop: 10, lineHeight: 1.5 }}>
+        Pay option: <strong>{paymentPreference === 'deposit_now' ? 'Deposit now' : 'At the visit'}</strong>
+      </div>
+      <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
+        Slot: {slotId}
+      </div>
+      <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div>
+      <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
+        <button
+          type="button"
+          onClick={onConfirm}
+          style={{
+            padding: '16px 20px', background: W.blueBright, color: W.white,
+            border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
+          }}
+        >Confirm booking</button>
+        <button
+          type="button"
+          onClick={onCancel}
+          style={{
+            padding: '12px 20px', background: 'transparent', color: W.textBody,
+            border: `1px solid ${W.border}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+          }}
+        >Go back</button>
+      </div>
+    </div>
+  );
+}
+
+function SuccessCard({ onboardingToken }) {
+  return (
+    <div style={{
+      background: W.white, borderRadius: 16, padding: 28, textAlign: 'center',
+      borderTop: `4px solid ${W.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 40 }}>🎉</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: W.navy, marginTop: 8 }}>
+        You're booked.
+      </div>
+      <div style={{ fontSize: 14, color: W.textBody, marginTop: 10, lineHeight: 1.55 }}>
+        Check your phone for the confirmation text.
+        {onboardingToken ? ' We also sent you an onboarding link to finish setup.' : ''}
+      </div>
+      {onboardingToken ? (
+        <a
+          href={`/onboard/${onboardingToken}`}
+          style={{
+            display: 'inline-block', marginTop: 16, padding: '14px 20px',
+            background: W.blueBright, color: W.white, textDecoration: 'none',
+            borderRadius: 12, fontWeight: 600, fontSize: 15,
+          }}
+        >Continue to setup</a>
+      ) : null}
+    </div>
+  );
+}
+
+function SlotConflictBanner({ onRetry }) {
+  return (
+    <div style={{
+      background: '#fff4e5', borderRadius: 12, padding: 14,
+      border: `1px solid #f5bb5c`, marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 14, color: W.navy }}>
+        That slot was just taken. We've refreshed the options below — pick another.
+      </div>
+      {onRetry ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            marginTop: 10, padding: '8px 14px',
+            background: W.blueBright, color: W.white, border: 'none',
+            borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+          }}
+        >Refresh times</button>
+      ) : null}
+    </div>
+  );
+}
+
+export default function EstimateViewPage() {
+  const { token } = useParams();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+
+  const [selectedFrequency, setSelectedFrequency] = useState(null);
+  const [selectedAddOns, setSelectedAddOns] = useState(new Set());
+  const [selectedSlotId, setSelectedSlotId] = useState(null);
+  const [paymentPreference, setPaymentPreference] = useState(null);
+  const [ctaPhase, setCtaPhase] = useState('configure');
+  const [reservation, setReservation] = useState(null);
+  const [onboardingToken, setOnboardingToken] = useState(null);
+  const [error, setError] = useState(null);
+  const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
+
+  const [countdownSeconds, setCountdownSeconds] = useState(0);
+  const countdownRef = useRef(null);
+
+  // Fetch on mount
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`${API_BASE}/estimates/${token}/data`)
+      .then((r) => {
+        if (r.status === 404) { setNotFound(true); setLoading(false); return null; }
+        return r.json();
+      })
+      .then((body) => {
+        if (cancelled || !body) return;
+        setData(body);
+        setLoading(false);
+        const firstFreq = body?.pricing?.frequencies?.[0];
+        if (firstFreq) {
+          setSelectedFrequency(firstFreq.key);
+          // Seed add-on selection from this frequency's preChecked defaults
+          setSelectedAddOns(new Set((firstFreq.addOns || []).filter((a) => a.preChecked).map((a) => a.key)));
+        }
+      })
+      .catch(() => { if (!cancelled) { setNotFound(true); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, [token]);
+
+  // Rebuild add-on defaults when the customer changes frequency — but
+  // preserve any manual toggles the customer already made by keying off
+  // only defaults, not clobbering their selections outright. Simpler v1:
+  // reset to the new frequency's defaults. Revisit if Virginia reports
+  // "I kept unchecking inside spray and it kept re-checking."
+  const currentFrequency = useMemo(() => {
+    if (!data || !selectedFrequency) return null;
+    return data.pricing?.frequencies?.find((f) => f.key === selectedFrequency) || null;
+  }, [data, selectedFrequency]);
+
+  useEffect(() => {
+    if (!currentFrequency) return;
+    setSelectedAddOns(new Set((currentFrequency.addOns || []).filter((a) => a.preChecked).map((a) => a.key)));
+  }, [currentFrequency]);
+
+  // Countdown timer tied to reservation.expiresAt
+  useEffect(() => {
+    if (!reservation?.expiresAt) {
+      setCountdownSeconds(0);
+      if (countdownRef.current) clearInterval(countdownRef.current);
+      return undefined;
+    }
+    const tick = () => {
+      const remaining = Math.max(0, Math.floor((new Date(reservation.expiresAt).getTime() - Date.now()) / 1000));
+      setCountdownSeconds(remaining);
+      if (remaining === 0) {
+        clearInterval(countdownRef.current);
+        setCtaPhase('configure');
+        setReservation(null);
+        setSelectedSlotId(null);
+        setPaymentPreference(null);
+        setSlotsRefreshSignal((v) => v + 1);
+      }
+    };
+    tick();
+    countdownRef.current = setInterval(tick, 1000);
+    return () => clearInterval(countdownRef.current);
+  }, [reservation]);
+
+  const onToggleAddOn = useCallback((key) => {
+    setSelectedAddOns((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const handlePaymentChoice = useCallback(async (pref) => {
+    if (!selectedSlotId) return;
+    setPaymentPreference(pref);
+    setCtaPhase('submitting');
+    setError(null);
+
+    try {
+      const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId: selectedSlotId }),
+      });
+      if (r.status === 409) {
+        setCtaPhase('slot_conflict');
+        setSelectedSlotId(null);
+        setSlotsRefreshSignal((v) => v + 1);
+        return;
+      }
+      if (!r.ok) throw new Error(`reserve failed: ${r.status}`);
+      const body = await r.json();
+      setReservation({ scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt });
+      setCtaPhase('review');
+    } catch (err) {
+      setError(err.message);
+      setCtaPhase('configure');
+    }
+  }, [selectedSlotId, token]);
+
+  const handleConfirm = useCallback(async () => {
+    setCtaPhase('submitting');
+    setError(null);
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/accept`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slotId: selectedSlotId,
+          paymentMethodPreference: paymentPreference,
+        }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 409) {
+          setCtaPhase('slot_conflict');
+          setSlotsRefreshSignal((v) => v + 1);
+          setReservation(null);
+          setSelectedSlotId(null);
+          return;
+        }
+        throw new Error(body.error || `accept failed: ${r.status}`);
+      }
+      const body = await r.json();
+      setOnboardingToken(body.onboardingToken || null);
+      setCtaPhase('success');
+      setReservation(null);
+    } catch (err) {
+      setError(err.message);
+      setCtaPhase('review');
+    }
+  }, [token, selectedSlotId, paymentPreference]);
+
+  const handleReviewCancel = useCallback(() => {
+    setCtaPhase('configure');
+    setReservation(null);
+    setPaymentPreference(null);
+    // Don't clear selectedSlotId — the customer may want to retry with
+    // the same slot if the reservation call succeeded. Reservation row
+    // still exists server-side for up to 15 min; the commit-on-accept
+    // is idempotent.
+  }, []);
+
+  if (loading) {
+    return <Page><Header customerFirstName={null} address={null} /><SkeletonBlock /><SkeletonBlock /></Page>;
+  }
+  if (notFound || !data) {
+    return <Page><NotFoundCard /></Page>;
+  }
+
+  const { estimate, pricing, cta } = data;
+  const canAccept = cta?.canAccept === true;
+
+  if (!canAccept) {
+    return (
+      <Page>
+        <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
+        <TerminalStateCard
+          state={cta.terminalState}
+          customerFirstName={estimate.customerFirstName}
+          address={estimate.address}
+        />
+        <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
+      </Page>
+    );
+  }
+
+  if (ctaPhase === 'success') {
+    return (
+      <Page>
+        <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
+        <SuccessCard onboardingToken={onboardingToken} />
+        <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
+      </Page>
+    );
+  }
+
+  return (
+    <Page>
+      <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
+
+      {ctaPhase === 'slot_conflict' ? (
+        <SlotConflictBanner onRetry={() => setSlotsRefreshSignal((v) => v + 1)} />
+      ) : null}
+
+      {ctaPhase === 'review' && reservation ? (
+        <ReviewPhase
+          slotId={selectedSlotId}
+          paymentPreference={paymentPreference}
+          secondsRemaining={countdownSeconds}
+          onConfirm={handleConfirm}
+          onCancel={handleReviewCancel}
+        />
+      ) : (
+        <>
+          {pricing.frequencies && pricing.frequencies.length > 1 ? (
+            <FrequencySlider
+              frequencies={pricing.frequencies}
+              selected={selectedFrequency}
+              onChange={setSelectedFrequency}
+            />
+          ) : null}
+
+          <PriceCard
+            frequency={currentFrequency}
+            anchorOneTimePrice={pricing.anchorOneTimePrice}
+            waveGuardTier={pricing.waveGuardTier}
+          />
+
+          {pricing.anchorOneTimePrice && (pricing.frequencies?.[0]?.oneTimeTotal === pricing.anchorOneTimePrice) ? (
+            <OneTimeCard anchorOneTimePrice={pricing.anchorOneTimePrice} />
+          ) : null}
+
+          <IncludedChecklist included={currentFrequency?.included || []} />
+
+          <AddOnsBlock
+            addOns={currentFrequency?.addOns || []}
+            selectedKeys={selectedAddOns}
+            onToggle={onToggleAddOn}
+          />
+
+          <SlotPicker
+            token={token}
+            selectedSlotId={selectedSlotId}
+            onSelect={setSelectedSlotId}
+            refreshSignal={slotsRefreshSignal}
+          />
+
+          {selectedSlotId ? (
+            <PaymentPreferenceButtons
+              onSelect={handlePaymentChoice}
+              disabled={ctaPhase === 'submitting'}
+            />
+          ) : null}
+
+          {error ? (
+            <div style={{
+              background: '#fee', borderRadius: 12, padding: 12,
+              border: `1px solid ${W.red}`, marginBottom: 16,
+              color: W.red, fontSize: 14,
+            }}>
+              Something went wrong: {error}. Try again or call{' '}
+              <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
+            </div>
+          ) : null}
+        </>
+      )}
+
+      <QuestionsEscapeHatch estimateSlug={estimate.slug} />
+      <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
+    </Page>
+  );
+}
