@@ -1,0 +1,163 @@
+# Waves SEO Rubric — v1
+#
+# The scoring function for the SEO Diagnosis Agent. Before the agent can
+# rank issues, it needs a rubric. This file IS that rubric — edit it here
+# rather than burying assumptions in prompt strings. The agent pulls this
+# file at run time via the `fetch_rubric` tool.
+#
+# Philosophy (brief):
+#   - Spoke domains own [vertical] + [county/city] queries.
+#   - Hub (wavespestcontrol.com) aggregates brand + primary transactional.
+#   - Service-area pages (portal DB → Astro build) MUST exist for every
+#     coverage-grid combo; missing pages are the highest-ROI fix we ship.
+#   - Transactional queries route to service pages, informational to blog.
+#   - Local pack presence beats raw SERP position for pest queries.
+#   - WaveGuard tier pages convert; they are not a ranking surface.
+#
+# Any override Adam/Virginia makes on an agent recommendation is recorded
+# in seo_decisions — over time the agent learns Waves-specific weights
+# that a generic tool never could.
+
+version: 1
+owner: adam
+last_reviewed: 2026-04-22
+
+# ────────────────────────────────────────────────────────────────────────
+# domain_roles — which domain owns which intent
+# ────────────────────────────────────────────────────────────────────────
+domain_roles:
+  wavespestcontrol.com:
+    type: hub
+    owns:
+      - brand queries
+      - primary transactional (contact, book, pricing)
+      - geography-agnostic pest education
+    never_rank_for:
+      - long-tail [pest] + [spoke county] — spoke should win
+  wavespestcontrolbradenton.com:
+    type: spoke
+    owns: [pest control bradenton, pest bradenton, exterminator bradenton, manatee county pest]
+  wavespestcontrolparrish.com:
+    type: spoke
+    owns: [pest control parrish, parrish pest, ellenton pest, palmetto pest]
+  wavespestcontrolsarasota.com:
+    type: spoke
+    owns: [pest control sarasota, siesta key pest, sarasota exterminator]
+  wavespestcontrolvenice.com:
+    type: spoke
+    owns: [pest control venice, north port pest, englewood pest]
+  waveslawncare.com:
+    type: hub
+    owns:
+      - lawn brand queries
+      - turf education
+  # Remaining 10 spoke domains follow the same pattern — add rows as they
+  # graduate from "tracked" to "owned".
+
+# ────────────────────────────────────────────────────────────────────────
+# intent_routing — transactional goes to service pages, informational to blog
+# ────────────────────────────────────────────────────────────────────────
+intent_routing:
+  transactional:
+    signals: [price, cost, near me, quote, book, appointment, emergency]
+    target: service-page
+    penalty_if_blog: severe  # pushing transactional to a blog loses conversions
+  informational:
+    signals: [how to, why, identify, what is, when does, diy, symptoms]
+    target: blog
+    penalty_if_service_page: mild  # service page ranking for info is tolerable
+  commercial-investigation:
+    signals: [best, vs, reviews, compare]
+    target: blog
+    penalty_if_service_page: moderate
+
+# ────────────────────────────────────────────────────────────────────────
+# scoring_weights — how the agent ranks issues
+# ────────────────────────────────────────────────────────────────────────
+# Each weight drives the issue's impact_score. The agent sorts by
+# impact_score / effort_score and reports top N. Adjust to reflect what
+# Waves has actually learned.
+scoring_weights:
+  # Traffic potential signals
+  missing_service_area_page: 100       # one of our coverage combos has no page
+  striking_distance_top_5_to_top_3: 85 # rank 4-5 → 1-3 is huge CTR bump
+  striking_distance_page_2_to_page_1: 70
+  cannibalization_between_spokes: 60   # two of our domains fighting over one query
+  local_pack_missing: 55               # not in 3-pack for a service query
+  intent_mismatch: 50                  # blog ranking for transactional or vice-versa
+  thin_content_vs_competitor: 35       # < 70% word count of top result
+  schema_missing_or_invalid: 25
+  internal_link_gap: 20
+  title_meta_below_competitor: 15
+
+# ────────────────────────────────────────────────────────────────────────
+# effort_scores — informs impact-over-effort ranking
+# ────────────────────────────────────────────────────────────────────────
+effort_scores:
+  title_meta_h1_rewrite: 1       # Astro PR, 5-10 min review
+  schema_add_or_fix: 2           # templated Astro component change
+  missing_service_area_page: 3   # Blog Content Engine generates, portal DB write
+  thin_content_expand: 5         # requires research + Claude draft + human QA
+  cannibalization_consolidation: 8  # manual call — which page wins, redirects
+  local_pack_diagnosis: 10       # usually a GBP category / NAP issue, ops work
+
+# ────────────────────────────────────────────────────────────────────────
+# geographic_conversion_weights — Waves-specific overrides
+# ────────────────────────────────────────────────────────────────────────
+# Source: feedback loop via seo_decisions + historical invoice data.
+# If Venice clicks convert 3x better than Parrish clicks per impression,
+# ranking Venice at pos 4 beats ranking Parrish at pos 2. Update as we
+# accumulate evidence.
+geographic_conversion_weights:
+  bradenton: 1.0        # baseline
+  lakewood-ranch: 1.2
+  sarasota: 1.1
+  venice: 1.5           # highest conversion per impression (revisit quarterly)
+  north-port: 0.9
+  parrish: 0.7
+  palmetto: 0.6
+  ellenton: 0.5
+
+# ────────────────────────────────────────────────────────────────────────
+# local_pack_rules — when 3-pack presence matters more than blue-link rank
+# ────────────────────────────────────────────────────────────────────────
+local_pack_rules:
+  - pattern: "[pest] + [city]"
+    local_pack_weight: 2.0      # 3-pack presence 2x more valuable than blue link
+  - pattern: "[pest] + near me"
+    local_pack_weight: 2.5
+  - pattern: "emergency [pest]"
+    local_pack_weight: 2.5
+  - pattern: "how to [task]"
+    local_pack_weight: 0.5      # informational; blue link fine
+
+# ────────────────────────────────────────────────────────────────────────
+# do_not_rank — pages that exist for conversion, not SEO
+# ────────────────────────────────────────────────────────────────────────
+# WaveGuard tier pages and the portal itself are transactional surfaces.
+# Ranking them is a bonus, not a goal. Agent should never suggest
+# SEO optimization on these.
+do_not_rank:
+  - /waveguard/bronze
+  - /waveguard/silver
+  - /waveguard/gold
+  - /waveguard/platinum
+  - /portal/*
+  - /admin/*
+  - /pay/*
+  - /rate/*
+
+# ────────────────────────────────────────────────────────────────────────
+# autonomous_fix_allowlist — what the agent can ship without human approval
+# ────────────────────────────────────────────────────────────────────────
+# Anything NOT on this list routes to agent_review_queue for human review.
+# Tightly scoped on purpose — trust must be earned.
+autonomous_fix_allowlist:
+  - title_meta_h1_rewrite
+  - schema_add_or_fix
+  - internal_link_insert
+# NOT allowed (always route to review):
+#   - missing_service_area_page    (content generation — human reviews draft)
+#   - thin_content_expand          (same)
+#   - cannibalization_consolidation (requires strategy decision)
+#   - anything touching robots.txt / canonicals / redirects
