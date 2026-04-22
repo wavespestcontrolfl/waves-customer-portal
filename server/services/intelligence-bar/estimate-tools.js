@@ -157,6 +157,19 @@ Use for: per-estimate v2 rollout during Virginia's UAT. Reversible — flipping 
       required: ['estimate_identifier'],
     },
   },
+  {
+    name: 'toggle_show_one_time_option',
+    description: `Flip the estimates.show_one_time_option flag on a single estimate. When true, the customer sees a segmented toggle above the price card that lets them switch between recurring pricing and one-time pricing. Default off — most customers see recurring-only. Use when the operator says "enable one-time option for [estimate]", "show one-time pricing to Adam", or "let them pick one-time or recurring". Accept UUID, token, or phone. When enabled is omitted, toggles the current value.
+Use for: customers who explicitly want to weigh both recurring and one-time. Reversible — flipping off hides the toggle without losing state.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        estimate_identifier: { type: 'string', description: 'Estimate UUID, token, or customer phone (phone resolves to their most recent estimate)' },
+        enabled: { type: 'boolean', description: 'Optional. If omitted, toggle current value. Pass true/false to set explicitly.' },
+      },
+      required: ['estimate_identifier'],
+    },
+  },
 ];
 
 // ─── EXECUTION ──────────────────────────────────────────────────
@@ -173,6 +186,7 @@ async function executeEstimateTool(toolName, input) {
       case 'get_waveguard_tiers': return await getWaveGuardTiers();
       case 'create_pending_estimate': return await createPendingEstimate(input);
       case 'toggle_estimate_v2_view': return await toggleEstimateV2View(input);
+      case 'toggle_show_one_time_option': return await toggleShowOneTimeOption(input);
       default: return { error: `Unknown estimate tool: ${toolName}` };
     }
   } catch (err) {
@@ -533,6 +547,30 @@ async function toggleEstimateV2View({ estimate_identifier, enabled }) {
     customerName: estimate.customer_name,
     token: estimate.token,
     useV2View: next,
+    previewUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+  };
+}
+
+async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
+  if (!estimate_identifier) {
+    return { error: 'estimate_identifier required (UUID, token, or phone)' };
+  }
+
+  const estimate = await resolveEstimateByIdentifier(estimate_identifier);
+  if (!estimate) {
+    return { error: `No estimate found matching "${estimate_identifier}" (try a token, UUID, or phone)` };
+  }
+
+  const next = typeof enabled === 'boolean' ? enabled : !estimate.show_one_time_option;
+  await db('estimates').where({ id: estimate.id }).update({ show_one_time_option: next });
+
+  logger.info(`[estimate-v2] Toggled show_one_time_option for estimate ${estimate.id} → ${next}`);
+
+  return {
+    estimateId: estimate.id,
+    customerName: estimate.customer_name,
+    token: estimate.token,
+    showOneTimeOption: next,
     previewUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
   };
 }
