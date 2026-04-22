@@ -34,7 +34,7 @@ const ContentScheduler = {
         title: b.title,
         scheduledDate: b.scheduled_publish_at || b.publish_date,
         status: b.publish_status || b.status,
-        platforms: ['wordpress'],
+        platforms: ['blog'],
         tag: b.tag,
         city: b.city,
       });
@@ -124,15 +124,11 @@ const ContentScheduler = {
       try {
         await db('blog_posts').where('id', blog.id).update({ publish_status: 'publishing' });
 
-        // Publish to WordPress
-        const WordPressSync = require('./content/wordpress-sync');
-        await WordPressSync.publishToWordPress(blog.id);
-
         // Auto-share to social if enabled
         if (blog.auto_share_social) {
           try {
             const SocialMediaService = require('./social-media');
-            const link = blog.wordpress_url || blog.url || `https://www.wavespestcontrol.com/${blog.slug}`;
+            const link = blog.url || `https://www.wavespestcontrol.com/${blog.slug}`;
             await SocialMediaService.publishToAll({
               title: blog.title,
               description: blog.meta_description || (blog.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300),

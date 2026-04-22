@@ -12,7 +12,6 @@
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
- *   GATE_WORDPRESS_PUBLISH=true (enable publishing to WordPress)
  *
  * In development, all gates are OPEN by default so you can test locally.
  */
@@ -46,9 +45,6 @@ const gates = {
 
   // Voice Agent — AI phone agent for missed/after-hours calls
   voiceAgent: isProd ? process.env.GATE_VOICE_AGENT === 'true' : true,
-
-  // WordPress — publish blog posts to live site
-  wordpressPublish: isProd ? process.env.GATE_WORDPRESS_PUBLISH === 'true' : true,
 
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,

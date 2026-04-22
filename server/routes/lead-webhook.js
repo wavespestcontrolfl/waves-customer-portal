@@ -26,12 +26,12 @@ const WAVES_ADMIN_PHONE = '+19413187612';
 // line used elsewhere for notifications; new leads should ring Adam directly.
 const ADAM_CELL = '+19415993489';
 
-// POST /api/webhooks/lead — Elementor form submission webhook
+// POST /api/webhooks/lead — website lead-form submission webhook
 router.post('/', async (req, res) => {
   try {
     const body = req.body;
 
-    // Map Elementor form fields (garbled names → clean)
+    // Map raw form field names (garbled → clean)
     const rawName = body.first_name || body['First Things First Whats Your Name'] || body.name || body.full_name || findField(body, /name/i) || '';
     const email = body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '';
     const rawPhone = body.phone || body['Got A Number We Can Call Or Text'] || findField(body, /number|phone|call|text/i) || '';

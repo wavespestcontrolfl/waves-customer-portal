@@ -7,7 +7,6 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const RENTCAST_KEY = process.env.RENTCAST_API_KEY || '6dfcb2eaa9f34bf285e101b74e1a3ef6';
 const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
-const SATELLITE_WEBHOOK = process.env.SATELLITE_WEBHOOK_URL || 'https://hooks.zapier.com/hooks/catch/18868815/unk1e8d/';
 
 // GET /api/admin/lookup/property?address=...
 router.get('/property', async (req, res, next) => {

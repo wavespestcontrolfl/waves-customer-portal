@@ -11,7 +11,7 @@
  *     topic: 'chinch bug damage',
  *     city: 'Lakewood Ranch',
  *   });
- *   // result = { postId, title, wordCount, qaScore, wordpressUrl, socialStatus, report }
+ *   // result = { postId, title, wordCount, qaScore, publishedUrl, socialStatus, report }
  */
 
 const logger = require('../logger');
@@ -95,11 +95,11 @@ const ContentAgent = {
    * @param {string} opts.topic — Topic or keyword (e.g. "chinch bug damage", "lawn fertilization schedule")
    * @param {string} [opts.city] — Target city (optional — agent will pick if not specified)
    * @param {string} [opts.angle] — Specific angle or differentiation (optional)
-   * @param {boolean} [opts.publishDraft=true] — Whether to publish to WordPress as draft
+   * @param {boolean} [opts.publishDraft=true] — Whether to save the post as a portal draft
    * @param {boolean} [opts.distributeSocial=true] — Whether to queue social distribution
    * @param {function} [opts.onProgress] — Callback for progress updates: (stage, detail) => void
    *
-   * @returns {object} { postId, title, wordCount, qaScore, wordpressUrl, socialStatus, report, sessionId }
+   * @returns {object} { postId, title, wordCount, qaScore, publishedUrl, socialStatus, report, sessionId }
    */
   async run({ topic, city, angle, publishDraft = true, distributeSocial = true, onProgress }) {
     if (!ANTHROPIC_API_KEY || !CONTENT_AGENT_ID) {
@@ -113,7 +113,7 @@ const ContentAgent = {
     let prompt = `Produce a complete blog post about: ${topic}`;
     if (city) prompt += `\n\nTarget city: ${city}`;
     if (angle) prompt += `\n\nSpecific angle: ${angle}`;
-    prompt += `\n\nPublish to WordPress: ${publishDraft ? 'yes, as draft' : 'no, just write and QA score it'}`;
+    prompt += `\n\nSave as portal draft: ${publishDraft ? 'yes' : 'no, just write and QA score it'}`;
     prompt += `\nDistribute to social: ${distributeSocial ? 'yes, queue for all platforms' : 'no'}`;
     prompt += `\n\nFollow your full workflow: research → plan → write → QA → publish → distribute → report.`;
 
@@ -173,7 +173,6 @@ const ContentAgent = {
           create_blog_post: 'writing',
           generate_blog_content: 'writing',
           run_content_qa: 'scoring',
-          publish_to_wordpress: 'publishing',
           distribute_to_social: 'distributing',
           schedule_content: 'scheduling',
         };
@@ -231,7 +230,7 @@ const ContentAgent = {
       title: postData?.title || null,
       wordCount: postData?.word_count || null,
       qaScore: null,
-      wordpressUrl: postData?.wordpress_url || null,
+      publishedUrl: postData?.url || null,
       socialDistributed: toolsExecuted.some(t => t.tool === 'distribute_to_social'),
       toolsExecuted: toolsExecuted.map(t => t.tool),
       durationSeconds: Math.round(durationMs / 1000),
@@ -251,7 +250,7 @@ const ContentAgent = {
         blog_post_id: postId,
         topic,
         city: city || postData?.city,
-        status: postData?.wordpress_url ? 'published' : (postId ? 'drafted' : 'failed'),
+        status: postData?.url ? 'published' : (postId ? 'drafted' : 'failed'),
         tools_executed: JSON.stringify(result.toolsExecuted),
         qa_score: result.qaScore,
         word_count: result.wordCount,

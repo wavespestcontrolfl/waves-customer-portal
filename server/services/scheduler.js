@@ -511,20 +511,7 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // =========================================================================
-  // DAILY 4AM — Sync WordPress posts
-  // =========================================================================
-  cron.schedule('0 4 * * *', async () => {
-    logger.info('Running: WordPress sync');
-    try {
-      const WordPressSync = require('./content/wordpress-sync');
-      await WordPressSync.syncAllPosts();
-    } catch (err) {
-      logger.error(`WordPress sync failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
+// =========================================================================
   // DAILY 5AM — Auto-generate next blog post content
   // =========================================================================
   cron.schedule('0 5 * * *', async () => {

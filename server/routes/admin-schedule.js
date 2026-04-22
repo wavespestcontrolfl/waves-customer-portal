@@ -1330,19 +1330,6 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/schedule/sync-calendar — unified sync from Google Calendar
-router.post('/sync-calendar', async (req, res, next) => {
-  try {
-    const CalendarSync = require('../services/calendar-sync');
-    const days = parseInt(req.body.days) || 14;
-    const result = await CalendarSync.syncAll(days);
-    res.json(result);
-  } catch (err) {
-    logger.error(`[cal-sync] ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 /**
  * Queue a review request to send 2 hours after service completion.
  *

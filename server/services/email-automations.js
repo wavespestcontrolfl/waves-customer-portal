@@ -1,5 +1,5 @@
 /**
- * Email Automation Service — replaces 7 Zapier zaps.
+ * Email Automation Service.
  *
  * ALL TRIGGERS ARE MANUAL for now — admin clicks a button to send.
  *

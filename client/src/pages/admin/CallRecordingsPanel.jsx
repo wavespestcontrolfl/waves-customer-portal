@@ -131,7 +131,7 @@ export default function CallRecordingsPanel() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div>
             <div style={{ fontSize: 20, fontWeight: 700, color: D.heading }}>Call Recording Processor</div>
-            <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>AI transcription + customer extraction -- replaces Zapier</div>
+            <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>AI transcription + customer extraction</div>
           </div>
           <span style={{ ...sBadge(`${D.green}22`, D.green), fontSize: 11, padding: '4px 10px' }}>Auto-processing enabled</span>
         </div>

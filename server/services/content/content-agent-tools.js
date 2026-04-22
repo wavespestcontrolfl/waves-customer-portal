@@ -13,7 +13,6 @@ const logger = require('../logger');
 const getService = (name) => {
   const map = {
     BlogWriter: () => require('./blog-writer'),
-    WordPressSync: () => require('./wordpress-sync'),
     ContentQA: () => require('../seo/content-qa'),
     ContentScheduler: () => require('../content-scheduler'),
     SocialMedia: () => require('../social-media'),
@@ -206,23 +205,11 @@ async function executeContentTool(toolName, input) {
 
     // ── Publishing tools ──────────────────────────────────────
 
-    case 'publish_to_wordpress': {
-      const WordPressSync = getService('WordPressSync');
-      const wpPost = await WordPressSync.publishToWordPress(input.post_id);
-
-      return {
-        post_id: input.post_id,
-        wordpress_id: wpPost.id,
-        wordpress_url: wpPost.link,
-        status: wpPost.status,
-      };
-    }
-
     case 'distribute_to_social': {
       const post = await db('blog_posts').where('id', input.post_id).first();
       if (!post) return { error: 'Post not found' };
 
-      const link = post.wordpress_url || `https://www.wavespestcontrol.com/${post.slug}`;
+      const link = post.url || `https://www.wavespestcontrol.com/${post.slug}`;
       const description = post.meta_description || (post.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300);
 
       const SocialMedia = getService('SocialMedia');
