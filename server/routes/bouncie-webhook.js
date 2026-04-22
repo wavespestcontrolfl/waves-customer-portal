@@ -20,6 +20,22 @@ router.post('/', async (req, res) => {
     const eventType = payload.eventType || payload.event_type || payload.type || 'unknown';
     const imei = payload.imei || payload.vehicleId || (payload.data && payload.data.imei) || '';
 
+    // Optional key verification. Non-strict on purpose: this endpoint is
+    // already registered with Bouncie without a secret, and flipping it to
+    // strict would 401 every in-flight mileage event the instant the secret
+    // lands in Railway. Log mismatches, accept the event, let us migrate the
+    // Bouncie-side config deliberately.
+    const expected = process.env.BOUNCIE_WEBHOOK_SECRET;
+    if (expected) {
+      const headerKey = req.get('x-webhook-key');
+      const bodyKey = payload.webhookKey || payload.webhook_key;
+      const queryKey = req.query && req.query.key;
+      const ok = [headerKey, bodyKey, queryKey].some((k) => k && k === expected);
+      if (!ok) {
+        logger.warn(`[bouncie-webhook] secret mismatch for ${eventType} imei=${imei} — accepted anyway (non-strict)`);
+      }
+    }
+
     // Log the webhook event
     let logId = null;
     try {

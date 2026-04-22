@@ -310,6 +310,7 @@ app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
 app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));
+app.use('/api/webhooks/bouncie', require('./routes/webhooks-bouncie'));
 app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
 app.use('/api/newsletter', require('./routes/newsletter'));
