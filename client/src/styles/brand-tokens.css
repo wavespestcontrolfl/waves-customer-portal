@@ -1,0 +1,55 @@
+/*
+ * Waves Customer Portal — Brand Tokens
+ *
+ * Canonical token set for customer-facing surfaces. Values pulled live from
+ * wavespestcontrol.com computed styles on 2026-04-22 (source of truth on
+ * marketing: Tailwind tokens --waves-navy / --color-brand-blueDeeper,
+ * both #1B2C5B). If marketing ever reskins, re-pull and reconcile here.
+ *
+ * Imported once at the app root (client/src/main.jsx). Reuse these exact
+ * variable names on admin surfaces — do not fork.
+ *
+ * See: docs/design/DECISIONS.md (2026-04-22 entry) and
+ *      Downloads/waves-customer-surfaces-spec.md §3.
+ */
+
+:root {
+  /* Brand — pulled from marketing --waves-navy (2026-04-22). Deep indigo-navy. */
+  --brand:         #1B2C5B;
+  --brand-hover:   #142144;
+  --brand-ink:     #0A1128;
+  --brand-soft:    rgba(27, 44, 91, 0.08);
+  --brand-ring:    rgba(27, 44, 91, 0.18);
+
+  /* Neutrals — inherited from admin portal */
+  --page:          #FAFAFA;
+  --surface:       #FFFFFF;
+  --text:          #0A0A0A;
+  --text-muted:    #525252;
+  --text-subtle:   #737373;
+  --border:        #EAEAEA;
+  --border-strong: #D4D4D4;
+
+  /* Status — reserved per portal spec */
+  --danger:        #C8102E;   /* marketing brand red per wavespestcontrol.com (--color-brand-red); overdue invoices, destructive confirms, system failure */
+  --success:       #047857;   /* payment confirmed, job complete, estimate accepted */
+
+  /* Type scale */
+  --text-xs:       11.5px;
+  --text-sm:       12.5px;
+  --text-base:     13.5px;
+  --text-md:       14px;
+  --text-lg:       16px;
+  --text-xl:       20px;
+  --h1-serif:      32px;
+
+  /* Radii */
+  --radius-sm:     6px;
+  --radius-md:     8px;
+  --radius-lg:     12px;
+  --radius-xl:     14px;
+
+  /* Elevation */
+  --shadow-card:   0 1px 2px rgba(0,0,0,0.03), 0 8px 24px rgba(27, 44, 91, 0.05);
+  --shadow-modal:  0 4px 12px rgba(0,0,0,0.08), 0 24px 48px rgba(27, 44, 91, 0.10);
+}
