@@ -192,7 +192,11 @@ const ReviewService = {
     if (!request || request.sms_sent_at) return;
 
     const customer = await db('customers').where({ id: request.customer_id }).first();
-    if (!customer?.phone) return;
+    // Route to the service beneficiary (see services/customer-contact.js) —
+    // falls back to the billing phone when no service contact is configured.
+    const { getServiceContact } = require('./customer-contact');
+    const contact = getServiceContact(customer);
+    if (!contact.phone) return;
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
     const longReviewUrl = `${domain}/rate/${request.token}`;
@@ -206,17 +210,17 @@ const ReviewService = {
     try {
       const tpl = require('../routes/admin-sms-templates');
       body = await tpl.getTemplate('review_request', {
-        first_name: customer.first_name || '',
+        first_name: contact.name || customer.first_name || '',
         review_url: reviewUrl,
       });
     } catch { /* fall through */ }
     if (!body) {
-      body = `Hello ${customer.first_name}! How was your service with ${techName}? We'd love your feedback: ${reviewUrl}`;
+      body = `Hello ${contact.name || customer.first_name}! How was your service with ${techName}? We'd love your feedback: ${reviewUrl}`;
     }
 
     try {
       const TwilioService = require('./twilio');
-      await TwilioService.sendSMS(customer.phone, body, {
+      await TwilioService.sendSMS(contact.phone, body, {
         customerId: customer.id,
         messageType: 'review_request',
       });
@@ -480,9 +484,11 @@ const ReviewService = {
       .limit(20);
 
     let sent = 0;
+    const { getServiceContact } = require('./customer-contact');
     for (const request of eligible) {
       const customer = await db('customers').where({ id: request.customer_id }).first();
-      if (!customer?.phone) continue;
+      const contact = getServiceContact(customer);
+      if (!contact.phone) continue;
 
       const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
       const longReviewUrl = `${domain}/rate/${request.token}`;
@@ -490,12 +496,12 @@ const ReviewService = {
         kind: 'review', entityType: 'review_requests', entityId: request.id, customerId: customer.id,
       });
 
-      const fallback = `No pressure at all, ${customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${reviewUrl} 🌊`;
+      const fallback = `No pressure at all, ${contact.name || customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${reviewUrl} 🌊`;
       let body = fallback;
       try {
         const templates = require('../routes/admin-sms-templates');
         const rendered = await templates.getTemplate('review_request_followup', {
-          first_name: customer.first_name || '',
+          first_name: contact.name || customer.first_name || '',
           review_url: reviewUrl,
         });
         if (rendered && !rendered.includes('{first_name}')) body = rendered;
@@ -503,7 +509,7 @@ const ReviewService = {
 
       try {
         const TwilioService = require('./twilio');
-        await TwilioService.sendSMS(customer.phone, body, {
+        await TwilioService.sendSMS(contact.phone, body, {
           customerId: customer.id,
           messageType: 'review_followup',
         });
