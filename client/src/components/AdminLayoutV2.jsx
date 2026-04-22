@@ -12,6 +12,7 @@
  */
 import { useState, useEffect, useRef } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
+import { consumeSnapshotOnMount } from '../lib/tapToPayReturn';
 import { cn } from './ui/cn';
 import {
   LayoutDashboard,
@@ -133,6 +134,11 @@ export default function AdminLayoutV2() {
   const isMobile = useIsMobile();
   const [user, setUser] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Restore route if we just returned from WavesPay (iOS often evicts the
+  // tab during the hand-off, reloading the app to its default route).
+  // See lib/tapToPayReturn.js.
+  useEffect(() => { consumeSnapshotOnMount(navigate); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const paletteRef = useRef(null);
 
   useEffect(() => {
