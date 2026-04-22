@@ -1301,6 +1301,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         satelliteUrl: estimate.satellite_url || null,
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
+        showOneTimeOption: !!estimate.show_one_time_option,
       },
       pricing: pricingBundle,
       cta: {
