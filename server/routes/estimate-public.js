@@ -405,6 +405,28 @@ function renderPage(token, estimate, estData) {
   .switch input:checked+.slider{background:#1B2C5B}
   .switch input:checked+.slider::before{transform:translateX(18px)}
   .switch input:disabled+.slider{opacity:.5;cursor:not-allowed}
+  .booking-card h2{margin-bottom:4px}
+  .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#6B7280;text-align:center}
+  .slot-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+  .slot-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:12px 14px;text-align:left;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:2px;width:100%}
+  .slot-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
+  .slot-btn.selected{border-color:#1B2C5B;background:#F7F5EE}
+  .slot-btn .slot-day{font-size:14px;font-weight:600;color:#1B2C5B}
+  .slot-btn .slot-window{font-size:13px;color:#3F4A65}
+  .slot-btn .slot-tag{display:inline-block;margin-top:4px;padding:2px 8px;border-radius:999px;background:rgba(22,163,74,0.1);color:${BRAND.green};font-size:11px;font-weight:600;align-self:flex-start}
+  .slot-more{background:transparent;border:none;color:#1B2C5B;font:inherit;font-size:13px;font-weight:500;text-decoration:underline;cursor:pointer;padding:8px 0;align-self:flex-start}
+  .pay-pref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
+  @media(max-width:560px){.pay-pref-grid{grid-template-columns:1fr}}
+  .pay-pref-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:14px;text-align:left;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:4px}
+  .pay-pref-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
+  .pay-pref-btn[disabled]{opacity:.5;cursor:not-allowed}
+  .pay-pref-btn .pay-pref-title{font-size:14px;font-weight:600;color:#1B2C5B}
+  .pay-pref-btn .pay-pref-sub{font-size:12px;color:#6B7280;line-height:1.45}
+  .pay-pref-btn.primary{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
+  .pay-pref-btn.primary .pay-pref-title{color:#fff}
+  .pay-pref-btn.primary .pay-pref-sub{color:rgba(255,255,255,.8)}
+  .reservation-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:#065F46;border-radius:10px;padding:12px 14px;font-size:13px;margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .reservation-banner .countdown{font-family:'Source Serif 4',Georgia,serif;font-weight:500;color:#065F46;font-size:15px}
   table{width:100%;border-collapse:collapse}
   td{padding:10px 0;border-bottom:1px solid #E7E2D7;vertical-align:top;font-size:14px}
   tr:last-child td{border-bottom:0}
@@ -506,7 +528,27 @@ ${shellTopBar()}
   </div>` : ''}
 
   ${locked ? '' : `
-  <button class="cta" id="accept-btn" onclick="acceptEstimate()">Accept this estimate \u2192</button>
+  <section class="card booking-card" id="booking-card">
+    <div class="eyebrow">Pick a time</div>
+    <h2>Reserve your first visit</h2>
+    <p class="card-sub">The 3 times below fit the tech route closest to you. We will hold your pick for 15 minutes while you confirm.</p>
+    <div id="slot-area" class="booking-state">Loading available times...</div>
+    <div id="pay-pref-area" style="display:none">
+      <h3 style="margin:20px 0 4px">How would you like to pay?</h3>
+      <p class="card-sub" style="margin:0">Both options reserve your slot. You will not be charged until you confirm on the next screen.</p>
+      <div class="pay-pref-grid">
+        <button type="button" class="pay-pref-btn primary" data-pay-pref="deposit_now"><span class="pay-pref-title">Deposit now with card</span><span class="pay-pref-sub">Secure your slot with a small card-on-file deposit. Pay the rest at the visit.</span></button>
+        <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit"><span class="pay-pref-title">Pay at the visit</span><span class="pay-pref-sub">We will collect payment with the tech on-site. No card needed now.</span></button>
+      </div>
+    </div>
+    <div id="review-area" style="display:none">
+      <div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>
+      <div class="pay-pref-grid">
+        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn" onclick="confirmBooking()"><span class="pay-pref-title" id="confirm-book-title">Confirm and pay deposit</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to complete the deposit.</span></button>
+        <button type="button" class="pay-pref-btn" onclick="cancelReservation()"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>
+      </div>
+    </div>
+  </section>
   <div class="decline"><a href="#" onclick="declineEstimate();return false">No thanks, decline this estimate</a></div>
   `}
 
@@ -557,7 +599,7 @@ ${shellTopBar()}
   <div class="final">
     <h2>Ready to lock in <span data-monthly-echo>${fmtMoney(monthlyTotal)}</span>/mo?</h2>
     <p>No surprise increases, no hidden fees.</p>
-    ${locked ? '' : `<button class="cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B" onclick="acceptEstimate()">Accept &amp; get started</button>`}
+    ${locked ? '' : `<button class="cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B" onclick="document.getElementById('booking-card')?.scrollIntoView({behavior:'smooth',block:'start'})">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:+19412975749" style="color:#fff;font-weight:700">(941) 297-5749</a>
     </div>
@@ -636,6 +678,228 @@ ${shellTopBar()}
       }
     });
   });
+
+  // ── Booking flow: slots → reserve → confirm+accept ───────────
+  // Shared state for the booking card. Each step transitions the visible
+  // sub-section. Reservation auto-expires server-side after 15 min; the
+  // client countdown is cosmetic but matches the backend hold.
+  const bookingState = {
+    selectedSlotId: null,
+    selectedSlotLabel: null,
+    pickedPref: null,
+    reservation: null,
+    countdownTimer: null,
+  };
+
+  function fmtSlotDay(dateStr) {
+    try {
+      const d = new Date(dateStr + 'T12:00:00');
+      return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    } catch { return dateStr; }
+  }
+  function fmtSlotWindow(start, end) {
+    const fmt = (t) => {
+      if (!t) return '';
+      const [h, m] = String(t).split(':').map(Number);
+      const d = new Date(); d.setHours(h, m, 0, 0);
+      return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    };
+    return fmt(start) + ' – ' + fmt(end);
+  }
+
+  function renderSlot(s, isExpander) {
+    const day = fmtSlotDay(s.date);
+    const win = fmtSlotWindow(s.windowStart, s.windowEnd);
+    const tech = s.techFirstName ? 'with ' + s.techFirstName : 'tech TBD';
+    const tag = s.routeOptimal ? '<span class="slot-tag">Nearby day — good for you</span>' : '';
+    return '<button type="button" class="slot-btn" data-slot-id="' + s.slotId + '" data-slot-label="' + day + ' at ' + win + '">'
+      + '<span class="slot-day">' + day + '</span>'
+      + '<span class="slot-window">' + win + ' · ' + tech + '</span>'
+      + tag + '</button>';
+  }
+
+  async function loadSlots() {
+    const area = document.getElementById('slot-area');
+    if (!area) return;
+    try {
+      const r = await fetch('/api/public/estimates/' + TOKEN + '/available-slots');
+      if (!r.ok) throw new Error('slot fetch failed');
+      const body = await r.json();
+      const primary = body.primary || [];
+      const expander = body.expander || [];
+      if (!primary.length && !expander.length) {
+        area.className = 'booking-state';
+        area.innerHTML = 'No open times in the next 2 weeks. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we will fit you in.';
+        return;
+      }
+      area.className = '';
+      const html = [];
+      html.push('<div class="slot-list">');
+      primary.forEach((s) => html.push(renderSlot(s, false)));
+      if (expander.length) {
+        html.push('<button type="button" class="slot-more" id="slot-more-btn">See more times</button>');
+        html.push('<div class="slot-list" id="slot-expander" style="display:none">');
+        expander.forEach((s) => html.push(renderSlot(s, true)));
+        html.push('</div>');
+      }
+      html.push('</div>');
+      area.innerHTML = html.join('');
+      area.querySelectorAll('.slot-btn').forEach((btn) => btn.addEventListener('click', () => selectSlot(btn)));
+      const more = document.getElementById('slot-more-btn');
+      if (more) more.addEventListener('click', () => {
+        const expanderEl = document.getElementById('slot-expander');
+        if (expanderEl) expanderEl.style.display = '';
+        more.style.display = 'none';
+      });
+    } catch (e) {
+      area.className = 'booking-state';
+      area.innerHTML = 'Could not load times right now. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we will get you scheduled.';
+    }
+  }
+
+  function selectSlot(btn) {
+    document.querySelectorAll('.slot-btn').forEach((el) => el.classList.remove('selected'));
+    btn.classList.add('selected');
+    bookingState.selectedSlotId = btn.dataset.slotId;
+    bookingState.selectedSlotLabel = btn.dataset.slotLabel;
+    const payArea = document.getElementById('pay-pref-area');
+    if (payArea) {
+      payArea.style.display = '';
+      payArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+
+  async function pickPaymentPref(pref) {
+    if (!bookingState.selectedSlotId) {
+      toast('Pick a time first.');
+      return;
+    }
+    const buttons = document.querySelectorAll('[data-pay-pref]');
+    buttons.forEach((b) => { b.disabled = true; });
+    bookingState.pickedPref = pref;
+    try {
+      const r = await fetch('/api/public/estimates/' + TOKEN + '/reserve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId: bookingState.selectedSlotId }),
+      });
+      if (r.status === 409) {
+        toast('That slot was just taken. Pick another.');
+        buttons.forEach((b) => { b.disabled = false; });
+        bookingState.pickedPref = null;
+        loadSlots();
+        return;
+      }
+      if (!r.ok) throw new Error('reserve failed');
+      const body = await r.json();
+      bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
+      // Swap UI: hide slot list + pay pref, show review
+      document.getElementById('slot-area').style.display = 'none';
+      document.getElementById('pay-pref-area').style.display = 'none';
+      const reviewArea = document.getElementById('review-area');
+      reviewArea.style.display = '';
+      const title = document.getElementById('confirm-book-title');
+      const sub = document.getElementById('confirm-book-sub');
+      if (pref === 'deposit_now') {
+        if (title) title.textContent = 'Confirm and enter payment';
+        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · next step collects your card securely via Stripe.';
+      } else {
+        if (title) title.textContent = 'Confirm and book';
+        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · pay at the visit, no card needed now.';
+      }
+      startReservationCountdown(body.expiresAt);
+      reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch (e) {
+      toast('Could not reserve. Try again or call ${COMPANY.phone}.');
+      buttons.forEach((b) => { b.disabled = false; });
+      bookingState.pickedPref = null;
+    }
+  }
+
+  function startReservationCountdown(expiresAt) {
+    if (bookingState.countdownTimer) clearInterval(bookingState.countdownTimer);
+    const tick = () => {
+      const el = document.getElementById('reservation-countdown');
+      if (!el) return;
+      const msLeft = new Date(expiresAt).getTime() - Date.now();
+      if (msLeft <= 0) {
+        el.textContent = 'expired';
+        clearInterval(bookingState.countdownTimer);
+        toast('Reservation expired — pick another time.');
+        cancelReservation();
+        return;
+      }
+      const total = Math.floor(msLeft / 1000);
+      const m = Math.floor(total / 60);
+      const s = total % 60;
+      el.textContent = m + ':' + (s < 10 ? '0' + s : s);
+    };
+    tick();
+    bookingState.countdownTimer = setInterval(tick, 1000);
+  }
+
+  function cancelReservation() {
+    if (bookingState.countdownTimer) { clearInterval(bookingState.countdownTimer); bookingState.countdownTimer = null; }
+    bookingState.reservation = null;
+    bookingState.pickedPref = null;
+    document.getElementById('review-area').style.display = 'none';
+    document.getElementById('slot-area').style.display = '';
+    const payArea = document.getElementById('pay-pref-area');
+    if (payArea) {
+      payArea.style.display = 'none';
+      document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
+    }
+    // Reload slots to reflect any changes since the first fetch
+    loadSlots();
+  }
+
+  async function confirmBooking() {
+    const btn = document.getElementById('confirm-book-btn');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch(API + '/accept', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slotId: bookingState.selectedSlotId,
+          paymentMethodPreference: bookingState.pickedPref,
+        }),
+      });
+      const data = await r.json();
+      if (r.status === 409) {
+        toast('Slot conflict — pick another time.');
+        cancelReservation();
+        return;
+      }
+      if (!r.ok) throw new Error(data.error || 'accept failed');
+      if (bookingState.countdownTimer) clearInterval(bookingState.countdownTimer);
+      // Everything continues in /onboard/:token — the payment preference
+      // we submitted on accept is persisted on the customer row, and
+      // onboarding handles the Stripe step for deposit_now and the
+      // scheduling confirmation for pay_at_visit.
+      if (data.onboardingToken) {
+        window.location.href = '/onboard/' + data.onboardingToken;
+      } else {
+        toast('Booked! We will be in touch shortly.');
+        setTimeout(() => location.reload(), 1200);
+      }
+    } catch (e) {
+      toast('Could not confirm. Call ${COMPANY.phone} if this keeps happening.');
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // Wire pay-pref buttons once DOM is ready (script runs after the card
+  // is emitted inline so the nodes already exist).
+  document.querySelectorAll('[data-pay-pref]').forEach((b) => {
+    b.addEventListener('click', () => pickPaymentPref(b.dataset.payPref));
+  });
+
+  // Kick off the slot fetch if the booking card is on the page (i.e.,
+  // estimate is not yet accepted/expired).
+  if (document.getElementById('booking-card')) {
+    loadSlots();
+  }
 
   async function acceptEstimate() {
     const btn = document.getElementById('accept-btn');
