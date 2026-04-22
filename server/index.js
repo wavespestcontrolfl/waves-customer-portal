@@ -269,6 +269,7 @@ app.use('/api/admin/invoices', require('./routes/admin-invoices'));
 app.use('/api/admin/job-forms', require('./routes/admin-job-forms'));
 app.use('/api/admin/job-costs', require('./routes/admin-job-costs'));
 app.use('/api/admin/job-expenses', require('./routes/admin-job-expenses'));
+app.use('/api/admin/projects', require('./routes/admin-projects'));
 app.use('/api/pay', require('./routes/pay-v2'));
 app.use('/api/receipt', require('./routes/receipt-v2'));
 app.use('/api/rate', require('./routes/review-gate'));

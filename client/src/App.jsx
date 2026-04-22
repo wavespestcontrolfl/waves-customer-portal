@@ -42,6 +42,7 @@ import AdminCommunicationsPage from './pages/admin/CommunicationsGate';
 import AdminCustomersPage from './pages/admin/CustomersGate';
 import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';
+import ProjectReportViewPage from './pages/ProjectReportViewPage';
 import { lazy, Suspense } from 'react';
 
 function showReloadToast() {
@@ -105,6 +106,7 @@ const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingP
 const LeadsPage = lazyWithRetry(() => import('./pages/admin/LeadsPage'));
 const EquipmentMaintenancePage = lazyWithRetry(() => import('./pages/admin/EquipmentMaintenancePage'));
 const ServiceLibraryPage = lazyWithRetry(() => import('./pages/admin/ServiceLibraryPage'));
+const ProjectsPage = lazyWithRetry(() => import('./pages/admin/ProjectsPage'));
 const CredentialsPage = lazyWithRetry(() => import('./pages/admin/CredentialsPage'));
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
 const DiscountsPage = lazyWithRetry(() => import('./pages/admin/DiscountsPage'));
@@ -164,6 +166,7 @@ export default function App() {
           <Route path="/login" element={<LoginGate />} />
           <Route path="/onboard/:token" element={<OnboardingPage />} />
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
+          <Route path="/report/project/:token" element={<ProjectReportViewPage />} />
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayGate /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptGate /></Suspense>} />
@@ -211,6 +214,7 @@ export default function App() {
             <Route path="leads" element={<Navigate to="/admin/estimates" replace />} />
             <Route path="fleet" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading fleet...</div>}><EquipmentMaintenancePage /></Suspense>} />
             <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
+            <Route path="projects" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading projects...</div>}><ProjectsPage /></Suspense>} />
             <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
             <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
             <Route path="credentials" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading credentials...</div>}><CredentialsPage /></Suspense>} />
