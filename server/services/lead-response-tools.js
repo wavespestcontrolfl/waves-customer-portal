@@ -322,23 +322,24 @@ async function executeLeadTool(toolName, input) {
       }
 
       const customer = await db('customers').where('id', input.customer_id).first();
-      const crypto = require('crypto');
+      const { createEstimate } = require('./estimate-creator');
 
-      const [estimate] = await db('estimates').insert({
-        customer_id: input.customer_id,
-        customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
-        customer_phone: customer?.phone,
-        customer_email: customer?.email,
-        address: input.address || customer?.address_line1 || '',
-        status: 'draft',
+      // Placeholder path — agent flags that this lead should become a
+      // priced estimate; admin fills in via admin UI later (creates v2).
+      const result = await createEstimate({
         source: 'lead_agent',
-        service_interest: input.service_interest,
+        createdById: null,
+        customerId: input.customer_id,
+        customerName: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
+        customerPhone: customer?.phone,
+        customerEmail: customer?.email,
+        address: input.address || customer?.address_line1 || '',
+        serviceInterest: input.service_interest,
         notes: `${input.urgency ? `Urgency: ${input.urgency}. ` : ''}${input.notes || ''}`,
-        token: crypto.randomBytes(16).toString('hex'),
-      }).returning('*');
+      });
 
       logger.info(`[lead-agent] Flagged for estimate: ${input.service_interest} for ${customer?.first_name}`);
-      return { flagged: true, estimateId: estimate.id };
+      return { flagged: true, estimateId: result.id };
     }
 
     case 'save_lead_response_report': {
