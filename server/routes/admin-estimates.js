@@ -1,12 +1,19 @@
+// TODO(separate-PR): status enum drift — this file writes
+// status='scheduled' (scheduled-send path) while the original enum only
+// whitelists draft|sent|viewed|accepted|declined|expired. Sibling code
+// references 'void' (estimate-follow-up.js TERMINAL_STATUSES), and the
+// scheduled_services table similarly writes 'en_route'/'on_site' outside
+// its original enum. Audit all estimates.status writes in a surgical PR —
+// either expand the CHECK constraint or migrate values. Not in scope here.
 const express = require('express');
 const router = express.Router();
-const crypto = require('crypto');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { createEstimate } = require('../services/estimate-creator');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -25,22 +32,29 @@ router.post('/', async (req, res, next) => {
   try {
     const { customerId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl } = req.body;
 
-    const shortId = crypto.randomBytes(4).toString('hex');
-    const nameSlug = (customerName || 'customer').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const token = `${nameSlug}-${shortId}`;
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
+    // Admin UI currently passes pre-computed estimateData + totals from
+    // client/src/lib/estimateEngine.js (deprecated, scheduled for Session 11
+    // retirement). Until then this path writes pricing_source='client_submitted'.
+    const result = await createEstimate({
+      source: 'manual',
+      createdById: req.technicianId,
+      customerId,
+      customerName,
+      customerPhone,
+      customerEmail,
+      address,
+      category: 'RESIDENTIAL',
+      prebuiltData: estimateData || {},
+      clientTotals: { monthly: monthlyTotal, annual: annualTotal, onetime: onetimeTotal },
+      notes,
+      satelliteUrl,
+    });
 
-    const [estimate] = await db('estimates').insert({
-      customer_id: customerId || null,
-      created_by_technician_id: req.technicianId,
-      estimate_data: estimateData ? JSON.stringify(estimateData) : null,
-      address, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail,
-      monthly_total: monthlyTotal, annual_total: annualTotal, onetime_total: onetimeTotal,
-      waveguard_tier: waveguardTier, token, expires_at: expiresAt, notes, satellite_url: satelliteUrl,
-    }).returning('*');
-
-    res.status(201).json({ id: estimate.id, token, viewUrl: `https://portal.wavespestcontrol.com/estimate/${token}` });
+    res.status(201).json({
+      id: result.id,
+      token: result.token,
+      viewUrl: `https://portal.wavespestcontrol.com/estimate/${result.token}`,
+    });
   } catch (err) { next(err); }
 });
 
