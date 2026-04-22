@@ -28,7 +28,7 @@ export default function ReportViewPage() {
       <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
         <div style={{ fontSize: 32 }}>📄</div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>Report not found</div>
-        <a href="tel:+19413187612" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 318-7612</a>
+        <a href="tel:+19412975749" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 297-5749</a>
       </div>
     </div>
   );
@@ -131,12 +131,12 @@ export default function ReportViewPage() {
         {/* CTA */}
         <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
           <div style={{ fontSize: 13, color: B.grayDark }}>Questions about your service?</div>
-          <a href="sms:+19413187612" style={{
+          <a href="sms:+19412975749" style={{
             ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14, marginTop: 8,
             borderRadius: 999, background: B.yellow, color: B.blueDeeper,
             textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
             fontWeight: 800,
-          }}>💬 Text Us — (941) 318-7612</a>
+          }}>💬 Text Us — (941) 297-5749</a>
         </div>
 
         <BrandFooter />

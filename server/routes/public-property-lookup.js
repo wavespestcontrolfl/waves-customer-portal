@@ -13,7 +13,7 @@ const lookupLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many lookup requests. Please try again in an hour or call (941) 318-7612.' },
+  message: { error: 'Too many lookup requests. Please try again in an hour or call (941) 297-5749.' },
 });
 
 function normalizePhone(raw) {
@@ -101,7 +101,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     });
   } catch (err) {
     logger.error(`[public-property-lookup] failed: ${err.message}`, { stack: err.stack });
-    res.status(500).json({ error: 'Property lookup failed. Please call (941) 318-7612 to speak with our team.' });
+    res.status(500).json({ error: 'Property lookup failed. Please call (941) 297-5749 to speak with our team.' });
   }
 });
 

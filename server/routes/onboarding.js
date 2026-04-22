@@ -13,7 +13,7 @@ async function loadSession(req, res, next) {
   const { token } = req.params;
   const session = await db('onboarding_sessions').where({ token }).first();
   if (!session) return res.status(404).json({ error: 'Onboarding session not found' });
-  if (new Date(session.expires_at) < new Date()) return res.status(410).json({ error: 'This onboarding link has expired. Call (941) 318-7612 for a new one.' });
+  if (new Date(session.expires_at) < new Date()) return res.status(410).json({ error: 'This onboarding link has expired. Call (941) 297-5749 for a new one.' });
   req.session = session;
   req.customer = await db('customers').where({ id: session.customer_id }).first();
   next();

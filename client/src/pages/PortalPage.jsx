@@ -2502,7 +2502,7 @@ function ServicesTab() {
                         {/* Precautions */}
                         <div style={{ padding: '12px 18px', background: `${B.yellow}20`, borderBottom: `1px solid ${B.grayLight}` }}>
                           <div style={{ fontSize: 11, color: '#F57F17', lineHeight: 1.5 }}>
-                            {'⚠️'} Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 318-7612.
+                            {'⚠️'} Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 297-5749.
                           </div>
                         </div>
 
@@ -2522,7 +2522,7 @@ function ServicesTab() {
                             >
                               {'📄'} Download PDF
                             </a>
-                            <div style={{ fontSize: 10, color: B.grayMid }}>Waves Pest Control · (941) 318-7612</div>
+                            <div style={{ fontSize: 10, color: B.grayMid }}>Waves Pest Control · (941) 297-5749</div>
                           </div>
                         </div>
                       </div>
@@ -3534,7 +3534,7 @@ function BillingTab({ customer }) {
             <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Auto Pay Enrollment</div>
             <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Bank transfers have no added fee — credit/debit cards add a 3% processing fee.</div>
             <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6, lineHeight: 1.5 }}>
-              By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. Bank transfers (ACH) are charged the quoted invoice amount. Credit and debit card payments include a 3% processing fee added at checkout. To update your billing information or cancel automatic payments, contact us at (941) 318-7612 or billing@wavespestcontrol.com.
+              By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. Bank transfers (ACH) are charged the quoted invoice amount. Credit and debit card payments include a 3% processing fee added at checkout. To update your billing information or cancel automatic payments, contact us at (941) 297-5749 or billing@wavespestcontrol.com.
             </div>
           </div>
           <span style={{
@@ -3932,7 +3932,7 @@ function RequestTab({ customer, onSwitchTab }) {
       setTimeout(() => setSubmitted(false), 4000);
     } catch (err) {
       console.error(err);
-      const msg = err?.response?.data?.error || err?.message || 'Could not submit your request. Please try again or call our office at (941) 318-7612.';
+      const msg = err?.response?.data?.error || err?.message || 'Could not submit your request. Please try again or call our office at (941) 297-5749.';
       alert(msg);
     }
     setSubmitting(false);
@@ -4165,10 +4165,10 @@ function RequestTab({ customer, onSwitchTab }) {
               textAlign: 'center',
             }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: B.red }}>Need help right now?</div>
-              <a href="tel:+19413187612" style={{
+              <a href="tel:+19412975749" style={{
                 ...BUTTON_BASE, display: 'inline-block', padding: '10px 22px', fontSize: 14, marginTop: 8,
                 borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
-              }}>Call (941) 318-7612 directly</a>
+              }}>Call (941) 297-5749 directly</a>
               <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
                 For urgent issues, calling gets the fastest response.
               </div>
@@ -5476,7 +5476,7 @@ function LearnTab({ customer }) {
             textAlign: 'center', padding: 16, background: B.blueSurface, borderRadius: 12, marginTop: 8,
           }}>
             <div style={{ fontSize: 13, color: B.grayDark }}>Still have questions?</div>
-            <a href="sms:+19413187612" style={{
+            <a href="sms:+19412975749" style={{
               ...BUTTON_BASE, padding: '9px 20px', fontSize: 13, marginTop: 8,
               borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
               display: 'inline-flex',
@@ -6012,7 +6012,7 @@ function MyPlanTab({ customer }) {
                       setAddonRequested(prev => ({ ...prev, [addon.id]: true }));
                       setExpandedAddon(null);
                     } catch (err) {
-                      alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 318-7612.'}`);
+                      alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
                     } finally {
                       setAddonSubmitting(prev => ({ ...prev, [addon.id]: false }));
                     }
@@ -6087,7 +6087,7 @@ function MyPlanTab({ customer }) {
                             await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to ${tn} WaveGuard`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
                             setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
                           } catch (err) {
-                            alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 318-7612.'}`);
+                            alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
                           } finally {
                             setUpgradeSubmitting(prev => ({ ...prev, [tn]: false }));
                           }
@@ -6106,7 +6106,7 @@ function MyPlanTab({ customer }) {
                     </div>
                   )
                 ) : (
-                  <a href="sms:+19413187612?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
+                  <a href="sms:+19412975749?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
                     marginTop: 10, display: 'inline-block', fontSize: 10, color: B.wavesBlue,
                     fontWeight: 600, textDecoration: 'none', padding: '4px 0',
                   }}>Contact us to adjust</a>
@@ -6299,7 +6299,7 @@ function MyPlanTab({ customer }) {
                     setPauseSubmitted(true);
                     setShowPauseForm(false);
                   } catch (err) {
-                    alert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 318-7612.'}`);
+                    alert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
                   } finally {
                     setPauseSubmitting(false);
                   }
@@ -6373,7 +6373,7 @@ function MyPlanTab({ customer }) {
                     setCancelSubmitted(true);
                     setShowCancelForm(false);
                   } catch (err) {
-                    alert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 318-7612.'}`);
+                    alert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
                   } finally {
                     setCancelSubmitting(false);
                   }
@@ -6453,7 +6453,7 @@ function ServiceTracker() {
   const eta = tracker.etaMinutes;
   const notes = tracker.liveNotes || [];
   const summary = tracker.serviceSummary;
-  const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 318-7612', area: 'Southwest Florida' };
+  const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 297-5749', area: 'Southwest Florida' };
   const isLawn = svcType.toLowerCase().includes('lawn');
   const isPest = svcType.toLowerCase().includes('pest');
   const isMosquito = svcType.toLowerCase().includes('mosquito');
@@ -6814,7 +6814,7 @@ function ReferTab({ customer, onSwitchTab }) {
       setTimeout(() => setSubmitted(false), 3000);
     } catch (err) {
       console.error(err);
-      const msg = err?.response?.data?.error || err?.message || 'Could not submit your referral. Please try again or call our office at (941) 318-7612.';
+      const msg = err?.response?.data?.error || err?.message || 'Could not submit your referral. Please try again or call our office at (941) 297-5749.';
       alert(msg);
     }
     setSubmitting(false);
@@ -7185,7 +7185,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       ? `Valid through: ${new Date(doc.expirationDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`
       : '';
     const body = encodeURIComponent(
-      `Hi,\n\nPlease find attached the WDO (Wood-Destroying Organism) inspection report for the property at ${customer.address || 'the address on file'}.\n\nReport: ${safeReportTitle}\n${validThrough}\n\nFor questions, contact Waves Pest Control at (941) 318-7612.\n\nBest regards,\n${customer.firstName || ''} ${customer.lastName || ''}`
+      `Hi,\n\nPlease find attached the WDO (Wood-Destroying Organism) inspection report for the property at ${customer.address || 'the address on file'}.\n\nReport: ${safeReportTitle}\n${validThrough}\n\nFor questions, contact Waves Pest Control at (941) 297-5749.\n\nBest regards,\n${customer.firstName || ''} ${customer.lastName || ''}`
     );
     window.open(`mailto:?subject=${subject}&body=${body}`, '_self');
   };
@@ -7362,11 +7362,11 @@ function DocumentsTab({ customer, onSwitchTab }) {
           Need a specific document? We'll upload it within 24 hours.
         </div>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 12 }}>
-          <a href="tel:+19413187612" style={{
+          <a href="tel:+19412975749" style={{
             ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
             background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
           }}>Call</a>
-          <a href="sms:+19413187612" style={{
+          <a href="sms:+19412975749" style={{
             ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
             background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
           }}>Text</a>
@@ -7981,12 +7981,12 @@ function ChatWidget({ customer, onClose }) {
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
       });
       const data = await res.json();
-      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 318-7612." }]);
+      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749." }]);
       if (data.escalated) {
         setMessages(prev => [...prev, { role: 'system', content: 'A team member has been notified and will follow up shortly.' }]);
       }
     } catch {
-      setMessages(prev => [...prev, { role: 'assistant', content: "Connection issue — please try again or call us at (941) 318-7612." }]);
+      setMessages(prev => [...prev, { role: 'assistant', content: "Connection issue — please try again or call us at (941) 297-5749." }]);
     }
     setSending(false);
   };
@@ -8232,13 +8232,13 @@ export default function PortalPage() {
         borderTop: `1px solid ${B.grayLight}`, padding: '10px 12px',
         display: 'flex', gap: 6, justifyContent: 'center', zIndex: 100,
       }}>
-        <a href="tel:+19413187612" style={{
+        <a href="tel:+19412975749" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
           background: B.yellow, color: B.blueDeeper, fontSize: 12, textAlign: 'center',
           boxShadow: `0 4px 15px ${B.yellow}55`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>{'📞'} Call</a>
-        <a href="sms:+19413187612" style={{
+        <a href="sms:+19412975749" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
           background: B.yellow, color: B.blueDeeper, fontSize: 12,
           textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,

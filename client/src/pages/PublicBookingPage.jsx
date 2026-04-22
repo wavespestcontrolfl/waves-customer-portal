@@ -90,7 +90,7 @@ export default function PublicBookingPage() {
       setAvailability(data.days || []);
       if (data.lat && data.lng) setCoords({ lat: data.lat, lng: data.lng });
       if (!data.days || data.days.length === 0) {
-        setError('No times available in the next 2 weeks. Call (941) 877-9887 and we\'ll get you on the schedule.');
+        setError('No times available in the next 2 weeks. Call (941) 297-5749 and we\'ll get you on the schedule.');
       }
     } catch (err) {
       setError(err.message);
@@ -510,7 +510,7 @@ export default function PublicBookingPage() {
               </div>
             </div>
             <p style={{ fontSize: 12, color: BRAND.gray400 }}>
-              Need to change it? Text us at (941) 877-9887 or reply RESCHEDULE to the confirmation text.
+              Need to change it? Text us at (941) 297-5749 or reply RESCHEDULE to the confirmation text.
             </p>
           </div>
         )}

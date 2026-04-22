@@ -46,8 +46,8 @@ const W = {
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const WAVES_PHONE_DISPLAY = '(941) 318-7612';
-const WAVES_PHONE_TEL = '+19413187612';
+const WAVES_PHONE_DISPLAY = '(941) 297-5749';
+const WAVES_PHONE_TEL = '+19412975749';
 
 function fmtMoney(n) {
   if (n == null) return '—';

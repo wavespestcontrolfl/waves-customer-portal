@@ -11,8 +11,8 @@ const W = {
   white: '#FFFFFF', border: '#CBD5E1',
 };
 
-const WAVES_PHONE = '(941) 318-7612';
-const WAVES_TEL = '+19413187612';
+const WAVES_PHONE = '(941) 297-5749';
+const WAVES_TEL = '+19412975749';
 
 export default function TerminalStateCard({ state, customerFirstName, address }) {
   const who = customerFirstName || 'there';

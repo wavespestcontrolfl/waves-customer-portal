@@ -21,8 +21,8 @@ const W = {
 };
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const WAVES_PHONE_DISPLAY = '(941) 318-7612';
-const WAVES_PHONE_TEL = '+19413187612';
+const WAVES_PHONE_DISPLAY = '(941) 297-5749';
+const WAVES_PHONE_TEL = '+19412975749';
 
 function formatWindow(startIso, endIso) {
   if (!startIso) return '';
