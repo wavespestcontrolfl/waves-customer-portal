@@ -597,6 +597,12 @@ router.put('/:token/accept', async (req, res, next) => {
       if (raw === 'deposit_now' || raw === 'pay_at_visit') return raw;
       return null;
     })();
+    // serviceMode — 'recurring' (default) | 'one_time'. When one_time, the
+    // customer picked the inline toggle on the v2 estimate view and
+    // explicitly asked for a single visit instead of a recurring plan.
+    // Gates post-commit behavior: no onboarding session, no customer tier
+    // upgrade, no EstimateConverter recurring schedule creation.
+    const serviceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
 
     let reservationRow = null;
     if (slotId) {
@@ -629,7 +635,15 @@ router.put('/:token/accept', async (req, res, next) => {
     const estResult = estData?.result || estData || {};
     const recurringSvcList = estResult?.recurring?.services || [];
     const oneTimeList = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+    // Structural "one-time only" — the estimate was built with no
+    // recurring services, only one-time items. Older concept.
     const isOneTimeOnly = recurringSvcList.length === 0 && oneTimeList.length > 0;
+    // Customer-choice "treat as one-time" — either the estimate is
+    // structurally one-time-only, OR the customer picked the one-time
+    // toggle on the v2 view (serviceMode='one_time'). Gates the same
+    // post-commit branches (no onboarding session, no tier upgrade,
+    // no recurring schedule via EstimateConverter).
+    const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
@@ -690,7 +704,7 @@ router.put('/:token/accept', async (req, res, next) => {
       }
 
       let onboardingToken = null;
-      if (customerId && !isOneTimeOnly) {
+      if (customerId && !treatAsOneTime) {
         const obToken = crypto.randomUUID();
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 7);
@@ -725,7 +739,7 @@ router.put('/:token/accept', async (req, res, next) => {
           waveguard_tier: estimate.waveguard_tier || 'Bronze',
           monthly_total: estimate.monthly_total || 0,
         };
-        const officeFallback = isOneTimeOnly
+        const officeFallback = treatAsOneTime
           ? `🎉 One-time booking! ${officeVars.customer_name} at ${officeVars.address} — ${oneTimeList[0]?.name || 'service'}. Booking link sent.`
           : `🎉 Estimate accepted! ${officeVars.customer_name} at ${officeVars.address} — ${officeVars.waveguard_tier} WaveGuard $${officeVars.monthly_total}/mo. Onboarding link sent.`;
         const officeBody = await renderTemplate('estimate_accepted_office', officeVars, officeFallback);
@@ -737,7 +751,7 @@ router.put('/:token/accept', async (req, res, next) => {
     let bookingUrl = null;
     if (estimate.customer_phone) {
       try {
-        if (isOneTimeOnly) {
+        if (treatAsOneTime) {
           const primarySvc = bookingServiceFor(oneTimeList[0]?.name || '');
           const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=estimate-accept`;
           bookingUrl = await shortenOrPassthrough(longBookingUrl, {
@@ -787,13 +801,19 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
 
-    // Auto-convert estimate to active customer (Feature #5)
-    if (customerId) {
+    // Auto-convert estimate to active customer (Feature #5). Skip entirely
+    // when this is a one-time booking — EstimateConverter creates recurring
+    // scheduled_services rows + upgrades the customer's WaveGuard tier +
+    // marks them active_customer. None of that applies for a single-visit
+    // one-time booking. Reservation row (if any) already holds the slot.
+    if (customerId && !treatAsOneTime) {
       try {
         const EstimateConverter = require('../services/estimate-converter');
         await EstimateConverter.convertEstimate(estimate.id);
         logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id}`);
       } catch (e) { logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`); }
+    } else if (customerId && treatAsOneTime) {
+      logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
     }
 
     res.json({ success: true, onboardingToken });
