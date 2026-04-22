@@ -222,6 +222,7 @@ app.use('/api/admin/newsletter', require('./routes/admin-newsletter'));
 app.use('/api/public/newsletter', require('./routes/public-newsletter'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
+app.use('/api/public/track', require('./routes/track-public'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
@@ -308,6 +309,7 @@ app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));
 app.use('/api/webhooks/bouncie', require('./routes/webhooks-bouncie'));
 app.use('/api/tech/notifications', require('./routes/tech-notifications'));
+app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
 app.use('/api/newsletter', require('./routes/newsletter'));
 

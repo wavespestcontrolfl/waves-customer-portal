@@ -7,6 +7,7 @@ const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const trackTransitions = require('../services/track-transitions');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -151,15 +152,33 @@ router.put('/:serviceId/status', async (req, res, next) => {
     }
     await db('scheduled_services').where({ id: svc.id }).update(updates);
 
-    if (status === 'en_route' && svc.cust_phone) {
+    // Customer-visible track_state is owned by services/track-transitions.js.
+    // Legacy `status` column write above stays for back-compat; the helper
+    // owns track_state, lifecycle timestamps, and the en-route SMS fire.
+    // Removed the inline sendSMS block that lived here — the helper calls
+    // TwilioService.sendTechEnRoute with the track-link body, and the legacy
+    // message would have been duplicative.
+    if (status === 'en_route') {
       try {
-        const fallback = `Hello ${svc.first_name}! Your Waves technician is on the way. ETA: ~${svc.eta_minutes || '30'} minutes. Log into the Waves Customer Portal at portal.wavespestcontrol.com to track your technician live.\n\nQuestions or requests? Reply to this message.`;
-        const body = await renderTemplate('tech_en_route', {
-          first_name: svc.first_name || '',
-          eta_minutes: svc.eta_minutes || '30',
-        }, fallback);
-        await TwilioService.sendSMS(svc.cust_phone, body);
-      } catch (e) { logger.error(`En route SMS failed: ${e.message}`); }
+        await trackTransitions.markEnRoute(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] markEnRoute failed: ${e.message}`); }
+    } else if (status === 'completed') {
+      try {
+        await trackTransitions.markComplete(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    } else if (status === 'cancelled') {
+      try {
+        await trackTransitions.cancel(svc.id, {
+          reason: notes || null,
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] cancel failed: ${e.message}`); }
     }
 
     await db('activity_log').insert({
@@ -218,6 +237,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     });
 
     await db('service_status_log').insert({ scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId });
+
+    // Customer-visible track_state → 'complete' so /track/:token renders the
+    // summary card. track_state is owned by services/track-transitions.js.
+    try {
+      await trackTransitions.markComplete(svc.id, {
+        actorType: 'admin',
+        actorId: req.technicianId,
+      });
+    } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
 
     // Invoice + completion SMS:
     //   - If the appointment was flagged `create_invoice_on_complete` (scheduler's
