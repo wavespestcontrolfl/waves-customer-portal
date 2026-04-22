@@ -499,6 +499,15 @@ async function handleEstimateView(req, res, next) {
       );
     }
 
+    // V2 gate — when this estimate's row has use_v2_view=true, skip the
+    // server-HTML pipeline entirely and let the request fall through to
+    // the SPA static-index fallback at server/index.js's app.get('*',...).
+    // The React page owns view tracking + first-view side effects via
+    // GET /:token/data; do NOT double-count them here.
+    if (estimate.use_v2_view === true) {
+      return next();
+    }
+
     if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted') {
       return res.set('Content-Type', 'text/html').send(
         renderExpiredPage({ address: estimate.address, customerName: estimate.customer_name })
