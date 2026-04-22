@@ -149,10 +149,10 @@ const PERKS = [
 // server/config/locations.js but kept inline so the SSR estimate page
 // stays self-contained (no require cycle at render time).
 const LOCATIONS = [
-  { name: 'Lakewood Ranch', area: 'Bradenton / Lakewood Ranch', address: '13649 Luxe Ave #110, Bradenton, FL 34211', zips: '34202 · 34211 · 34212', slug: 'pest-control-bradenton-fl', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
-  { name: 'Parrish', area: 'Parrish / Palmetto / Ellenton', address: '5155 115th Dr E, Parrish, FL 34219', zips: '34219 · 34221', slug: 'pest-control-parrish-fl', placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
-  { name: 'Sarasota', area: 'Sarasota / Siesta Key', address: '1450 Pine Warbler Pl, Sarasota, FL 34240', zips: '34231 · 34233 · 34238 · 34240 · 34241', slug: 'pest-control-sarasota-fl', placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
-  { name: 'Venice', area: 'Venice / North Port / Englewood', address: '1978 S Tamiami Trl #10, Venice, FL 34293', zips: '34285 · 34287 · 34288 · 34293', slug: 'pest-control-venice-fl', placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
+  { name: 'Lakewood Ranch', area: 'Bradenton / Lakewood Ranch', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612', phoneRaw: '+19413187612', slug: 'pest-control-bradenton-fl', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
+  { name: 'Parrish',        area: 'Parrish / Palmetto / Ellenton',    address: '5155 115th Dr E, Parrish, FL 34219',          phone: '(941) 297-2817', phoneRaw: '+19412972817', slug: 'pest-control-parrish-fl',   placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
+  { name: 'Sarasota',       area: 'Sarasota / Siesta Key',              address: '1450 Pine Warbler Pl, Sarasota, FL 34240',   phone: '(941) 297-2606', phoneRaw: '+19412972606', slug: 'pest-control-sarasota-fl',  placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
+  { name: 'Venice',         area: 'Venice / North Port / Englewood',    address: '1978 S Tamiami Trl #10, Venice, FL 34293',    phone: '(941) 297-3337', phoneRaw: '+19412973337', slug: 'pest-control-venice-fl',    placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
 ];
 
 // Footer — company contact + social profiles. Kept in one place so the
@@ -276,6 +276,7 @@ function renderPage(token, estimate, estData) {
     return `<div class="loc">
       <a class="loc-name" href="${sitePage}" target="_blank" rel="noopener">Waves Pest Control ${escapeHtml(l.name)}</a>
       <a class="loc-addr" href="${mapsUrl}" target="_blank" rel="noopener">${escapeHtml(l.address)}</a>
+      <a class="loc-phone" href="tel:${l.phoneRaw}">${escapeHtml(l.phone)}</a>
       <div class="loc-hours">Open 24 hours</div>
     </div>`;
   }).join('');
@@ -477,8 +478,9 @@ function renderPage(token, estimate, estData) {
   .loc .loc-name:hover{text-decoration:underline}
   .loc .loc-addr{color:#3F4A65;font-size:12px;text-decoration:none;line-height:1.4}
   .loc .loc-addr:hover{text-decoration:underline}
+  .loc .loc-phone{color:#1B2C5B;font-size:13px;font-weight:500;text-decoration:none}
+  .loc .loc-phone:hover{text-decoration:underline}
   .loc .loc-hours{color:${BRAND.green};font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
-  .loc .loc-zips{color:#6B7280;font-size:11px}
   .final{background:#1B2C5B;color:#fff;text-align:center;padding:32px 24px;border-radius:14px;border:1px solid #1B2C5B}
   .final h2{color:#fff;margin:0 0 8px}
   .final p{color:rgba(255,255,255,.8);font-size:14px}
