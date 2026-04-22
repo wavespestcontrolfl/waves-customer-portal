@@ -127,8 +127,13 @@ async function findAvailableSlots(opts) {
       'customers.first_name',
       'customers.last_name',
       'customers.city',
-      'customers.lat as cust_lat',
-      'customers.lng as cust_lng',
+      // Canonical columns on customers are latitude/longitude (added
+      // by 20260414000029_geofence_timers.js). customers.lat / customers.lng
+      // don't exist on prod — reading them throws and kills the whole
+      // /available-slots query. Aliased back to cust_lat/cust_lng for
+      // the downstream code that consumes those names.
+      'customers.latitude as cust_lat',
+      'customers.longitude as cust_lng',
     );
 
   const dates = enumerateDates(dateFrom, dateTo);
