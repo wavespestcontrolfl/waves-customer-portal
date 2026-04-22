@@ -1,56 +1,93 @@
 /**
  * Phase 1 tracking lifecycle on scheduled_services.
  *
- * Re-ship of the reverted PR #52 with the en-route-only SMS model:
- *   - no morning-of SMS cron
- *   - customer only gets the track link when the tech flips en_route
- *   - track_sms_sent_at is the idempotency guard against retaps
+ * Re-ship of the reverted PR #52 with the en-route-only SMS model.
  *
- * Five-state enum lives as a real Postgres ENUM (track_state) not a CHECK
- * constraint. State list is stable; we'd rather pay ALTER TYPE costs once
- * later than live with the string-column drift that bit other tables.
+ * Reality check on prod state:
+ *   PR #52's migration (20260422000007) ran against prod on merge; PR
+ *   #53 reverted the git history but the DB state persisted. So prod
+ *   still has the #52 columns on scheduled_services (varchar track_state
+ *   with a CHECK constraint, plus a bunch of track_* timestamps with
+ *   slightly different names than we settled on). The first deploy of
+ *   this migration failed healthcheck because ALTER TABLE ADD COLUMN
+ *   collided with those orphaned columns. This version cleans them up
+ *   before adding the new shape. IF EXISTS / IF NOT EXISTS guards
+ *   throughout so the migration is also safe on a clean DB (preview /
+ *   fresh env that never saw #52).
  *
- * Columns added: track_view_token, track_state, en_route_at, arrived_at,
- * completed_at, cancelled_at, cancellation_reason, track_sms_sent_at,
- * track_token_expires_at. Collision grep against existing migrations came
- * back clean on the four simple timestamp names.
- *
- * Backfill: every row with scheduled_date >= CURRENT_DATE gets a token so
- * in-flight services pick up the feature day-one. track_token_expires_at
- * is composed from scheduled_date + window_end + 1 day so a completed
- * service keeps its token live for a day post-service (same UX pattern
- * as /pay/:token staying live post-payment). NULL window_end falls back
- * to end-of-day on scheduled_date.
+ * Final shape:
+ *   - track_state: real Postgres ENUM (not CHECK). Worth the one-time
+ *     ALTER TYPE cost later if we add a state; the string-column drift
+ *     that bit other tables costs more.
+ *   - Simple timestamp names (completed_at, cancelled_at, arrived_at,
+ *     en_route_at) — collision grep against current migrations clean.
+ *   - Backfill covers scheduled_date >= CURRENT_DATE; expiry = window_end
+ *     + 1 day (end-of-day fallback when window_end is NULL).
  */
 exports.up = async function (knex) {
+  // 1. Drop orphaned PR #52 artifacts if present. All idempotent — no-op
+  // on a clean DB.
+  await knex.raw('DROP INDEX IF EXISTS idx_scheduled_services_track_state_window');
+  await knex.raw(
+    'ALTER TABLE scheduled_services DROP CONSTRAINT IF EXISTS scheduled_services_track_state_check'
+  );
+
+  const orphanColumns = [
+    'track_view_token',
+    'track_state',
+    'en_route_at',
+    'arrived_at',
+    'track_completed_at',
+    'track_cancelled_at',
+    'track_cancellation_reason',
+    'track_sms_sent_at',
+    'late_sms_sent_at',
+    'track_token_expires_at',
+  ];
+  for (const col of orphanColumns) {
+    await knex.raw(`ALTER TABLE scheduled_services DROP COLUMN IF EXISTS ${col}`);
+  }
+
+  // 2. (Re)create the enum type. DROP first in case a prior failed run
+  // left a stale type; safe because we dropped the only column that
+  // could reference it above.
+  await knex.raw('DROP INDEX IF EXISTS idx_scheduled_services_track_token');
+  await knex.raw('DROP TYPE IF EXISTS track_state');
   await knex.raw(`
     CREATE TYPE track_state AS ENUM (
       'scheduled','en_route','on_property','complete','cancelled'
     )
   `);
 
-  await knex.raw(`
-    ALTER TABLE scheduled_services
-      ADD COLUMN track_view_token       varchar(64),
-      ADD COLUMN track_state            track_state NOT NULL DEFAULT 'scheduled',
-      ADD COLUMN en_route_at            timestamptz,
-      ADD COLUMN arrived_at             timestamptz,
-      ADD COLUMN completed_at           timestamptz,
-      ADD COLUMN cancelled_at           timestamptz,
-      ADD COLUMN cancellation_reason    text,
-      ADD COLUMN track_sms_sent_at      timestamptz,
-      ADD COLUMN track_token_expires_at timestamptz
-  `);
+  // 3. Add the Phase 1 shape. IF NOT EXISTS on each column so a
+  // partially-applied prior run doesn't re-collide.
+  const addCols = [
+    "ADD COLUMN IF NOT EXISTS track_view_token       varchar(64)",
+    "ADD COLUMN IF NOT EXISTS track_state            track_state NOT NULL DEFAULT 'scheduled'",
+    "ADD COLUMN IF NOT EXISTS en_route_at            timestamptz",
+    "ADD COLUMN IF NOT EXISTS arrived_at             timestamptz",
+    "ADD COLUMN IF NOT EXISTS completed_at           timestamptz",
+    "ADD COLUMN IF NOT EXISTS cancelled_at           timestamptz",
+    "ADD COLUMN IF NOT EXISTS cancellation_reason    text",
+    "ADD COLUMN IF NOT EXISTS track_sms_sent_at      timestamptz",
+    "ADD COLUMN IF NOT EXISTS track_token_expires_at timestamptz",
+  ];
+  for (const clause of addCols) {
+    await knex.raw(`ALTER TABLE scheduled_services ${clause}`);
+  }
 
+  // 4. Unique partial index on the token. Legacy NULL rows aren't forced
+  // into uniqueness they can't satisfy.
   await knex.raw(`
-    CREATE UNIQUE INDEX idx_scheduled_services_track_token
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_services_track_token
       ON scheduled_services (track_view_token)
       WHERE track_view_token IS NOT NULL
   `);
 
-  // Backfill tokens + expiry for today + future rows. window_end can be
-  // NULL (time-TBD services) — fall back to end-of-day so the token still
-  // expires predictably.
+  // 5. Backfill. scheduled_date >= CURRENT_DATE captures today-and-future
+  // rows. Token expiry composes from scheduled_date + window_end so a
+  // completed service stays live for 24h post-service (customer revisits
+  // the summary card). NULL window_end falls back to end-of-day.
   await knex.raw(`
     UPDATE scheduled_services
        SET track_view_token = encode(gen_random_bytes(32), 'hex'),
