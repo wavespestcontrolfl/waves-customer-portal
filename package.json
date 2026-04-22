@@ -15,7 +15,7 @@
     "prebuild": "npm run verify:blog-schema",
     "build": "cd client && npm run build",
     "prestart": "npm run verify:blog-schema",
-    "start": "cd server && npx knex migrate:latest && cd .. && node server/index.js",
+    "start": "cd server && (npx knex migrate:latest || echo '[start] CLI migrate failed — falling through to internal retry') && cd .. && node server/index.js",
     "db:migrate": "cd server && npx knex migrate:latest",
     "db:rollback": "cd server && npx knex migrate:rollback",
     "db:seed": "cd server && npx knex seed:run",
