@@ -14,6 +14,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
+const { getServiceContact } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 
@@ -171,11 +172,12 @@ const AppointmentReminders = {
       if (sendConfirmation) {
         try {
           const { customer, techName } = await getCustomerAndTech(customerId, scheduledServiceId);
-          if (customer?.phone) {
+          const contact = getServiceContact(customer);
+          if (contact.phone) {
             const day = formatDay(apptTime);
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
-            const firstName = customer.first_name || 'there';
+            const firstName = contact.name || customer.first_name || 'there';
 
             const body = await renderTemplate(
               'appointment_confirmation',
@@ -183,7 +185,7 @@ const AppointmentReminders = {
               `Hello ${firstName}! Your ${serviceType || 'service'} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
             );
 
-            const sent = await safeSend(customerId, customer.phone, body, 'confirmation');
+            const sent = await safeSend(customerId, contact.phone, body, 'confirmation');
 
             if (sent) {
               await db('appointment_reminders')
@@ -256,9 +258,10 @@ const AppointmentReminders = {
 
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
-            if (!customer?.phone) { results.skipped++; continue; }
+            const contact = getServiceContact(customer);
+            if (!contact.phone) { results.skipped++; continue; }
 
-            const firstName = customer.first_name || 'there';
+            const firstName = contact.name || customer?.first_name || 'there';
             const day = formatDay(apptTime);
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
@@ -269,7 +272,7 @@ const AppointmentReminders = {
               `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nIf you have any questions or need assistance, simply reply to this message.`,
             );
 
-            await safeSend(r.customer_id, customer.phone, body);
+            await safeSend(r.customer_id, contact.phone, body);
 
             await db('appointment_reminders')
               .where({ id: r.id })
@@ -297,9 +300,10 @@ const AppointmentReminders = {
 
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
-            if (!customer?.phone) { results.skipped++; continue; }
+            const contact = getServiceContact(customer);
+            if (!contact.phone) { results.skipped++; continue; }
 
-            const firstName = customer.first_name || 'there';
+            const firstName = contact.name || customer?.first_name || 'there';
             const time = formatTime(apptTime);
 
             const body = await renderTemplate(
@@ -308,7 +312,7 @@ const AppointmentReminders = {
               `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`,
             );
 
-            await safeSend(r.customer_id, customer.phone, body);
+            await safeSend(r.customer_id, contact.phone, body);
 
             await db('appointment_reminders')
               .where({ id: r.id })
@@ -368,8 +372,9 @@ const AppointmentReminders = {
 
       // Send reschedule notice
       const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-      if (customer?.phone) {
-        const firstName = customer.first_name || 'there';
+      const contact = getServiceContact(customer);
+      if (contact.phone) {
+        const firstName = contact.name || customer?.first_name || 'there';
         const day = formatDay(newApptTime);
         const date = formatDate(newApptTime);
         const time = formatTime(newApptTime);
@@ -382,7 +387,7 @@ const AppointmentReminders = {
             `Questions? Reply to this message.\nThank you for choosing Waves!`,
         );
 
-        await safeSend(record.customer_id, customer.phone, body);
+        await safeSend(record.customer_id, contact.phone, body);
         logger.info(`[appt-remind] Reschedule notice sent: ${firstName} — ${record.service_type} -> ${day} ${date}`);
       }
 
@@ -413,8 +418,9 @@ const AppointmentReminders = {
 
       // Send cancellation notice
       const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-      if (customer?.phone) {
-        const firstName = customer.first_name || 'there';
+      const contact = getServiceContact(customer);
+      if (contact.phone) {
+        const firstName = contact.name || customer?.first_name || 'there';
         const apptTime = new Date(record.appointment_time);
         const day = formatDay(apptTime);
         const date = formatDate(apptTime);
@@ -426,7 +432,7 @@ const AppointmentReminders = {
             `Need to rebook? Reply to this message and we'll get you scheduled.\nThank you for choosing Waves!`,
         );
 
-        await safeSend(record.customer_id, customer.phone, body);
+        await safeSend(record.customer_id, contact.phone, body);
         logger.info(`[appt-remind] Cancellation notice sent: ${firstName} — ${record.service_type}`);
       }
 

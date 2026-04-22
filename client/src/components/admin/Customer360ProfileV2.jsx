@@ -456,6 +456,18 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                 {c.email && <a href={`mailto:${c.email}`} className="text-zinc-900 hover:underline">{c.email}</a>}
               </div>
             )}
+            {(c.serviceContactPhone || c.serviceContactEmail) && (
+              <div className="text-12 text-ink-secondary mb-1.5">
+                <span className="text-ink-tertiary mr-1">Service contact:</span>
+                {c.serviceContactName && <span className="text-zinc-900 mr-2">{c.serviceContactName}</span>}
+                {c.serviceContactPhone && (
+                  <a href={`tel:${c.serviceContactPhone}`} className="u-nums text-zinc-900 hover:underline mr-3">{c.serviceContactPhone}</a>
+                )}
+                {c.serviceContactEmail && (
+                  <a href={`mailto:${c.serviceContactEmail}`} className="text-zinc-900 hover:underline">{c.serviceContactEmail}</a>
+                )}
+              </div>
+            )}
             <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
               <span>{c.address?.line1}, {c.address?.city}, {c.address?.state} {c.address?.zip}</span>
               <span className="u-nums text-zinc-900">{fmtCurrency(c.monthlyRate)}/mo</span>

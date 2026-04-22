@@ -437,6 +437,9 @@ router.get('/:id', async (req, res, next) => {
         id: c.id, firstName: c.first_name, lastName: c.last_name,
         email: c.email, phone: c.phone, secondaryPhone: c.secondary_phone,
         secondaryContact: c.secondary_contact_name, companyName: c.company_name,
+        serviceContactName: c.service_contact_name,
+        serviceContactPhone: c.service_contact_phone,
+        serviceContactEmail: c.service_contact_email,
         address: { line1: c.address_line1, city: c.city, state: c.state, zip: c.zip },
         property: { type: c.property_type, lawnType: c.lawn_type, sqft: c.property_sqft, lotSqft: c.lot_sqft, palmCount: c.palm_count },
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
@@ -525,7 +528,7 @@ router.post('/', async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email' };
     const updates = {};
     for (const [k, v] of Object.entries(fields)) {
       if (req.body[k] !== undefined) {

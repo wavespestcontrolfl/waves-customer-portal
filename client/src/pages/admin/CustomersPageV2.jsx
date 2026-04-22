@@ -474,6 +474,9 @@ export default function CustomersPageV2() {
       firstName: c.firstName, lastName: c.lastName, email: c.email || '',
       phone: c.phone || '', city: c.city || '', tier: c.tier || 'Bronze',
       monthlyRate: c.monthlyRate || '', pipelineStage: c.pipelineStage || 'new_lead',
+      serviceContactName: c.serviceContactName || '',
+      serviceContactPhone: c.serviceContactPhone || '',
+      serviceContactEmail: c.serviceContactEmail || '',
     });
   };
 
@@ -1046,6 +1049,33 @@ export default function CustomersPageV2() {
                           </select>
                         </div>
                       </div>
+
+                      {/* Service contact — routes appointment reminders, post-service
+                          SMS, and review requests to a different person than the
+                          bill-payer (e.g. mother pays, son lives at the property). */}
+                      <div className="border-t border-hairline border-zinc-200 pt-3 mb-3">
+                        <div className="u-label text-ink-tertiary mb-2">
+                          Service Contact <span className="normal-case text-11 text-ink-tertiary">(optional — overrides primary for reminders, review requests)</span>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                          {[
+                            { key: 'serviceContactName', label: 'Name' },
+                            { key: 'serviceContactPhone', label: 'Phone', type: 'tel' },
+                            { key: 'serviceContactEmail', label: 'Email', type: 'email' },
+                          ].map((f) => (
+                            <div key={f.key}>
+                              <label className="u-label text-ink-tertiary block mb-1">{f.label}</label>
+                              <input
+                                value={editForm[f.key] || ''}
+                                onChange={(e) => setEditForm((p) => ({ ...p, [f.key]: e.target.value }))}
+                                type={f.type || 'text'}
+                                className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
                       <div className="flex gap-2">
                         <Button variant="primary" onClick={saveEdit} disabled={savingEdit}>
                           {savingEdit ? 'Saving…' : 'Save'}
