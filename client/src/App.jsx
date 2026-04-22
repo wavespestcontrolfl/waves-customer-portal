@@ -87,6 +87,7 @@ const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePage'));
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
+const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
 const AdminPricingPage = lazyWithRetry(() => import('./pages/admin/PricingStrategyPage'));
@@ -161,6 +162,7 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/onboard/:token" element={<OnboardingPage />} />
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
+          <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#FDF6EC',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
