@@ -1,7 +1,6 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   Button,
-  Input,
   Select,
   Switch,
   Card,
@@ -87,8 +86,14 @@ export default function DesignSystemFlagsPage() {
       ...prev,
       [userId]: { ...(prev[userId] || {}), [flagKey]: next },
     }));
-    const me = localStorage.getItem('waves_admin_user');
-    if (me === userId) refetchFlags();
+    // Refetch the in-memory flag cache when the toggler IS the current user
+    // so the change reflects without a full reload. waves_admin_user stores
+    // the user record as JSON (not the bare id); parse before comparing.
+    try {
+      const raw = localStorage.getItem('waves_admin_user');
+      const meId = raw && JSON.parse(raw)?.id;
+      if (meId === userId) refetchFlags();
+    } catch { /* legacy bare-id format — skip refetch */ }
   };
 
   const addFlag = async () => {
@@ -118,12 +123,12 @@ export default function DesignSystemFlagsPage() {
         </CardHeader>
         <CardBody>
           <div className="flex flex-wrap items-end gap-3">
-            <div>
+            <div className="flex-1 min-w-[180px]">
               <label className="u-label block mb-1 text-ink-secondary">User</label>
               <Select
                 value={newFlagUser}
                 onChange={(e) => setNewFlagUser(e.target.value)}
-                className="w-56"
+                className="w-full"
               >
                 <option value="">Select user…</option>
                 {users.map((u) => (
@@ -133,14 +138,18 @@ export default function DesignSystemFlagsPage() {
                 ))}
               </Select>
             </div>
-            <div>
+            <div className="flex-1 min-w-[180px]">
               <label className="u-label block mb-1 text-ink-secondary">Flag key</label>
-              <Input
-                placeholder="dashboard-v2"
+              <Select
                 value={newFlag}
                 onChange={(e) => setNewFlag(e.target.value)}
-                className="w-56"
-              />
+                className="w-full"
+              >
+                <option value="">Select flag…</option>
+                {[...new Set([...flagKeys, ...KNOWN_FLAGS])].sort().map((k) => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </Select>
             </div>
             <Button onClick={addFlag} disabled={!newFlag.trim() || !newFlagUser}>
               Enable
@@ -148,6 +157,15 @@ export default function DesignSystemFlagsPage() {
           </div>
         </CardBody>
       </Card>
+
+      <MyFlagsCard
+        users={users}
+        flagKeys={flagKeys}
+        states={states}
+        toggle={toggle}
+        loading={loading}
+      />
+
 
       <Card>
         <CardHeader>
@@ -204,5 +222,57 @@ export default function DesignSystemFlagsPage() {
         </CardBody>
       </Card>
     </div>
+  );
+}
+
+// Mobile-friendly single-user view. Resolves the current admin user from
+// localStorage.waves_admin_user (set during login), falls back to matching
+// role === 'admin' if localStorage is empty. Renders one vertical list of
+// Name + Switch rows — no horizontal scrolling required to flip a flag.
+function MyFlagsCard({ users, flagKeys, states, toggle, loading }) {
+  const meId = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const raw = localStorage.getItem('waves_admin_user');
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed?.id && users.some((u) => u.id === parsed.id)) return parsed.id;
+      } catch {
+        // Legacy format where the bare id was stored — fall through.
+        if (users.some((u) => u.id === raw)) return raw;
+      }
+    }
+    return users.find((u) => u.role === 'admin')?.id || null;
+  }, [users]);
+
+  const me = users.find((u) => u.id === meId);
+  if (loading || !me) return null;
+  const myState = states[meId] || {};
+
+  return (
+    <Card className="mb-6">
+      <CardHeader>
+        <CardTitle>Your flags — {me.name}</CardTitle>
+      </CardHeader>
+      <CardBody className="p-0">
+        <ul className="divide-y divide-zinc-200">
+          {flagKeys.map((k) => {
+            const on = !!myState[k];
+            return (
+              <li
+                key={k}
+                className="flex items-center justify-between gap-3 px-4 py-3 min-h-[56px]"
+              >
+                <span className="text-14 text-ink-primary break-all">{k}</span>
+                <Switch
+                  checked={on}
+                  onChange={(next) => toggle(meId, k, next)}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      </CardBody>
+    </Card>
   );
 }
