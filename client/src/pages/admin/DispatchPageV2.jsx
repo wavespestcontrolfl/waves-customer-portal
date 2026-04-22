@@ -1291,8 +1291,6 @@ export default function DispatchPageV2() {
             setPaymentData({ service: svc, invoiceId, amount });
           }}
           onEditServiceLine={(svc) => setEditingLineService(svc)}
-          onAddService={() => alert('Add Service — coming soon')}
-          onAddItem={() => alert('Add Item or Discount — coming soon')}
         />
       )}
       {editingLineService && (
