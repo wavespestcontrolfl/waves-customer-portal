@@ -97,6 +97,7 @@ const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/Knowled
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
 const PayPage = lazyWithRetry(() => import('./pages/PayPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
+const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
 const ReviewPage = lazyWithRetry(() => import('./pages/ReviewPage'));
 const CustomerHealthPage = lazyWithRetry(() => import('./pages/admin/CustomerHealthPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
@@ -165,6 +166,7 @@ export default function App() {
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><EstimateViewPage /></Suspense>} />
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
