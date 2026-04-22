@@ -807,22 +807,40 @@ router.post('/:id/invoice', async (req, res, next) => {
     const amount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
       ? Number(svc.estimated_price)
       : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
-    if (!(amount > 0)) {
+
+    // Mobile checkout sheet can append extra services + discount lines before
+    // minting. Each extra is { description, quantity, unit_price, amount,
+    // category? }; negative amount = discount. Sanitize aggressively — this
+    // field is client-supplied.
+    const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
+    const extraLines = extras
+      .map((e) => ({
+        description: String(e?.description || '').slice(0, 200),
+        quantity: Number(e?.quantity) || 1,
+        unit_price: Number(e?.unit_price) || 0,
+        amount: Number(e?.amount) || (Number(e?.quantity) || 1) * (Number(e?.unit_price) || 0),
+        category: e?.category ? String(e.category).slice(0, 100) : null,
+      }))
+      .filter((e) => e.description && Number.isFinite(e.unit_price));
+
+    const extrasTotal = extraLines.reduce((s, e) => s + e.amount, 0);
+    if (!(amount > 0) && extrasTotal <= 0) {
       return res.status(400).json({ error: 'No chargeable amount — estimated price is 0' });
     }
 
     const InvoiceService = require('../services/invoice');
+    const baseLine = amount > 0 ? [{
+      description: svc.service_type || 'Service visit',
+      quantity: 1,
+      unit_price: amount,
+      amount,
+      category: svc.service_type || null,
+    }] : [];
     const invoice = await InvoiceService.create({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
       title: svc.service_type || 'Service visit',
-      lineItems: [{
-        description: svc.service_type || 'Service visit',
-        quantity: 1,
-        unit_price: amount,
-        amount,
-        category: svc.service_type || null,
-      }],
+      lineItems: [...baseLine, ...extraLines],
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
     });
 
