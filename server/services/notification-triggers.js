@@ -129,6 +129,43 @@ const TRIGGER_REGISTRY = {
       link: p.customerId ? `/admin/customers/${p.customerId}` : '/admin/health',
     }),
   },
+  estimate_expired: {
+    label: 'Estimate(s) expired',
+    category: 'estimate',
+    priority: 'normal',
+    group: 'Leads & Sales',
+    build: (p) => ({
+      title: p.count && p.count > 1
+        ? `${p.count} estimates expired`
+        : `Estimate expired — ${p.customerName || 'customer'}`,
+      body: p.count && p.count > 1
+        ? `${p.count} estimates aged out today. Review the pipeline for follow-up opportunities.`
+        : `${p.customerName || 'Customer'}${p.monthlyTotal ? ' — $' + p.monthlyTotal + '/mo' : ''} expired without a decision.`,
+      link: p.estimateId ? `/admin/estimates/${p.estimateId}` : '/admin/estimates',
+    }),
+  },
+  credential_expiring_soon: {
+    label: 'Credential expiring within 60 days',
+    category: 'credential',
+    priority: 'high',
+    group: 'Compliance',
+    build: (p) => ({
+      title: `${p.displayName || 'Credential'} expires in ${p.daysUntil || '?'}d`,
+      body: `${p.credentialNumber ? '#' + p.credentialNumber + ' — ' : ''}${p.issuingAuthority || 'Issuer'}. Renew before ${p.expirationDate || 'expiry'} to avoid service interruption.`,
+      link: '/admin/credentials',
+    }),
+  },
+  seo_sync_failed: {
+    label: 'SEO sync failure (GSC / GBP)',
+    category: 'system',
+    priority: 'high',
+    group: 'Marketing',
+    build: (p) => ({
+      title: `${p.source || 'SEO'} sync failed`,
+      body: `${p.locationName ? p.locationName + ': ' : ''}${p.reason || 'unknown error'}. Check the Sync Health card on the SEO Advisor tab.`,
+      link: '/admin/seo?tab=advisor',
+    }),
+  },
 };
 
 const PRIORITY_VIBRATE = {
