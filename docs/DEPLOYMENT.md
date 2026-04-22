@@ -37,9 +37,9 @@ TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=<your auth token>
 TWILIO_PHONE_NUMBER=+1941XXXXXXX
 TWILIO_VERIFY_SERVICE_SID=VAxxxxxxxxxxxxxxxxxxxxxxxxx
-SQUARE_ACCESS_TOKEN=EAAAxxxxxxxxxxxxxxxxxxxxxxxxx
-SQUARE_LOCATION_ID=LIDxxxxxxxxxxxxxxxxx
-SQUARE_ENVIRONMENT=production
+STRIPE_SECRET_KEY=your_stripe_secret_key_here
+STRIPE_PUBLISHABLE_KEY=your_stripe_publishable_key_here
+STRIPE_WEBHOOK_SECRET=your_stripe_webhook_secret_here
 AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxxxxxxx
 AWS_SECRET_ACCESS_KEY=<your secret>
 AWS_REGION=us-east-1
@@ -96,30 +96,37 @@ npx knex seed:run  # only for demo data
 
 ---
 
-## Square Setup
+## Stripe Setup
 
-### 1. Create Square Developer Account
-- Go to https://developer.squareup.com
-- Create an application: "Waves Customer Portal"
+### 1. Create Stripe Account
+- Go to https://dashboard.stripe.com and sign up
+- Complete business verification for live mode
 
-### 2. Get Credentials
-- Dashboard → your app → Credentials
-- Copy Access Token and Location ID
-- Use Sandbox credentials for testing first
+### 2. Get API Keys
+- Dashboard → Developers → API keys
+- Copy the Secret Key (live or test; prefixed `sk_`)
+- Copy the Publishable Key (live or test; prefixed `pk_`)
+- Use test keys for development first
 
-### 3. Web Payments SDK (Frontend)
-The frontend uses Square's Web Payments SDK to securely tokenize cards.
-Add your Application ID to the client:
-```
-VITE_SQUARE_APP_ID=sandbox-sq0idb-xxxxxxxxxxxxx
-```
+### 3. Payment Element (Frontend)
+The frontend uses Stripe's Payment Element to securely collect card,
+Apple Pay, Google Pay, and ACH payments. No separate app ID is needed —
+the publishable key drives the client.
 
-### 4. Go Live
-- Submit your app for review in Square Developer Dashboard
-- Switch `SQUARE_ENVIRONMENT` from `sandbox` to `production`
-- Use production Access Token
+### 4. Configure Webhook
+- Dashboard → Developers → Webhooks → Add endpoint
+- Endpoint URL: `https://portal.wavespestcontrol.com/api/webhooks/stripe`
+- Events: `payment_intent.succeeded`, `payment_intent.payment_failed`,
+  `charge.refunded`, `customer.subscription.updated`,
+  `invoice.payment_succeeded`, `invoice.payment_failed`
+- Copy the signing secret (prefixed `whsec_`) into `STRIPE_WEBHOOK_SECRET`
 
-**Square fees:** 2.9% + $0.30 per transaction (standard processing)
+### 5. Go Live
+- Switch from test keys to live keys in Railway variables
+- Verify webhook endpoint is receiving events on the live key
+- Run a $1 live test charge end-to-end
+
+**Stripe fees:** 2.9% + $0.30 per card transaction; ACH 0.8% (capped at $5)
 
 ---
 
@@ -164,12 +171,13 @@ SSL is handled automatically by Railway.
 
 - [ ] Database migrations run successfully
 - [ ] Twilio test SMS sends correctly
-- [ ] Square sandbox payment processes
+- [ ] Stripe test payment processes
+- [ ] Stripe webhook endpoint receives events (check signing secret)
 - [ ] Login flow works (send code → verify → dashboard)
 - [ ] Service history loads from database
 - [ ] Notification preferences save and persist
 - [ ] Cron jobs fire at scheduled times
-- [ ] Switch Square to production environment
+- [ ] Switch Stripe from test keys to live keys
 - [ ] Custom domain + SSL configured
 - [ ] Rate limiting tested
 - [ ] Error monitoring set up (Sentry recommended)

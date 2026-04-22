@@ -1,6 +1,6 @@
 # Waves Pest Control — Customer Portal
 
-A full-stack customer portal for Waves Pest Control, integrating **Twilio** (SMS notifications), **Square** (payments/invoicing), and a **React** frontend.
+A full-stack customer portal for Waves Pest Control, integrating **Twilio** (SMS notifications), **Stripe** (payments/invoicing), and a **React** frontend.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ waves-portal/
 │   ├── middleware/           # Auth, error handling, rate limiting
 │   ├── models/              # Database schemas (PostgreSQL via Knex)
 │   ├── routes/              # REST API endpoints
-│   ├── services/            # Twilio, Square, and business logic
+│   ├── services/            # Twilio, Stripe, and business logic
 │   └── index.js             # Server entry point
 ├── client/                  # React frontend (Vite)
 │   └── src/
@@ -36,7 +36,7 @@ waves-portal/
 | Database    | PostgreSQL via Knex.js             |
 | Auth        | JWT + bcrypt (phone/email login)   |
 | SMS         | Twilio Programmable Messaging      |
-| Payments    | Square Payments SDK                |
+| Payments    | Stripe (Payment Element)           |
 | File Storage| AWS S3 (service photos)            |
 | Hosting     | Railway / Render / Vercel          |
 
@@ -46,7 +46,7 @@ waves-portal/
 - Node.js 18+
 - PostgreSQL 14+
 - Twilio account (Account SID, Auth Token, Phone Number)
-- Square account (Access Token, Location ID)
+- Stripe account (Secret Key, Publishable Key, Webhook Secret)
 
 ### Setup
 
@@ -77,7 +77,7 @@ See `.env.example` for all required variables. At minimum you need:
 
 - `DATABASE_URL` — PostgreSQL connection string
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`
-- `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID`
+- `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`
 - `JWT_SECRET` — random 64-char string for auth tokens
 - `S3_BUCKET` — for service photo uploads
 
@@ -90,8 +90,8 @@ See `docs/API.md` for full documentation. Key routes:
 - `GET  /api/services/:customerId` — Service history with tech notes
 - `GET  /api/schedule/:customerId` — Upcoming service appointments
 - `POST /api/schedule/:id/confirm` — Confirm an appointment
-- `GET  /api/billing/:customerId` — Payment history (Square)
-- `POST /api/billing/update-card` — Update payment method (Square)
+- `GET  /api/billing/:customerId` — Payment history (Stripe)
+- `POST /api/billing/update-card` — Update payment method (Stripe)
 - `PUT  /api/notifications/preferences` — Update SMS preferences
 
 ## Deployment
