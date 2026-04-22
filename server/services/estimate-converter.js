@@ -104,28 +104,50 @@ const EstimateConverter = {
       active: true,
     });
 
-    // 2. Create scheduled_services for recurring services
+    // 2. Create scheduled_services for recurring services — but ONLY if
+    //    the accept path didn't already create one via slot reservation
+    //    (PR B.1). The reservation path commits a scheduled_services row
+    //    inside the accept transaction with source_estimate_id set to
+    //    this estimate. When that row exists, the customer has already
+    //    picked + committed a specific slot — overwriting with our
+    //    auto-picked "first available date" would destroy their choice
+    //    and silently re-slot them.
+    //
     //    All recurring services for this new customer bundle onto the same
     //    first date — they'll be done on one visit. Pick a date where a tech
     //    is already working the zone (falls back safely if we can't resolve).
     let scheduledCount = 0;
-    const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
+    const existingFromReservation = await db('scheduled_services')
+      .where({ source_estimate_id: estimateId })
+      .count('id as count')
+      .first();
+    const reservationRowsExist = Number(existingFromReservation?.count || 0) > 0;
 
-    for (const svc of recurringServices) {
-      const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
-      const frequency = svc.frequency || 'monthly';
+    if (reservationRowsExist) {
+      logger.info(
+        `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
+        `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
+      );
+    } else {
+      const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
 
-      try {
-        await db('scheduled_services').insert({
-          customer_id: customerId,
-          scheduled_date: firstServiceDate,
-          service_type: serviceName,
-          status: 'pending',
-          notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}`,
-        });
-        scheduledCount++;
-      } catch (e) {
-        logger.error(`[estimate-converter] Failed to create scheduled_service: ${e.message}`);
+      for (const svc of recurringServices) {
+        const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
+        const frequency = svc.frequency || 'monthly';
+
+        try {
+          await db('scheduled_services').insert({
+            customer_id: customerId,
+            scheduled_date: firstServiceDate,
+            service_type: serviceName,
+            status: 'pending',
+            notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}`,
+            source_estimate_id: estimateId,
+          });
+          scheduledCount++;
+        } catch (e) {
+          logger.error(`[estimate-converter] Failed to create scheduled_service: ${e.message}`);
+        }
       }
     }
 
