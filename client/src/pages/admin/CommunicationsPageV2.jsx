@@ -16,7 +16,7 @@
 // behind the comms-v2 flag. V1 CommunicationsPage still uses the V1 inline
 // tabs and V1 separate panels.
 import React, {
-  useState, useEffect, useCallback, useMemo,
+  useState, useEffect, useCallback, useMemo, useRef,
 } from 'react';
 import {
   ALL_NUMBERS,
@@ -305,6 +305,15 @@ function SmsTab() {
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
+  // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
+  const [attachments, setAttachments] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  // Voice-to-text (Web Speech API) — populated below on first use.
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const [showAttachSheet, setShowAttachSheet] = useState(false);
 
   // Filters
   const [dirFilter, setDirFilter] = useState('all');
@@ -382,17 +391,109 @@ function SmsTab() {
           body: msgBody.trim(),
           messageType: 'manual',
           fromNumber,
+          mediaUrls: attachments.length > 0 ? attachments.map((a) => a.url) : undefined,
         }),
       });
       setSendResult({ ok: true, text: 'Message sent.' });
       setToNumber('');
       setMsgBody('');
+      // Release blob preview URLs before clearing so we don't leak them.
+      for (const a of attachments) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+      setAttachments([]);
       loadData();
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
       setSending(false);
     }
+  };
+
+  // Upload one-or-more image files → S3 → mediaUrls. Called from the hidden
+  // <input type="file"> triggered by the + button.
+  const handleUpload = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    const remaining = 5 - attachments.length;
+    if (remaining <= 0) {
+      alert('Max 5 attachments per message');
+      return;
+    }
+    const queue = files.slice(0, remaining);
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      for (const f of queue) fd.append('attachments', f);
+      const token = localStorage.getItem('waves_admin_token');
+      const r = await fetch(`${API_BASE}/admin/communications/attach`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error || `Upload failed (${r.status})`);
+      }
+      const d = await r.json();
+      const withPreview = d.attachments.map((a, idx) => ({
+        ...a,
+        previewUrl: URL.createObjectURL(queue[idx]),
+      }));
+      setAttachments((prev) => [...prev, ...withPreview]);
+    } catch (e) {
+      alert(`Upload failed: ${e.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const removeAttachment = (idx) => {
+    setAttachments((prev) => {
+      const next = [...prev];
+      const [removed] = next.splice(idx, 1);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return next;
+    });
+  };
+
+  // Web Speech API dictation — toggles on/off, appends final transcripts to
+  // the message field. Falls back to an alert on browsers without support
+  // (Firefox). iOS Safari ships `webkitSpeechRecognition`.
+  const toggleDictation = () => {
+    const SR = typeof window !== 'undefined'
+      ? window.SpeechRecognition || window.webkitSpeechRecognition
+      : null;
+    if (!SR) {
+      alert('Voice dictation isn\'t supported in this browser. Use the keyboard mic on your phone, or try Chrome/Safari.');
+      return;
+    }
+    if (listening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      return;
+    }
+    const rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.lang = 'en-US';
+    rec.onresult = (ev) => {
+      let append = '';
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
+      }
+      if (append) setMsgBody((b) => (b ? `${b} ${append.trim()}` : append.trim()));
+    };
+    rec.onerror = (e) => {
+      if (e.error !== 'aborted' && e.error !== 'no-speech') {
+        alert(`Dictation error: ${e.error}`);
+      }
+      setListening(false);
+    };
+    rec.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+    };
+    recognitionRef.current = rec;
+    rec.start();
+    setListening(true);
   };
 
   const handleAiDraft = async () => {
@@ -736,25 +837,130 @@ function SmsTab() {
         })()}
 
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">Message</label>
-        <textarea
-          placeholder="Type your message…"
-          value={msgBody}
-          onChange={(e) => setMsgBody(e.target.value)}
-          rows={3}
-          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-        />
-        <div className="text-right text-13 md:text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
-          {msgBody.length} chars
+        <div className="relative">
+          <textarea
+            placeholder={listening ? 'Listening…' : 'Type your message…'}
+            value={msgBody}
+            onChange={(e) => setMsgBody(e.target.value)}
+            rows={3}
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 pl-3 pr-11 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+          />
+          {/* Mic: voice-to-text dictation via Web Speech API. */}
+          <button
+            type="button"
+            onClick={toggleDictation}
+            aria-label={listening ? 'Stop dictation' : 'Start voice dictation'}
+            title={listening ? 'Stop dictation' : 'Start voice dictation'}
+            className={cn(
+              'absolute top-2 right-2 flex items-center justify-center h-8 w-8 rounded-full u-focus-ring',
+              listening ? 'bg-alert-fg text-white animate-pulse' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200',
+            )}
+          >
+            {/* Mic glyph */}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+          </button>
         </div>
 
-        <div className="flex gap-2">
+        {/* Attachment tray */}
+        {attachments.length > 0 && (
+          <div className="flex gap-2 flex-wrap mt-2">
+            {attachments.map((a, i) => (
+              <div
+                key={a.key || i}
+                className="relative"
+                style={{ width: 56, height: 56 }}
+              >
+                <img
+                  src={a.previewUrl || a.url}
+                  alt={a.fileName}
+                  className="object-cover rounded-sm border-hairline border-zinc-300"
+                  style={{ width: 56, height: 56 }}
+                />
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(i)}
+                  aria-label={`Remove ${a.fileName}`}
+                  className="absolute -top-1.5 -right-1.5 flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring"
+                  style={{ width: 18, height: 18, fontSize: 11, lineHeight: 1 }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between text-13 md:text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
+          <span>{attachments.length > 0 ? `${attachments.length} attached` : ''}</span>
+          <span>{msgBody.length} chars</span>
+        </div>
+
+        {/* Hidden file inputs, triggered by the + menu buttons. */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(e) => { handleUpload(e.target.files); e.target.value = ''; }}
+        />
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={(e) => { handleUpload(e.target.files); e.target.value = ''; }}
+        />
+
+        <div className="flex gap-2 items-center">
+          {/* Plus — attachment menu */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowAttachSheet((v) => !v)}
+              disabled={uploading}
+              aria-label="Add attachment"
+              title="Add image"
+              className="flex items-center justify-center h-10 w-10 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            {showAttachSheet && (
+              <div className="absolute bottom-full left-0 mb-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden" style={{ width: 180 }}>
+                <button
+                  type="button"
+                  onClick={() => { setShowAttachSheet(false); cameraInputRef.current?.click(); }}
+                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+                >
+                  📷 Take photo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowAttachSheet(false); fileInputRef.current?.click(); }}
+                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                >
+                  🖼 Photo library
+                </button>
+              </div>
+            )}
+          </div>
+
           <Button
             variant="primary"
             className="flex-1"
             onClick={handleSend}
-            disabled={sending || !toNumber.trim() || !msgBody.trim()}
+            disabled={sending || uploading || !toNumber.trim() || !msgBody.trim()}
           >
-            {sending ? 'Sending…' : 'Send'}
+            {sending ? 'Sending…' : uploading ? 'Uploading…' : 'Send'}
           </Button>
           <Button
             variant="secondary"

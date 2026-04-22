@@ -152,10 +152,21 @@ const TwilioService = {
       }
 
       const msgPayload = { body, from: fromNumber, to };
-      // Include Waves logo for automated messages, not manual correspondence
+      // Include Waves logo for automated messages, not manual correspondence.
+      // Admin composer can attach multiple images via `mediaUrls` (plural) —
+      // preserve the legacy single-image `mediaUrl` path for existing callers.
       const isManual = options.messageType === 'manual' || options.skipLogo;
-      if (options.mediaUrl) msgPayload.mediaUrl = [options.mediaUrl];
-      else if (!isManual) msgPayload.mediaUrl = [WAVES_LOGO_URL];
+      const urls = [];
+      if (Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0) {
+        for (const u of options.mediaUrls.slice(0, 10)) {
+          if (typeof u === 'string' && u) urls.push(u);
+        }
+      } else if (options.mediaUrl) {
+        urls.push(options.mediaUrl);
+      } else if (!isManual) {
+        urls.push(WAVES_LOGO_URL);
+      }
+      if (urls.length > 0) msgPayload.mediaUrl = urls;
       const message = await c.messages.create(msgPayload);
       logger.info(`SMS sent to ${to} from ${fromNumber}: ${message.sid}`);
 

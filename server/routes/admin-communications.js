@@ -19,12 +19,13 @@ const ADMIN_PHONES = [
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   try {
-    const { to, body, customerId, messageType, fromNumber } = req.body;
+    const { to, body, customerId, messageType, fromNumber, mediaUrls } = req.body;
     if (!to || !body) return res.status(400).json({ error: 'to and body required' });
 
     const result = await TwilioService.sendSMS(to, body, {
       customerId, messageType: messageType || 'manual', adminUserId: req.technicianId,
       fromNumber: fromNumber || undefined,
+      mediaUrls: Array.isArray(mediaUrls) ? mediaUrls : undefined,
     });
 
     res.json(result);
