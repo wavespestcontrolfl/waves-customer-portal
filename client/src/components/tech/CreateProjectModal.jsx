@@ -266,7 +266,9 @@ export default function CreateProjectModal({
                         type="button"
                         onClick={() => {
                           setCustomerId(c.id);
-                          setCustomerLabel(`${c.first_name || ''} ${c.last_name || ''} · ${c.phone || ''}`.trim());
+                          const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();
+                          const phone = c.phone || '';
+                          setCustomerLabel([name, phone].filter(Boolean).join(' · ') || c.id);
                         }}
                         style={{
                           width: '100%', textAlign: 'left', background: 'transparent',
@@ -275,9 +277,13 @@ export default function CreateProjectModal({
                           fontSize: 13,
                         }}
                       >
-                        <div style={{ fontWeight: 700 }}>{c.first_name} {c.last_name}</div>
+                        <div style={{ fontWeight: 700 }}>
+                          {c.firstName || c.first_name || ''} {c.lastName || c.last_name || ''}
+                          {!(c.firstName || c.first_name || c.lastName || c.last_name) && (c.phone || 'Unnamed customer')}
+                        </div>
                         <div style={{ fontSize: 11, color: P.muted }}>
-                          {c.phone} {c.city ? `· ${c.city}` : ''}
+                          {(c.firstName || c.first_name || c.lastName || c.last_name) ? c.phone : ''}
+                          {c.city ? ` · ${c.city}` : ''}
                         </div>
                       </button>
                     ))}
