@@ -979,14 +979,41 @@ ${shellTopBar()}
     timer = setInterval(() => show(idx + 1), 6000);
   })();
 
+  // Bundle-applied banner. When the page loads with ?bundle_applied=1,
+  // show a one-time dismissible banner above the hero so the customer
+  // sees "we just auto-applied your bundle" before they start reading.
+  (function () {
+    if (!/[?&]bundle_applied=1/.test(location.search)) return;
+    var div = document.createElement('div');
+    div.setAttribute('role', 'status');
+    div.style.cssText = 'background:#ECFDF5;border:1px solid #10B981;color:#064E3B;padding:12px 16px;border-radius:8px;margin:0 auto 16px;max-width:820px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:14px;';
+    div.innerHTML = '<span><strong>Bundle applied.</strong> Silver tier pricing is now reflected below. We also sent a heads-up to our office.</span><button type="button" aria-label="Dismiss" style="background:none;border:none;color:#064E3B;cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;">\u00D7</button>';
+    div.querySelector('button').addEventListener('click', function () { div.remove(); });
+    var wrap = document.querySelector('.wrap') || document.body;
+    wrap.insertBefore(div, wrap.firstChild);
+  })();
+
   async function inquireBundle(svc) {
+    var btn = document.querySelector('.upsell-btn');
     try {
-      await fetch(API + '/bundle-inquiry', {
+      if (btn) { btn.disabled = true; btn.textContent = 'Applying bundle\u2026'; }
+      var r = await fetch(API + '/bundle-inquiry', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ suggestedService: svc })
       });
-      toast('Got it \u2014 we\u2019ll text you a bundle quote shortly.');
-    } catch (e) { toast('Could not send. Call (941) 297-5749.'); }
+      var data = await r.json().catch(function () { return {}; });
+      if (data && data.bundled) {
+        toast('Bundle applied \u2014 ' + data.bundled.tier + ' tier pricing');
+        var sep = location.search ? '&' : '?';
+        setTimeout(function () { location.href = location.pathname + location.search + sep + 'bundle_applied=1'; }, 700);
+      } else {
+        toast('Got it \u2014 we\u2019ll text you a bundle quote shortly.');
+        if (btn) { btn.disabled = false; btn.textContent = 'Get a bundle quote'; }
+      }
+    } catch (e) {
+      toast('Could not send. Call (941) 297-5749.');
+      if (btn) { btn.disabled = false; btn.textContent = 'Get a bundle quote'; }
+    }
   }
 </script>
 </body></html>`;
@@ -1493,33 +1520,124 @@ router.put('/:token/preferences', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/estimates/:token/bundle-inquiry — customer interested in bundling
+// POST /api/estimates/:token/bundle-inquiry — customer taps "Get a bundle quote"
+// Re-runs the pricing engine with the suggested service added, writes the new
+// bundled pricing back to the estimate, and tells the client to reload. Falls
+// back to the inquiry-only SMS path if re-pricing fails (missing lawn_sqft,
+// unsupported service combo, engine error, etc.).
 router.post('/:token/bundle-inquiry', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Estimate already accepted — bundle must be manually requoted' });
 
     const { suggestedService } = req.body;
 
-    // SMS to office
+    // Attempt auto re-price with the added service.
+    let bundled = null;
     try {
-      await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
-        `\u{1F4E6} Bundle inquiry from ${estimate.customer_name}:\nCurrently quoted: ${estimate.waveguard_tier || 'Bronze'} at $${estimate.monthly_total}/mo\nInterested in adding: ${suggestedService || 'another service'}\nProperty: ${estimate.address || 'N/A'}\nPhone: ${estimate.customer_phone || 'N/A'}`
-      );
+      const estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : estimate.estimate_data;
+      const engineInputs = extractEngineInputs(estData);
+
+      if (engineInputs && suggestedService) {
+        const updatedInputs = JSON.parse(JSON.stringify(engineInputs));
+        updatedInputs.services = updatedInputs.services || {};
+
+        const addLawn = /lawn/i.test(suggestedService);
+        const addPest = /pest/i.test(suggestedService);
+
+        if (addLawn && !updatedInputs.services.lawn) {
+          // Need a lawn area. Prefer explicit input, fall back to engine-derived.
+          const lawnSqFt = Number(updatedInputs.lawnSqFt || estData?.result?.property?.lawnSqFt || 0);
+          if (lawnSqFt > 0) {
+            updatedInputs.lawnSqFt = lawnSqFt;
+            updatedInputs.services.lawn = {
+              track: 'st_augustine',
+              tier: 'enhanced',
+              shadeClassification: 'FULL_SUN',
+            };
+          }
+        } else if (addPest && !updatedInputs.services.pest) {
+          updatedInputs.services.pest = { frequency: 'quarterly', version: 'v1', roachType: 'none' };
+        }
+
+        // Only re-price if we actually added a service this round.
+        const didAdd = (addLawn && updatedInputs.services.lawn) || (addPest && updatedInputs.services.pest);
+        if (didAdd) {
+          const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+          const v1Result = generateEstimate(updatedInputs);
+          const legacyResult = mapV1ToLegacyShape(v1Result);
+
+          const newMonthly = Number(legacyResult?.recurring?.monthlyTotal || 0);
+          const newAnnual = Number(legacyResult?.recurring?.annualAfterDiscount || newMonthly * 12);
+          const newOneTime = Number(legacyResult?.oneTime?.total || estimate.onetime_total || 0);
+          const newTier = String(legacyResult?.recurring?.tier || 'silver').replace(/^./, (c) => c.toUpperCase());
+
+          const newEstimateData = {
+            ...(estData || {}),
+            inputs: updatedInputs,
+            result: legacyResult,
+            bundleAutoApplied: {
+              addedService: suggestedService,
+              previousMonthly: Number(estimate.monthly_total || 0),
+              previousTier: estimate.waveguard_tier || 'Bronze',
+              newMonthly,
+              newTier,
+              appliedAt: new Date().toISOString(),
+            },
+          };
+
+          await db('estimates').where({ id: estimate.id }).update({
+            estimate_data: JSON.stringify(newEstimateData),
+            monthly_total: newMonthly,
+            annual_total: newAnnual,
+            onetime_total: newOneTime,
+            waveguard_tier: newTier,
+            updated_at: db.fn.now(),
+          });
+
+          // Bust the per-estimate pricing cache so the next GET re-reads from DB.
+          pricingCache.delete(estimate.id);
+
+          bundled = {
+            addedService: suggestedService,
+            previousMonthly: Number(estimate.monthly_total || 0),
+            newMonthly,
+            tier: newTier,
+            savingsPerMonth: Math.max(0, Math.round((Number(estimate.monthly_total || 0) + newMonthly - newMonthly) * 100) / 100),
+          };
+          logger.info(`[estimate] Bundle auto-applied for ${estimate.customer_name}: ${estimate.waveguard_tier} $${estimate.monthly_total}/mo → ${newTier} $${newMonthly}/mo`);
+        }
+      }
+    } catch (err) {
+      logger.error(`[estimate] Bundle re-price failed, falling back to inquiry: ${err.message}`);
+    }
+
+    // Always fire the office SMS / admin notification so the team has a
+    // heads-up — either the customer wants a bundle we couldn't auto-apply,
+    // or they've just self-served a tier upgrade and we should follow up.
+    try {
+      const preMonthly = Number(estimate.monthly_total || 0);
+      const smsBody = bundled
+        ? `\u{1F4E6} Bundle SELF-APPLIED by ${estimate.customer_name}:\nAdded: ${bundled.addedService}\nWas: ${estimate.waveguard_tier || 'Bronze'} @ $${preMonthly}/mo\nNow: ${bundled.tier} @ $${bundled.newMonthly}/mo\nProperty: ${estimate.address || 'N/A'}\nPhone: ${estimate.customer_phone || 'N/A'}`
+        : `\u{1F4E6} Bundle inquiry from ${estimate.customer_name}:\nCurrently quoted: ${estimate.waveguard_tier || 'Bronze'} at $${preMonthly}/mo\nInterested in adding: ${suggestedService || 'another service'}\nProperty: ${estimate.address || 'N/A'}\nPhone: ${estimate.customer_phone || 'N/A'}`;
+      await TwilioService.sendSMS(WAVES_OFFICE_PHONE, smsBody);
     } catch (e) { logger.error(`[estimate] Bundle inquiry SMS failed: ${e.message}`); }
 
-    // In-app notification
     try {
       const NotificationService = require('../services/notification-service');
       await NotificationService.notifyAdmin('estimate',
-        `Bundle inquiry: ${estimate.customer_name}`,
-        `Interested in adding ${suggestedService || 'a service'} to ${estimate.waveguard_tier || 'Bronze'} plan`,
+        bundled ? `Bundle self-applied: ${estimate.customer_name}` : `Bundle inquiry: ${estimate.customer_name}`,
+        bundled
+          ? `Added ${bundled.addedService} → ${bundled.tier} @ $${bundled.newMonthly}/mo`
+          : `Interested in adding ${suggestedService || 'a service'} to ${estimate.waveguard_tier || 'Bronze'} plan`,
         { icon: '\u{1F4E6}', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
       );
     } catch (e) { logger.error(`[estimate] Bundle inquiry notification failed: ${e.message}`); }
 
-    logger.info(`[estimate] Bundle inquiry from ${estimate.customer_name} — wants ${suggestedService}`);
-    res.json({ success: true });
+    res.json({ success: true, bundled });
   } catch (err) { next(err); }
 });
 
