@@ -142,11 +142,11 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   const logoBuf = getLogoBuffer();
   if (logoBuf) {
     doc.image(logoBuf, L + 2, 8, { width: 64, height: 64 });
-    doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('Licensed & Insured | FL License #JF336375', L + 72, 60);
+    doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('Licensed & Insured | FL License #JB351547', L + 72, 60);
   } else {
     doc.fontSize(22).font('Helvetica-Bold').fillColor('#fff').text('WAVES', L + 10, 18);
     doc.fontSize(9).font('Helvetica').fillColor(TEAL).text('LAWN & PEST CONTROL', L + 10, 42);
-    doc.fontSize(8).fillColor('#ccc').text('Licensed & Insured | FL License #JF336375', L + 10, 56);
+    doc.fontSize(8).fillColor('#ccc').text('Licensed & Insured | FL License #JB351547', L + 10, 56);
   }
 
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', R - 150, 22, { width: 150, align: 'right' });
@@ -493,7 +493,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   doc.save();
   doc.rect(0, 730, 612, 62).fill(NAVY);
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(
-    'Waves Pest Control, LLC · FL License #JF336375',
+    'Waves Pest Control, LLC · FL License #JB351547',
     0, 738, { width: 612, align: 'center' }
   );
   doc.fontSize(7).font('Helvetica').fillColor('#ccc').text(
