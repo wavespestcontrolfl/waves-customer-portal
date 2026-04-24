@@ -1108,8 +1108,8 @@ function PromotionCards() {
                   background: `linear-gradient(135deg, ${B.yellow}15, ${B.orange}10)`,
                   border: `1px solid ${B.yellow}33`,
                 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: B.navy }}>
-                    ⬆️ Add this and unlock {promo.potentialNewTier} — {promo.potentialNewDiscount} off everything
+                  <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Icon name="arrowUp" size={14} strokeWidth={2} /> Add this and unlock {promo.potentialNewTier} — {promo.potentialNewDiscount} off everything
                   </div>
                   {promo.totalMonthlySavingsAtNewTier > 0 && (
                     <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 2 }}>
@@ -1940,13 +1940,13 @@ function DashboardTab({ customer, onSwitchTab }) {
           { label: 'Monthly Rate', value: `$${customer.monthlyRate}`, sub: `${tier?.discount || '0%'} discount`, icon: 'money' },
           { label: 'Next Service', value: nextService ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—', sub: nextService?.serviceType || '', icon: 'calendar' },
           { label: 'Services YTD', value: stats?.servicesYTD ?? '...', sub: stats?.celsiusApplicationsThisYear != null ? `Weed treatments: ${stats.celsiusApplicationsThisYear} of ${stats.celsiusMaxPerYear || 3} annual` : '', icon: 'clipboard' },
-          { label: 'Member Since', value: customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—', sub: '', icon: '⭐' },
+          { label: 'Member Since', value: customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—', sub: '', icon: 'star' },
         ].map((s, i) => (
           <div key={i} style={{
             background: B.white, borderRadius: 14, padding: 16,
             border: `1px solid ${B.bluePale}`,
           }}>
-            <div style={{ fontSize: 20, marginBottom: 6 }}>{s.icon}</div>
+            <div style={{ marginBottom: 6, color: B.wavesBlue }}><Icon name={s.icon} size={22} strokeWidth={1.75} /></div>
             <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayDark, fontFamily: FONTS.ui }}>{s.label}</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: B.navy, marginTop: 2, fontFamily: FONTS.ui }}>{s.value}</div>
             <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 2 }}>{s.sub}</div>
@@ -2655,7 +2655,7 @@ function ScheduleTab({ customer }) {
         ...BUTTON_BASE, padding: compact ? '6px 14px' : '9px 18px', flex: compact ? undefined : 1,
         background: B.yellow, color: B.blueDeeper, fontSize: 12,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
-      }}>{busy ? 'Confirming…' : `$<Icon name="check" size={16} strokeWidth={1.75} /> Confirm`}</button>
+      }}>{busy ? 'Confirming…' : <><Icon name="check" size={16} strokeWidth={1.75} /> Confirm</>}</button>
     );
   };
 
@@ -3281,7 +3281,7 @@ function BillingTab({ customer }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {includedServices.map(svc => (
             <div key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: B.grayDark }}>
-              <span>{svc.icon}</span>
+              <Icon name={svc.icon} size={16} strokeWidth={1.75} style={{ color: B.wavesBlue }} />
               <span>{svc.name}</span>
               {discount > 0 && (
                 <span style={{ fontSize: 12, color: B.green, fontWeight: 600, marginLeft: 'auto' }}>
@@ -3446,8 +3446,8 @@ function BillingTab({ customer }) {
             { label: 'Promo Credits', items: promoCredits, icon: 'party' },
           ].filter(g => g.items.length > 0).map(group => (
             <div key={group.label} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
-                {group.icon} {group.label}
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Icon name={group.icon} size={12} strokeWidth={2} /> {group.label}
               </div>
               {group.items.map((cr, i) => (
                 <div key={i} style={{
@@ -4959,7 +4959,7 @@ function MyPlanTab({ customer }) {
   if (customer.activity_log) {
     customer.activity_log.forEach(a => {
       if (a.type === 'tier_change' || a.type === 'upgrade') {
-        planTimeline.push({ date: parseDate(a.date), label: a.description || `Upgraded to ${a.tier || 'new tier'}`, icon: '⬆️' });
+        planTimeline.push({ date: parseDate(a.date), label: a.description || `Upgraded to ${a.tier || 'new tier'}`, icon: 'upgrade' });
       }
       if (a.type === 'service_added') {
         planTimeline.push({ date: parseDate(a.date), label: a.description || `Added ${a.service || 'service'}`, icon: 'plus' });
@@ -4971,7 +4971,7 @@ function MyPlanTab({ customer }) {
     const startDate = parseDate(customer.memberSince);
     const upgradeDate = new Date(startDate);
     upgradeDate.setMonth(upgradeDate.getMonth() + Math.floor(memberMonths * 0.4));
-    planTimeline.push({ date: upgradeDate, label: `Upgraded to ${tierName}`, icon: '⬆️' });
+    planTimeline.push({ date: upgradeDate, label: `Upgraded to ${tierName}`, icon: 'upgrade' });
   }
   if (numServices >= 3 && planTimeline.length <= 2) {
     const startDate = parseDate(customer.memberSince);
@@ -5122,7 +5122,7 @@ function MyPlanTab({ customer }) {
             <div onClick={() => setExpandedService(expandedService === svc.id ? null : svc.id)}
               style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <span style={{ fontSize: 28 }}>{svc.icon}</span>
+                <span style={{ color: B.wavesBlue, display: 'inline-flex' }}><Icon name={svc.icon} size={28} strokeWidth={1.75} /></span>
                 <div>
                   <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{svc.name}</div>
                   <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{svc.frequencies[0]}</div>
@@ -5221,8 +5221,8 @@ function MyPlanTab({ customer }) {
             const completedMonths = getCompletedMonths(svc.id);
             return (
               <div key={svc.id}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6 }}>
-                  {svc.icon} {svc.name.replace(/ Program| Barrier Treatment/g, '')}
+                <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Icon name={svc.icon} size={14} strokeWidth={1.75} /> {svc.name.replace(/ Program| Barrier Treatment/g, '')}
                 </div>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                   {MONTH_LABELS.map((month, mi) => {
@@ -5305,7 +5305,7 @@ function MyPlanTab({ customer }) {
           <div onClick={() => setExpandedAddon(expandedAddon === addon.id ? null : addon.id)}
             style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span style={{ fontSize: 24 }}>{addon.icon}</span>
+              <span style={{ color: B.wavesBlue, display: 'inline-flex' }}><Icon name={addon.icon} size={24} strokeWidth={1.75} /></span>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{addon.name}</div>
                 <div style={{ fontSize: 12, color: B.grayMid }}>{addon.min}</div>
@@ -5482,7 +5482,7 @@ function MyPlanTab({ customer }) {
               { text: `$${Math.min(75, Math.round(memberMonths * 6.25))} annual renewal credit (applied to month 13)`, icon: 'money' },
               tierIdx < TIER_ORDER.length - 1 && {
                 text: `$${tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
-                icon: '⬆️',
+                icon: 'upgrade',
               },
               tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },
             ].filter(Boolean).map((item, i) => (
@@ -5525,8 +5525,8 @@ function MyPlanTab({ customer }) {
               <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600 }}>
                 {!isNaN(event.date) ? event.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}
               </div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginTop: 2 }}>
-                {event.icon} {event.label}
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginTop: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Icon name={event.icon} size={14} strokeWidth={1.75} /> {event.label}
               </div>
             </div>
           ))}

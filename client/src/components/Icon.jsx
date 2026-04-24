@@ -3,7 +3,7 @@
 // off lucide. Icons inherit `currentColor` and scale with font-size, so
 // callers control appearance via parent styles.
 import {
-  AlertCircle, AlertTriangle, ArrowRight, Award,
+  AlertCircle, AlertTriangle, ArrowRight, ArrowUp, Award,
   BarChart3, Bell, Bot, Brain, Bug, Building2,
   Calendar, Camera, Check, CheckCircle2, ChevronDown,
   ChevronRight, ClipboardList, Clock, Cloud, CloudLightning,
@@ -51,6 +51,8 @@ const MAP = {
   chevronRight: ChevronRight,
   chevronDown: ChevronDown,
   arrowRight: ArrowRight,
+  arrowUp: ArrowUp,
+  upgrade: ArrowUp,
   eye: Eye,
   eyeOff: EyeOff,
   refresh: RefreshCw,
