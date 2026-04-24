@@ -203,14 +203,25 @@ async function performPropertyLookup(address) {
   }
 
   // ── STEP 3.5: Stories fallback — Claude w/ web_search when RentCast had
-  // none. Stamp `_storiesSource` on the rentcast object so
+  // none. Pass the RentCast facts we DO have as hints so Claude can match
+  // by subdivision + sqft against builder floorplan catalogs (the pattern
+  // that catches new-construction homes the public listings haven't indexed
+  // yet). Stamp `_storiesSource` on the rentcast object so
   // buildEnrichedProfile can surface provenance to the client without a
   // signature change.
   if (result.rentcast) {
     if (result.rentcast.stories) {
       result.rentcast._storiesSource = 'rentcast';
     } else {
-      const aiStories = await lookupStoriesFromAI(address).catch((err) => {
+      const hints = {
+        subdivision: result.rentcast._raw?.subdivision || null,
+        squareFootage: result.rentcast.squareFootage || null,
+        bedrooms: result.rentcast.bedrooms || null,
+        bathrooms: result.rentcast.bathrooms || null,
+        yearBuilt: result.rentcast.yearBuilt || null,
+        propertyType: result.rentcast.propertyType || null,
+      };
+      const aiStories = await lookupStoriesFromAI(address, hints).catch((err) => {
         result.errors.push({ source: 'ai-stories', message: err?.message || String(err) });
         return null;
       });

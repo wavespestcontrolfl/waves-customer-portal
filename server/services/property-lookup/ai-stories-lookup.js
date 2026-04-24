@@ -30,7 +30,7 @@ const MODELS = require('../../config/models');
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
 
-async function lookupStoriesFromAI(address) {
+async function lookupStoriesFromAI(address, hints = {}) {
   if (!process.env.ANTHROPIC_API_KEY) {
     logger.info('[ai-stories] skipped — ANTHROPIC_API_KEY not set');
     return null;
@@ -46,6 +46,7 @@ async function lookupStoriesFromAI(address) {
   const t0 = Date.now();
   logger.info('[ai-stories] calling Claude with web_search', {
     address: address.slice(0, 80),
+    hints: Object.keys(hints).filter((k) => hints[k] != null),
     model: MODELS.WORKHORSE,
     timeoutMs,
     maxSearches,
@@ -66,7 +67,7 @@ async function lookupStoriesFromAI(address) {
       }],
       messages: [{
         role: 'user',
-        content: buildPrompt(address),
+        content: buildPrompt(address, hints),
       }],
     }, { timeout: timeoutMs });
 
@@ -101,18 +102,11 @@ async function lookupStoriesFromAI(address) {
       return null;
     }
 
-    // Reject low-confidence answers — better to default to 1 + nudge than to
-    // confidently set a wrong number from a guess.
-    if (parsed.confidence !== 'high' && parsed.confidence !== 'medium') {
-      logger.info('[ai-stories] low confidence — discarded', {
-        elapsedMs,
-        confidence: parsed.confidence,
-        stories: parsed.stories,
-        source: parsed.source,
-      });
-      return null;
-    }
-
+    // Accept any confidence level — the previous "discard low-confidence"
+    // policy meant new-construction homes (no public listing yet) all came
+    // back null and got the wrong default of 1. Better to accept Claude's
+    // best inference and let the estimator eyeball it than to silently
+    // under-price every brand-new 2-story.
     logger.info('[ai-stories] got stories', {
       stories: parsed.stories,
       confidence: parsed.confidence,
@@ -129,26 +123,46 @@ async function lookupStoriesFromAI(address) {
   }
 }
 
-function buildPrompt(address) {
+function buildPrompt(address, hints = {}) {
+  const hintLines = [];
+  if (hints.subdivision) hintLines.push(`Subdivision: ${hints.subdivision}`);
+  if (hints.squareFootage) hintLines.push(`Living area: ${hints.squareFootage} sf`);
+  if (hints.bedrooms) hintLines.push(`Bedrooms: ${hints.bedrooms}`);
+  if (hints.bathrooms) hintLines.push(`Bathrooms: ${hints.bathrooms}`);
+  if (hints.yearBuilt) hintLines.push(`Year built: ${hints.yearBuilt}`);
+  if (hints.propertyType) hintLines.push(`Type: ${hints.propertyType}`);
+  const hintsBlock = hintLines.length
+    ? `\nKnown facts from RentCast (use these to triangulate):\n${hintLines.map((l) => `- ${l}`).join('\n')}\n`
+    : '';
+
   return `How many stories (floors above grade) does the residential property at this address have?
 
 Address: ${address}
+${hintsBlock}
+Search aggressively across these source families. Use web_search multiple times if needed:
 
-Search Zillow, Realtor.com, county property records (Manatee / Sarasota / Charlotte county property appraiser sites for SWFL), and recent MLS listings. Cross-reference at least two sources before answering when possible.
+1. PRIMARY listing sites — start here, in this order: zillow.com, redfin.com, homes.com, realtor.com, trulia.com. Most listings show stories explicitly in the Facts & Features / Home Highlights section.
+2. Secondary aggregators — compass.com, era.com, liveinswflorida.com, villageshomefinder.com, bradentonhomelocator.com. Try these when the primary sites don't surface the address (common for new construction or recently sold).
+3. County property appraisers — manateepao.gov (Manatee), sc-pa.com (Sarasota), ccappraiser.com (Charlotte). Authoritative for tax records; often include "stories" or "number of stories" fields.
+4. Builder floorplan catalogs (when subdivision identifies a builder) — drhorton.com, pulte.com, lennar.com, mihomes.com, taylormorrison.com, mattamyhomes.com, neal-communities.com, kbhome.com, davidweekleyhomes.com, meritagehomes.com, ryanhomes.com, richmond-american.com, homesbywestbay.com. Match the home's square footage to a floorplan in the catalog.
+5. Permit / contractor data — buildzoom.com sometimes has stories from building permits.
 
-Important:
+Inference rules when direct data is unavailable:
 - Garage square footage is NOT counted as a story.
-- An attic with finished living space CAN count if listed as a story on the source.
+- A finished attic CAN count if a source lists it as a story.
 - Ground-floor + second-floor = 2 stories. Single-floor ranch = 1 story.
+- A 4+ bedroom new-construction SWFL home above ~2,500 sf is more often 2-story than 1-story.
+- A "3.5 bath" or "2.5 bath" split is a strong 2-story signal (powder room downstairs).
+- If the subdivision matches a known builder (e.g., "Bella Lago" → D.R. Horton), check that builder's floorplan catalog and match by square footage.
 
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {"stories": <integer 1-4 or null>, "source": "<URL of primary source>", "confidence": "high" | "medium" | "low"}
 
-- "high" = two independent sources agree on the same number
-- "medium" = one authoritative source (Zillow listing, county records) confirms it
-- "low" = only inferred or conflicting sources
+- "high" = two independent sources agree on the same number, OR one authoritative source (county records, builder floorplan match) is unambiguous.
+- "medium" = a single listing or floorplan-by-sqft match.
+- "low" = inference from bedroom/bath/sqft profile only.
 
-Return {"stories": null, ...} if you can't find a verified answer.`;
+Make your best determination. Only return {"stories": null, ...} if you have absolutely no evidence — even an inference is more useful to the operator than null.`;
 }
 
 function parseStoriesJSON(text) {
