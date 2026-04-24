@@ -508,10 +508,14 @@ function renderPage(token, estimate, estData) {
   .cta:hover:not([disabled]){background:#121E3D}
   .cta.secondary{background:transparent;color:#1B2C5B;border:1px solid #1B2C5B}
   .cta[disabled]{opacity:.6;cursor:not-allowed}
-  .upsell{background:#F7F5EE;border:1px solid #E7E2D7;border-radius:12px;padding:18px;margin-bottom:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .upsell{background:#F7F5EE;border:1px solid #E7E2D7;border-radius:12px;padding:18px;margin-bottom:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;cursor:pointer;transition:background .15s,border-color .15s;width:100%;text-align:left;font:inherit;color:inherit;-webkit-tap-highlight-color:rgba(27,44,91,.12)}
+  .upsell:hover{background:#F2EEE0;border-color:#D9D3C4}
+  .upsell:active{background:#EDE8D8}
+  .upsell:disabled{opacity:.7;cursor:wait}
   .upsell .txt{flex:1;min-width:200px}
   .upsell h3{color:#1B2C5B;margin:0 0 4px}
-  .upsell-btn{background:#1B2C5B;color:#fff;padding:10px 16px;border-radius:8px;border:none;font-weight:500;cursor:pointer;font-size:14px}
+  .upsell-btn{background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;border:none;font-weight:500;cursor:pointer;font-size:14px;min-height:44px;pointer-events:none}
+  @media(max-width:520px){.upsell-btn{width:100%}}
   .perks-list{list-style:none;padding:0;margin:0;columns:2;column-gap:20px}
   @media(max-width:640px){.perks-list{columns:1}}
   .perks-list li{padding:6px 0 6px 24px;position:relative;break-inside:avoid;font-size:14px;color:#3F4A65}
@@ -584,13 +588,13 @@ ${shellTopBar()}
   ${prefsBlockHtml}
 
   ${showUpsell ? `
-  <div class="upsell">
-    <div class="txt">
+  <button type="button" class="upsell" onclick="inquireBundle('${escapeHtml(upsellService)}')" aria-label="Get a bundle quote for ${escapeHtml(upsellService)}">
+    <span class="txt">
       <h3>Add ${escapeHtml(upsellService)} and save more</h3>
       <div style="font-size:14px">Bundling unlocks ${escapeHtml(nextTierName)} tier pricing (${nextTierPct}% off everything). Curious what that looks like?</div>
-    </div>
-    <button class="upsell-btn" onclick="inquireBundle('${escapeHtml(upsellService)}')">Get a bundle quote</button>
-  </div>` : ''}
+    </span>
+    <span class="upsell-btn">Get a bundle quote</span>
+  </button>` : ''}
 
   ${locked ? '' : `
   <section class="card booking-card" id="booking-card">
@@ -1019,9 +1023,11 @@ ${shellTopBar()}
   })();
 
   async function inquireBundle(svc) {
-    var btn = document.querySelector('.upsell-btn');
+    var card = document.querySelector('.upsell');
+    var pill = document.querySelector('.upsell-btn');
     try {
-      if (btn) { btn.disabled = true; btn.textContent = 'Applying bundle\u2026'; }
+      if (card) card.disabled = true;
+      if (pill) pill.textContent = 'Applying bundle\u2026';
       var r = await fetch(API + '/bundle-inquiry', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ suggestedService: svc })
@@ -1033,11 +1039,13 @@ ${shellTopBar()}
         setTimeout(function () { location.href = location.pathname + location.search + sep + 'bundle_applied=1'; }, 700);
       } else {
         toast('Got it \u2014 we\u2019ll text you a bundle quote shortly.');
-        if (btn) { btn.disabled = false; btn.textContent = 'Get a bundle quote'; }
+        if (card) card.disabled = false;
+        if (pill) pill.textContent = 'Get a bundle quote';
       }
     } catch (e) {
       toast('Could not send. Call (941) 297-5749.');
-      if (btn) { btn.disabled = false; btn.textContent = 'Get a bundle quote'; }
+      if (card) card.disabled = false;
+      if (pill) pill.textContent = 'Get a bundle quote';
     }
   }
 </script>
