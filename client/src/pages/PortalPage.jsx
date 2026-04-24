@@ -1249,7 +1249,6 @@ function HeroSlider({ onSwitchTab }) {
     {
       image: '/waves-ford-1.png',
       alt: 'Waves Pest Control & Lawn Care truck',
-      icon: '🛡️',
       title: 'Wave Goodbye to Pests!',
       subtitle: 'Full-service pest control, lawn care & mosquito protection for your home.',
       cta: { label: 'View My Plan', tab: 'plan' },
@@ -1257,7 +1256,6 @@ function HeroSlider({ onSwitchTab }) {
     {
       image: '/waves-ford-2.png',
       alt: 'Waves Pest Control & Lawn Care truck',
-      icon: '🎁',
       title: 'Refer a Friend, Earn Cash!',
       subtitle: 'Share your referral link and earn rewards for every neighbor who signs up.',
       cta: { label: 'Start Referring', tab: 'refer' },
@@ -1265,7 +1263,6 @@ function HeroSlider({ onSwitchTab }) {
     {
       image: '/waves-ford-3.png',
       alt: 'Waves Pest Control & Lawn Care truck',
-      icon: '🌿',
       title: 'Lawn Care Programs',
       subtitle: 'St. Augustine, Bermuda, Zoysia & Bahia — customized fertilization & weed control.',
       cta: { label: 'Learn More', tab: 'learn' },
@@ -1273,7 +1270,6 @@ function HeroSlider({ onSwitchTab }) {
     {
       image: '/waves-ford-4.png',
       alt: 'Waves Pest Control & Lawn Care truck',
-      icon: '🌊',
       title: 'Trusted SWFL Service',
       subtitle: 'Family-owned & operated across Manatee, Sarasota & Charlotte counties.',
       cta: { label: 'View My Plan', tab: 'plan' },
@@ -1281,7 +1277,6 @@ function HeroSlider({ onSwitchTab }) {
     {
       image: '/waves-ford-1.png',
       alt: 'Waves Pest Control & Lawn Care truck',
-      icon: '📚',
       title: 'Stay in the Know',
       subtitle: 'SWFL pest & lawn tips, expert advice from UF/IFAS, and our monthly newsletter — all in the Learn tab.',
       cta: { label: 'Open Learn', tab: 'learn' },
@@ -1347,7 +1342,6 @@ function HeroSlider({ onSwitchTab }) {
               padding: '24px 28px 24px 44px', boxSizing: 'border-box',
               ...(i === active ? { animation: 'heroFadeIn 0.6s ease' } : {}),
             }}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>{slide.icon}</div>
               <div style={{
                 fontSize: 20, fontWeight: 800, color: '#fff',
                 fontFamily: FONTS.heading, lineHeight: 1.2, marginBottom: 6,
