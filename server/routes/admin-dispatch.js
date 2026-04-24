@@ -19,6 +19,16 @@ async function renderTemplate(templateKey, vars, fallback) {
   return fallback;
 }
 
+// Templates say "Your {service_type} service report is ready", but
+// many service_type values already end in "Service" / "Services"
+// (e.g. "One-Time Pest Control Service") which would duplicate the
+// word. Strip the trailing suffix before substitution so output reads
+// "Your One-Time Pest Control service report is ready."
+function normalizeServiceTypeForTemplate(s) {
+  if (!s) return 'your service';
+  return s.replace(/\s+services?$/i, '');
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/dispatch/today (or /:date)
@@ -281,7 +291,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
     const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
-    const portalUrl = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    // Customer-facing SMS URL must be the canonical portal domain, not
+    // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
+    // prod for app-internal redirects). PORTAL_URL can override for dev.
+    const portalUrl = process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com';
 
     let invoiceCreated = false;
     let payUrl = null;
@@ -336,20 +349,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (sendCompletionSms && svc.cust_phone) {
       try {
+        const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         if (invoiceCreated && payUrl) {
-          const fallback = `Hello ${svc.first_name}! Your ${svc.service_type} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+          const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
-            service_type: svc.service_type || 'your service',
+            service_type: displayServiceType,
             portal_url: portalUrl,
             pay_url: payUrl,
           }, fallback);
           await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
         } else if (prepaidCovered || alreadyPaid) {
-          const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${svc.service_type} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+          const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_prepaid', {
             first_name: svc.first_name || '',
-            service_type: svc.service_type || 'your service',
+            service_type: displayServiceType,
             portal_url: portalUrl,
           }, fallback);
           await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
