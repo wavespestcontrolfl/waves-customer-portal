@@ -1586,6 +1586,65 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
 
 /* ── Completion Panel (slide-over) ────────────────────── */
 
+// Module-scoped helpers for the mobile Complete sheet. Keeping these
+// outside CompletionPanel is load-bearing: if they're defined inside the
+// render, every keystroke creates new component identities and React
+// unmounts/remounts the textarea, dropping focus after each word.
+const CP_M = {
+  card: '#FFFFFF', hairline: '#E5E5E5',
+  ink: '#111111', ink4: '#A3A3A3', actionFg: '#FFFFFF',
+};
+const CP_FONT = "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif";
+const CP_EYEBROW = {
+  display: 'block', fontFamily: CP_FONT, fontSize: 11, fontWeight: 600,
+  color: CP_M.ink4, textTransform: 'uppercase', letterSpacing: '0.3px',
+  marginBottom: 8,
+};
+
+function CPField({ label, children }) {
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <label style={CP_EYEBROW}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function CPChip({ selected, onClick, children, dot }) {
+  return (
+    <button type="button" onClick={onClick} style={{
+      height: 36, padding: '0 14px', borderRadius: 999,
+      background: selected ? CP_M.ink : CP_M.card,
+      color: selected ? CP_M.actionFg : CP_M.ink,
+      border: `1px solid ${selected ? CP_M.ink : CP_M.hairline}`,
+      fontFamily: CP_FONT, fontSize: 13, fontWeight: 500,
+      cursor: 'pointer', display: 'inline-flex',
+      alignItems: 'center', gap: 8, whiteSpace: 'nowrap',
+    }}>
+      {dot && <span style={{
+        width: 8, height: 8, borderRadius: '50%', background: dot, flexShrink: 0,
+      }}/>}
+      {children}
+    </button>
+  );
+}
+
+function CPChipGroup({ label, dot, chips, onPick }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: dot }}/>
+        <span style={CP_EYEBROW}>{label}</span>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {chips.map(c => (
+          <CPChip key={c} onClick={() => onPick(c)}>{c}</CPChip>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [notes, setNotes] = useState('');
   const [selectedProducts, setSelectedProducts] = useState([]);
@@ -1768,49 +1827,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       height: 44,
     };
 
-    function Field({ label, children }) {
-      return (
-        <div style={{ marginBottom: 20 }}>
-          <label style={eyebrowStyle}>{label}</label>
-          {children}
-        </div>
-      );
-    }
-
-    function Chip({ selected, onClick, children, dot }) {
-      return (
-        <button type="button" onClick={onClick} style={{
-          height: 36, padding: '0 14px', borderRadius: 999,
-          background: selected ? M.ink : M.card,
-          color: selected ? M.actionFg : M.ink,
-          border: `1px solid ${selected ? M.ink : M.hairline}`,
-          fontFamily: font, fontSize: 13, fontWeight: 500,
-          cursor: 'pointer', display: 'inline-flex',
-          alignItems: 'center', gap: 8, whiteSpace: 'nowrap',
-        }}>
-          {dot && <span style={{
-            width: 8, height: 8, borderRadius: '50%', background: dot, flexShrink: 0,
-          }}/>}
-          {children}
-        </button>
-      );
-    }
-
-    function ChipGroup({ label, dot, chips, onPick }) {
-      return (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: dot }}/>
-            <span style={eyebrowStyle}>{label}</span>
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {chips.map(c => (
-              <Chip key={c} onClick={() => onPick(c)}>{c}</Chip>
-            ))}
-          </div>
-        </div>
-      );
-    }
+    // Field / Chip / ChipGroup are hoisted above CompletionPanel (CPField,
+    // CPChip, CPChipGroup) so they survive re-renders without unmounting
+    // the inputs inside them.
+    const Field = CPField;
+    const Chip = CPChip;
+    const ChipGroup = CPChipGroup;
 
     return (
       <>
