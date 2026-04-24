@@ -999,17 +999,16 @@ function mobileStatusClass(status) {
 // present. Row tap is currently a no-op — action sheet will land in a
 // follow-up PR so this PR stays scoped to the list-view redesign per
 // CLAUDE.md Rule 1/2.
-function MobileEstimateRow({ estimate, onCreateFromAddress, v3Flag = false }) {
+function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel, onSend, v3Flag = false }) {
+  const navigate = useNavigate();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
   const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
   const customerName = estimate.customerName || 'Unknown';
-  const customerHref = estimate.customerId
-    ? `/admin/customers?customerId=${encodeURIComponent(estimate.customerId)}`
-    : null;
   const isDraftMuted = v3Flag && estimate.status === 'draft';
+  const openPanel = () => { if (estimate.customerId) onOpenCustomerPanel?.(estimate.customerId); };
   return (
     <div
-      onClick={() => { if (customerHref) window.location.href = customerHref; }}
+      onClick={openPanel}
       className={cn(
         'bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5 cursor-pointer hover:bg-zinc-50',
         isDraftMuted && 'opacity-60',
@@ -1017,14 +1016,14 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, v3Flag = false }) {
       style={{ height: 64 }}
     >
       <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-        {customerHref ? (
-          <a
-            href={customerHref}
-            onClick={(e) => e.stopPropagation()}
-            className="text-14 font-medium text-ink-primary truncate no-underline hover:underline"
+        {estimate.customerId ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); openPanel(); }}
+            className="text-14 font-medium text-ink-primary truncate text-left bg-transparent border-0 p-0 cursor-pointer hover:underline"
           >
             {customerName}
-          </a>
+          </button>
         ) : (
           <div className="text-14 font-medium text-ink-primary truncate">{customerName}</div>
         )}
@@ -1075,6 +1074,45 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, v3Flag = false }) {
           <MessageSquare size={16} strokeWidth={1.75} />
         </a>
       )}
+      {estimate.customerId && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            const params = new URLSearchParams();
+            if (estimate.address) params.set('address', estimate.address);
+            if (estimate.customerName) params.set('customerName', estimate.customerName);
+            if (estimate.customerPhone) params.set('customerPhone', estimate.customerPhone);
+            if (estimate.customerEmail) params.set('customerEmail', estimate.customerEmail);
+            navigate(`/admin/estimates?${params.toString()}`);
+          }}
+          aria-label={`Create new estimate for ${customerName}`}
+          title="Create a new estimate for this customer"
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+        >
+          <FilePlus2 size={16} strokeWidth={1.75} />
+        </button>
+      )}
+      {['draft', 'sent', 'viewed'].includes(estimate.status) && (
+        <button
+          type="button"
+          onClick={async (e) => {
+            e.stopPropagation();
+            const action = estimate.status === 'draft' ? 'Send' : 'Resend';
+            if (!window.confirm(`${action} estimate to ${customerName} via SMS + email?`)) return;
+            await adminFetch(`/admin/estimates/${estimate.id}/send`, {
+              method: 'POST',
+              body: JSON.stringify({ sendMethod: 'both' }),
+            }).catch(() => {});
+            onSend?.();
+          }}
+          aria-label={`${estimate.status === 'draft' ? 'Send' : 'Resend'} estimate`}
+          title={estimate.status === 'draft' ? 'Send estimate via SMS + email' : 'Resend estimate via SMS + email'}
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+        >
+          <Send size={16} strokeWidth={1.75} />
+        </button>
+      )}
     </div>
   );
 }
@@ -1089,9 +1127,16 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
+  const [customerPanelId, setCustomerPanelId] = useState(null);
   // Spec §7 default sort is the v3 status-rank; keep the old newest/oldest
   // options available when the flag is off.
   const [sort, setSort] = useState(v3Flag ? 'v3' : 'newest');
+
+  const refreshEstimates = useCallback(() => {
+    adminFetch('/admin/estimates')
+      .then((d) => setEstimates(d.estimates || []))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     adminFetch('/admin/estimates')
@@ -1256,10 +1301,19 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               key={e.id}
               estimate={e}
               onCreateFromAddress={onCreateFromAddress}
+              onOpenCustomerPanel={setCustomerPanelId}
+              onSend={refreshEstimates}
               v3Flag={v3Flag}
             />
           ))}
         </div>
+      )}
+
+      {customerPanelId && (
+        <CustomerEstimatesPanel
+          customerId={customerPanelId}
+          onClose={() => setCustomerPanelId(null)}
+        />
       )}
     </div>
   );
