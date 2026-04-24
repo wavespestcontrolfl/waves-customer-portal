@@ -14,7 +14,11 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
-const { recordTouchpoint } = require('../services/conversations');
+const NewsletterSender = require('../services/newsletter-sender');
+const MODELS = require('../config/models');
+
+let Anthropic;
+try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -146,11 +150,12 @@ router.get('/sends/:id', async (req, res, next) => {
 // POST /api/admin/newsletter/sends — create a draft
 router.post('/sends', async (req, res, next) => {
   try {
-    const { subject, htmlBody, textBody, previewText, fromName, fromEmail, replyTo } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt } = req.body;
     if (!subject) return res.status(400).json({ error: 'subject required' });
 
     const [row] = await db('newsletter_sends').insert({
       subject,
+      subject_b: subjectB || null,
       html_body: htmlBody || null,
       text_body: textBody || null,
       preview_text: previewText || null,
@@ -158,6 +163,8 @@ router.post('/sends', async (req, res, next) => {
       from_email: fromEmail || 'newsletter@wavespestcontrol.com',
       reply_to: replyTo || 'contact@wavespestcontrol.com',
       status: 'draft',
+      segment_filter: segmentFilter || null,
+      ai_prompt: aiPrompt || null,
       created_by: req.technicianId || null,
     }).returning('*');
 
@@ -165,22 +172,25 @@ router.post('/sends', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /api/admin/newsletter/sends/:id — edit a draft
+// PATCH /api/admin/newsletter/sends/:id — edit a draft (or a scheduled row)
 router.patch('/sends/:id', async (req, res, next) => {
   try {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
-    if (send.status !== 'draft') return res.status(400).json({ error: 'can only edit drafts' });
+    if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
 
-    const { subject, htmlBody, textBody, previewText, fromName, fromEmail, replyTo } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt } = req.body;
     await db('newsletter_sends').where({ id: req.params.id }).update({
       subject: subject ?? send.subject,
+      subject_b: subjectB !== undefined ? subjectB : send.subject_b,
       html_body: htmlBody ?? send.html_body,
       text_body: textBody ?? send.text_body,
       preview_text: previewText ?? send.preview_text,
       from_name: fromName ?? send.from_name,
       from_email: fromEmail ?? send.from_email,
       reply_to: replyTo ?? send.reply_to,
+      segment_filter: segmentFilter !== undefined ? segmentFilter : send.segment_filter,
+      ai_prompt: aiPrompt !== undefined ? aiPrompt : send.ai_prompt,
       updated_at: new Date(),
     });
 
@@ -236,120 +246,11 @@ router.post('/sends/:id/test', async (req, res) => {
   }
 });
 
-// POST /api/admin/newsletter/sends/:id/send — send to all active subscribers
+// POST /api/admin/newsletter/sends/:id/send — send to all matching active subscribers
 router.post('/sends/:id/send', async (req, res) => {
   try {
-    if (!sendgrid.isConfigured()) return res.status(400).json({ error: 'SendGrid not configured (SENDGRID_API_KEY missing)' });
-
-    const send = await db('newsletter_sends').where({ id: req.params.id }).first();
-    if (!send) return res.status(404).json({ error: 'not found' });
-    if (send.status !== 'draft') return res.status(400).json({ error: 'already sent or in progress' });
-    if (!send.html_body && !send.text_body) return res.status(400).json({ error: 'body required' });
-
-    // Mark sending before we start — prevents a double-click double-send.
-    await db('newsletter_sends').where({ id: send.id }).update({ status: 'sending', updated_at: new Date() });
-
-    const subscribers = await db('newsletter_subscribers').where({ status: 'active' });
-    logger.info(`[newsletter] Starting send ${send.id} to ${subscribers.length} active subscribers via SendGrid`);
-
-    // Pre-seed deliveries so the SendGrid event webhook can upsert by message id.
-    const deliveryRows = subscribers.map((s) => ({
-      send_id: send.id,
-      subscriber_id: s.id,
-      email: s.email,
-      status: 'queued',
-    }));
-    if (deliveryRows.length) {
-      await db('newsletter_send_deliveries').insert(deliveryRows).onConflict(['send_id', 'subscriber_id']).ignore();
-    }
-
-    // Inject the unsubscribe footer with a substitution placeholder. SendGrid
-    // expands {{unsubscribe_url}} per recipient via personalizations.substitutions.
-    const htmlWithFooter = sendgrid.injectUnsubscribeFooter(send.html_body || '');
-
-    // SendGrid caps personalizations at 1000 per request. Chunk for safety
-    // and to keep individual requests under the 30s API timeout.
-    let delivered = 0, failed = 0;
-    const chunks = [];
-    for (let i = 0; i < subscribers.length; i += 500) chunks.push(subscribers.slice(i, i + 500));
-
-    for (const chunk of chunks) {
-      const recipients = chunk.map((s) => ({
-        email: s.email,
-        unsubscribeUrl: sendgrid.unsubscribeUrl(s.unsubscribe_token),
-      }));
-
-      try {
-        const result = await sendgrid.sendBatch({
-          recipients,
-          fromEmail: send.from_email,
-          fromName: send.from_name,
-          subject: send.subject,
-          html: htmlWithFooter,
-          text: send.text_body || undefined,
-          replyTo: send.reply_to,
-          categories: ['newsletter', `send_${send.id}`],
-        });
-
-        // SendGrid returns one X-Message-Id for the whole batch; per-recipient
-        // events arrive later via the event webhook (TODO PR 5b).
-        for (const s of chunk) {
-          await db('newsletter_send_deliveries')
-            .where({ send_id: send.id, subscriber_id: s.id })
-            .update({
-              status: 'sent',
-              resend_message_id: result.messageId,  // column reused; renamed in PR for cross-vendor portability
-              sent_at: new Date(),
-              updated_at: new Date(),
-            });
-          delivered++;
-
-          // Dual-write into messages so Customer 360 thread shows the touchpoint —
-          // only when the subscriber is linked to a customer record.
-          if (s.customer_id) {
-            await recordTouchpoint({
-              customerId: s.customer_id,
-              channel: 'newsletter',
-              direction: 'outbound',
-              authorType: 'admin',
-              adminUserId: send.created_by,
-              contactEmail: s.email,
-              subject: send.subject,
-              body: send.text_body || stripHtml(send.html_body),
-              metadata: {
-                send_id: send.id,
-                sendgrid_message_id: result.messageId,
-                campaign_subject: send.subject,
-              },
-            });
-          }
-        }
-      } catch (err) {
-        logger.error(`[newsletter] batch failed for send ${send.id}: ${err.message}`);
-        for (const s of chunk) {
-          await db('newsletter_send_deliveries')
-            .where({ send_id: send.id, subscriber_id: s.id })
-            .update({ status: 'failed', bounce_reason: err.message.slice(0, 500), updated_at: new Date() });
-          failed++;
-        }
-      }
-    }
-
-    await db('newsletter_sends').where({ id: send.id }).update({
-      status: failed === subscribers.length ? 'failed' : 'sent',
-      recipient_count: subscribers.length,
-      delivered_count: delivered,
-      sent_at: new Date(),
-      updated_at: new Date(),
-    });
-
-    res.json({
-      success: true,
-      sendId: send.id,
-      recipients: subscribers.length,
-      delivered,
-      failed,
-    });
+    const result = await NewsletterSender.sendCampaign(req.params.id);
+    res.json({ success: true, sendId: req.params.id, ...result });
   } catch (err) {
     logger.error(`[newsletter] send failed: ${err.message}`, { stack: err.stack });
     try { await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' }); } catch { /* swallow */ }
@@ -357,16 +258,115 @@ router.post('/sends/:id/send', async (req, res) => {
   }
 });
 
-// ── helpers ─────────────────────────────────────────────────────
+// POST /api/admin/newsletter/sends/:id/schedule — mark a draft as scheduled
+router.post('/sends/:id/schedule', async (req, res, next) => {
+  try {
+    const { scheduledFor } = req.body;
+    if (!scheduledFor) return res.status(400).json({ error: 'scheduledFor required (ISO timestamp)' });
+    const when = new Date(scheduledFor);
+    if (Number.isNaN(when.getTime())) return res.status(400).json({ error: 'invalid scheduledFor' });
+    if (when.getTime() <= Date.now()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
 
-function stripHtml(html) {
-  if (!html) return null;
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 10000);
+    const send = await db('newsletter_sends').where({ id: req.params.id }).first();
+    if (!send) return res.status(404).json({ error: 'not found' });
+    if (send.status !== 'draft') return res.status(400).json({ error: 'can only schedule drafts' });
+    if (!send.html_body && !send.text_body) return res.status(400).json({ error: 'body required before scheduling' });
+
+    await db('newsletter_sends').where({ id: send.id }).update({
+      status: 'scheduled',
+      scheduled_for: when,
+      updated_at: new Date(),
+    });
+    const updated = await db('newsletter_sends').where({ id: send.id }).first();
+    res.json({ success: true, send: updated });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/newsletter/sends/:id/cancel-schedule — return a scheduled row to draft
+router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
+  try {
+    const send = await db('newsletter_sends').where({ id: req.params.id }).first();
+    if (!send) return res.status(404).json({ error: 'not found' });
+    if (send.status !== 'scheduled') return res.status(400).json({ error: 'not scheduled' });
+    await db('newsletter_sends').where({ id: send.id }).update({
+      status: 'draft',
+      scheduled_for: null,
+      updated_at: new Date(),
+    });
+    const updated = await db('newsletter_sends').where({ id: send.id }).first();
+    res.json({ success: true, send: updated });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/newsletter/segment-preview — count subscribers matching a segment
+router.post('/segment-preview', async (req, res, next) => {
+  try {
+    const count = await NewsletterSender.buildSubscriberQuery(req.body.segmentFilter || null).count('* as c').first();
+    res.json({ count: Number(count?.c || 0) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/newsletter/draft-ai — Claude drafts a newsletter
+// Body: { prompt, audience?, tone?, includeCTA? }
+router.post('/draft-ai', async (req, res) => {
+  try {
+    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+      return res.status(400).json({ error: 'Anthropic API not configured' });
+    }
+    const { prompt, audience, tone, includeCTA } = req.body;
+    if (!prompt || prompt.trim().length < 8) {
+      return res.status(400).json({ error: 'prompt required (min 8 chars)' });
+    }
+
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    const systemPrompt = `You draft email newsletters for Waves Pest Control, a family-owned pest control + lawn care company in Southwest Florida (Bradenton, Parrish, Palmetto, Sarasota, Venice, North Port).
+
+VOICE:
+- Warm, neighborly, no corporate jargon
+- Short sentences. Short paragraphs (2-4 sentences).
+- Owner-operator voice: "we", "our team", "our trucks"
+- SWFL-specific when it makes sense: sandy soil, afternoon thunderstorms, St. Augustine grass, no-see-ums, German roaches, subterranean termites, chinch bugs
+
+FORMAT (HTML body):
+- Lead with a strong opening line that hooks
+- 2-4 short sections, each with an <h2>
+- Short paragraphs in <p> tags
+- Use <ul><li> for any list
+- ${includeCTA ? 'End with ONE clear call to action (book, call, reply)' : 'End with a friendly sign-off — no hard CTA'}
+- NO unsubscribe footer (appended automatically)
+- NO <html>/<head>/<body> wrapper — just the content markup
+
+Return STRICT JSON with these keys:
+{
+  "subject": "string, 30-65 chars, no clickbait, no ALL CAPS",
+  "previewText": "string, 50-110 chars, complements subject without repeating",
+  "htmlBody": "string, the HTML body as described",
+  "textBody": "string, plain-text version of the same content"
 }
+No prose outside the JSON.`;
+
+    const userPrompt = `Topic / prompt: ${prompt}
+${audience ? `Audience: ${audience}` : ''}
+${tone ? `Tone: ${tone}` : ''}`;
+
+    const response = await anthropic.messages.create({
+      model: MODELS.WORKHORSE,
+      max_tokens: 2000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    });
+
+    const text = response.content?.[0]?.text || '';
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('Claude did not return JSON');
+
+    const draft = JSON.parse(jsonMatch[0]);
+    res.json({ success: true, draft });
+  } catch (err) {
+    logger.error(`[newsletter] draft-ai failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;

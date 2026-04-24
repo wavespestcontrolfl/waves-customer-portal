@@ -80,6 +80,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY MIN — Newsletter scheduled sends (dispatches any whose scheduled_for
+  // has passed). Intentionally high-frequency so "send at 8:00am" fires close
+  // to the minute. Per-tick work is a single indexed query on newsletter_sends.
+  // =========================================================================
+  cron.schedule('* * * * *', async () => {
+    try {
+      const NewsletterSender = require('./newsletter-sender');
+      await NewsletterSender.processScheduledSends();
+    } catch (err) {
+      logger.error(`Newsletter scheduler tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Appointment reminders (72h, 24h) from appointment_reminders table
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
