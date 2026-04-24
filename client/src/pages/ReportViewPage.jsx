@@ -1,3 +1,4 @@
+import Icon from '../components/Icon';
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
@@ -26,7 +27,7 @@ export default function ReportViewPage() {
   if (!data || data.error) return (
     <div style={{ minHeight: '100vh', background: B.blueDark, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
-        <div style={{ fontSize: 32 }}>📄</div>
+        <div style={{ fontSize: 32 }}></div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>Report not found</div>
         <a href="tel:+19412975749" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 297-5749</a>
       </div>
@@ -108,16 +109,16 @@ export default function ReportViewPage() {
           {(data.measurements?.soilTemp || data.measurements?.thatch) && (
             <div style={{ marginTop: 14, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               {data.measurements.soilTemp && (
-                <div style={{ fontSize: 12, color: B.grayDark }}>🌡️ Soil: {data.measurements.soilTemp}°F</div>
+                <div style={{ fontSize: 12, color: B.grayDark }}> Soil: {data.measurements.soilTemp}°F</div>
               )}
               {data.measurements.thatch && (
-                <div style={{ fontSize: 12, color: B.grayDark }}>📏 Thatch: {data.measurements.thatch}"</div>
+                <div style={{ fontSize: 12, color: B.grayDark }}> Thatch: {data.measurements.thatch}"</div>
               )}
               {data.measurements.soilPh && (
-                <div style={{ fontSize: 12, color: B.grayDark }}>⚗️ pH: {data.measurements.soilPh}</div>
+                <div style={{ fontSize: 12, color: B.grayDark }}> pH: {data.measurements.soilPh}</div>
               )}
               {data.measurements.moisture && (
-                <div style={{ fontSize: 12, color: B.grayDark }}>💧 Moisture: {data.measurements.moisture}</div>
+                <div style={{ fontSize: 12, color: B.grayDark }}> Moisture: {data.measurements.moisture}</div>
               )}
             </div>
           )}
@@ -136,7 +137,7 @@ export default function ReportViewPage() {
             borderRadius: 999, background: B.yellow, color: B.blueDeeper,
             textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
             fontWeight: 800,
-          }}>💬 Text Us — (941) 297-5749</a>
+          }}> Text Us — (941) 297-5749</a>
         </div>
 
         <BrandFooter />

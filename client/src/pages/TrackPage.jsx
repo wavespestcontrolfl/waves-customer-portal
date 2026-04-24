@@ -1,3 +1,4 @@
+import Icon from '../components/Icon';
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
@@ -120,7 +121,7 @@ function TechBlock({ tech, size = 'md' }) {
           background: W.bluePale,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: px * 0.5, color: W.blueBright,
-        }}>🌊</div>
+        }}></div>
         <div style={{ fontSize: 18, fontWeight: 600 }}>Your Waves technician</div>
       </div>
     );
@@ -348,7 +349,7 @@ function SkeletonCard() {
 function NotFoundCard() {
   return (
     <Card>
-      <div style={{ fontSize: 32, textAlign: 'center' }}>🌊</div>
+      <div style={{ fontSize: 32, textAlign: 'center' }}></div>
       <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
         Tracking link unavailable
       </div>

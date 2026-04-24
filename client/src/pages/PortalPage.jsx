@@ -6,6 +6,7 @@ import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import BrandFooter from '../components/BrandFooter';
+import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
@@ -595,7 +596,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: 16,
           }}>
-            {neighborBenchmark.percentile.includes('top 25') ? '🏆' : neighborBenchmark.percentile.includes('top 50') ? '⭐' : '📊'}
+            {neighborBenchmark.percentile.includes('top 25') ? '' : neighborBenchmark.percentile.includes('top 50') ? '⭐' : ''}
           </div>
           <div>
             <div style={{ fontSize: 12, fontWeight: 700, color: B.navy }}>
@@ -693,7 +694,7 @@ function BadgeRow({ badges, earnedCount, totalCount, onViewAll }) {
               <span style={{
                 position: 'absolute', top: -3, right: -3,
                 fontSize: 10, color: B.yellow, lineHeight: 1,
-              }}>★</span>
+              }}></span>
             )}
           </div>
         ))}
@@ -735,7 +736,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
         backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
         borderRadius: 16, padding: 20, color: '#fff', textAlign: 'center',
       }}>
-        <div style={{ fontSize: 32 }}>🏅</div>
+        <div style={{ fontSize: 32 }}></div>
         <div style={{ fontSize: 22, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em', marginTop: 4 }}>{earnedCount} Badges Earned</div>
         <div style={{ fontSize: 13, color: B.blueLight, marginTop: 4 }}>out of {badges.length} total</div>
         <div style={{
@@ -781,13 +782,13 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                         fontSize: 10, background: B.grayMid, color: '#fff',
                         width: 16, height: 16, borderRadius: '50%',
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      }}>🔒</div>
+                      }}></div>
                     )}
                     {b.reward && (
                       <span style={{
                         position: 'absolute', top: -3, right: -3,
                         fontSize: 11, color: B.yellow, lineHeight: 1,
-                      }}>★</span>
+                      }}></span>
                     )}
                   </div>
                   <div style={{
@@ -796,7 +797,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}>{b.title}</div>
                   {b.reward && (
-                    <div style={{ fontSize: 8, color: B.yellow, fontWeight: 700, marginTop: 1 }}>★ Reward</div>
+                    <div style={{ fontSize: 8, color: B.yellow, fontWeight: 700, marginTop: 1 }}> Reward</div>
                   )}
                   {b.earned && b.earnedAt && (
                     <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2 }}>
@@ -843,14 +844,14 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
             {selected.earned ? (
               <>
                 <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 12 }}>
-                  ✓ Earned {selected.earnedAt ? new Date(selected.earnedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
+                   Earned {selected.earnedAt ? new Date(selected.earnedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
                 </div>
                 {selected.reward && (
                   <div style={{
                     marginTop: 10, padding: '8px 12px', borderRadius: 8,
                     background: `${B.yellow}20`, border: '1px solid #DAA520',
                   }}>
-                    <div style={{ fontSize: 11, color: B.yellow, fontWeight: 700 }}>★ Reward unlocked: {selected.reward.description}</div>
+                    <div style={{ fontSize: 11, color: B.yellow, fontWeight: 700 }}> Reward unlocked: {selected.reward.description}</div>
                   </div>
                 )}
               </>
@@ -878,7 +879,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                     marginTop: 10, padding: '8px 12px', borderRadius: 8,
                     background: `${B.yellow}20`, border: `1px solid ${B.yellow}33`,
                   }}>
-                    <div style={{ fontSize: 11, color: B.blueDeeper, fontWeight: 600 }}>★ Unlock reward: {selected.reward.description}</div>
+                    <div style={{ fontSize: 11, color: B.blueDeeper, fontWeight: 600 }}> Unlock reward: {selected.reward.description}</div>
                   </div>
                 )}
               </>
@@ -967,7 +968,7 @@ function BadgeCelebrationToast({ badges }) {
             }}>{b.icon}</div>
             <div>
               <div style={{ fontSize: 11, color: isReward ? B.yellow : B.yellow, fontWeight: 700 }}>
-                {isReward ? '★ Reward Badge Earned!' : '🎉 New Badge Earned!'}
+                {isReward ? ' Reward Badge Earned!' : ' New Badge Earned!'}
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{b.title}</div>
               {isReward && b.reward && (
@@ -1029,7 +1030,7 @@ function PromotionCards() {
         border: `2px solid ${B.green}22`,
         textAlign: 'center',
       }}>
-        <div style={{ fontSize: 28 }}>🛡️</div>
+        <div style={{ fontSize: 28 }}></div>
         <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>
           You're Fully Protected
         </div>
@@ -1043,9 +1044,9 @@ function PromotionCards() {
   if (!promoData.promotions?.length) return null;
 
   const urgencyConfig = {
-    peak: { badge: '🔥 Peak Season', color: B.orange, bg: `${B.orange}20`, borderColor: B.orange },
-    high: { badge: '📈 Rising', color: B.orange, bg: `${B.orange}20`, borderColor: B.orange },
-    moderate: { badge: '📋 Recommended', color: B.teal, bg: `${B.bluePale}20`, borderColor: B.teal },
+    peak: { badge: ' Peak Season', color: B.orange, bg: `${B.orange}20`, borderColor: B.orange },
+    high: { badge: ' Rising', color: B.orange, bg: `${B.orange}20`, borderColor: B.orange },
+    moderate: { badge: ' Recommended', color: B.teal, bg: `${B.bluePale}20`, borderColor: B.teal },
   };
 
   return (
@@ -1071,7 +1072,7 @@ function PromotionCards() {
                 <button onClick={() => handleDismiss(promo.id)} style={{
                   background: 'none', border: 'none', cursor: 'pointer',
                   color: B.grayMid, fontSize: 18, padding: 0, lineHeight: 1,
-                }} title="Dismiss">✕</button>
+                }} title="Dismiss"></button>
               </div>
 
               {/* Title & description */}
@@ -1143,7 +1144,7 @@ function PromotionCards() {
                   marginTop: 12, padding: 13, borderRadius: 50, textAlign: 'center',
                   background: `${B.green}20`, color: B.green, fontSize: 14, fontWeight: 700,
                 }}>
-                  ✓ We'll follow up within 24 hours!
+                   We'll follow up within 24 hours!
                 </div>
               )}
             </div>
@@ -1537,7 +1538,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               {/* PHASE: Review prompt (8-10) */}
               {satPhase === 'review' && (
                 <div style={{ textAlign: 'center' }}>
-                  <div style={{ fontSize: 36, marginBottom: 8 }}>🎉</div>
+                  <div style={{ fontSize: 36, marginBottom: 8 }}></div>
                   <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
                     Awesome — {satRating}/10!
                   </div>
@@ -1566,7 +1567,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               {satPhase === 'feedback' && (
                 <>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                    <span style={{ fontSize: 24 }}>💬</span>
+                    <Icon name="chat" size={24} strokeWidth={1.75} />
                     <div>
                       <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
                         {satRating <= 3 ? "We're sorry to hear that." : "Thanks for the honest feedback."}
@@ -1609,7 +1610,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               {/* PHASE: Thank you */}
               {satPhase === 'thanks' && (
                 <div style={{ textAlign: 'center', padding: '8px 0' }}>
-                  <span style={{ fontSize: 32 }}>🙏</span>
+                  <Icon name="hand" size={28} strokeWidth={1.75} />
                   <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 6 }}>
                     Thank you for your feedback.
                   </div>
@@ -1660,7 +1661,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           margin: 0,
           textShadow: '0 2px 12px rgba(0,0,0,0.25)',
         }}>
-          {customer.firstName}! 👋
+          {customer.firstName}! 
         </h1>
         {tier && (
           <div style={{
@@ -1672,7 +1673,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             color: '#fff',
             border: 'none',
             textShadow: '0 1px 3px rgba(0,0,0,0.3)',
-          }}>🛡️ WaveGuard {customer.tier}</div>
+          }}> WaveGuard {customer.tier}</div>
         )}
         <div style={{ position: 'relative', zIndex: 1, marginTop: 12, fontSize: 13, color: '#fff', lineHeight: 1.6 }}>
           {customer.address?.line1}, {customer.address?.city}, {customer.address?.state} {customer.address?.zip}<br/>
@@ -1685,10 +1686,10 @@ function DashboardTab({ customer, onSwitchTab }) {
         display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10,
       }}>
         {[
-          { icon: '🔧', label: 'Request Service', action: () => onSwitchTab?.('request') },
-          { icon: '💬', label: 'Message Us', action: () => onSwitchTab?.('messages') },
-          { icon: '💳', label: 'Pay Now', action: () => onSwitchTab?.('billing') },
-          { icon: '🎁', label: 'Refer a Friend', action: () => onSwitchTab?.('refer') },
+          { icon: 'wrench', label: 'Request Service', action: () => onSwitchTab?.('request') },
+          { icon: 'chat', label: 'Message Us', action: () => onSwitchTab?.('messages') },
+          { icon: 'card', label: 'Pay Now', action: () => onSwitchTab?.('billing') },
+          { icon: 'gift', label: 'Refer a Friend', action: () => onSwitchTab?.('refer') },
         ].map((item, i) => (
           <button key={i} onClick={item.action} style={{
             ...BUTTON_BASE, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
@@ -1697,7 +1698,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             color: B.navy, fontSize: 11, fontWeight: 600, fontFamily: FONTS.ui,
             boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
           }}>
-            <span style={{ fontSize: 22 }}>{item.icon}</span>
+            <Icon name={item.icon} size={22} strokeWidth={1.75} />
             {item.label}
           </button>
         ))}
@@ -1736,7 +1737,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <span style={{ fontSize: 26 }}>{isToday ? '🔧' : isTomorrow ? '⏰' : '📅'}</span>
+                <span style={{ fontSize: 26 }}>{isToday ? '' : isTomorrow ? '⏰' : ''}</span>
                 <div>
                   <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, opacity: 0.85, fontFamily: FONTS.ui }}>
                     {isToday ? "Today's Service" : isTomorrow ? 'Tomorrow' : 'Your Next Visit'}
@@ -1787,21 +1788,22 @@ function DashboardTab({ customer, onSwitchTab }) {
                   Communication Timeline
                 </div>
                 {[
-                  { icon: '📲', label: '72-hour reminder', desc: 'SMS 3 days before your visit', done: diffHrs <= 72, active: diffHrs <= 72 && diffHrs > 24 },
-                  { icon: '📲', label: '24-hour reminder', desc: 'SMS the day before your visit', done: diffHrs <= 24, active: diffHrs <= 24 && diffHrs > 1 },
-                  { icon: '🚐', label: 'Tech en route alert', desc: 'Live GPS tracking via Bouncie', done: false, active: isToday },
-                  { icon: '✅', label: 'Service complete summary', desc: 'Products applied + tech notes', done: false, active: false },
+                  { icon: 'smartphone', label: '72-hour reminder', desc: 'SMS 3 days before your visit', done: diffHrs <= 72, active: diffHrs <= 72 && diffHrs > 24 },
+                  { icon: 'smartphone', label: '24-hour reminder', desc: 'SMS the day before your visit', done: diffHrs <= 24, active: diffHrs <= 24 && diffHrs > 1 },
+                  { icon: 'truck', label: 'Tech en route alert', desc: 'Live GPS tracking via Bouncie', done: false, active: isToday },
+                  { icon: 'checkCircle', label: 'Service complete summary', desc: 'Products applied + tech notes', done: false, active: false },
                 ].map((step, i) => (
                   <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: i < 3 ? 10 : 0 }}>
                     <div style={{
                       width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
                       background: step.done ? `${B.green}18` : step.active ? `${B.orange}18` : B.grayLight,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: step.done ? B.green : step.active ? B.orange : B.grayMid,
                       border: step.active ? `1.5px solid ${B.orange}` : step.done ? `1.5px solid ${B.green}` : `1px solid ${B.grayLight}`,
-                    }}>{step.icon}</div>
+                    }}><Icon name={step.icon} size={14} strokeWidth={2} /></div>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 600, color: step.done ? B.green : step.active ? B.orange : B.grayDark }}>
-                        {step.label} {step.done && '✓'}
+                        {step.label} {step.done && ''}
                       </div>
                       <div style={{ fontSize: 11, color: B.grayMid }}>{step.desc}</div>
                     </div>
@@ -1820,12 +1822,12 @@ function DashboardTab({ customer, onSwitchTab }) {
                     ...BUTTON_BASE, padding: '10px 20px', flex: 1,
                     background: B.green, color: '#fff', fontSize: 13,
                     boxShadow: `0 3px 10px ${B.green}30`,
-                  }}>✓ Confirm Appointment</button>
+                  }}> Confirm Appointment</button>
                 ) : (
                   <span style={{
                     padding: '10px 20px', borderRadius: 50, background: `${B.green}20`, flex: 1,
                     color: B.green, fontSize: 13, fontWeight: 700, textAlign: 'center',
-                  }}>✓ Confirmed</span>
+                  }}> Confirmed</span>
                 )}
                 <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType} on ${svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
                   ...BUTTON_BASE, padding: '10px 20px', flex: 1, textDecoration: 'none',
@@ -1845,7 +1847,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           border: `1px solid ${B.bluePale}`, boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-            <span style={{ fontSize: 22 }}>✅</span>
+            <Icon name="checkCircle" size={22} strokeWidth={1.75} />
             <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Last Visit</div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -1887,7 +1889,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           border: `2px solid ${B.teal}33`, boxShadow: '0 4px 20px rgba(0,0,0,0.04)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-            <span style={{ fontSize: 24 }}>💧</span>
+            <Icon name="droplet" size={24} strokeWidth={1.75} />
             <div>
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Irrigation Recommendation</div>
               <div style={{ fontSize: 11, color: B.grayMid }}>From {irrigationRecs[0].tech} · {parseDate(irrigationRecs[0].date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
@@ -1921,7 +1923,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           border: `2px solid ${B.green}22`, boxShadow: '0 4px 20px rgba(0,0,0,0.04)',
           textAlign: 'center',
         }}>
-          <span style={{ fontSize: 32 }}>🌱</span>
+          <Icon name="sprout" size={28} strokeWidth={1.75} />
           <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>Lawn Health Tracking</div>
           <div style={{ fontSize: 13, color: B.grayMid, marginTop: 6, lineHeight: 1.6 }}>
             Your lawn health tracking will begin after your first assessment visit.
@@ -1935,9 +1937,9 @@ function DashboardTab({ customer, onSwitchTab }) {
       {/* Quick stats */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         {[
-          { label: 'Monthly Rate', value: `$${customer.monthlyRate}`, sub: `${tier?.discount || '0%'} discount`, icon: '💰' },
-          { label: 'Next Service', value: nextService ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—', sub: nextService?.serviceType || '', icon: '📅' },
-          { label: 'Services YTD', value: stats?.servicesYTD ?? '...', sub: stats?.celsiusApplicationsThisYear != null ? `Weed treatments: ${stats.celsiusApplicationsThisYear} of ${stats.celsiusMaxPerYear || 3} annual` : '', icon: '📋' },
+          { label: 'Monthly Rate', value: `$${customer.monthlyRate}`, sub: `${tier?.discount || '0%'} discount`, icon: 'money' },
+          { label: 'Next Service', value: nextService ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—', sub: nextService?.serviceType || '', icon: 'calendar' },
+          { label: 'Services YTD', value: stats?.servicesYTD ?? '...', sub: stats?.celsiusApplicationsThisYear != null ? `Weed treatments: ${stats.celsiusApplicationsThisYear} of ${stats.celsiusMaxPerYear || 3} annual` : '', icon: 'clipboard' },
           { label: 'Member Since', value: customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—', sub: '', icon: '⭐' },
         ].map((s, i) => (
           <div key={i} style={{
@@ -1963,7 +1965,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             border: `1.5px solid ${B.wavesBlue}22`,
             display: 'flex', alignItems: 'center', gap: 14,
           }}>
-            <span style={{ fontSize: 28 }}>🎖️</span>
+            <Icon name="medal" size={28} strokeWidth={1.75} />
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 13, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Your WaveGuard Rewards</div>
               <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2, lineHeight: 1.5 }}>
@@ -1985,7 +1987,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         borderRadius: 16, padding: 20, color: '#fff',
         display: 'flex', alignItems: 'center', gap: 14,
       }}>
-        <div style={{ fontSize: 36 }}>🎁</div>
+        <div style={{ fontSize: 36 }}></div>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 15, fontWeight: 800, fontFamily: FONTS.heading }}>
             {referralStats && referralStats.totalReferrals > 0
@@ -2287,7 +2289,7 @@ function ServicesTab() {
                               fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6,
                               marginBottom: 10,
                             }}>
-                              {'🔄'} Callback — included with your Gold WaveGuard
+                              <Icon name="refresh" size={16} strokeWidth={1.75} /> Callback — included with your Gold WaveGuard
                             </div>
                           </div>
                         )}
@@ -2312,10 +2314,10 @@ function ServicesTab() {
                           <div style={{ padding: '12px 18px', background: B.blueSurface, borderBottom: `1px solid ${B.grayLight}` }}>
                             <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 6 }}>Conditions & Measurements</div>
                             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                              {s.soilTemp && <div style={{ fontSize: 12, color: B.navy }}>{'🌡️'} Soil Temp: <strong>{s.soilTemp}°F</strong></div>}
-                              {s.soilPh && <div style={{ fontSize: 12, color: B.navy }}>{'⚗️'} pH: <strong>{s.soilPh}</strong></div>}
-                              {s.thatchMeasurement && <div style={{ fontSize: 12, color: B.navy }}>{'📏'} Thatch: <strong>{s.thatchMeasurement}"</strong></div>}
-                              {s.soilMoisture && <div style={{ fontSize: 12, color: B.navy }}>{'💧'} Moisture: <strong>{s.soilMoisture}</strong></div>}
+                              {s.soilTemp && <div style={{ fontSize: 12, color: B.navy }}><Icon name="thermometer" size={16} strokeWidth={1.75} /> Soil Temp: <strong>{s.soilTemp}°F</strong></div>}
+                              {s.soilPh && <div style={{ fontSize: 12, color: B.navy }}><Icon name="flask" size={16} strokeWidth={1.75} /> pH: <strong>{s.soilPh}</strong></div>}
+                              {s.thatchMeasurement && <div style={{ fontSize: 12, color: B.navy }}><Icon name="ruler" size={16} strokeWidth={1.75} /> Thatch: <strong>{s.thatchMeasurement}"</strong></div>}
+                              {s.soilMoisture && <div style={{ fontSize: 12, color: B.navy }}><Icon name="droplet" size={16} strokeWidth={1.75} /> Moisture: <strong>{s.soilMoisture}</strong></div>}
                             </div>
                           </div>
                         )}
@@ -2367,7 +2369,7 @@ function ServicesTab() {
                         {s.hasPhotos && (
                           <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
                             <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 8 }}>
-                              {'📷'} Service Photos ({s.photoCount})
+                              <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
                             {!photoMap[s.id] ? (
                               <div style={{ fontSize: 12, color: B.grayMid }}>Loading photos…</div>
@@ -2401,7 +2403,7 @@ function ServicesTab() {
                         {/* Precautions */}
                         <div style={{ padding: '12px 18px', background: `${B.yellow}20`, borderBottom: `1px solid ${B.grayLight}` }}>
                           <div style={{ fontSize: 11, color: '#F57F17', lineHeight: 1.5 }}>
-                            {'⚠️'} Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 297-5749.
+                            <Icon name="warning" size={16} strokeWidth={1.75} /> Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 297-5749.
                           </div>
                         </div>
 
@@ -2419,7 +2421,7 @@ function ServicesTab() {
                                 borderRadius: 8,
                               }}
                             >
-                              {'📄'} Download PDF
+                              <Icon name="document" size={16} strokeWidth={1.75} /> Download PDF
                             </a>
                             <div style={{ fontSize: 10, color: B.grayMid }}>Waves Pest Control · (941) 297-5749</div>
                           </div>
@@ -2643,7 +2645,7 @@ function ScheduleTab({ customer }) {
           color: B.green, fontSize: 12, fontWeight: 700, textAlign: 'center',
           display: 'inline-flex', alignItems: 'center', gap: 4,
         }}>
-          {'✓'} Confirmed{ts ? ` ${formatConfirmTs(ts)}` : ''}
+          <Icon name="check" size={16} strokeWidth={1.75} /> Confirmed{ts ? ` ${formatConfirmTs(ts)}` : ''}
         </span>
       );
     }
@@ -2653,7 +2655,7 @@ function ScheduleTab({ customer }) {
         ...BUTTON_BASE, padding: compact ? '6px 14px' : '9px 18px', flex: compact ? undefined : 1,
         background: B.yellow, color: B.blueDeeper, fontSize: 12,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
-      }}>{busy ? 'Confirming…' : `${'✓'} Confirm`}</button>
+      }}>{busy ? 'Confirming…' : `$<Icon name="check" size={16} strokeWidth={1.75} /> Confirm`}</button>
     );
   };
 
@@ -2685,7 +2687,7 @@ function ScheduleTab({ customer }) {
                 animation: 'schedPulse 2s ease-in-out infinite', flexShrink: 0,
               }} />
             ) : (
-              <span style={{ fontSize: 22 }}>{isOrange ? '⏰' : '📅'}</span>
+              <span style={{ fontSize: 22 }}>{isOrange ? '⏰' : ''}</span>
             )}
             <div>
               <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, opacity: 0.85 }}>
@@ -2729,21 +2731,22 @@ function ScheduleTab({ customer }) {
               You'll hear from us
             </div>
             {[
-              { icon: '📲', label: '72-hour SMS reminder', time: '3 days before your visit', done: s.diffHrs <= 72 },
-              { icon: '📲', label: '24-hour SMS reminder', time: 'Day before your visit', done: s.diffHrs <= 24 },
-              { icon: '🚐', label: 'Tech en route', time: '~1 hour before arrival · Live Bouncie GPS', done: false, active: s.isToday },
-              { icon: '✅', label: 'Service complete report', time: 'Products used + tech notes texted to you', done: false },
+              { icon: 'smartphone', label: '72-hour SMS reminder', time: '3 days before your visit', done: s.diffHrs <= 72 },
+              { icon: 'smartphone', label: '24-hour SMS reminder', time: 'Day before your visit', done: s.diffHrs <= 24 },
+              { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival · Live Bouncie GPS', done: false, active: s.isToday },
+              { icon: 'checkCircle', label: 'Service complete report', time: 'Products used + tech notes texted to you', done: false },
             ].map((step, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < 3 ? 8 : 0 }}>
                 <div style={{
                   width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
                   background: step.done ? `${B.green}18` : step.active ? `${B.orange}18` : B.grayLight,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: step.done ? B.green : step.active ? B.orange : B.grayMid,
                   border: step.done ? `1.5px solid ${B.green}` : step.active ? `1.5px solid ${B.orange}` : 'none',
-                }}>{step.icon}</div>
+                }}><Icon name={step.icon} size={12} strokeWidth={2} /></div>
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 600, color: step.done ? B.green : step.active ? B.orange : B.grayDark }}>
-                    {step.label} {step.done && '✓'}
+                    {step.label} {step.done && ''}
                   </div>
                   <div style={{ fontSize: 10, color: B.grayMid }}>{step.time}</div>
                 </div>
@@ -2818,7 +2821,7 @@ function ScheduleTab({ customer }) {
           background: B.white, borderRadius: 16, padding: 32, textAlign: 'center',
           border: `1px solid ${B.grayLight}`, boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
         }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>{'🌿'}</div>
+          <div style={{ fontSize: 40, marginBottom: 12 }}><Icon name="leaf" size={16} strokeWidth={1.75} /></div>
           <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>No upcoming services scheduled</div>
           <div style={{ fontSize: 13, color: B.grayMid, lineHeight: 1.6 }}>
             Your next quarterly pest treatment will be in {nextQuarterName}.
@@ -2879,18 +2882,18 @@ function ScheduleTab({ customer }) {
             background: `linear-gradient(135deg, ${B.blueDark}, ${B.wavesBlue})`,
             padding: '14px 20px', color: '#fff',
           }}>
-            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: FONTS.heading }}>📱 SMS Notifications</div>
+            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: FONTS.heading }}> SMS Notifications</div>
             <div style={{ fontSize: 11, color: B.blueLight, marginTop: 2 }}>Powered by Twilio · We'll never show up unannounced</div>
           </div>
           <div style={{ padding: '6px 20px 16px' }}>
             <div style={{ fontSize: 11, color: B.grayMid, padding: '10px 0 6px' }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
             {[
-              { key: 'serviceReminder72h', label: '72-Hour Appointment Reminder', desc: 'Get a text 3 days before every visit', icon: '📲', locked: false, defaultOn: true },
-              { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: '📲', locked: true },
-              { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: '🚐', locked: true },
-              { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: '✅', locked: true },
-              { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: '💳', locked: false },
-              { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: '🌴', locked: false },
+              { key: 'serviceReminder72h', label: '72-Hour Appointment Reminder', desc: 'Get a text 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
+              { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: 'smartphone', locked: true },
+              { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: true },
+              { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
+              { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
+              { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
             ].map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
               return (
@@ -2900,7 +2903,7 @@ function ScheduleTab({ customer }) {
                   borderBottom: i < 5 ? `1px solid ${B.grayLight}` : 'none',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
-                    <span style={{ fontSize: 18 }}>{p.icon}</span>
+                    <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     <div>
                       <div style={{ fontSize: 13, color: B.navy, fontWeight: 600 }}>{p.label}</div>
                       <div style={{ fontSize: 11, color: B.grayMid }}>{p.desc}</div>
@@ -2924,7 +2927,7 @@ function ScheduleTab({ customer }) {
                       }} />
                     </div>
                     {p.locked && (
-                      <span style={{ fontSize: 8, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.3 }}>🔒 Locked</span>
+                      <span style={{ fontSize: 8, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.3 }}> Locked</span>
                     )}
                   </div>
                 </div>
@@ -3264,7 +3267,7 @@ function BillingTab({ customer }) {
         borderRadius: 16, padding: 20, border: `1.5px solid ${tier?.color || B.navy}44`,
         position: 'relative', overflow: 'hidden',
       }}>
-        <div style={{ position: 'absolute', top: -20, right: -20, fontSize: 80, opacity: 0.08 }}>🛡️</div>
+        <div style={{ position: 'absolute', top: -20, right: -20, fontSize: 80, opacity: 0.08 }}></div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
           <span style={{
             fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
@@ -3438,9 +3441,9 @@ function BillingTab({ customer }) {
             </div>
           )}
           {[
-            { label: 'Referral Credits', items: referralCredits, icon: '🤝' },
-            { label: 'Service Credits', items: serviceCredits, icon: '🔧' },
-            { label: 'Promo Credits', items: promoCredits, icon: '🎉' },
+            { label: 'Referral Credits', items: referralCredits, icon: 'hand' },
+            { label: 'Service Credits', items: serviceCredits, icon: 'wrench' },
+            { label: 'Promo Credits', items: promoCredits, icon: 'party' },
           ].filter(g => g.items.length > 0).map(group => (
             <div key={group.label} style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
@@ -3634,7 +3637,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
           position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
           background: 'none', border: 'none', cursor: 'pointer', fontSize: 16,
           color: B.grayMid, padding: 4,
-        }}>{show ? '🙈' : '👁️'}</button>
+        }}>{show ? '' : '️'}</button>
       </div>
     </div>
   );
@@ -3715,7 +3718,7 @@ function ServicePrefsSection() {
   ];
 
   return (
-    <PropertySection title="🛠️ Service preferences">
+    <PropertySection title=" Service preferences">
       <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10, lineHeight: 1.5 }}>
         Both on by default. Toggle either off if you'd rather skip it — we'll update your next work order and the office will be notified.
       </div>
@@ -3861,7 +3864,7 @@ function PropertyTab({ customer }) {
           transition: 'opacity 0.3s',
           opacity: saveStatus ? 1 : 0,
         }}>
-          {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'error' ? 'Save failed — try again' : 'Saved ✓'}
+          {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'error' ? 'Save failed — try again' : 'Saved '}
         </div>
       )}
 
@@ -3918,7 +3921,7 @@ function PropertyTab({ customer }) {
       <ServicePrefsSection />
 
       {/* SECTION 1 — Access & Gate Codes */}
-      <PropertySection title="🔑 Access & Gate Codes">
+      <PropertySection title=" Access & Gate Codes">
         <PasswordField
           label="Neighborhood / Community Gate Code"
           value={prefs.neighborhoodGateCode}
@@ -3949,12 +3952,12 @@ function PropertyTab({ customer }) {
           {textArea('parkingNotes', 'e.g., Park in driveway, HOA enforces no street parking')}
         </div>
         <div style={{ fontSize: 11, color: B.grayMid, fontStyle: 'italic', marginTop: 4 }}>
-          🔒 Only visible to your assigned technician on service day
+           Only visible to your assigned technician on service day
         </div>
       </PropertySection>
 
       {/* SECTION 2 — Pets */}
-      <PropertySection title="🐾 Pets">
+      <PropertySection title=" Pets">
         <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>How many pets?</div>
           <NumberStepper value={prefs.petCount} onChange={v => {
@@ -4104,8 +4107,8 @@ function PropertyTab({ customer }) {
             value={prefs.contactPreference}
             onChange={v => updateField('contactPreference', v)}
             options={[
-              { value: 'call', label: '📞 Call' }, { value: 'text', label: '💬 Text' },
-              { value: 'email', label: '📧 Email' },
+              { value: 'call', label: ' Call' }, { value: 'text', label: ' Text' },
+              { value: 'email', label: ' Email' },
             ]}
           />
         </div>
@@ -4153,7 +4156,7 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       {/* SECTION 4 — Irrigation */}
-      <PropertySection title="💧 Irrigation">
+      <PropertySection title=" Irrigation">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>Has irrigation system?</div>
           <div onClick={() => updateField('irrigationSystem', !prefs.irrigationSystem)} style={{
@@ -4234,7 +4237,7 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       {/* SECTION 5 — HOA Information */}
-      <PropertySection title="🏘️ HOA Information">
+      <PropertySection title=" HOA Information">
         {textInput('hoaName', 'e.g., Sandpiper Bay HOA', 'HOA Name')}
         {textInput('hoaCompany', 'e.g., FirstService Residential', 'HOA Management Company')}
         {textInput('hoaPhone', 'e.g., (239) 555-0100', 'HOA Contact Phone')}
@@ -4250,12 +4253,12 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       {/* SECTION 6 — Access Notes */}
-      <PropertySection title="🚪 Access Notes">
+      <PropertySection title=" Access Notes">
         {textArea('accessNotes', "e.g., Please don't ring doorbell — baby sleeping during morning appointments", 2)}
       </PropertySection>
 
       {/* SECTION 7 — Anything Else */}
-      <PropertySection title="📝 Anything Else">
+      <PropertySection title=" Anything Else">
         {textArea('specialInstructions', 'Anything else your technician should know about your property...', 4)}
       </PropertySection>
     </div>
@@ -4267,37 +4270,37 @@ function PropertyTab({ customer }) {
 // =========================================================================
 const ARTICLES = [
   {
-    id: 1, icon: '🐜', category: 'Pests',
+    id: 1, icon: 'bug', category: 'Pests',
     title: 'Why Ghost Ants Love Your Kitchen',
     summary: 'Ghost ants are one of the most common indoor pests in Southwest Florida. They\'re attracted to moisture and sweet foods, and their tiny size (1.3mm) lets them slip through the smallest cracks.',
     tips: ['Keep counters wiped down — even small crumbs attract them', 'Fix any dripping faucets or pipes', 'Don\'t leave pet food out overnight', 'Our quarterly treatment creates a barrier they can\'t cross'],
   },
   {
-    id: 2, icon: '🌿', category: 'Lawn Care',
+    id: 2, icon: 'leaf', category: 'Lawn Care',
     title: 'Large Patch Fungus in St. Augustine',
     summary: 'Large patch (Rhizoctonia solani) is the #1 disease in St. Augustine lawns in Florida. It shows up as circular brown patches, usually in fall/spring when soil temps are 60-75°F.',
     tips: ['Don\'t water in the evening — morning irrigation only', 'Reduce nitrogen fertilizer during active infection', 'Improve air circulation by trimming overhanging branches', 'We treat with Headway G or Azoxystrobin for proven control'],
   },
   {
-    id: 3, icon: '🦟', category: 'Pests',
+    id: 3, icon: 'bug', category: 'Pests',
     title: 'Mosquito Season in SWFL',
     summary: 'In Southwest Florida, mosquito season runs nearly year-round but peaks June through October. Standing water after rain is their #1 breeding ground.',
     tips: ['Empty saucers, bird baths, and any standing water weekly', 'Keep gutters clear and draining properly', 'Our barrier treatments last 21-30 days per application', 'WaveGuard Gold and Platinum include monthly mosquito service'],
   },
   {
-    id: 4, icon: '🌴', category: 'Lawn Care',
+    id: 4, icon: 'palm', category: 'Lawn Care',
     title: 'Dollar Weed: What It Tells You',
     summary: 'Dollar weed (Hydrocotyle) is actually an indicator plant — it thrives in overwatered areas. If you see it spreading, your irrigation is probably too aggressive.',
     tips: ['Reduce irrigation runtime by 5-10 minutes per zone', 'Water deeply but less frequently (2-3x per week max)', 'We spot-treat with Celsius WG (max 3 applications/year)', 'Proper irrigation is the real long-term fix'],
   },
   {
-    id: 5, icon: '🕷️', category: 'Pests',
+    id: 5, icon: 'bug', category: 'Pests',
     title: 'Spiders Around Your Lanai',
     summary: 'Most spiders in SWFL (banana spiders, orb weavers, wolf spiders) are harmless and actually helpful — they eat other pests. But nobody wants webs all over their lanai.',
     tips: ['Our cobweb sweep is included in every quarterly visit', 'Reducing outdoor lighting at night reduces spider food (bugs)', 'Seal gaps around doors and windows', 'Dangerous species (brown recluse, black widow) are rare but we monitor'],
   },
   {
-    id: 6, icon: '🌱', category: 'Lawn Care',
+    id: 6, icon: 'sprout', category: 'Lawn Care',
     title: 'Chinch Bugs: The Silent Lawn Killer',
     summary: 'Southern chinch bugs cause more damage to St. Augustine lawns in Florida than any other insect. They suck plant juices and inject a toxin that kills the grass.',
     tips: ['Damage looks like drought stress — yellowing then browning at edges', 'Peak season is July-September in the hottest, sunniest spots', 'Thatch buildup over 0.5" increases risk — ask us about dethatching', 'We rotate insecticide modes of action to prevent resistance'],
@@ -4351,9 +4354,9 @@ function WeatherPestWidget({ customer, nextService }) {
   };
 
   const pressureItems = [
-    { label: 'Mosquito Pressure', ...weather.pestPressure.mosquito, icon: '🦟', type: 'mosquito' },
-    { label: 'Fungus Risk', ...weather.pestPressure.fungus, icon: '🍄', type: 'fungus' },
-    { label: 'Chinch Bug Risk', ...weather.pestPressure.chinch, icon: '🐛', type: 'chinch' },
+    { label: 'Mosquito Pressure', ...weather.pestPressure.mosquito, icon: 'bug', type: 'mosquito' },
+    { label: 'Fungus Risk', ...weather.pestPressure.fungus, icon: null, type: 'fungus' },
+    { label: 'Chinch Bug Risk', ...weather.pestPressure.chinch, icon: 'bug', type: 'chinch' },
   ];
 
   return (
@@ -4377,9 +4380,9 @@ function WeatherPestWidget({ customer, nextService }) {
           </div>
         </div>
         <div style={{ fontSize: 48, lineHeight: 1 }}>
-          {weather.forecast?.toLowerCase().includes('rain') || weather.forecast?.toLowerCase().includes('storm') ? '⛈️' :
-           weather.forecast?.toLowerCase().includes('cloud') ? '⛅' :
-           weather.forecast?.toLowerCase().includes('sunny') || weather.forecast?.toLowerCase().includes('clear') ? '☀️' : '🌤️'}
+          {weather.forecast?.toLowerCase().includes('rain') || weather.forecast?.toLowerCase().includes('storm') ? '' :
+           weather.forecast?.toLowerCase().includes('cloud') ? '' :
+           weather.forecast?.toLowerCase().includes('sunny') || weather.forecast?.toLowerCase().includes('clear') ? '' : ''}
         </div>
       </div>
 
@@ -4390,7 +4393,7 @@ function WeatherPestWidget({ customer, nextService }) {
           return (
             <div key={p.label}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <span style={{ fontSize: 12, opacity: 0.9 }}>{p.icon} {p.label}</span>
+                <span style={{ fontSize: 12, opacity: 0.9, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon name={p.icon} size={14} strokeWidth={2} /> {p.label}</span>
                 <span style={{
                   fontSize: 11, fontWeight: 800, letterSpacing: 0.5,
                   padding: '2px 8px', borderRadius: 10,
@@ -4420,7 +4423,7 @@ function WeatherPestWidget({ customer, nextService }) {
         background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.15)',
         display: 'flex', alignItems: 'center', gap: 12,
       }}>
-        <span style={{ fontSize: 24 }}>💧</span>
+        <Icon name="droplet" size={24} strokeWidth={1.75} />
         <div>
           <div style={{ fontSize: 12, fontWeight: 700 }}>
             Irrigation: {weather.irrigationRecommendation.inches}" recommended
@@ -4624,7 +4627,7 @@ function LearnTab({ customer }) {
       {alerts.length > 0 && (
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-            🚨 SWFL Alerts
+             SWFL Alerts
           </div>
           <div style={{ display: 'flex', gap: 10, overflowX: 'auto', WebkitOverflowScrolling: 'touch', paddingBottom: 4 }}>
             {alerts.map((a, i) => (
@@ -4650,7 +4653,7 @@ function LearnTab({ customer }) {
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
-              🌿 From Waves
+               From Waves
             </div>
             {hasMorePosts && !showAllPosts && (
               <button onClick={() => setShowAllPosts(true)} style={{
@@ -4678,7 +4681,7 @@ function LearnTab({ customer }) {
       {expertPosts.length > 0 && (
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-            🔬 From the Experts
+             From the Experts
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {expertPosts.map((p, i) => (
@@ -4692,7 +4695,7 @@ function LearnTab({ customer }) {
       {localNews.length > 0 && (
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
-            📰 Local Suncoast News
+             Local Suncoast News
           </div>
           <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 10 }}>What's happening in SWFL that affects your home</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -4712,7 +4715,7 @@ function LearnTab({ customer }) {
           borderRadius: 16, padding: 20, color: '#fff',
         }}>
           <div style={{ fontSize: 12, color: B.blueLight, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8 }}>
-            🌴 {monthlyTip.month} Homeowner Tip
+             {monthlyTip.month} Homeowner Tip
           </div>
           <div style={{ fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 6 }}>
             {monthlyTip.title}
@@ -4735,10 +4738,10 @@ function LearnTab({ customer }) {
       {filteredFaq.length > 0 || faqSearch.trim() ? (
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-            🧠 Pest & Lawn FAQ
+             Pest & Lawn FAQ
           </div>
           <div style={{ position: 'relative', marginBottom: 12 }}>
-            <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: B.grayMid, pointerEvents: 'none' }}>🔍</span>
+            <Icon name="search" size={14} strokeWidth={1.75} />
             <input
               type="text" value={faqSearch} onChange={e => setFaqSearch(e.target.value)}
               placeholder="Search questions..."
@@ -4808,7 +4811,7 @@ function LearnTab({ customer }) {
               ...BUTTON_BASE, padding: '9px 20px', fontSize: 13, marginTop: 8,
               borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
               display: 'inline-flex',
-            }}>💬 Text Us</a>
+            }}> Text Us</a>
           </div>
         </div>
       ) : null}
@@ -4821,25 +4824,25 @@ function LearnTab({ customer }) {
 // =========================================================================
 const SERVICE_CATALOG = [
   {
-    id: 'pest_control', name: 'Quarterly Pest Control', icon: '🐜',
+    id: 'pest_control', name: 'Quarterly Pest Control', icon: 'bug',
     frequencies: ['Quarterly (4x)', 'Bi-Monthly (6x)', 'Monthly (12x)'],
     basePrice: 55, description: 'Interior + exterior treatment, granular perimeter band, bait station check, cobweb sweep on all eaves',
     products: ['Demand CS', 'Advion WDG Granular', 'Alpine WSG'],
   },
   {
-    id: 'lawn_care', name: 'Lawn Care Program', icon: '🌱',
+    id: 'lawn_care', name: 'Lawn Care Program', icon: 'sprout',
     frequencies: ['4x per year', '6x per year', '9x per year', '12x per year'],
     basePrice: 65, description: 'Fertilization, weed control, fungicide treatments, soil testing, thatch monitoring',
     products: ['Prodiamine 65 WDG', 'Celsius WG', '16-4-8 + Micros', 'Headway G'],
   },
   {
-    id: 'mosquito', name: 'Mosquito Barrier Treatment', icon: '🦟',
+    id: 'mosquito', name: 'Mosquito Barrier Treatment', icon: 'bug',
     frequencies: ['Monthly (Apr–Oct)', 'Year-Round (12x)'],
     basePrice: 45, description: 'Perimeter barrier spray, standing water treatment, foliage and shrub line application',
     products: ['Cyzmic CS', 'Tekko Pro IGR'],
   },
   {
-    id: 'tree_shrub', name: 'Tree & Shrub Program', icon: '🌴',
+    id: 'tree_shrub', name: 'Tree & Shrub Program', icon: 'palm',
     frequencies: ['4x per year', '6x per year'],
     basePrice: 50, description: 'Deep root feeding, insect & disease treatment, palm injections (Arborjet)',
     products: ['Merit 75 WP', 'Keel Fungicide', 'Arborjet TREE-age'],
@@ -4853,11 +4856,11 @@ const SERVICE_CATALOG = [
 ];
 
 const ADD_ONS = [
-  { id: 'palm_injection', name: 'Arborjet Palm Injection', icon: '🌴', price: 35, unit: '/palm', min: '$75/visit minimum', desc: 'Trunk-injected nutrients and pest protection for coconut, queen, and royal palms' },
-  { id: 'top_dressing', name: 'Top Dressing / Dethatching', icon: '🏖️', price: 150, unit: '/service', min: 'Seasonal (fall recommended)', desc: 'Sand top-dressing to improve soil structure + mechanical dethatching when thatch exceeds 0.5"' },
-  { id: 'fire_ant', name: 'Fire Ant Treatment', icon: '🔥', price: 40, unit: '/treatment', min: 'As needed', desc: 'Broadcast granular bait + individual mound drench for aggressive colonies' },
-  { id: 'rodent', name: 'Rodent Bait Stations', icon: '🐀', price: 30, unit: '/month', min: 'Monthly monitoring', desc: 'Tamper-resistant exterior bait stations, monthly monitoring and reporting' },
-  { id: 'wdo_inspection', name: 'WDO Inspection', icon: '📋', price: 250, unit: '', min: 'Real estate transaction?', desc: 'Wood-destroying organism inspection report for real estate closings. FL Form 13645 compliant. Includes full attic, crawl space, and exterior assessment.' },
+  { id: 'palm_injection', name: 'Arborjet Palm Injection', icon: 'palm', price: 35, unit: '/palm', min: '$75/visit minimum', desc: 'Trunk-injected nutrients and pest protection for coconut, queen, and royal palms' },
+  { id: 'top_dressing', name: 'Top Dressing / Dethatching', icon: 'palm', price: 150, unit: '/service', min: 'Seasonal (fall recommended)', desc: 'Sand top-dressing to improve soil structure + mechanical dethatching when thatch exceeds 0.5"' },
+  { id: 'fire_ant', name: 'Fire Ant Treatment', icon: 'flame', price: 40, unit: '/treatment', min: 'As needed', desc: 'Broadcast granular bait + individual mound drench for aggressive colonies' },
+  { id: 'rodent', name: 'Rodent Bait Stations', icon: 'mouse', price: 30, unit: '/month', min: 'Monthly monitoring', desc: 'Tamper-resistant exterior bait stations, monthly monitoring and reporting' },
+  { id: 'wdo_inspection', name: 'WDO Inspection', icon: 'clipboard', price: 250, unit: '', min: 'Real estate transaction?', desc: 'Wood-destroying organism inspection report for real estate closings. FL Form 13645 compliant. Includes full attic, crawl space, and exterior assessment.' },
 ];
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
@@ -4951,7 +4954,7 @@ function MyPlanTab({ customer }) {
   const planTimeline = [];
   if (customer.memberSince) {
     const startDate = parseDate(customer.memberSince);
-    planTimeline.push({ date: startDate, label: `Started ${tierName} WaveGuard`, icon: '🚀' });
+    planTimeline.push({ date: startDate, label: `Started ${tierName} WaveGuard`, icon: 'rocket' });
   }
   if (customer.activity_log) {
     customer.activity_log.forEach(a => {
@@ -4959,7 +4962,7 @@ function MyPlanTab({ customer }) {
         planTimeline.push({ date: parseDate(a.date), label: a.description || `Upgraded to ${a.tier || 'new tier'}`, icon: '⬆️' });
       }
       if (a.type === 'service_added') {
-        planTimeline.push({ date: parseDate(a.date), label: a.description || `Added ${a.service || 'service'}`, icon: '➕' });
+        planTimeline.push({ date: parseDate(a.date), label: a.description || `Added ${a.service || 'service'}`, icon: 'plus' });
       }
     });
   }
@@ -4974,7 +4977,7 @@ function MyPlanTab({ customer }) {
     const startDate = parseDate(customer.memberSince);
     const addDate = new Date(startDate);
     addDate.setMonth(addDate.getMonth() + Math.floor(memberMonths * 0.6));
-    planTimeline.push({ date: addDate, label: 'Added mosquito service', icon: '🦟' });
+    planTimeline.push({ date: addDate, label: 'Added mosquito service', icon: 'bug' });
   }
   planTimeline.sort((a, b) => a.date - b.date);
 
@@ -5039,7 +5042,7 @@ function MyPlanTab({ customer }) {
         borderRadius: 20, padding: '28px 24px', color: tier?.darkText ? B.navy : '#fff',
         position: 'relative', overflow: 'hidden',
       }}>
-        <div style={{ position: 'absolute', top: -30, right: -30, fontSize: 120, opacity: 0.1 }}>🛡️</div>
+        <div style={{ position: 'absolute', top: -30, right: -30, fontSize: 120, opacity: 0.1 }}></div>
         <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.5, opacity: 0.8 }}>Your Plan</div>
         <div style={{ fontSize: 32, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em', marginTop: 4 }}>
           {tierName} WaveGuard
@@ -5061,7 +5064,7 @@ function MyPlanTab({ customer }) {
             display: 'inline-flex', alignItems: 'center', gap: 8,
             fontSize: 13, fontWeight: 600,
           }}>
-            <span style={{ fontSize: 16 }}>📅</span>
+            <Icon name="calendar" size={16} strokeWidth={1.75} />
             Next visit: {parseDate(nextService.date).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
             {nextService.serviceType ? ` (${nextService.serviceType})` : ''}
           </div>
@@ -5137,7 +5140,7 @@ function MyPlanTab({ customer }) {
                         fontSize: 11, fontWeight: 700, marginTop: 3,
                         color: improving ? B.green : B.orange,
                       }}>
-                        🌱 Lawn health: {avg}% {improving ? `(up from ${initialAvg}%)` : `(from ${initialAvg}%)`}
+                         Lawn health: {avg}% {improving ? `(up from ${initialAvg}%)` : `(from ${initialAvg}%)`}
                       </div>
                     );
                   })()}
@@ -5173,7 +5176,7 @@ function MyPlanTab({ customer }) {
                   ))}
                 </div>
                 <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: `${B.green}20`, fontSize: 12, color: B.green, fontWeight: 600 }}>
-                  💰 You save ${annualSavingsForService.toFixed(2)}/year on {svc.name} with your {tierName} discount
+                   You save ${annualSavingsForService.toFixed(2)}/year on {svc.name} with your {tierName} discount
                 </div>
 
                 {/* What's Covered — collapsible */}
@@ -5326,7 +5329,7 @@ function MyPlanTab({ customer }) {
                   background: `${B.green}20`, color: B.green, fontWeight: 600,
                   display: 'flex', alignItems: 'center', gap: 8,
                 }}>
-                  <span style={{ fontSize: 16 }}>✓</span>
+                  <Icon name="check" size={16} strokeWidth={1.75} />
                   Request sent — we'll call to confirm
                 </div>
               ) : (
@@ -5380,7 +5383,7 @@ function MyPlanTab({ customer }) {
                   background: `linear-gradient(135deg, ${t.gradientFrom}, ${t.gradientTo})`,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: 18,
-                }}>🛡️</div>
+                }}></div>
                 <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>{tn}</div>
                 <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, marginTop: 4 }}>{Math.round(disc * 100)}%</div>
                 <div style={{ fontSize: 11, color: B.grayMid }}>discount</div>
@@ -5402,7 +5405,7 @@ function MyPlanTab({ customer }) {
                 ) : i > tierIdx ? (
                   upgradeRequested[tn] ? (
                     <div style={{ marginTop: 10, fontSize: 11, fontWeight: 600, color: B.green, padding: '4px 10px' }}>
-                      ✓ Request sent
+                       Request sent
                     </div>
                   ) : (
                     <div>
@@ -5448,7 +5451,7 @@ function MyPlanTab({ customer }) {
       {/* Section 5 — Annual Savings Summary */}
       <Card style={{ background: `linear-gradient(135deg, ${B.green}12, #E8F5E9)`, border: `1.5px solid ${B.green}33` }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-          <span style={{ fontSize: 32 }}>💰</span>
+          <Icon name="money" size={28} strokeWidth={1.75} />
           <div>
             <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Your Annual Savings</div>
             <div style={{ fontSize: 12, color: B.grayMid }}>With your {tierName} WaveGuard bundle</div>
@@ -5468,7 +5471,7 @@ function MyPlanTab({ customer }) {
       {tier && (
         <Card style={{ border: `1.5px solid ${tier.color}33`, background: `${tier.color}08` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-            <span style={{ fontSize: 32 }}>🎖️</span>
+            <Icon name="medal" size={28} strokeWidth={1.75} />
             <div>
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Loyalty Rewards</div>
               <div style={{ fontSize: 12, color: B.grayMid }}>Your {tierName} membership rewards</div>
@@ -5476,15 +5479,15 @@ function MyPlanTab({ customer }) {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
             {[
-              { text: `$${Math.min(75, Math.round(memberMonths * 6.25))} annual renewal credit (applied to month 13)`, icon: '💰' },
+              { text: `$${Math.min(75, Math.round(memberMonths * 6.25))} annual renewal credit (applied to month 13)`, icon: 'money' },
               tierIdx < TIER_ORDER.length - 1 && {
                 text: `$${tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
                 icon: '⬆️',
               },
-              tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: '🌀' },
+              tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },
             ].filter(Boolean).map((item, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: B.grayDark, lineHeight: 1.5 }}>
-                <span style={{ fontSize: 16, flexShrink: 0 }}>{item.icon}</span>
+                <Icon name={item.icon} size={16} strokeWidth={1.75} style={{ flexShrink: 0 }} />
                 {item.text}
               </div>
             ))}
@@ -5637,7 +5640,7 @@ function MyPlanTab({ customer }) {
 
         {pauseSubmitted && (
           <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.green}20`, fontSize: 13, color: B.green, fontWeight: 600 }}>
-            ✓ Pause request submitted — we'll confirm within 1 business day.
+             Pause request submitted — we'll confirm within 1 business day.
           </div>
         )}
 
@@ -5711,7 +5714,7 @@ function MyPlanTab({ customer }) {
 
         {cancelSubmitted && (
           <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.grayMid}15`, fontSize: 13, color: B.grayDark, fontWeight: 600 }}>
-            ✓ Cancellation request received — we'll reach out to finalize.
+             Cancellation request received — we'll reach out to finalize.
           </div>
         )}
       </div>
@@ -5957,7 +5960,7 @@ function ServiceTracker() {
         {/* Weather badge */}
         {weather && (
           <div style={{ fontSize: 12, color: '#fff', fontWeight: 600, fontFamily: FONTS.ui, textAlign: 'right' }}>
-            {weather.forecast?.toLowerCase().includes('rain') ? '🌧️' : weather.temp >= 85 ? '☀️' : '⛅'} {weather.temp}°F
+            {weather.forecast?.toLowerCase().includes('rain') ? '' : weather.temp >= 85 ? '' : ''} {weather.temp}°F
             {weather.forecast?.toLowerCase().includes('rain') && (
               <div style={{ fontSize: 9, color: B.blueLight, marginTop: 2 }}>Rain possible — tech may adjust timing</div>
             )}
@@ -6019,7 +6022,7 @@ function ServiceTracker() {
                     fontSize: isCurrent ? 22 : 18, fontWeight: 900,
                     color: '#fff', fontFamily: FONTS.ui, lineHeight: 1,
                     textShadow: isCurrent ? '0 1px 3px rgba(0,0,0,0.3)' : 'none',
-                  }}>{isComplete ? '✓' : s.num}</div>
+                  }}>{isComplete ? '' : s.num}</div>
                   <div style={{
                     fontSize: isCurrent ? 8 : 6, fontWeight: 700, marginTop: 2,
                     color: isCurrent ? B.yellow : isFuture ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.85)',
@@ -6095,7 +6098,7 @@ function ServiceTracker() {
           {/* ETA */}
           {step === 3 && eta && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <span style={{ fontSize: 18 }}>🚐</span>
+              <Icon name="truck" size={18} strokeWidth={1.75} />
               <div style={{ flex: 1 }}><div style={{ height: 5, borderRadius: 3, background: B.grayLight, overflow: 'hidden' }}><div style={{ height: '100%', borderRadius: 3, background: `linear-gradient(90deg, ${B.wavesBlue}, ${B.green})`, width: `${Math.max(10, 100 - eta * 3)}%`, transition: 'width 1s ease' }} /></div></div>
               <span style={{ fontSize: 16, fontWeight: 900, color: B.navy, fontFamily: FONTS.ui }}>~{eta}m</span>
             </div>
@@ -6123,8 +6126,8 @@ function ServiceTracker() {
               <div style={{ fontSize: 9, color: B.textCaption }}>Open 24 hrs</div>
             </div>
             <div style={{ display: 'flex', gap: 6 }}>
-              <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.yellow, color: B.blueDeeper, textDecoration: 'none' }}>📞 Call</a>
-              <a href={`sms:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}>💬 Text</a>
+              <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.yellow, color: B.blueDeeper, textDecoration: 'none' }}> Call</a>
+              <a href={`sms:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}> Text</a>
             </div>
           </div>
 
@@ -6134,26 +6137,26 @@ function ServiceTracker() {
               <div style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Before Your Tech Arrives</div>
               {[
                 propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
-                  ? { icon: '✅', text: 'Gate code on file', ok: true }
-                  : { icon: '⚠️', text: 'No gate code on file', ok: false },
+                  ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
+                  : { icon: 'warning', text: 'No gate code on file', ok: false },
                 propertyPrefs?.petCount > 0 && propertyPrefs?.petSecuredPlan
-                  ? { icon: '✅', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 40)}`, ok: true }
-                  : { icon: '⚠️', text: 'Secure pets before tech arrives', ok: false },
-                { icon: '🔓', text: 'Ensure gates are unlocked', ok: true },
+                  ? { icon: 'checkCircle', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 40)}`, ok: true }
+                  : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
+                { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
                 ...(isLawn ? [
-                  { icon: '💧', text: 'Turn off irrigation 24hrs before', ok: true },
-                  { icon: '🌿', text: "Don't mow 3 days before/after", ok: true },
+                  { icon: 'droplet', text: 'Turn off irrigation 24hrs before', ok: true },
+                  { icon: 'leaf', text: "Don't mow 3 days before/after", ok: true },
                 ] : []),
                 ...(isPest ? [
-                  { icon: '🏠', text: 'Clear counters and baseboards', ok: true },
-                  { icon: '🐠', text: 'Cover fish tanks and pet bowls', ok: true },
+                  { icon: 'home', text: 'Clear counters and baseboards', ok: true },
+                  { icon: 'fish', text: 'Cover fish tanks and pet bowls', ok: true },
                 ] : []),
                 ...(isMosquito ? [
-                  { icon: '💧', text: 'Remove standing water', ok: true },
-                  { icon: '✅', text: 'Exterior only — no indoor prep', ok: true },
+                  { icon: 'droplet', text: 'Remove standing water', ok: true },
+                  { icon: 'checkCircle', text: 'Exterior only — no indoor prep', ok: true },
                 ] : []),
                 ...(isTermite ? [
-                  { icon: '🏠', text: 'Clear access to garage/attic', ok: true },
+                  { icon: 'home', text: 'Clear access to garage/attic', ok: true },
                 ] : []),
               ].map((item, i) => (
                 <div key={i} style={{
@@ -6161,7 +6164,7 @@ function ServiceTracker() {
                   borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
                   paddingLeft: item.ok ? 0 : 6,
                 }}>
-                  <span style={{ flexShrink: 0, fontSize: 11 }}>{item.icon}</span>
+                  <Icon name={item.icon} size={12} strokeWidth={1.75} style={{ flexShrink: 0 }} />
                   <span style={{ fontSize: 11, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.grayDark : B.navy, lineHeight: 1.3 }}>{item.text}</span>
                 </div>
               ))}
@@ -6211,7 +6214,7 @@ function ServiceTracker() {
                 </div>
               )}
               {summary.areasTreated?.length > 0 && <div style={{ fontSize: 11, color: B.grayDark, marginBottom: 4 }}><strong>Areas:</strong> {summary.areasTreated.join(' · ')}</div>}
-              {summary.recommendations && <div style={{ fontSize: 11, color: B.grayDark, fontStyle: 'italic' }}>💡 {summary.recommendations}</div>}
+              {summary.recommendations && <div style={{ fontSize: 11, color: B.grayDark, fontStyle: 'italic' }}> {summary.recommendations}</div>}
               {summary.nextVisitDate && <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, marginTop: 4 }}>Next visit: {new Date(summary.nextVisitDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>}
             </div>
           )}
@@ -6322,7 +6325,7 @@ function ReferTab({ customer, onSwitchTab }) {
         borderRadius: 20, padding: '28px 24px', color: '#fff', textAlign: 'center',
         position: 'relative', overflow: 'hidden',
       }}>
-        <div style={{ fontSize: 40, marginBottom: 8 }}>🎁</div>
+        <div style={{ fontSize: 40, marginBottom: 8 }}></div>
         <div style={{ fontSize: 28, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em' }}>Give $25, Get $25</div>
         <div style={{ fontSize: 14, opacity: 0.85, marginTop: 8, lineHeight: 1.6 }}>
           Refer anyone in Southwest Florida to Waves Pest Control. When they sign up for any WaveGuard plan, you both get a <strong>$25 credit</strong> on your next bill.
@@ -6367,7 +6370,7 @@ function ReferTab({ customer, onSwitchTab }) {
           border: `1px solid ${B.grayLight}`,
           display: 'flex', alignItems: 'center', gap: 12,
         }}>
-          <div style={{ fontSize: 28 }}>🏆</div>
+          <div style={{ fontSize: 28 }}></div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: B.navy }}>
               You're {referralsToNext} referral{referralsToNext !== 1 ? 's' : ''} away from {nextMilestone.title}!
@@ -6413,11 +6416,11 @@ function ReferTab({ customer, onSwitchTab }) {
           <a href={`sms:?body=${encodeURIComponent(shareText)}`} style={{
             ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
             background: B.yellow, color: B.blueDeeper, textDecoration: 'none', textAlign: 'center',
-          }}>💬 Text</a>
+          }}> Text</a>
           <a href={`mailto:?subject=${encodeURIComponent('$25 off Waves Pest Control')}&body=${encodeURIComponent(shareText)}`} style={{
             ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
             background: B.wavesBlue, color: '#fff', textDecoration: 'none', textAlign: 'center',
-          }}>📧 Email</a>
+          }}> Email</a>
           <a href={`https://wa.me/?text=${encodeURIComponent(shareText)}`} target="_blank" rel="noopener noreferrer" style={{
             ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
             background: '#25D366', color: '#fff', textDecoration: 'none', textAlign: 'center',
@@ -6653,9 +6656,9 @@ function DocumentsTab({ customer, onSwitchTab }) {
   // next to the visit they document); they were removed from here to avoid
   // the same report appearing in two places.
   const categories = [
-    { key: 'wdo_inspection', label: '🏠 Real Estate', empty: 'No WDO inspections on file. Need one for a real estate transaction? Contact us to schedule.' },
-    { key: 'service_agreement', label: '📋 Agreements', empty: 'Your service agreement will appear here after enrollment.' },
-    { key: 'insurance_cert', label: '🔒 Insurance', empty: 'Insurance certificates will be uploaded by Waves.' },
+    { key: 'wdo_inspection', label: ' Real Estate', empty: 'No WDO inspections on file. Need one for a real estate transaction? Contact us to schedule.' },
+    { key: 'service_agreement', label: ' Agreements', empty: 'Your service agreement will appear here after enrollment.' },
+    { key: 'insurance_cert', label: ' Insurance', empty: 'Insurance certificates will be uploaded by Waves.' },
   ];
 
   const typeFilters = [
@@ -6740,7 +6743,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             onFocus={e => e.target.style.borderColor = B.wavesBlue}
             onBlur={e => e.target.style.borderColor = B.grayLight}
           />
-          <span style={{ position: 'absolute', left: 12, top: 10, fontSize: 14, color: B.grayMid }}>🔍</span>
+          <Icon name="search" size={14} strokeWidth={1.75} />
         </div>
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
           {typeFilters.map(f => (
@@ -6760,7 +6763,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         border: `1px solid ${B.grayLight}`,
         display: 'flex', gap: 16, alignItems: 'center',
       }}>
-        <div style={{ fontSize: 24 }}>📊</div>
+        <div style={{ fontSize: 24 }}></div>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{thisYear} Year-to-Date</div>
           <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2 }}>
@@ -6797,7 +6800,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 18 }}>💰</span>
+          <Icon name="money" size={18} strokeWidth={1.75} />
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>Invoices & Receipts</div>
             <div style={{ fontSize: 11, color: B.grayMid }}>View payment history and invoices</div>
@@ -6887,7 +6890,7 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
                       background: doc.isAutoGenerated ? `${B.teal}15` : B.bluePale,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       fontSize: 16,
-                    }}>{doc.isAutoGenerated ? '⚡' : '📎'}</div>
+                    }}>{doc.isAutoGenerated ? '' : ''}</div>
 
                     {/* Info — actual date primary, relative secondary */}
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -6929,7 +6932,7 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
                           background: share === 'copied' ? B.green : B.offWhite,
                           color: share === 'copied' ? '#fff' : B.grayDark,
                           border: share === 'copied' ? 'none' : `1px solid ${B.grayLight}`,
-                        }}>{share === 'copied' ? '✓' : share === 'copying' ? '...' : '↗'}</button>
+                        }}>{share === 'copied' ? '' : share === 'copying' ? '...' : '↗'}</button>
                       )}
                       <button onClick={() => onDownload(doc)} style={{
                         ...BUTTON_BASE, padding: '5px 8px', fontSize: 11, borderRadius: 8,
@@ -6946,7 +6949,7 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
                       background: B.offWhite, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}33`,
                       display: 'flex', alignItems: 'center', gap: 6,
                     }}>
-                      <span>📧</span> Share with Realtor
+                      <span></span> Share with Realtor
                     </button>
                   )}
                 </div>
@@ -6984,16 +6987,16 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   }, [open]);
 
   const problemCategories = [
-    { value: 'pest_issue', label: '🐜 Pest Issue' },
-    { value: 'lawn_concern', label: '🌱 Lawn Problem' },
-    { value: 'irrigation_issue', label: '💧 Irrigation' },
-    { value: 'schedule_change', label: '📅 Schedule' },
+    { value: 'pest_issue', label: ' Pest Issue' },
+    { value: 'lawn_concern', label: ' Lawn Problem' },
+    { value: 'irrigation_issue', label: ' Irrigation' },
+    { value: 'schedule_change', label: ' Schedule' },
   ];
 
   const requestCategories = [
-    { value: 'billing', label: '💳 Billing' },
-    { value: 'add_service', label: '➕ Add Service' },
-    { value: 'other', label: '💬 Other' },
+    { value: 'billing', label: ' Billing' },
+    { value: 'add_service', label: ' Add Service' },
+    { value: 'other', label: ' Other' },
   ];
 
   const locationOptions = [
@@ -7097,14 +7100,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
           background: B.offWhite, border: 'none', cursor: 'pointer', fontSize: 18,
           color: B.grayMid, width: 32, height: 32, borderRadius: '50%',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>✕</button>
+        }}></button>
       </div>
 
       {submitted ? (
         <div style={{ padding: 40, textAlign: 'center' }}>
           <div style={{ fontSize: 64, animation: 'checkPop 0.5s ease-out' }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 80, height: 80, borderRadius: '50%', background: `${B.green}15` }}>
-              <span style={{ color: B.green, fontSize: 48 }}>✓</span>
+              <Icon name="check" size={28} strokeWidth={1.75} />
             </span>
           </div>
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 12 }}>Sent to Waves!</div>
@@ -7135,7 +7138,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
           {/* Photo Upload — moved to top */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
-              📸 Photos <span style={{ fontWeight: 400, color: B.grayMid }}>(optional, up to 5)</span>
+               Photos <span style={{ fontWeight: 400, color: B.grayMid }}>(optional, up to 5)</span>
             </div>
             <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{ display: 'none' }} />
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -7145,7 +7148,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   border: `2px dashed ${B.wavesBlue}`, background: `${B.wavesBlue}08`,
                   display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                 }}>
-                  <span style={{ fontSize: 24 }}>📷</span>
+                  <Icon name="camera" size={24} strokeWidth={1.75} />
                   <span style={{ fontSize: 9, color: B.wavesBlue, marginTop: 2, fontWeight: 600 }}>Add photo</span>
                 </div>
               )}
@@ -7161,7 +7164,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     background: B.red, color: '#fff', border: '2px solid #fff',
                     cursor: 'pointer', fontSize: 11, display: 'flex',
                     alignItems: 'center', justifyContent: 'center', padding: 0,
-                  }}>✕</button>
+                  }}></button>
                 </div>
               ))}
             </div>
@@ -7220,7 +7223,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               background: `${B.wavesBlue}10`, border: `1px solid ${B.wavesBlue}30`,
               fontSize: 12, color: B.wavesBlue, fontWeight: 600, lineHeight: 1.5,
             }}>
-              📅 Your next visit is {nextServiceDateStr}. Want us to address it then, or do you need us sooner?
+               Your next visit is {nextServiceDateStr}. Want us to address it then, or do you need us sooner?
             </div>
           )}
 
@@ -7301,7 +7304,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             opacity: submitting ? 0.7 : 1,
             boxShadow: (category && description.trim()) ? `0 4px 15px ${B.teal}40` : 'none',
           }}>
-            {submitting ? 'Sending...' : '📤 Send to Waves'}
+            {submitting ? 'Sending...' : ' Send to Waves'}
           </button>
         </div>
       )}
@@ -7342,7 +7345,7 @@ function MyRequestsCard() {
       border: `1px solid ${B.grayLight}`, boxShadow: '0 2px 12px rgba(0,0,0,0.03)',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-        <span style={{ fontSize: 18 }}>📋</span>
+        <Icon name="clipboard" size={18} strokeWidth={1.75} />
         <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>My Requests</div>
         <span style={{
           marginLeft: 'auto', fontSize: 11, fontWeight: 700, padding: '2px 8px',
@@ -7393,16 +7396,16 @@ function MyRequestsCard() {
 // Bottom nav pins the five most-used destinations; the rest live behind a
 // "More" sheet. Short labels picked specifically for the 5-across layout.
 const PRIMARY_TABS = [
-  { id: 'dashboard', label: 'Home', icon: '🏠' },
-  { id: 'plan', label: 'Plan', icon: '🛡️' },
-  { id: 'visits', label: 'Visits', icon: '📅' },
-  { id: 'billing', label: 'Billing', icon: '💳' },
-  { id: 'refer', label: 'Refer', icon: '🎁' },
+  { id: 'dashboard', label: 'Home', icon: 'home' },
+  { id: 'plan', label: 'Plan', icon: 'plan' },
+  { id: 'visits', label: 'Visits', icon: 'calendar' },
+  { id: 'billing', label: 'Billing', icon: 'card' },
+  { id: 'refer', label: 'Refer', icon: 'gift' },
 ];
 const MORE_TABS = [
-  { id: 'documents', label: 'Documents', icon: '📄' },
-  { id: 'property', label: 'My Property', icon: '🏡' },
-  { id: 'learn', label: 'Learn', icon: '💡' },
+  { id: 'documents', label: 'Documents', icon: 'document' },
+  { id: 'property', label: 'My Property', icon: 'house' },
+  { id: 'learn', label: 'Learn', icon: 'bulb' },
 ];
 
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
@@ -7420,7 +7423,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
         fontFamily: FONTS.heading, transition: 'color 0.15s ease',
       }}
     >
-      <span style={{ fontSize: 20, lineHeight: 1, filter: isActive ? 'none' : 'grayscale(0.3)' }}>{t.icon}</span>
+      <Icon name={t.icon} size={22} strokeWidth={isActive ? 2.25 : 1.75} />
       <span style={{ fontSize: 10, fontWeight: isActive ? 700 : 600, letterSpacing: 0.2 }}>{t.label}</span>
     </button>
   );
@@ -7474,7 +7477,7 @@ function MoreSheet({ activeTab, onSelect, onClose }) {
                 color: isActive ? B.wavesBlue : B.navy,
                 fontFamily: FONTS.body, fontSize: 14, fontWeight: isActive ? 700 : 500,
               }}>
-                <span style={{ fontSize: 20 }}>{t.icon}</span>
+                <Icon name={t.icon} size={20} strokeWidth={1.75} />
                 <span>{t.label}</span>
               </button>
             );
@@ -7587,7 +7590,7 @@ function ChatWidget({ customer, onClose }) {
             <div style={{
               width: 36, height: 36, borderRadius: 18, background: 'rgba(255,255,255,0.2)',
               display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
-            }}>{'🌊'}</div>
+            }}><Icon name="waves" size={16} strokeWidth={1.75} /></div>
             <div>
               <div style={{ fontSize: 15, fontWeight: 700, color: '#fff' }}>Waves Assistant</div>
               <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)' }}>Usually replies instantly</div>
@@ -7597,7 +7600,7 @@ function ChatWidget({ customer, onClose }) {
             background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
             width: 32, height: 32, borderRadius: 16, cursor: 'pointer', fontSize: 16,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>{'✕'}</button>
+          }}><Icon name="close" size={16} strokeWidth={1.75} /></button>
         </div>
 
         {/* Messages */}
@@ -7760,22 +7763,22 @@ export default function PortalPage() {
                 <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
               </div>
               {[
-                { icon: '🏠', label: 'Home', action: () => { switchTab('dashboard'); setShowMenu(false); } },
-                { icon: '🛡️', label: 'My Plan', action: () => { switchTab('plan'); setShowMenu(false); } },
-                { icon: '📅', label: 'Visits', action: () => { switchTab('schedule'); setShowMenu(false); } },
-                { icon: '💳', label: 'Billing', action: () => { switchTab('billing'); setShowMenu(false); } },
-                { icon: '🆘', label: 'Request Service', action: () => { switchTab('request'); setShowMenu(false); } },
-                { icon: '🎁', label: 'Refer & Earn', action: () => { switchTab('refer'); setShowMenu(false); } },
-                { icon: '📄', label: 'Documents', action: () => { switchTab('documents'); setShowMenu(false); } },
-                { icon: '🏡', label: 'My Property', action: () => { switchTab('property'); setShowMenu(false); } },
-                { icon: '💡', label: 'Learn', action: () => { switchTab('learn'); setShowMenu(false); } },
+                { icon: 'home', label: 'Home', action: () => { switchTab('dashboard'); setShowMenu(false); } },
+                { icon: 'plan', label: 'My Plan', action: () => { switchTab('plan'); setShowMenu(false); } },
+                { icon: 'calendar', label: 'Visits', action: () => { switchTab('schedule'); setShowMenu(false); } },
+                { icon: 'card', label: 'Billing', action: () => { switchTab('billing'); setShowMenu(false); } },
+                { icon: 'sos', label: 'Request Service', action: () => { switchTab('request'); setShowMenu(false); } },
+                { icon: 'gift', label: 'Refer & Earn', action: () => { switchTab('refer'); setShowMenu(false); } },
+                { icon: 'document', label: 'Documents', action: () => { switchTab('documents'); setShowMenu(false); } },
+                { icon: 'house', label: 'My Property', action: () => { switchTab('property'); setShowMenu(false); } },
+                { icon: 'bulb', label: 'Learn', action: () => { switchTab('learn'); setShowMenu(false); } },
               ].map(item => (
                 <div key={item.label} onClick={item.action} style={{
                   padding: '11px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
                   transition: 'background 0.15s',
                 }} onMouseEnter={e => e.currentTarget.style.background = B.offWhite}
                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                  <span style={{ fontSize: 16 }}>{item.icon}</span>
+                  <Icon name={item.icon} size={18} strokeWidth={1.75} />
                   <span style={{ fontSize: 13, fontWeight: 500, color: B.navy }}>{item.label}</span>
                 </div>
               ))}
@@ -7784,7 +7787,7 @@ export default function PortalPage() {
                   padding: '11px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
                 }} onMouseEnter={e => e.currentTarget.style.background = B.offWhite}
                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                  <span style={{ fontSize: 16 }}>👋</span>
+                  <Icon name="hand" size={16} strokeWidth={1.75} />
                   <span style={{ fontSize: 13, fontWeight: 500, color: B.red }}>Sign Out</span>
                 </div>
               </div>
@@ -7840,19 +7843,19 @@ export default function PortalPage() {
           background: B.yellow, color: B.blueDeeper, fontSize: 12, textAlign: 'center',
           boxShadow: `0 4px 15px ${B.yellow}55`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>{'📞'} Call</a>
+        }}><Icon name="phone" size={16} strokeWidth={1.75} /> Call</a>
         <a href="sms:+19412975749" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
           background: B.yellow, color: B.blueDeeper, fontSize: 12,
           textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>{'💬'} Text</a>
+        }}><Icon name="chat" size={16} strokeWidth={1.75} /> Text</a>
         <button onClick={() => setShowChat(true)} style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
           background: B.yellow, color: B.blueDeeper, fontSize: 12,
           textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>{'🤖'} Chat</button>
+        }}><Icon name="bot" size={16} strokeWidth={1.75} /> Chat</button>
         <a href="mailto:contact@wavespestcontrol.com"
           onClick={(e) => {
             e.preventDefault();
@@ -7864,7 +7867,7 @@ export default function PortalPage() {
           textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           textDecoration: 'none',
-        }}>{'✉️'} Email</a>
+        }}><Icon name="mail" size={16} strokeWidth={1.75} /> Email</a>
       </div>
 
       {/* AI Chat Widget */}

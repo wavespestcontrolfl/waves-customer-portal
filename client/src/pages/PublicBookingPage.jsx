@@ -1,3 +1,4 @@
+import Icon from '../components/Icon';
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
@@ -29,12 +30,12 @@ const BRAND = {
 };
 
 const SERVICES = [
-  { id: 'pest_control', label: 'Pest Control', duration: 45, icon: '🐜', desc: 'Quarterly interior + exterior treatment' },
-  { id: 'lawn_care', label: 'Lawn Care', duration: 60, icon: '🌱', desc: 'Fertilization + weed control program' },
-  { id: 'mosquito', label: 'Mosquito Control', duration: 45, icon: '🦟', desc: 'WaveGuard barrier treatment' },
-  { id: 'tree_shrub', label: 'Tree & Shrub', duration: 60, icon: '🌳', desc: 'Ornamental plant care' },
+  { id: 'pest_control', label: 'Pest Control', duration: 45, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
+  { id: 'lawn_care', label: 'Lawn Care', duration: 60, icon: 'sprout', desc: 'Fertilization + weed control program' },
+  { id: 'mosquito', label: 'Mosquito Control', duration: 45, icon: 'bug', desc: 'WaveGuard barrier treatment' },
+  { id: 'tree_shrub', label: 'Tree & Shrub', duration: 60, icon: 'tree', desc: 'Ornamental plant care' },
   { id: 'termite', label: 'Termite Inspection', duration: 90, icon: '🪵', desc: 'WDO inspection + treatment plan' },
-  { id: 'rodent', label: 'Rodent Control', duration: 60, icon: '🐀', desc: 'Exclusion + monitoring stations' },
+  { id: 'rodent', label: 'Rodent Control', duration: 60, icon: 'mouse', desc: 'Exclusion + monitoring stations' },
 ];
 
 export default function PublicBookingPage() {
@@ -408,7 +409,7 @@ export default function PublicBookingPage() {
                 />
                 {existingCustomerId && (
                   <div style={{ fontSize: 12, color: BRAND.green, marginTop: 6 }}>
-                    ✓ Welcome back! We have your info on file.
+                     Welcome back! We have your info on file.
                   </div>
                 )}
               </div>

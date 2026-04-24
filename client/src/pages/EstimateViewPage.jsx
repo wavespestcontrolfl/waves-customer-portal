@@ -22,6 +22,7 @@
  * Matches PayPage / TrackPage convention: inline styles + W palette,
  * mobile-first stacked layout, two-column desktop via grid.
  */
+import Icon from '../components/Icon';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
@@ -89,7 +90,7 @@ function NotFoundCard() {
       background: W.white, borderRadius: 16, padding: 32, textAlign: 'center',
       border: `1px solid ${W.border}`, marginTop: 40,
     }}>
-      <div style={{ fontSize: 32 }}>🌊</div>
+      <div style={{ fontSize: 32 }}></div>
       <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
       <div style={{ fontSize: 14, color: W.textBody, marginTop: 12, lineHeight: 1.55 }}>
         This link may have expired or isn't valid. Call us at{' '}
@@ -239,7 +240,7 @@ function SuccessCard({ onboardingToken }) {
       borderTop: `4px solid ${W.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
       marginBottom: 16,
     }}>
-      <div style={{ fontSize: 40 }}>🎉</div>
+      <div style={{ fontSize: 40 }}></div>
       <div style={{ fontSize: 22, fontWeight: 700, color: W.navy, marginTop: 8 }}>
         You're booked.
       </div>
