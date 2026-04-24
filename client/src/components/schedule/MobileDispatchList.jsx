@@ -119,7 +119,7 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
       <button
         type="button"
         onClick={() => onEdit?.(service)}
-        className="flex-1 min-w-0 flex items-center gap-3 active:bg-zinc-50 u-focus-ring text-left"
+        className="flex-1 min-w-0 flex items-center gap-3 bg-white active:bg-zinc-50 u-focus-ring text-left"
       >
         <span className="flex-1 min-w-0">
           <span className="flex items-baseline gap-2">

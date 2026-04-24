@@ -215,7 +215,7 @@ export default function MobileCheckoutSheet({
           <button
             type="button"
             onClick={() => onEditServiceLine?.(service)}
-            className="w-full flex items-start justify-between gap-3 py-4 border-b border-hairline border-zinc-200 text-left u-focus-ring"
+            className="w-full flex items-start justify-between gap-3 py-4 bg-white border-b border-hairline border-zinc-200 text-left u-focus-ring"
           >
             <div className="flex-1 min-w-0 pr-2">
               <div className="flex items-center gap-1.5">
