@@ -349,7 +349,6 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                 const display = getDisplayStatus(inv);
                 const isOpen = expanded === inv.id;
                 const cardOnFile = inv.card_on_file && inv.card_on_file.last_four ? inv.card_on_file : null;
-                const reminderCount = inv.sms_reminder_count || 0;
                 return (
                   <div key={inv.id} style={{ borderBottom: `1px solid ${D.border}` }}>
                     <button
@@ -394,20 +393,12 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, padding: '14px 0', fontSize: 13, color: D.muted }}>
                           <span>{inv.title || lineItems[0]?.description || 'Service'}</span>
                           {inv.waveguard_tier && <span style={sBadge(`${D.amber}22`, D.amber)}>{inv.waveguard_tier}</span>}
-                          {inv.view_count > 0 && <span>{inv.view_count} views</span>}
-                          {reminderCount > 0 && <span style={{ color: D.amber }}>↩ {reminderCount} reminder{reminderCount === 1 ? '' : 's'}</span>}
-                          {inv.status === 'paid' && (inv.payment_method || inv.card_brand) && (
-                            <span style={{ color: D.green }}>
-                              ✓ {inv.card_brand || inv.payment_method}
-                              {inv.card_last_four ? ` •${inv.card_last_four}` : ''}
-                            </span>
-                          )}
                           {cardOnFile && inv.status !== 'paid' && inv.status !== 'void' && (
                             <span>💳 {cardOnFile.brand || 'Card'} •{cardOnFile.last_four} on file</span>
                           )}
-                          {inv.sms_sent_at && <span>SMS: {new Date(inv.sms_sent_at).toLocaleString()}</span>}
-                          {inv.receipt_sent_at && <span style={{ color: D.green }}>✉ Receipt sent {new Date(inv.receipt_sent_at).toLocaleString()}</span>}
                         </div>
+
+                        <InvoiceTimeline invoice={inv} />
 
                         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                           {inv.status === 'draft' && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Send invoice via SMS + email">Send</button>}
@@ -475,6 +466,110 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
           onError={(msg) => showToast(msg)}
         />
       )}
+    </div>
+  );
+}
+
+// ── Invoice activity timeline ──
+// Reconstructed entirely from invoice row columns — no dedicated events table.
+// Newest event on top so the current state is the first thing you read.
+function buildInvoiceTimeline(inv) {
+  const events = [];
+  if (inv.sent_at || inv.sms_sent_at) {
+    events.push({ kind: 'sent', at: inv.sent_at || inv.sms_sent_at, label: 'Invoice sent', detail: 'SMS + email', color: D.text });
+  }
+  if (inv.viewed_at) {
+    const count = Number(inv.view_count) || 0;
+    events.push({
+      kind: 'viewed',
+      at: inv.viewed_at,
+      label: 'Customer opened the invoice',
+      detail: count > 1 ? `${count} total views` : null,
+      color: D.text,
+    });
+  }
+  const reminderCount = Number(inv.sms_reminder_count) || 0;
+  if (inv.last_reminder_at && reminderCount > 0) {
+    events.push({
+      kind: 'reminder',
+      at: inv.last_reminder_at,
+      label: reminderCount === 1 ? 'Reminder sent' : `Reminder sent (${reminderCount} total)`,
+      color: D.amber,
+    });
+  }
+  if (inv.paid_at) {
+    const method = [inv.card_brand || inv.payment_method, inv.card_last_four ? `•${inv.card_last_four}` : null].filter(Boolean).join(' ');
+    events.push({
+      kind: 'paid',
+      at: inv.paid_at,
+      label: `Paid $${parseFloat(inv.total).toFixed(2)}`,
+      detail: method || null,
+      color: D.green,
+      emphasis: true,
+    });
+  }
+  if (inv.receipt_sent_at) {
+    events.push({
+      kind: 'receipt',
+      at: inv.receipt_sent_at,
+      label: 'Receipt sent',
+      detail: inv.receipt_memo ? `“${inv.receipt_memo}”` : null,
+      color: D.green,
+    });
+  }
+  if (inv.status === 'void') {
+    events.push({ kind: 'void', at: inv.updated_at, label: 'Voided', color: D.muted });
+  }
+  return events.sort((a, b) => new Date(b.at) - new Date(a.at));
+}
+
+function formatTimelineWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const timeStr = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  if (sameDay) return `Today at ${timeStr}`;
+  const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `Yesterday at ${timeStr}`;
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleDateString('en-US', sameYear
+    ? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+    : { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function InvoiceTimeline({ invoice }) {
+  const events = buildInvoiceTimeline(invoice);
+  if (events.length === 0) return null;
+  return (
+    <div style={{ margin: '4px 0 16px', paddingTop: 12, borderTop: `1px solid ${D.border}` }}>
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', color: D.muted, textTransform: 'uppercase', marginBottom: 12 }}>
+        Activity
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {events.map((e, i) => (
+          <div key={`${e.kind}-${i}`} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+            <div style={{
+              width: 8, height: 8, borderRadius: 999, background: e.color,
+              marginTop: 6, flexShrink: 0,
+              boxShadow: e.emphasis ? `0 0 0 3px ${e.color}22` : undefined,
+            }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, color: D.heading, fontWeight: e.emphasis ? 700 : 500, lineHeight: 1.3 }}>
+                {e.label}
+              </div>
+              {e.detail && (
+                <div style={{ fontSize: 13, color: D.muted, marginTop: 2, lineHeight: 1.35, wordBreak: 'break-word' }}>
+                  {e.detail}
+                </div>
+              )}
+              <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                {formatTimelineWhen(e.at)}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
