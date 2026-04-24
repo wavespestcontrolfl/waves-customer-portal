@@ -365,9 +365,10 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
 }
 
 // --- View toggle (flat pill row, no emoji) ---
+// Directory was removed — Map is the new default. Map no longer uses
+// the desktopOnly gate so mobile users land somewhere useful.
 const VIEWS = [
-  { key: 'directory', label: 'Directory' },
-  { key: 'map', label: 'Map', desktopOnly: true },
+  { key: 'map', label: 'Map' },
   { key: 'pipeline', label: 'Pipeline', desktopOnly: true },
   { key: 'health', label: 'Health', desktopOnly: true },
   { key: 'intelligence', label: 'AI Advisor', desktopOnly: true },
@@ -458,7 +459,12 @@ export default function CustomersPageV2() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchParams] = useSearchParams();
-  const [view, setView] = useState(searchParams.get('view') || 'directory');
+  // Default changed from 'directory' (removed) to 'map'. Legacy URLs still
+  // carrying ?view=directory silently land on map instead.
+  const [view, setView] = useState(() => {
+    const raw = searchParams.get('view');
+    return raw && raw !== 'directory' ? raw : 'map';
+  });
   const [search, setSearch] = useState('');
   const [filterStage, setFilterStage] = useState('all');
   const [filterTier, setFilterTier] = useState('all');
