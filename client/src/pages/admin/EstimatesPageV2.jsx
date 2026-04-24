@@ -1052,27 +1052,44 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
   const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
   const customerName = estimate.customerName || 'Unknown';
   const isDraftMuted = v3Flag && estimate.status === 'draft';
-  const openPanel = () => { if (estimate.customerId) onOpenCustomerPanel?.(estimate.customerId); };
+  const hasCustomer = !!estimate.customerId;
+  const openPanel = () => { if (hasCustomer) onOpenCustomerPanel?.(estimate.customerId); };
   return (
     <div
-      onClick={openPanel}
+      // Row-level click only activates when the estimate is linked to a
+      // customer. Showing cursor-pointer + hover shade on an unlinked
+      // estimate reads as "this should open a panel" and then silently
+      // does nothing on tap — that's been the root of the "customers
+      // aren't clickable on mobile" complaint for unlinked rows.
+      onClick={hasCustomer ? openPanel : undefined}
+      role={hasCustomer ? 'button' : undefined}
+      tabIndex={hasCustomer ? 0 : undefined}
+      onKeyDown={hasCustomer ? (e) => { if (e.key === 'Enter' || e.key === ' ') openPanel(); } : undefined}
       className={cn(
-        'bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5 cursor-pointer hover:bg-zinc-50',
+        'bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5',
+        hasCustomer ? 'cursor-pointer hover:bg-zinc-50 active:bg-zinc-100' : 'cursor-default',
         isDraftMuted && 'opacity-60',
       )}
       style={{ height: 64 }}
     >
       <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-        {estimate.customerId ? (
+        {hasCustomer ? (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); openPanel(); }}
-            className="text-14 font-medium text-ink-primary truncate text-left bg-transparent border-0 p-0 cursor-pointer hover:underline"
+            // Underline-always (not hover:underline) so touch users see
+            // the affordance — hover doesn't fire on mobile.
+            className="text-14 font-medium text-blue-700 underline decoration-dotted underline-offset-2 truncate text-left bg-transparent border-0 p-0 cursor-pointer"
           >
             {customerName}
           </button>
         ) : (
-          <div className="text-14 font-medium text-ink-primary truncate">{customerName}</div>
+          <div
+            className="text-14 font-medium text-ink-primary truncate"
+            title="This estimate isn't linked to a customer yet"
+          >
+            {customerName}
+          </div>
         )}
         {v3Flag ? (
           <div className="flex items-center gap-2 flex-wrap">
