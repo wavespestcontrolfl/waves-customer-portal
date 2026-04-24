@@ -569,11 +569,27 @@ export default function CustomersPageV2() {
     } catch (e) { window.alert('Delete failed: ' + e.message); }
   };
 
+  // Push customers with no sortable name to the end of the list instead
+  // of the top (which is where '' lands in a naive string sort). ￿
+  // is the highest BMP code point — it sorts after every letter, so any
+  // real name beats it in ascending order.
+  const phonebookKey = (c) => {
+    const lastKey = (c.lastName || '').toString().toLowerCase().trim();
+    const firstKey = (c.firstName || '').toString().toLowerCase().trim();
+    if (lastKey || firstKey) return `${lastKey || '￿'} ${firstKey || '￿'}`;
+    // Blank first + last: fall back to company / email so businesses
+    // with no rep name still land in an intuitive A-Z slot.
+    const fallback = (c.companyName || c.email || '').toString().toLowerCase().trim();
+    return fallback || '￿￿';
+  };
+
   const sorted = [...customers].sort((a, b) => {
     let aVal, bVal;
     switch (sortBy) {
-      case 'name': aVal = `${a.lastName} ${a.firstName}`.toLowerCase(); bVal = `${b.lastName} ${b.firstName}`.toLowerCase(); break;
-      case 'lastName': aVal = (a.lastName || '').toLowerCase(); bVal = (b.lastName || '').toLowerCase(); break;
+      case 'name':
+      case 'lastName':
+        aVal = phonebookKey(a); bVal = phonebookKey(b);
+        break;
       case 'leadScore': aVal = a.leadScore || 0; bVal = b.leadScore || 0; break;
       case 'monthlyRate': aVal = a.monthlyRate || 0; bVal = b.monthlyRate || 0; break;
       case 'lastContactDate': aVal = a.lastContactDate || ''; bVal = b.lastContactDate || ''; break;
