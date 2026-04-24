@@ -76,7 +76,10 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
 
   if (!customerId) return null;
 
-  const c = data?.customer || data;  // endpoint returns customer at top-level
+  // Endpoint returns { customer: { firstName, lastName, email, phone,
+  // address: {line1, city, state, zip}, ... }, services, scheduled,
+  // payments, cards, ... } — note camelCase on customer + nested address.
+  const c = data?.customer || null;
   const services = data?.services || [];
   const scheduled = data?.scheduled || [];
   const payments = data?.payments || [];
@@ -109,12 +112,12 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
     <div
       role="dialog"
       aria-label="Customer detail"
-      className="fixed inset-0 z-50 bg-surface-subtle overflow-y-auto"
+      className="fixed inset-0 z-[60] bg-surface-page overflow-y-auto"
       style={{ WebkitOverflowScrolling: 'touch' }}
     >
       {/* Top bar */}
       <div
-        className="sticky top-0 bg-surface-subtle flex items-center justify-between gap-3 px-4 border-b border-hairline border-zinc-200"
+        className="sticky top-0 bg-surface-page flex items-center justify-between gap-3 px-4 border-b border-hairline border-zinc-200"
         style={{ height: 64, paddingTop: 'env(safe-area-inset-top, 0)' }}
       >
         <button
@@ -148,7 +151,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
               className="text-ink-primary"
               style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1, margin: '4px 0 20px' }}
             >
-              {`${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unknown'}
+              {`${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown'}
             </h1>
 
             {/* Stat row — Visits | Last visit | First visit */}
@@ -174,10 +177,14 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
                 <a href={`mailto:${c.email}`} className="text-ink-primary" style={{ fontSize: 17, wordBreak: 'break-word' }}>{c.email}</a>
               </ContactRow>
             )}
-            {(c.address_line1 || c.city) && (
+            {(c.address?.line1 || c.address?.city) && (
               <ContactRow label="Address">
                 <div style={{ fontSize: 17 }}>
-                  {[c.address_line1, [c.city, c.state].filter(Boolean).join(', '), c.zip].filter(Boolean).join(', ')}
+                  {[
+                    c.address.line1,
+                    [c.address.city, c.address.state].filter(Boolean).join(', '),
+                    c.address.zip,
+                  ].filter(Boolean).join(', ')}
                 </div>
               </ContactRow>
             )}
