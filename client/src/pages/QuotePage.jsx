@@ -1023,7 +1023,7 @@ export default function QuotePage() {
                               border: `1.5px solid ${COLORS.blueDeeper}`, borderRadius: 6,
                               cursor: subscribeStatus === 'loading' ? 'default' : 'pointer',
                               opacity: subscribeStatus === 'loading' ? 0.6 : 1,
-                              fontFamily: 'inherit',
+                              fontFamily: FONTS.ui,
                             }}
                           >
                             {subscribeStatus === 'loading' ? 'Subscribing…' : 'Subscribe →'}

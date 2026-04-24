@@ -1,3 +1,4 @@
+import { FONTS } from '../theme-brand';
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
@@ -196,13 +197,13 @@ export default function RatePage() {
       {screen === 'rating' && (
         <div>
           <div style={{ textAlign: 'center', marginBottom: 22 }}>
-            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'linear-gradient(135deg, #4DC9F6, #009CDE)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: '#fff', fontFamily: "'Anton', 'Luckiest Guy', cursive", boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}>
+            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'linear-gradient(135deg, #4DC9F6, #009CDE)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: '#fff', fontFamily: FONTS.display, boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}>
               {(techName || 'W')[0].toUpperCase()}
             </div>
             <div style={{ fontSize: 16, fontWeight: 700, color: '#1B2C5B' }}>{techName}</div>
           </div>
 
-          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 22, fontWeight: 700, textAlign: 'center', color: '#1B2C5B', marginBottom: 22, lineHeight: 1.3 }}>
+          <div style={{ fontFamily: FONTS.display, fontSize: 22, fontWeight: 700, textAlign: 'center', color: '#1B2C5B', marginBottom: 22, lineHeight: 1.3 }}>
             Hey {firstName}, how'd we do?
           </div>
 
@@ -217,7 +218,7 @@ export default function RatePage() {
               return (
                 <button key={n} onClick={() => handleScore(n)} style={{
                   minHeight: 44, minWidth: 44, border: `2px solid ${selected ? bg : '#CBD5E1'}`, borderRadius: 12,
-                  background: bg, fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 18, fontWeight: 700,
+                  background: bg, fontFamily: FONTS.display, fontSize: 18, fontWeight: 700,
                   color: selected ? '#fff' : '#334155', cursor: 'pointer', display: 'flex',
                   alignItems: 'center', justifyContent: 'center', padding: 0,
                 }}>{n}</button>
@@ -234,7 +235,7 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
             <span role="img" aria-label="party">&#127881;</span>
           </div>
-          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Awesome, thank you!</div>
+          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Awesome, thank you!</div>
           <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55, marginBottom: 16 }}>What stood out about your experience?</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
             {HIGHLIGHTS.map(h => (
@@ -263,7 +264,7 @@ export default function RatePage() {
       {screen === 'ai-review' && (
         <div>
           <div style={{ textAlign: 'center', marginBottom: 20 }}>
-            <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 22, fontWeight: 800, color: '#1B2C5B', marginBottom: 6 }}>
+            <div style={{ fontFamily: FONTS.display, fontSize: 22, fontWeight: 800, color: '#1B2C5B', marginBottom: 6 }}>
               We'll write it for you!
             </div>
             <div style={{ fontSize: 14, color: '#334155', lineHeight: 1.5 }}>
@@ -345,7 +346,7 @@ export default function RatePage() {
                 style={{
                   width: '100%', background: '#E3F5FD', border: '2px solid #BAE0F1', borderRadius: 14,
                   padding: 14, fontSize: 15, color: '#1B2C5B', lineHeight: 1.6, marginBottom: 12,
-                  fontFamily: 'inherit', resize: 'vertical', outline: 'none', boxSizing: 'border-box',
+                  fontFamily: FONTS.body, resize: 'vertical', outline: 'none', boxSizing: 'border-box',
                 }}
               />
 
@@ -392,7 +393,7 @@ export default function RatePage() {
             {score <= 3 ? '\uD83D\uDE14' : '\uD83E\uDD14'}
           </div>
           {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: '#C8102E', fontSize: 13, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>We want to make this right</div>}
-          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>
+          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>
             {score <= 3 ? "We're sorry to hear that." : "Thanks for the feedback."}
           </div>
           <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55, marginBottom: 16 }}>
@@ -419,7 +420,7 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
             <span role="img" aria-label="party">&#127881;</span>
           </div>
-          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Taking you to Google...</div>
+          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Taking you to Google...</div>
           <div style={{ fontSize: 15, color: '#334155' }}>Your review means the world to our small team!</div>
         </div>
       )}
@@ -430,7 +431,7 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
             <span role="img" aria-label="check">&#9989;</span>
           </div>
-          <div style={{ fontFamily: "'Anton', 'Luckiest Guy', cursive", fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Thank you!</div>
+          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Thank you!</div>
           <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55 }}>Your feedback helps us serve you better.</div>
         </div>
       )}
@@ -440,7 +441,7 @@ export default function RatePage() {
 
 function Page({ children }) {
   return (
-    <div style={{ minHeight: '100dvh', background: '#009CDE', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: "'Inter', system-ui, -apple-system, sans-serif", position: 'relative', overflow: 'hidden' }}>
+    <div style={{ minHeight: '100dvh', background: '#009CDE', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: FONTS.body, position: 'relative', overflow: 'hidden' }}>
       {/* Hero video — waves-hero-service.mp4 */}
       <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.25, zIndex: 0, pointerEvents: 'none' }}
@@ -449,7 +450,7 @@ function Page({ children }) {
       </video>
       <div style={{ position: 'relative', zIndex: 1, width: '100%', padding: '22px 20px 12px', textAlign: 'center' }}>
         <h1 style={{
-          fontFamily: "'Anton', 'Luckiest Guy', cursive", fontWeight: 400,
+          fontFamily: FONTS.display, fontWeight: 400,
           fontSize: 36, color: '#F1F5F9', letterSpacing: '0.03em', lineHeight: 1,
           margin: 0, textShadow: '2px 2px 0 #1B2C5B',
         }}>

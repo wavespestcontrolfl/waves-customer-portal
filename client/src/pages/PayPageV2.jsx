@@ -1,3 +1,4 @@
+import { FONTS } from '../theme-brand';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -117,7 +118,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
               colorBackground: '#FFFFFF',
               colorText: '#0F172A',
               colorDanger: '#C8102E',
-              fontFamily: "Inter, system-ui, sans-serif",
+              fontFamily: FONTS.body,
               borderRadius: '8px',
               spacingUnit: '4px',
             },
@@ -310,18 +311,18 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       <div style={{
         marginBottom: 16, padding: 14, borderRadius: 'var(--radius-md)',
         background: '#F8FAFB', border: '1px solid var(--border)',
-        fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+        fontFamily: FONTS.mono,
         fontSize: 13,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-          <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
+          <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
             Invoice total
           </span>
           <span style={{ color: 'var(--text)' }}>{fmtCurrency(displayedBase)}</span>
         </div>
         {isCardFamily && displayedSurcharge > 0 && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-            <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
+            <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
               Card processing fee ({pct}%)
             </span>
             <span style={{ color: 'var(--text)' }}>+ {fmtCurrency(displayedSurcharge)}</span>
@@ -332,7 +333,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paddingTop: 10, marginTop: 8, borderTop: '1px solid var(--border)',
           fontWeight: 700, color: 'var(--text)',
         }}>
-          <span style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
+          <span style={{ fontFamily: FONTS.body }}>
             {isCardFamily ? 'Total charged' : 'Total (bank transfer)'}
           </span>
           <span>{fmtCurrency(buttonAmount)}</span>
@@ -569,10 +570,10 @@ export default function PayPageV2() {
                   }}
                 >
                   <div style={{ lineHeight: 1.4 }}>{item.description}</div>
-                  <div style={{ textAlign: 'right', fontFamily: "'JetBrains Mono', ui-monospace, monospace" }}>
+                  <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>
                     {item.quantity || 1}
                   </div>
-                  <div style={{ textAlign: 'right', fontFamily: "'JetBrains Mono', ui-monospace, monospace", minWidth: 80 }}>
+                  <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 80 }}>
                     {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
                   </div>
                 </div>
@@ -581,16 +582,16 @@ export default function PayPageV2() {
           )}
 
           {/* Totals */}
-          <div style={{ fontSize: 14, fontFamily: "'JetBrains Mono', ui-monospace, monospace" }}>
+          <div style={{ fontSize: 14, fontFamily: FONTS.mono }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-              <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
+              <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
                 Subtotal
               </span>
               <span>{fmtCurrency(invoice.subtotal)}</span>
             </div>
             {invoice.discountAmount > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-                <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
+                <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
                   {invoice.discountLabel || 'Discount'}
                 </span>
                 <span>− {fmtCurrency(invoice.discountAmount)}</span>
@@ -598,7 +599,7 @@ export default function PayPageV2() {
             )}
             {invoice.taxAmount > 0 && customer?.isCommercial && (
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-                <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
+                <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
                   Tax ({(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)
                 </span>
                 <span>{fmtCurrency(invoice.taxAmount)}</span>
@@ -614,7 +615,7 @@ export default function PayPageV2() {
               fontWeight: 700,
               color: 'var(--text)',
             }}>
-              <span style={{ fontFamily: "'Inter', system-ui, sans-serif", letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 13 }}>
+              <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 13 }}>
                 Total
               </span>
               <span>{fmtCurrency(invoice.total)}</span>

@@ -1,3 +1,4 @@
+import { FONTS } from '../theme-brand';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import {
@@ -166,7 +167,7 @@ export default function ReceiptPage() {
           >
             <SuccessCheck size={56} />
             <div style={{
-              fontFamily: "'Instrument Serif', Georgia, serif",
+              fontFamily: FONTS.serif,
               fontSize: 24,
               color: 'var(--text)',
               lineHeight: 1.2,
@@ -323,7 +324,7 @@ export default function ReceiptPage() {
               )}
               <div>
                 <span style={{ color: 'var(--text-muted)' }}>Receipt #: </span>
-                <span style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", fontSize: 13 }}>
+                <span style={{ fontFamily: FONTS.mono, fontSize: 13 }}>
                   {invoice.invoiceNumber}
                 </span>
               </div>
@@ -362,10 +363,10 @@ export default function ReceiptPage() {
                   }}
                 >
                   <div style={{ lineHeight: 1.4 }}>{item.description}</div>
-                  <div style={{ textAlign: 'right', fontFamily: "'JetBrains Mono', ui-monospace, monospace" }}>
+                  <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>
                     {item.quantity || 1}
                   </div>
-                  <div style={{ textAlign: 'right', fontFamily: "'JetBrains Mono', ui-monospace, monospace", minWidth: 80 }}>
+                  <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 80 }}>
                     {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
                   </div>
                 </div>
@@ -374,16 +375,16 @@ export default function ReceiptPage() {
           )}
 
           {/* Totals + refund breakdown (original transaction is never hidden) */}
-          <div style={{ fontSize: 14, fontFamily: "'JetBrains Mono', ui-monospace, monospace" }}>
+          <div style={{ fontSize: 14, fontFamily: FONTS.mono }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-              <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
+              <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
                 Subtotal
               </span>
               <span>{fmtCurrency(invoice.subtotal)}</span>
             </div>
             {invoice.discountAmount > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-                <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
+                <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
                   {invoice.discountLabel || 'Discount'}
                 </span>
                 <span>− {fmtCurrency(invoice.discountAmount)}</span>
@@ -391,7 +392,7 @@ export default function ReceiptPage() {
             )}
             {invoice.taxAmount > 0 && customer?.isCommercial && (
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-                <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
+                <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
                   Tax ({(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)
                 </span>
                 <span>{fmtCurrency(invoice.taxAmount)}</span>
@@ -407,7 +408,7 @@ export default function ReceiptPage() {
               fontWeight: 700,
               color: 'var(--text)',
             }}>
-              <span style={{ fontFamily: "'Inter', system-ui, sans-serif", letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 13 }}>
+              <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 13 }}>
                 Total charged
               </span>
               <span>{fmtCurrency(payment?.amount || invoice.total)}</span>
@@ -416,7 +417,7 @@ export default function ReceiptPage() {
             {refundState && payment?.refundAmount > 0 && (
               <>
                 <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0 6px' }}>
-                  <span style={{ color: 'var(--danger)', fontFamily: "'Inter', system-ui, sans-serif", fontWeight: 500 }}>
+                  <span style={{ color: 'var(--danger)', fontFamily: FONTS.body, fontWeight: 500 }}>
                     Refunded
                     {payment.refundedAt ? ` · ${fmtDate(payment.refundedAt)}` : ''}
                   </span>
@@ -432,7 +433,7 @@ export default function ReceiptPage() {
                   fontWeight: 700,
                   color: 'var(--text)',
                 }}>
-                  <span style={{ fontFamily: "'Inter', system-ui, sans-serif", letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 12 }}>
+                  <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 12 }}>
                     Net paid
                   </span>
                   <span>{fmtCurrency(payment.remainingPaid)}</span>
@@ -471,7 +472,7 @@ export default function ReceiptPage() {
                 textUnderlineOffset: 3,
                 fontSize: 13,
                 cursor: 'pointer',
-                fontFamily: "'Inter', system-ui, sans-serif",
+                fontFamily: FONTS.body,
               }}
             >
               Print

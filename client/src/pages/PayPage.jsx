@@ -5,6 +5,7 @@ import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import StickyBottomCTA from '../components/customer/StickyBottomCTA';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
+import { FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -88,7 +89,7 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
               colorBackground: W.white,
               colorText: W.blueDeeper,
               colorDanger: W.red,
-              fontFamily: "Inter, system-ui, sans-serif",
+              fontFamily: FONTS.body,
               borderRadius: '12px',
               spacingUnit: '4px',
             },
@@ -451,7 +452,7 @@ export default function PayPage() {
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{ width: 40, height: 40, border: `3px solid ${W.border}`, borderTopColor: W.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 16px' }} />
-        <div style={{ color: W.textCaption, fontFamily: "'Inter', system-ui, sans-serif", fontSize: 14 }}>Loading your service details...</div>
+        <div style={{ color: W.textCaption, fontFamily: FONTS.body, fontSize: 14 }}>Loading your service details...</div>
         <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
       </div>
     </div>
@@ -461,8 +462,8 @@ export default function PayPage() {
   if (error) return (
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center', maxWidth: 400 }}>
-        <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 20, fontWeight: 700, color: W.blueDeeper, marginBottom: 8, letterSpacing: '-0.01em' }}>Invoice Not Found</div>
-        <div style={{ fontFamily: "'Inter', system-ui, sans-serif", fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a> if you need help.</div>
+        <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 700, color: W.blueDeeper, marginBottom: 8, letterSpacing: '-0.01em' }}>Invoice Not Found</div>
+        <div style={{ fontFamily: FONTS.body, fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a> if you need help.</div>
       </div>
     </div>
   );
@@ -473,7 +474,7 @@ export default function PayPage() {
   const tierColors = TIER_COLORS[tier] || TIER_COLORS.Bronze;
 
   return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Inter', system-ui, sans-serif" }}>
+    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: FONTS.body }}>
       {/* Brand fonts loaded globally via client/index.html */}
 
       {/* ── Header ── */}
@@ -492,7 +493,7 @@ export default function PayPage() {
         {/* ── Paid Banner ── */}
         {isPaid && (
           <div style={{ background: W.greenLight, border: `1px solid ${W.green}`, borderRadius: 12, padding: '16px 20px', marginTop: -16, marginBottom: 20, textAlign: 'center' }}>
-            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
+            <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
             <div style={{ fontSize: 13, color: W.textBody, marginTop: 4 }}>
               Paid {invoice.paidAt ? new Date(invoice.paidAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' }) : ''}
               {invoice.cardBrand && invoice.cardLastFour ? ` — ${invoice.cardBrand} ****${invoice.cardLastFour}` : ''}
@@ -503,7 +504,7 @@ export default function PayPage() {
         {/* ── Customer Greeting (hero H1) ── */}
         <div style={{ marginTop: isPaid ? 16 : 24, marginBottom: 24 }}>
           <h1 style={{
-            fontFamily: "'Anton', 'Luckiest Guy', cursive", fontWeight: 400,
+            fontFamily: FONTS.display, fontWeight: 400,
             fontSize: isMobile ? 32 : 40, color: W.blueBright,
             letterSpacing: '0.02em', lineHeight: 1.05, margin: 0,
           }}>
@@ -535,7 +536,7 @@ export default function PayPage() {
         {(service.type || service.techName) && (
           <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
             <div style={{ background: W.bluePale, padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
-              <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Service Completed</div>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Service Completed</div>
               <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 13, color: W.textBody, flexWrap: 'wrap' }}>
                 {service.date && <span>{new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })}</span>}
                 {service.techName && <span>Tech: {service.techName}</span>}
@@ -596,7 +597,7 @@ export default function PayPage() {
         <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
           <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
-              <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Invoice</div>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Invoice</div>
               <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>{invoice.invoiceNumber}</div>
             </div>
             {!isPaid && (() => {
@@ -639,7 +640,7 @@ export default function PayPage() {
                 </div>
               )}
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: isMobile ? 18 : 20, fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 800, color: W.blueDeeper, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${W.blueDeeper}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: isMobile ? 18 : 20, fontFamily: FONTS.heading, fontWeight: 800, color: W.blueDeeper, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${W.blueDeeper}` }}>
                 <span>Total</span><span>${invoice.total.toFixed(2)}</span>
               </div>
             </div>
@@ -650,7 +651,7 @@ export default function PayPage() {
         {!isPaid && paymentState !== 'success' && (
           <div ref={payNowRef} style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
             <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
-              <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Pay Now</div>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Pay Now</div>
               <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>Card, Apple Pay, Google Pay, or bank transfer</div>
             </div>
 
@@ -693,7 +694,7 @@ export default function PayPage() {
         {/* ── Payment Success ── */}
         {paymentState === 'success' && (
           <div style={{ background: W.greenLight, borderRadius: 16, border: `1px solid ${W.green}`, padding: 28, textAlign: 'center', marginBottom: 20 }}>
-            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 20, color: '#2E7D32', marginBottom: 8 }}>Payment Successful!</div>
+            <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 20, color: '#2E7D32', marginBottom: 8 }}>Payment Successful!</div>
             <div style={{ fontSize: 15, color: W.textBody, marginBottom: 4 }}>
               {paymentResult?.amount
                 ? `$${paymentResult.amount.toFixed(2)} paid for ${paymentResult.invoiceNumber || invoice.invoiceNumber}`
@@ -709,7 +710,7 @@ export default function PayPage() {
         {/* ── WaveGuard Upgrade Nudge (Bronze only, not paid) ── */}
         {tier === 'Bronze' && !isPaid && paymentState !== 'success' && (
           <div style={{ background: `linear-gradient(135deg, ${W.sand} 0%, #FFF8E1 100%)`, borderRadius: 14, border: '1px solid #E8D5B7', padding: '18px 20px', marginBottom: 20 }}>
-            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 14, color: '#8D6E63', marginBottom: 4 }}>
+            <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: '#8D6E63', marginBottom: 4 }}>
               Save on every visit
             </div>
             <div style={{ fontSize: 13, color: W.textBody, lineHeight: 1.5 }}>
