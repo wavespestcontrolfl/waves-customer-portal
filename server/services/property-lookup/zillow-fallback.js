@@ -18,26 +18,41 @@
  * a UI "verify stories" nudge.
  *
  * Actor choice is overridable via `APIFY_ZILLOW_ACTOR_ID` (default:
- * `maxcopell~zillow-api-scraper`) so we can swap scrapers without redeploying.
+ * `maxcopell~zillow-api-scraper`) and timeout via `APIFY_ZILLOW_TIMEOUT_MS`
+ * (default 45s — Apify actor cold-starts can run 30s+, 15s was too tight).
+ *
+ * All logs are prefixed `[zillow-fallback]` so they're greppable in Railway.
  */
+
+const logger = require('../logger');
 
 const APIFY_BASE = 'https://api.apify.com/v2';
 const DEFAULT_ACTOR = 'maxcopell~zillow-api-scraper';
-const TIMEOUT_MS = 15000;
+const DEFAULT_TIMEOUT_MS = 45000;
 
 async function lookupStoriesFromZillow(address) {
   const token = process.env.APIFY_API_TOKEN;
-  if (!token) return null;
-  if (!address || typeof address !== 'string' || address.trim().length < 5) return null;
+  if (!token) {
+    logger.info('[zillow-fallback] skipped — APIFY_API_TOKEN not set');
+    return null;
+  }
+  if (!address || typeof address !== 'string' || address.trim().length < 5) {
+    logger.warn('[zillow-fallback] skipped — address missing or too short');
+    return null;
+  }
 
   const actor = process.env.APIFY_ZILLOW_ACTOR_ID || DEFAULT_ACTOR;
+  const timeoutMs = Number(process.env.APIFY_ZILLOW_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
   // `run-sync-get-dataset-items` runs the actor inline and returns the dataset
   // in the response — avoids a poll loop for a lookup that has to fit inside
   // the estimator's single request/response cycle.
   const url = `${APIFY_BASE}/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const t0 = Date.now();
+
+  logger.info('[zillow-fallback] calling Apify', { actor, timeoutMs, address: address.slice(0, 80) });
 
   try {
     const resp = await fetch(url, {
@@ -56,13 +71,50 @@ async function lookupStoriesFromZillow(address) {
     });
     clearTimeout(timer);
 
-    if (!resp.ok) return null;
-    const items = await resp.json();
-    if (!Array.isArray(items) || items.length === 0) return null;
+    if (!resp.ok) {
+      const bodyText = await resp.text().catch(() => '');
+      logger.warn('[zillow-fallback] non-OK response', {
+        status: resp.status,
+        elapsedMs: Date.now() - t0,
+        bodySnippet: bodyText.slice(0, 300),
+      });
+      return null;
+    }
 
-    return extractStories(items[0]);
-  } catch {
+    const items = await resp.json();
+    if (!Array.isArray(items) || items.length === 0) {
+      logger.warn('[zillow-fallback] empty dataset', {
+        elapsedMs: Date.now() - t0,
+        itemsType: Array.isArray(items) ? 'array' : typeof items,
+      });
+      return null;
+    }
+
+    const stories = extractStories(items[0]);
+    if (stories) {
+      logger.info('[zillow-fallback] got stories', {
+        stories,
+        elapsedMs: Date.now() - t0,
+        itemCount: items.length,
+      });
+    } else {
+      // Log the shape of the first item so we can see what the actor returned
+      // and update extractStories() if the field is in a place we don't check.
+      logger.warn('[zillow-fallback] actor returned items but no stories field recognized', {
+        elapsedMs: Date.now() - t0,
+        itemCount: items.length,
+        firstItemKeys: Object.keys(items[0] || {}).slice(0, 40),
+      });
+    }
+    return stories;
+  } catch (err) {
     clearTimeout(timer);
+    const aborted = err?.name === 'AbortError';
+    logger.warn(`[zillow-fallback] ${aborted ? 'timed out' : 'errored'}`, {
+      elapsedMs: Date.now() - t0,
+      timeoutMs,
+      message: err?.message || String(err),
+    });
     return null;
   }
 }
