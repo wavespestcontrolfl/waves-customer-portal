@@ -140,6 +140,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const load = useCallback(async () => {
     const params = new URLSearchParams({ limit: '100' });
     if (filter === 'overdue' || filter === 'draft') params.set('status', filter);
+    if (filter === 'archived') params.set('archived', 'only');
     const data = await adminFetch(`/admin/invoices?${params}`).catch(() => ({ invoices: [] }));
     let rows = data.invoices || [];
     if (filter === 'unpaid') {
@@ -165,6 +166,20 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
     if (!confirm('Void this invoice?')) return;
     await adminFetch(`/admin/invoices/${id}/void`, { method: 'POST' });
     showToast('Invoice voided');
+    load(); onRefresh();
+  };
+
+  const handleArchive = async (id) => {
+    if (!confirm('Archive this voided invoice? It stays accessible under the Archived filter.')) return;
+    const res = await adminFetch(`/admin/invoices/${id}/archive`, { method: 'POST' });
+    if (res?.error) { showToast(res.error); return; }
+    showToast('Invoice archived');
+    load(); onRefresh();
+  };
+
+  const handleUnarchive = async (id) => {
+    await adminFetch(`/admin/invoices/${id}/unarchive`, { method: 'POST' });
+    showToast('Invoice restored');
     load(); onRefresh();
   };
 
@@ -307,6 +322,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
             { key: 'paid', label: 'Paid' },
             { key: 'needs_receipt', label: 'Needs receipt' },
             { key: 'draft', label: 'Draft' },
+            { key: 'archived', label: 'Archived' },
           ]}
         />
         <FilterPill
@@ -451,6 +467,12 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                             </a>
                           )}
                           {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
+                          {inv.status === 'void' && !inv.archived_at && (
+                            <button onClick={() => handleArchive(inv.id)} style={sBtn('transparent', D.muted, isMobile)} title="Tuck this voided invoice out of the default list">Archive</button>
+                          )}
+                          {inv.archived_at && (
+                            <button onClick={() => handleUnarchive(inv.id)} style={sBtn('transparent', D.text, isMobile)} title="Restore to the default list">Unarchive</button>
+                          )}
                           {sendReceiptEnabled && inv.status === 'paid' && (
                             <button
                               onClick={() => setReceiptModalInvoice(inv)}
@@ -557,6 +579,9 @@ function buildInvoiceTimeline(inv) {
   }
   if (inv.status === 'void') {
     events.push({ kind: 'void', at: inv.updated_at, label: 'Voided', color: D.muted });
+  }
+  if (inv.archived_at) {
+    events.push({ kind: 'archived', at: inv.archived_at, label: 'Archived', color: D.muted });
   }
   return events.sort((a, b) => new Date(b.at) - new Date(a.at));
 }

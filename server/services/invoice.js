@@ -369,7 +369,17 @@ const InvoiceService = {
     return { ...invoice, customer };
   },
 
-  async list({ status, customerId, limit = 50, offset = 0 } = {}) {
+  async list({ status, customerId, limit = 50, offset = 0, archived = 'hide' } = {}) {
+    // archived semantics:
+    //   'hide' (default) — WHERE archived_at IS NULL
+    //   'only'            — WHERE archived_at IS NOT NULL
+    //   'all'             — no filter
+    const applyArchived = (q) => {
+      if (archived === 'only') return q.whereNotNull('invoices.archived_at');
+      if (archived === 'all') return q;
+      return q.whereNull('invoices.archived_at');
+    };
+
     let query = db('invoices')
       .leftJoin('customers', 'invoices.customer_id', 'customers.id')
       .select(
@@ -388,12 +398,14 @@ const InvoiceService = {
       );
     if (status) query = query.where('invoices.status', status);
     if (customerId) query = query.where('invoices.customer_id', customerId);
+    query = applyArchived(query);
     query = query.orderBy('invoices.created_at', 'desc').limit(limit).offset(offset);
     const invoices = await query;
 
     let countQuery = db('invoices');
     if (status) countQuery = countQuery.where({ status });
     if (customerId) countQuery = countQuery.where({ customer_id: customerId });
+    countQuery = applyArchived(countQuery);
     const [{ count }] = await countQuery.count('* as count');
 
     return { invoices, total: parseInt(count) };
