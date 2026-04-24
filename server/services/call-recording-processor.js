@@ -93,19 +93,18 @@ Rules:
   }
 }
 
-// ── AI extraction via Claude ──
+// ── AI extraction via Gemini ──
+//
+// Same JSON schema as the prior Claude implementation — only the model
+// endpoint changed. Gemini's response_mime_type='application/json'
+// forces structured output so we rarely have to strip markdown fences,
+// but we still guard-parse for the "text-only refusal" edge case.
 async function extractCallData(transcription, callerPhone) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY not configured');
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY not configured');
   }
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-  const response = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 1500,
-    messages: [{
-      role: 'user',
-      content: `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida).
+  const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida).
 
 Caller phone: ${callerPhone || 'unknown'}
 
@@ -140,17 +139,37 @@ IMPORTANT — appointment_confirmed rules:
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 
-Return ONLY valid JSON, no markdown.`,
-    }],
-  });
+Return ONLY valid JSON.`;
 
-  const text = response.content[0]?.text?.trim() || '{}';
-  // Parse JSON, stripping any markdown code fences
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          response_mime_type: 'application/json',
+          temperature: 0.2, // keep extraction deterministic
+        },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Gemini HTTP ${res.status}: ${body.slice(0, 240)}`);
+  }
+
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim() || '{}';
+  // response_mime_type:application/json usually prevents fences, but strip
+  // defensively in case the model falls back to markdown.
   const cleaned = text.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
   try {
     return JSON.parse(cleaned);
   } catch (e) {
-    logger.error(`[call-proc] Invalid JSON from Claude: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
+    logger.error(`[call-proc] Invalid JSON from Gemini: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
     return { first_name: null, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
   }
 }
