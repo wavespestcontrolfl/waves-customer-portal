@@ -338,8 +338,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         recurringNth: isRecurring && recurringFreq === 'monthly_nth_weekday' ? recurringNth : undefined,
         recurringWeekday: isRecurring && recurringFreq === 'monthly_nth_weekday' ? recurringWeekday : undefined,
         recurringIntervalDays: isRecurring && recurringFreq === 'custom' ? recurringIntervalDays : undefined,
-        discountType: isRecurring && discountType ? discountType : undefined,
-        discountAmount: isRecurring && discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
+        discountType: discountType || undefined,
+        discountAmount: discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
         createInvoice: true,
         sendConfirmation: sendSms,
       };
@@ -696,26 +696,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   <input type="number" min={1} max={365} value={recurringIntervalDays} onChange={e => setRecurringIntervalDays(parseInt(e.target.value) || 30)} style={inputStyle} />
                 </div>
               )}
-              <div style={{ marginBottom: 8 }}>
-                <label style={labelStyle}>Discount (optional)</label>
-                <select
-                  value={discountPresetId}
-                  onChange={(e) => applyDiscountPreset(e.target.value)}
-                  style={inputStyle}
-                >
-                  <option value="">No discount</option>
-                  {discountPresets.map((d) => {
-                    const amt = d.discount_type === 'percentage'
-                      ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
-                      : `$${Number(d.amount).toFixed(2)}`;
-                    return (
-                      <option key={d.id} value={d.id}>
-                        {d.name} — {amt}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
               {recurringPreview() && (
                 <div style={{ fontSize: 11, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {recurringPreview().map((d, i) => (
@@ -728,6 +708,31 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               )}
             </div>
           )}
+        </div>
+
+        {/* Section 3.5: Discount — applies to both one-time and recurring.
+            Lives in its own section so the discount picker is always
+            visible, regardless of the Recurring toggle above. */}
+        <div style={sectionStyle}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Discount</div>
+          <label style={labelStyle}>Discount (optional)</label>
+          <select
+            value={discountPresetId}
+            onChange={(e) => applyDiscountPreset(e.target.value)}
+            style={inputStyle}
+          >
+            <option value="">No discount</option>
+            {discountPresets.map((d) => {
+              const amt = d.discount_type === 'percentage'
+                ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
+                : `$${Number(d.amount).toFixed(2)}`;
+              return (
+                <option key={d.id} value={d.id}>
+                  {d.name} — {amt}
+                </option>
+              );
+            })}
+          </select>
         </div>
 
         {/* Section 3b: Technician — its own section below Recurring */}
