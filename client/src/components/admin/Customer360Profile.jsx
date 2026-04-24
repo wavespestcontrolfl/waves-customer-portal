@@ -284,6 +284,34 @@ export default function Customer360Profile({ customerId, onClose }) {
             <a href={`/admin/schedule?customer=${customerId}`} style={actionBtnStyle(D.border)}>Book Appt</a>
             <a href={`/admin/invoices?customer=${customerId}`} style={actionBtnStyle(D.border)}>Invoice</a>
             <button onClick={() => { setActiveTab('comms'); }} style={{ ...actionBtnStyleBtn(D.border), cursor: 'pointer' }}>Add Note</button>
+            <button
+              onClick={async () => {
+                const name = `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'this customer';
+                const first = window.confirm(`Delete ${name}?\n\nThis removes the customer record from the admin portal. Past invoices and payments stay on file for accounting.`);
+                if (!first) return;
+                const second = window.prompt(`Type DELETE to confirm removing ${name}:`);
+                if (second !== 'DELETE') { if (second != null) window.alert('Delete cancelled — you did not type DELETE.'); return; }
+                try {
+                  const r = await fetch(`${API_BASE}/admin/customers/${customerId}`, {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+                  });
+                  if (!r.ok) { const err = await r.json().catch(() => ({})); throw new Error(err.error || `HTTP ${r.status}`); }
+                  onClose?.();
+                  window.location.reload();
+                } catch (e) {
+                  window.alert('Delete failed: ' + e.message);
+                }
+              }}
+              style={{
+                ...actionBtnStyleBtn(D.red),
+                cursor: 'pointer',
+                color: D.red,
+                borderColor: D.red,
+              }}
+            >
+              Delete
+            </button>
           </div>
         </div>
 
