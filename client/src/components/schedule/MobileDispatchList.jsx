@@ -148,14 +148,11 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
         </span>
         {techInitial && (
           <span
-            className="flex items-center justify-center font-medium text-zinc-700"
+            className="flex items-center justify-center font-semibold text-zinc-900"
             style={{
               width: 28,
               height: 28,
-              borderRadius: '50%',
-              background: '#FFFFFF',
-              border: '1px solid #E4E4E7',
-              fontSize: 12,
+              fontSize: 13,
               flexShrink: 0,
               alignSelf: 'center',
             }}
