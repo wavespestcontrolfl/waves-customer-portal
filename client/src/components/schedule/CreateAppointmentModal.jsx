@@ -198,8 +198,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       try {
         const r = await adminFetch('/admin/discounts');
         const list = Array.isArray(r) ? r : [];
-        const filtered = list.filter(d => d.is_active && !d.is_auto_apply
-          && (d.discount_type === 'percentage' || d.discount_type === 'fixed_amount'));
+        const filtered = list
+          .filter(d => d.is_active)
+          .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
         setDiscountPresets(filtered);
       } catch { /* discounts optional */ }
     })();
@@ -723,9 +724,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           >
             <option value="">No discount</option>
             {discountPresets.map((d) => {
-              const amt = d.discount_type === 'percentage'
-                ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
-                : `$${Number(d.amount).toFixed(2)}`;
+              const amt = d.discount_type === 'free_service'
+                ? 'Free'
+                : d.discount_type === 'percentage'
+                  ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
+                  : `$${Number(d.amount).toFixed(2)}`;
               return (
                 <option key={d.id} value={d.id}>
                   {d.name} — {amt}
