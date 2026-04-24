@@ -146,16 +146,14 @@ router.get('/', async (req, res, next) => {
       this.select('*').from('customer_tags').whereRaw('customer_tags.customer_id = customers.id').where('tag', tag);
     });
 
-    // Multi-column name sort so "Adams, Jim" and "Adams, Sarah" land next
-    // to each other instead of interleaving with whichever first name
-    // came first across the full table.
+    // Alphabetical by first name only — operator preference. No tie-break
+    // on last name or other columns. NULLS LAST keeps blank-first-name
+    // rows pinned to the end of the list instead of the top.
     const dir = order === 'desc' ? 'desc' : 'asc';
     if (sort === 'name') {
-      query = query
-        .orderByRaw(`LOWER(last_name) ${dir} NULLS LAST`)
-        .orderByRaw(`LOWER(first_name) ${dir} NULLS LAST`);
+      query = query.orderByRaw(`LOWER(first_name) ${dir} NULLS LAST`);
     } else {
-      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date', revenue: 'lifetime_revenue' }[sort] || 'last_name';
+      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date', revenue: 'lifetime_revenue' }[sort] || 'first_name';
       query = query.orderBy(sortCol, dir);
     }
 
