@@ -296,14 +296,41 @@ router.post('/', async (req, res) => {
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
-    // Auto-reply to lead — always send during business hours (whether call connected or not)
+    // Auto-reply to lead — always send (whether call connected or not).
+    // Pull from sms_templates (lead_auto_reply_biz / lead_auto_reply_after_hours)
+    // so Virginia can edit the copy in the admin UI without a deploy. The
+    // hardcoded strings below are the fallback if a template row is missing
+    // or disabled — keep them in sync with the seeded defaults.
     try {
-      const replyMsg = isDuringHours
+      const smsTemplatesRouter = require('./admin-sms-templates');
+      const templateKey = isDuringHours ? 'lead_auto_reply_biz' : 'lead_auto_reply_after_hours';
+      const fallback = isDuringHours
         ? `Hello ${firstName}! Thanks for reaching out to Waves! What are you interested in — Pest Control, Lawn Care, or a One-Time Service? Reply and we'll get you a quote right away.`
         : `Hello ${firstName}! Thanks for reaching out to Waves! What are you interested in — Pest Control, Lawn Care, or a One-Time Service? We'll follow up first thing in the morning with a custom quote.`;
+      let replyMsg = fallback;
+      try {
+        if (typeof smsTemplatesRouter.getTemplate === 'function') {
+          const rendered = await smsTemplatesRouter.getTemplate(templateKey, { first_name: firstName });
+          if (rendered) replyMsg = rendered;
+        }
+      } catch (tErr) { logger.warn(`[lead-webhook] template render failed, using fallback: ${tErr.message}`); }
+
       await TwilioService.sendSMS(phoneFormatted, replyMsg,
         { customerId: customer.id, messageType: 'auto_reply', customerLocationId: location.id }
       );
+
+      // Seed the intake state machine so the customer's next inbound SMS
+      // gets routed through server/services/lead-intake.js (classify →
+      // ask for address → auto-create draft estimate → notify Adam).
+      try {
+        await db('customers').where({ id: customer.id }).update({
+          lead_intake_status: 'awaiting_service',
+        });
+      } catch (stateErr) {
+        // Non-fatal — the auto-reply was sent; worst case the next SMS
+        // falls through to the normal AI draft path.
+        logger.warn(`[lead-webhook] intake state seed failed: ${stateErr.message}`);
+      }
     } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
 
     // Beehiiv — create subscriber, tag as Lead, enroll in lead automation

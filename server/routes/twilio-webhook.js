@@ -149,6 +149,29 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[sms-scheduler] Failed: ${e.message}`); }
     }
 
+    // LEAD INTAKE STATE MACHINE — catches replies to the "What are you
+    // interested in — Pest Control, Lawn Care, or One-Time Service?"
+    // auto-reply that lead-webhook.js sends after a form submission.
+    // Runs the intent classifier → asks for address → auto-creates a
+    // draft estimate → SMS-notifies Adam at 941-599-3489. Only active
+    // while lead_intake_status is set (seeded by lead-webhook).
+    if (customer && Body && customer.lead_intake_status &&
+        customer.lead_intake_status !== 'estimate_drafted') {
+      try {
+        const LeadIntake = require('../services/lead-intake');
+        const intakeResult = await LeadIntake.handleIntakeReply(customer, Body);
+        if (intakeResult?.handled) {
+          logger.info(`[lead-intake] Handled for ${customer.first_name}: ${customer.lead_intake_status} → ${intakeResult.next}`);
+          await db('sms_log').insert({
+            customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
+            message_body: Body, twilio_sid: MessageSid, status: 'received',
+            message_type: 'lead_intake',
+          }).catch(() => {});
+          return res.type('text/xml').send('<Response></Response>');
+        }
+      } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
+    }
+
     // DOMAIN TRACKING — new lead from a domain-specific number
     if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {
       const leadSource = TWILIO_NUMBERS.getLeadSourceFromNumber(To);
