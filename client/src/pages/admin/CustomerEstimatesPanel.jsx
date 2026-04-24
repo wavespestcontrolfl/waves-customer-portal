@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Phone, MessageSquare, FilePlus2, ExternalLink, ChevronLeft, PhoneCall } from 'lucide-react';
+import { Phone, MessageSquare, FilePlus2, ExternalLink, ChevronLeft, PhoneCall, User, Mail, MapPin, Tag } from 'lucide-react';
 import { Badge, Button, cn } from '../../components/ui';
 import { adminFetch } from '../../lib/adminFetch';
 
@@ -139,31 +139,48 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
 
         {!loading && !err && c && (
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
-            {/* Customer card — name is the primary header, then company, then phone/email/address */}
-            <section className="border border-hairline border-zinc-200 rounded-sm p-3 space-y-1 text-13">
-              <div className="text-16 font-medium text-zinc-900 mb-1">
-                {`${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unknown'}
+            {/* Customer card — each row has a leading icon so the field
+                type is obvious at a glance (Name / Phone / Email /
+                Address / Lead source). */}
+            <section className="border border-hairline border-zinc-200 rounded-sm p-3 space-y-1.5 text-13">
+              <div className="flex items-center gap-2">
+                <User size={14} strokeWidth={1.75} className="text-ink-tertiary flex-shrink-0" />
+                <span className="text-16 font-medium text-zinc-900">
+                  {`${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unknown'}
+                </span>
               </div>
               {c.company_name && (
-                <div className="text-ink-secondary">{c.company_name}</div>
+                <div className="text-ink-secondary pl-[22px]">{c.company_name}</div>
               )}
               {c.phone && (
                 <div className="flex items-center gap-2">
-                  <Phone size={13} strokeWidth={1.75} className="text-ink-tertiary" />
+                  <Phone size={14} strokeWidth={1.75} className="text-ink-tertiary flex-shrink-0" />
                   <a href={`tel:${c.phone}`} className="text-zinc-900 hover:underline font-mono">{c.phone}</a>
                 </div>
               )}
               {c.email && (
                 <div className="flex items-center gap-2">
-                  <span className="text-ink-tertiary text-11 w-[13px]">@</span>
+                  <Mail size={14} strokeWidth={1.75} className="text-ink-tertiary flex-shrink-0" />
                   <a href={`mailto:${c.email}`} className="text-zinc-900 hover:underline truncate">{c.email}</a>
                 </div>
               )}
               {(c.address_line1 || c.city) && (
-                <div className="text-ink-secondary mt-1">
-                  {c.address_line1}
-                  {c.address_line1 && (c.city || c.state) ? <br /> : null}
-                  {[c.city, c.state].filter(Boolean).join(', ')}{c.zip ? ' ' + c.zip : ''}
+                <div className="flex items-start gap-2">
+                  <MapPin size={14} strokeWidth={1.75} className="text-ink-tertiary flex-shrink-0 mt-0.5" />
+                  <div className="text-ink-secondary">
+                    {c.address_line1}
+                    {c.address_line1 && (c.city || c.state) ? <br /> : null}
+                    {[c.city, c.state].filter(Boolean).join(', ')}{c.zip ? ' ' + c.zip : ''}
+                  </div>
+                </div>
+              )}
+              {c.lead_source && (
+                <div className="flex items-center gap-2">
+                  <Tag size={14} strokeWidth={1.75} className="text-ink-tertiary flex-shrink-0" />
+                  <span className="text-ink-secondary">
+                    {formatLeadSource(c.lead_source)}
+                    {c.lead_source_detail ? ` · ${c.lead_source_detail}` : ''}
+                  </span>
                 </div>
               )}
               <div className="flex items-center gap-1.5 pt-2 flex-wrap">
@@ -237,47 +254,9 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
               </div>
             )}
 
-            {/* Communications — full chronological thread (SMS + calls) pulled
-                from /admin/customers/:id/comms. Falls back to the single
-                lastContact row from the summary endpoint when the comms call
-                is empty or failed. */}
-            {(comms.length > 0 || lastContact) && (
-              <section className="border-t border-hairline border-zinc-200 pt-3">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="uppercase tracking-label text-11 text-ink-tertiary">
-                    Communications {comms.length > 0 && `(${comms.length})`}
-                  </div>
-                  {c.phone && (
-                    <Link
-                      to={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                      className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
-                    >
-                      Open thread →
-                    </Link>
-                  )}
-                </div>
-                {comms.length > 0 ? (
-                  <div className="space-y-1.5">
-                    {comms.slice(0, 10).map((m) => <CommsRow key={m.id} m={m} />)}
-                    {comms.length > 10 && (
-                      <div className="text-11 text-ink-tertiary text-center pt-1">
-                        + {comms.length - 10} more — open thread to see all
-                      </div>
-                    )}
-                  </div>
-                ) : lastContact ? (
-                  <div className="text-12 text-ink-secondary">
-                    <span className="text-zinc-900">{lastContact.channel === 'voice' ? 'Call' : 'SMS'}</span>
-                    {' '}({lastContact.direction === 'inbound' ? 'from customer' : 'from us'}) · {timeAgo(lastContact.at)}
-                    {lastContact.preview && lastContact.channel === 'sms' && (
-                      <div className="mt-1 text-ink-secondary italic truncate">"{lastContact.preview}"</div>
-                    )}
-                  </div>
-                ) : null}
-              </section>
-            )}
-
-            {/* Estimates list */}
+            {/* Estimates list — shown before Communications per operator
+                preference: the estimate history is the primary context
+                on this panel; comms is supplementary. */}
             <section>
               <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
                 Estimate history ({estimates.length})
@@ -331,11 +310,72 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                 </div>
               )}
             </section>
+
+            {/* Communications — shown below Estimate history per operator
+                preference. Full chronological thread (SMS + calls) from
+                /admin/customers/:id/comms. Falls back to the single
+                lastContact row from the summary endpoint when the comms
+                call is empty or failed. */}
+            {(comms.length > 0 || lastContact) && (
+              <section className="border-t border-hairline border-zinc-200 pt-3">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="uppercase tracking-label text-11 text-ink-tertiary">
+                    Communications history {comms.length > 0 && `(${comms.length})`}
+                  </div>
+                  {c.phone && (
+                    <Link
+                      to={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                      className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
+                    >
+                      Open thread →
+                    </Link>
+                  )}
+                </div>
+                {comms.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {comms.slice(0, 10).map((m) => <CommsRow key={m.id} m={m} />)}
+                    {comms.length > 10 && (
+                      <div className="text-11 text-ink-tertiary text-center pt-1">
+                        + {comms.length - 10} more — open thread to see all
+                      </div>
+                    )}
+                  </div>
+                ) : lastContact ? (
+                  <div className="text-12 text-ink-secondary">
+                    <span className="text-zinc-900">{lastContact.channel === 'voice' ? 'Call' : 'SMS'}</span>
+                    {' '}({lastContact.direction === 'inbound' ? 'from customer' : 'from us'}) · {timeAgo(lastContact.at)}
+                    {lastContact.preview && lastContact.channel === 'sms' && (
+                      <div className="mt-1 text-ink-secondary italic truncate">"{lastContact.preview}"</div>
+                    )}
+                  </div>
+                ) : null}
+              </section>
+            )}
           </div>
         )}
       </aside>
     </>
   );
+}
+
+// Humanize lead_source enum values for display.
+function formatLeadSource(src) {
+  if (!src) return '';
+  const map = {
+    google: 'Google',
+    facebook: 'Facebook',
+    instagram: 'Instagram',
+    website: 'Website',
+    referral: 'Referral',
+    neighbor_referral: 'Neighbor referral',
+    yard_sign: 'Yard sign',
+    truck: 'Truck signage',
+    walk_in: 'Walk-in',
+    admin_manual: 'Manual entry',
+    cold_call: 'Cold call',
+  };
+  if (map[src]) return map[src];
+  return src.replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
 function StatCell({ label, value, sub, accent }) {
