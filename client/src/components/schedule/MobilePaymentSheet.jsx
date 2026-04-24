@@ -14,6 +14,7 @@
 import { X, ChevronRight, CreditCard } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
+import MobileManualCardSheet from './MobileManualCardSheet';
 
 export default function MobilePaymentSheet({
   service,
@@ -30,6 +31,7 @@ export default function MobilePaymentSheet({
   const [cards, setCards] = useState([]);
   const [cardsLoading, setCardsLoading] = useState(false);
   const [chargingCardId, setChargingCardId] = useState(null);
+  const [showManualCard, setShowManualCard] = useState(false);
   const [error, setError] = useState(null);
 
   const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -138,13 +140,14 @@ export default function MobilePaymentSheet({
   }
 
   // Gift Card removed per operator request — not a tender Waves accepts.
-  // Manual CC + Cash App open the /pay/:token public pay page in a new tab
-  // which already handles Stripe Elements for every supported method.
-  // Invoice fires the existing /admin/invoices/:id/send endpoint so the
-  // customer gets the pay link by SMS + email; the sheet closes on success.
+  // Manual CC opens an in-app Stripe card sheet so the tech never leaves
+  // the admin app. Cash App still punches out to the public /pay page
+  // (Stripe wallet support lives there). Invoice fires the existing
+  // /admin/invoices/:id/send endpoint so the customer gets the pay link
+  // by SMS + email; the sheet closes on success.
   const methods = [
     { key: 'cash', label: 'Cash', onClick: handleCash },
-    { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => openPayPage() },
+    { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => setShowManualCard(true) },
     {
       key: 'invoice',
       label: 'Invoice',
@@ -156,6 +159,7 @@ export default function MobilePaymentSheet({
   ];
 
   return (
+    <>
     <div className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden">
       {/* Header */}
       <div
@@ -171,12 +175,6 @@ export default function MobilePaymentSheet({
           <X size={22} strokeWidth={1.75} />
         </button>
         <div className="flex-1" />
-        <span
-          className="text-zinc-900 underline"
-          style={{ fontSize: 14, padding: '0 8px' }}
-        >
-          Split Amount
-        </span>
       </div>
 
       <div className="px-5 pt-8 pb-10 mx-auto" style={{ maxWidth: 560 }}>
@@ -326,5 +324,17 @@ export default function MobilePaymentSheet({
         </div>
       </div>
     </div>
+    {showManualCard && (
+      <MobileManualCardSheet
+        invoiceToken={invoiceToken}
+        amount={amount}
+        onClose={() => setShowManualCard(false)}
+        onChargeSuccess={(r) => {
+          onChargeSuccess?.(r);
+          onClose?.();
+        }}
+      />
+    )}
+    </>
   );
 }

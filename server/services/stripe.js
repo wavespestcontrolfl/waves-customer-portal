@@ -637,7 +637,7 @@ const StripeService = {
    * explicitly opted in on the pay page.
    *
    * @param {string} invoiceId
-   * @param {{ saveCard?: boolean }} [opts]
+   * @param {{ saveCard?: boolean, cardOnly?: boolean }} [opts]
    */
   async createInvoicePaymentIntent(invoiceId, opts = {}) {
     const stripe = getStripe();
@@ -648,23 +648,37 @@ const StripeService = {
     if (invoice.status === 'paid') throw new Error('Invoice already paid');
 
     const saveCard = !!opts.saveCard;
+    const cardOnly = !!opts.cardOnly;
     const baseAmount = parseFloat(invoice.total);
-    const amountCents = Math.round(baseAmount * 100);
+    // Card-only flow (admin manual card entry): bake the 3% surcharge
+    // into the PI up front since we already know the tender is card.
+    // The default non-card path leaves the PI at base amount and relies
+    // on /update-amount to add surcharge when the Payment Element
+    // change event fires.
+    const { base: cardBase, surcharge: cardSurcharge, total: cardTotal } = cardOnly
+      ? computeChargeAmount(baseAmount, 'card')
+      : { base: baseAmount, surcharge: 0, total: baseAmount };
+    const amountCents = Math.round(cardTotal * 100);
 
     const piParams = {
       amount: amountCents,
       currency: 'usd',
-      automatic_payment_methods: { enabled: true },
       description: `Invoice ${invoice.invoice_number} — ${invoice.title || 'Waves Pest Control'}`,
       metadata: {
         waves_invoice_id: invoiceId,
         invoice_number: invoice.invoice_number,
         waves_customer_id: invoice.customer_id,
-        base_amount: String(baseAmount),
-        card_surcharge: '0',
+        base_amount: String(cardBase),
+        card_surcharge: String(cardSurcharge),
         save_card_opt_in: saveCard ? 'true' : 'false',
+        selected_method_category: cardOnly ? 'card' : 'unknown',
       },
     };
+    if (cardOnly) {
+      piParams.payment_method_types = ['card'];
+    } else {
+      piParams.automatic_payment_methods = { enabled: true };
+    }
 
     if (saveCard && invoice.customer_id) {
       piParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
@@ -672,9 +686,9 @@ const StripeService = {
     }
 
     try {
-      // Idempotency key includes saveCard so toggling regenerates the PI
-      // cleanly — same amount but different Stripe intent surface.
-      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}`;
+      // Idempotency key includes saveCard + cardOnly so toggling either
+      // regenerates a clean PI instead of hitting the cached one.
+      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}_${cardOnly ? 'cardonly' : 'auto'}`;
       const paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
       await db('invoices')
