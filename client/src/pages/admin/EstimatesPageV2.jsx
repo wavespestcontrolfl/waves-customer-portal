@@ -415,6 +415,21 @@ function EstimatePipelineViewV2() {
     }
   }, []);
 
+  const toggleOneTimeOption = useCallback(async (e) => {
+    const newVal = !e.showOneTimeOption;
+    try {
+      await adminFetch(`/admin/estimates/${e.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ showOneTimeOption: newVal }),
+      });
+      setEstimates((prev) =>
+        prev.map((est) => (est.id === e.id ? { ...est, showOneTimeOption: newVal } : est)),
+      );
+    } catch {
+      alert('Failed to update one-time option');
+    }
+  }, []);
+
   if (loading) {
     return (
       <div className="p-10 text-center text-13 text-ink-secondary">
@@ -758,6 +773,22 @@ function EstimatePipelineViewV2() {
                   </button>
 
                   <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1">
+                    {['draft', 'sent', 'viewed'].includes(e.status) && (
+                      <Button
+                        size="sm"
+                        variant={e.showOneTimeOption ? 'secondary' : 'ghost'}
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={() => toggleOneTimeOption(e)}
+                        title={
+                          e.showOneTimeOption
+                            ? 'One-time option is visible to the customer. Click to hide.'
+                            : 'Let the customer choose one-time instead of recurring.'
+                        }
+                      >
+                        {e.showOneTimeOption ? '1x Option: On' : '1x Option: Off'}
+                      </Button>
+                    )}
+
                     {e.status === 'draft' && e.monthlyTotal > 0 && (
                       <Button
                         size="sm"
