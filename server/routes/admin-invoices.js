@@ -18,10 +18,17 @@ router.get('/stats', async (req, res, next) => {
 // GET / — list invoices
 router.get('/', async (req, res, next) => {
   try {
-    const { status, customer_id, limit = 50, page = 1 } = req.query;
+    const { status, customer_id, limit = 50, page = 1, archived: archivedRaw } = req.query;
+    // archived=only → archived-only view; archived=all → include both.
+    // Default (any other value or unset) = hide archived.
+    const archived = archivedRaw === 'only' || archivedRaw === '1' || archivedRaw === 'true'
+      ? 'only'
+      : archivedRaw === 'all'
+      ? 'all'
+      : 'hide';
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const { invoices, total } = await InvoiceService.list({
-      status, customerId: customer_id, limit: parseInt(limit), offset,
+      status, customerId: customer_id, limit: parseInt(limit), offset, archived,
     });
     res.json({ invoices, total, page: parseInt(page) });
   } catch (err) { next(err); }
@@ -335,6 +342,40 @@ router.post('/:id/void', async (req, res, next) => {
   try {
     const invoice = await InvoiceService.voidInvoice(req.params.id);
     res.json(invoice);
+  } catch (err) { next(err); }
+});
+
+// POST /:id/archive — tuck a voided invoice out of the default list view.
+// Void-only precondition: refusing paid/sent/draft because "archive" is
+// meaningful only as a final shelving step on a row that has no activity
+// left. Returns the updated row so the UI can update in place.
+router.post('/:id/archive', async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ id: req.params.id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoice.status !== 'void') {
+      return res.status(400).json({ error: `Only voided invoices can be archived (current status: ${invoice.status})` });
+    }
+    if (invoice.archived_at) return res.json(invoice);  // idempotent
+    const [updated] = await db('invoices')
+      .where({ id: req.params.id })
+      .update({ archived_at: db.fn.now(), updated_at: db.fn.now() })
+      .returning('*');
+    res.json(updated);
+  } catch (err) { next(err); }
+});
+
+// POST /:id/unarchive — pulls an archived invoice back into the default view.
+router.post('/:id/unarchive', async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ id: req.params.id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (!invoice.archived_at) return res.json(invoice);  // idempotent
+    const [updated] = await db('invoices')
+      .where({ id: req.params.id })
+      .update({ archived_at: null, updated_at: db.fn.now() })
+      .returning('*');
+    res.json(updated);
   } catch (err) { next(err); }
 });
 
