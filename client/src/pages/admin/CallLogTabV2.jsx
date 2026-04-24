@@ -65,6 +65,8 @@ export default function CallLogTabV2() {
   const [callResult, setCallResult] = useState(null);
   const [callFilter, setCallFilter] = useState('all');
   const [callLogSearch, setCallLogSearch] = useState('');
+  const [processingCallSid, setProcessingCallSid] = useState(null);
+  const [processResult, setProcessResult] = useState(null);
   // Transcript expand/collapse per call id. Collapsed by default because
   // transcripts are noisy; tap the row to expand.
   const [expandedTranscripts, setExpandedTranscripts] = useState(() => new Set());
@@ -78,7 +80,7 @@ export default function CallLogTabV2() {
     const q = search
       ? `?search=${encodeURIComponent(search)}&limit=1000`
       : '?days=365&limit=200';
-    adminFetch(`/ai/admin/calls${q}`)
+    return adminFetch(`/ai/admin/calls${q}`)
       .then((d) => { setCalls(d.calls || []); setLoading(false); })
       .catch(() => setLoading(false));
   };
@@ -113,6 +115,39 @@ export default function CallLogTabV2() {
     if (city) params.set('city', city);
     if (state) params.set('state', state);
     window.open(`/admin/customers/new?${params.toString()}`, '_blank');
+  };
+
+  const handleProcessCall = async (callSid, alreadyProcessed) => {
+    if (!callSid || processingCallSid) return;
+    setProcessingCallSid(callSid);
+    setProcessResult(null);
+    const force = alreadyProcessed;
+    try {
+      const res = await adminFetch(
+        `/admin/call-recordings/process/${callSid}${force ? '?force=true' : ''}`,
+        { method: 'POST' },
+      );
+      if (res?.success === false) {
+        setProcessResult({ ok: false, callSid, text: `Process failed: ${res.error || 'unknown error'}` });
+      } else if (res?.skipped) {
+        setProcessResult({ ok: true, callSid, text: `Skipped — ${res.reason || 'no work to do'}` });
+      } else {
+        const extracted = res?.extracted || {};
+        const parts = [];
+        const name = [extracted.first_name, extracted.last_name].filter(Boolean).join(' ');
+        if (name) parts.push(`Name: ${name}`);
+        if (extracted.email) parts.push(`Email: ${extracted.email}`);
+        const addr = extracted.address_line1 || extracted.address;
+        if (addr) parts.push(`Address: ${addr}`);
+        const detail = parts.length ? ` — ${parts.join(' · ')}` : '';
+        setProcessResult({ ok: true, callSid, text: `Processed${detail}` });
+      }
+      await loadCalls(callLogSearch.trim());
+    } catch (err) {
+      setProcessResult({ ok: false, callSid, text: `Process failed: ${err.message || 'unknown error'}` });
+    } finally {
+      setProcessingCallSid(null);
+    }
   };
 
   if (loading) return <div className="p-10 text-center text-ink-tertiary text-13">Loading calls…</div>;
@@ -350,22 +385,26 @@ export default function CallLogTabV2() {
                             Create Lead
                           </Button>
                         )}
-                        {c.twilio_call_sid && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={async () => {
-                              const force = c.processing_status === 'processed';
-                              try {
-                                await adminFetch(`/admin/call-recordings/process/${c.twilio_call_sid}${force ? '?force=true' : ''}`, { method: 'POST' });
-                                loadCalls(callLogSearch.trim());
-                              } catch (err) {
-                                alert('Process failed: ' + (err.message || 'unknown error'));
-                              }
-                            }}
-                          >
-                            {c.processing_status === 'processed' ? 'Reprocess' : 'Process'}
-                          </Button>
+                        {c.twilio_call_sid && (() => {
+                          const isBusy = processingCallSid === c.twilio_call_sid;
+                          const isProcessed = c.processing_status === 'processed';
+                          return (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              disabled={!!processingCallSid}
+                              onClick={() => handleProcessCall(c.twilio_call_sid, isProcessed)}
+                            >
+                              {isBusy
+                                ? (isProcessed ? 'Reprocessing…' : 'Processing…')
+                                : (isProcessed ? 'Reprocess' : 'Process')}
+                            </Button>
+                          );
+                        })()}
+                        {processResult && processResult.callSid === c.twilio_call_sid && (
+                          <span className={cn('text-12', processResult.ok ? 'text-ink-secondary' : 'text-alert-fg')}>
+                            {processResult.text}
+                          </span>
                         )}
                       </div>
                     )}
