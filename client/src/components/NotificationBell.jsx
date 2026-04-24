@@ -111,7 +111,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   return (
     <div ref={panelRef} style={{ position: 'relative' }}>
       {/* Bell Button */}
-      <button onClick={handleOpen} style={{
+      <button onClick={handleOpen} aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'} aria-haspopup="dialog" aria-expanded={open} style={{
         background: 'none', border: 'none', cursor: 'pointer', position: 'relative',
         padding: 8, fontSize: 20, color: isDark ? '#64748B' : '#fff', minWidth: 44, minHeight: 44,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -264,7 +264,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '4px 8px',
                   }}>Mark all read</button>
                 )}
-                <button onClick={() => setOpen(false)} style={{
+                <button onClick={() => setOpen(false)} aria-label="Close notifications" style={{
                   background: 'none', border: 'none', color: colors.muted,
                   fontSize: 20, cursor: 'pointer', padding: 4, minWidth: 44, minHeight: 44,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
