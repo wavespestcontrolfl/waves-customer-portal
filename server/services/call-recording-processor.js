@@ -10,6 +10,7 @@
  *   6. Full audit trail in call_log
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
@@ -124,6 +125,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
+  "wants_estimate": true/false,
   "is_voicemail": true/false,
   "is_spam": true/false,
   "sentiment": "positive/neutral/negative/frustrated",
@@ -138,6 +140,11 @@ IMPORTANT — appointment_confirmed rules:
 - Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
+
+IMPORTANT — wants_estimate rules:
+- Set wants_estimate to true if the caller asks for a quote, estimate, price, pricing, "how much", "what would it cost", "can you give me a number", or otherwise signals they want a written/verbal price before committing.
+- true even if they also booked an appointment — quote intent and service intent are not mutually exclusive.
+- false for existing-customer service questions, complaints, billing calls, rescheduling, voicemail, or spam.
 
 Return ONLY valid JSON.`;
 
@@ -501,6 +508,70 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Step 4c: If caller wants a quote/estimate, enqueue a draft estimate.
+    // `status: 'draft'` is the queue state — EstimatesPageV2's Drafts tab
+    // already surfaces these; `source: 'call_recording'` is the discriminator
+    // so Virginia can tell auto-queued ones from hand-started drafts.
+    let estimateQueueResult = null;
+    if (customerId && extracted.wants_estimate && !extracted.is_spam && !extracted.is_voicemail) {
+      try {
+        // Dedup: skip if an open draft already exists for this customer in the
+        // last 24h, so reprocessing or back-to-back calls don't stack duplicates.
+        const recentDraft = await db('estimates')
+          .where({ customer_id: customerId, status: 'draft' })
+          .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+          .first();
+
+        if (recentDraft) {
+          logger.info(`[call-proc] Skipping estimate enqueue — draft ${recentDraft.id} exists for customer ${customerId}`);
+          estimateQueueResult = { skipped: true, existingEstimateId: recentDraft.id };
+        } else {
+          const customerName = [extracted.first_name, extracted.last_name].filter(Boolean).map(capitalizeName).join(' ') || null;
+          const shortId = crypto.randomBytes(4).toString('hex');
+          const nameSlug = (customerName || 'customer').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+          const token = `${nameSlug}-${shortId}`;
+          const expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + 7);
+
+          const isPriority = extracted.lead_quality === 'hot' || extracted.sentiment === 'frustrated';
+          const urgency = extracted.lead_quality === 'hot' ? 3 : extracted.lead_quality === 'warm' ? 2 : 1;
+
+          const [est] = await db('estimates').insert({
+            customer_id: customerId,
+            status: 'draft',
+            source: 'call_recording',
+            service_interest: extracted.matched_service || extracted.requested_service || null,
+            is_priority: isPriority,
+            urgency,
+            customer_name: customerName,
+            customer_phone: phone || null,
+            customer_email: extracted.email || null,
+            address: extracted.address_line1 || null,
+            token,
+            expires_at: expiresAt,
+            notes: extracted.call_summary || null,
+            estimate_data: JSON.stringify({
+              callSid: call.twilio_call_sid,
+              leadId: leadId || null,
+              requested_service: extracted.requested_service,
+              matched_service: extracted.matched_service,
+              pain_points: extracted.pain_points,
+              sentiment: extracted.sentiment,
+              lead_quality: extracted.lead_quality,
+              city: extracted.city,
+              zip: extracted.zip,
+            }),
+          }).returning('*');
+
+          logger.info(`[call-proc] Queued draft estimate ${est.id} (${extracted.matched_service || 'unspecified service'}) for customer ${customerId}`);
+          estimateQueueResult = { created: true, estimateId: est.id, token };
+        }
+      } catch (err) {
+        logger.error(`[call-proc] Estimate enqueue failed (non-blocking): ${err.message}`);
+        estimateQueueResult = { error: err.message };
+      }
+    }
+
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
     // Guard: reject vague date/time (must contain an actual time like "10 AM", "2:30 PM", "noon")
     let appointmentResult = null;
@@ -725,6 +796,7 @@ const CallRecordingProcessor = {
       leadId,
       extracted,
       appointmentResult,
+      estimateQueueResult,
       beehiivResult,
     };
   },
