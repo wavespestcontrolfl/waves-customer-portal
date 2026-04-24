@@ -25,6 +25,7 @@ import { LeadsSection } from './LeadsTabs';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
 import { MarginCalculator } from './PricingLogicPage';
 import EstimateToolViewV2 from './EstimateToolViewV2';
+import CustomerEstimatesPanel from './CustomerEstimatesPanel';
 import {
   FollowUpModalV2,
   DeclineModalV2,
@@ -357,6 +358,7 @@ function EstimatePipelineViewV2() {
   const v3Flag = useFeatureFlag('estimates_v2_status_pills');
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [customerPanelId, setCustomerPanelId] = useState(null);
   const [filter, setFilter] = useState('all');
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
@@ -564,14 +566,15 @@ function EstimatePipelineViewV2() {
                 {/* Customer info */}
                 <div className="flex-1 min-w-[150px]">
                   <div className="flex items-center gap-2 flex-wrap">
-                    {v3Flag && e.customerId ? (
-                      <a
-                        href={`/admin/customers?customerId=${encodeURIComponent(e.customerId)}`}
-                        onClick={(evt) => evt.stopPropagation()}
-                        className="text-14 sm:text-14 font-medium text-zinc-900 no-underline hover:underline"
+                    {e.customerId ? (
+                      <button
+                        type="button"
+                        onClick={(evt) => { evt.stopPropagation(); setCustomerPanelId(e.customerId); }}
+                        className="text-14 sm:text-14 font-medium text-zinc-900 bg-transparent border-0 p-0 cursor-pointer hover:underline"
+                        title="Open customer + estimate history"
                       >
                         {e.customerName || 'Unknown'}
-                      </a>
+                      </button>
                     ) : (
                       <span className="text-14 sm:text-14 font-medium text-zinc-900">
                         {e.customerName || 'Unknown'}
@@ -783,6 +786,13 @@ function EstimatePipelineViewV2() {
             );
           })}
         </div>
+      )}
+
+      {customerPanelId && (
+        <CustomerEstimatesPanel
+          customerId={customerPanelId}
+          onClose={() => setCustomerPanelId(null)}
+        />
       )}
     </div>
   );
