@@ -541,10 +541,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FFFFFF', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14 }}>{selectedService.name}</div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-                  {selectedService.duration || selectedService.default_duration_minutes || 60} min
-                  {(selectedService.priceMin || selectedService.base_price) ? ` — $${selectedService.priceMin || selectedService.base_price}${selectedService.priceMax && selectedService.priceMax !== selectedService.priceMin ? `–$${selectedService.priceMax}` : ''}` : ''}
-                </div>
               </div>
               <button onClick={() => setSelectedService(null)} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
             </div>
