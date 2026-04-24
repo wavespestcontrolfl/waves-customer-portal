@@ -35,7 +35,7 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
   Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, Send, FilePlus2, SlidersHorizontal,
-  Check, X, ArrowLeft, Plus,
+  Check, X, ArrowLeft, Plus, Trash2,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1046,7 +1046,7 @@ function mobileStatusClass(status) {
 // present. Row tap is currently a no-op — action sheet will land in a
 // follow-up PR so this PR stays scoped to the list-view redesign per
 // CLAUDE.md Rule 1/2.
-function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel, onSend, v3Flag = false }) {
+function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel, onSend, onDeleted, v3Flag = false }) {
   const navigate = useNavigate();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
   const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
@@ -1177,6 +1177,29 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           <Send size={16} strokeWidth={1.75} />
         </button>
       )}
+      <button
+        type="button"
+        onClick={async (e) => {
+          e.stopPropagation();
+          const ok = window.confirm(`Delete ${estimate.status} estimate for ${customerName}?\n\nThis is permanent. Any pay link sent to the customer will stop working.`);
+          if (!ok) return;
+          try {
+            const r = await adminFetch(`/admin/estimates/${estimate.id}`, { method: 'DELETE' });
+            if (!r.ok) {
+              const err = await r.json().catch(() => ({}));
+              throw new Error(err.error || `HTTP ${r.status}`);
+            }
+            onDeleted?.(estimate.id);
+          } catch (err) {
+            alert('Delete failed: ' + err.message);
+          }
+        }}
+        aria-label={`Delete estimate for ${customerName}`}
+        title="Delete this estimate permanently"
+        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-alert-fg/60 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
+      >
+        <Trash2 size={16} strokeWidth={1.75} />
+      </button>
     </div>
   );
 }
@@ -1367,6 +1390,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onCreateFromAddress={onCreateFromAddress}
               onOpenCustomerPanel={setCustomerPanelId}
               onSend={refreshEstimates}
+              onDeleted={refreshEstimates}
               v3Flag={v3Flag}
             />
           ))}
