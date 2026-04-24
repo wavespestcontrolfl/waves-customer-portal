@@ -17,6 +17,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
+const { lookupStoriesFromZillow } = require('../services/property-lookup/zillow-fallback');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -201,6 +202,26 @@ async function performPropertyLookup(address) {
     result.errors.push({ source: 'ai', message: 'Satellite images not available — cannot run AI analysis' });
   }
 
+  // ── STEP 3.5: Stories fallback — Zillow via Apify when RentCast had none.
+  // Stamp `_storiesSource` on the rentcast object so buildEnrichedProfile can
+  // surface provenance to the client without a signature change.
+  if (result.rentcast) {
+    if (result.rentcast.stories) {
+      result.rentcast._storiesSource = 'rentcast';
+    } else {
+      const zillowStories = await lookupStoriesFromZillow(address).catch((err) => {
+        result.errors.push({ source: 'zillow-fallback', message: err?.message || String(err) });
+        return null;
+      });
+      if (zillowStories) {
+        result.rentcast.stories = zillowStories;
+        result.rentcast._storiesSource = 'zillow';
+      } else {
+        result.rentcast._storiesSource = 'default';
+      }
+    }
+  }
+
   // ── STEP 4: Enrich — merge all data sources ──
   result.enriched = buildEnrichedProfile(result.rentcast, result.aiAnalysis, lat, lng, result.avm);
 
@@ -292,8 +313,12 @@ async function fetchRentCast(address) {
     yearBuilt: p.yearBuilt || null,
     bedrooms: p.bedrooms || 0,
     bathrooms: p.bathrooms || 0,
+    // Return null (not 1) when RentCast has nothing — the orchestrator uses
+    // the null to decide whether to run the Zillow fallback lookup, and the
+    // enriched profile exposes `storiesSource` so the UI can nudge for manual
+    // verification when neither provider had data.
     stories: features.floorCount || features.floor_count || features.floors ||
-             features.stories || p.stories || 1,
+             features.stories || p.stories || null,
 
     // Construction & structure
     constructionMaterial: normalizeConstruction(
@@ -596,6 +621,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     homeSqFt: rc?.squareFootage || 0,
     lotSqFt: rc?.lotSize || 0,
     stories: rc?.stories || 1,
+    // Provenance for the `stories` value so the client can decide whether to
+    // amber-nudge the estimator to eyeball the photos. 'rentcast' / 'zillow'
+    // = verified data source; 'default' = nobody knew, we fell back to 1.
+    storiesSource: rc?._storiesSource || (rc?.stories ? 'rentcast' : 'default'),
     footprint: rc?.squareFootage
       ? Math.round(rc.squareFootage / (rc.stories || 1))
       : 0,

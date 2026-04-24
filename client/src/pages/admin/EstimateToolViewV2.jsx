@@ -1059,7 +1059,14 @@ export default function EstimateToolViewV2({
               </FieldV2>
               <div className="grid grid-cols-2 gap-3">
                 <FieldV2 label="Home Sq Ft"><InputV2 k="homeSqFt" type="number" placeholder="2000" /></FieldV2>
-                <FieldV2 label="Stories"><InputV2 k="stories" type="number" min="1" max="4" /></FieldV2>
+                <FieldV2 label="Stories">
+                  <InputV2 k="stories" type="number" min="1" max="4" />
+                  {enrichedProfile?.storiesSource === 'default' && (
+                    <div className="mt-1 text-11 text-alert-fg">
+                      ⚠ Verify stories — no data source confirmed a floor count. Defaulted to 1; a 2-story home priced here would under-charge.
+                    </div>
+                  )}
+                </FieldV2>
               </div>
               <FieldV2 label="Lot Sq Ft"><InputV2 k="lotSqFt" type="number" placeholder="8000" /></FieldV2>
               {form.svcTs && (
