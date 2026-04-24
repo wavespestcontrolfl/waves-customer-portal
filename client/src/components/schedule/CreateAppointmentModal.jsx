@@ -409,7 +409,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 style={{
                   position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
                   width: 36, height: 36, borderRadius: 18, border: 'none',
-                  background: '#F4F4F5', color: '#18181B', fontSize: 18, lineHeight: 1,
+                  background: '#FFFFFF', color: '#18181B', fontSize: 18, lineHeight: 1,
                   cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}
               >×</button>
@@ -439,7 +439,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         <div style={{ padding: isMobile ? '0 16px 24px' : 0 }}>
 
         {/* Toast */}
-        {toast && <div style={{ background: '#F4F4F5', border: `1px solid ${D.border}`, borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: D.text, fontSize: 13, fontWeight: 500 }}>{toast}</div>}
+        {toast && <div style={{ background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: D.text, fontSize: 13, fontWeight: 500 }}>{toast}</div>}
 
         {/* Section 1: Customer */}
         <div style={sectionStyle}>
@@ -460,7 +460,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               )}
               <button onClick={() => setShowQuickAdd(!showQuickAdd)} style={{ background: 'none', border: 'none', color: D.text, fontSize: 13, fontWeight: 500, cursor: 'pointer', marginTop: 6, padding: '4px 0', minHeight: 44, display: 'inline-flex', alignItems: 'center', textDecoration: 'underline', textUnderlineOffset: 3 }}>+ New customer</button>
               {showQuickAdd && (
-                <div style={{ marginTop: 8, padding: 12, background: '#FAFAFA', borderRadius: 10, border: `1px solid #E4E4E7` }}>
+                <div style={{ marginTop: 8, padding: 12, background: '#FFFFFF', borderRadius: 10, border: `1px solid #E4E4E7` }}>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
                     <div><label style={labelStyle}>First Name</label><input value={quickAdd.firstName} onChange={e => setQuickAdd(q => ({ ...q, firstName: e.target.value }))} style={inputStyle} /></div>
                     <div><label style={labelStyle}>Last Name</label><input value={quickAdd.lastName} onChange={e => setQuickAdd(q => ({ ...q, lastName: e.target.value }))} style={inputStyle} /></div>
@@ -487,7 +487,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               )}
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FAFAFA', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FFFFFF', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14 }}>{selectedCustomer.firstName} {selectedCustomer.lastName}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{selectedCustomer.address || `${selectedCustomer.city || ''}`}</div>
@@ -540,7 +540,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               )}
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FAFAFA', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FFFFFF', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14 }}>{selectedService.name}</div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
@@ -590,7 +590,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
 
           {timeSlots !== null && (
-            <div style={{ marginBottom: 12, background: '#FAFAFA', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
+            <div style={{ marginBottom: 12, background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                   {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : 'No feasible slots in next 7 days'}

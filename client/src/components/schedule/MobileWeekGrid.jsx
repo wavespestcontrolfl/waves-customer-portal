@@ -296,7 +296,7 @@ function TimeAxis({ slotHeight, nowMin, showNowDot }) {
         width: TIME_AXIS_WIDTH,
         flexShrink: 0,
         position: 'relative',
-        background: '#FAFAFA',
+        background: '#FFFFFF',
         borderRight: '1px solid rgba(0,0,0,0.08)',
       }}
     >

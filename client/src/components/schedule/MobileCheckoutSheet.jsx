@@ -267,7 +267,7 @@ export default function MobileCheckoutSheet({
                   type="button"
                   onClick={() => removeExtra(e.id)}
                   aria-label={`Remove ${e.description}`}
-                  className="flex items-center justify-center h-8 w-8 rounded-full bg-zinc-100 text-zinc-700 u-focus-ring"
+                  className="flex items-center justify-center h-8 w-8 rounded-full bg-white border border-hairline border-zinc-200 text-zinc-700 u-focus-ring"
                 >
                   <X size={14} strokeWidth={2} />
                 </button>

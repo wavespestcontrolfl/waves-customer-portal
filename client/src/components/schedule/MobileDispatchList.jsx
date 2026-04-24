@@ -153,7 +153,8 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
               width: 28,
               height: 28,
               borderRadius: '50%',
-              background: '#F4F4F5',
+              background: '#FFFFFF',
+              border: '1px solid #E4E4E7',
               fontSize: 12,
               flexShrink: 0,
               alignSelf: 'center',
@@ -185,7 +186,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute }) {
   return (
     <section>
       <header
-        className="sticky top-0 z-10 bg-zinc-50 border-b border-hairline border-zinc-200 flex items-center justify-between"
+        className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 flex items-center justify-between"
         style={{ padding: '8px 14px', height: 36 }}
       >
         <span

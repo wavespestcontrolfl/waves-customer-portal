@@ -83,7 +83,7 @@ export default function MobileItemDiscountPickerSheet({ onClose, onSelect }) {
     >
       <div
         className="flex items-center justify-center rounded-sm shrink-0 text-zinc-600"
-        style={{ width: 56, height: 56, background: '#E4E4E7' }}
+        style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E4E4E7' }}
         aria-hidden
       >
         {icon}
@@ -121,7 +121,7 @@ export default function MobileItemDiscountPickerSheet({ onClose, onSelect }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search"
-            className="block w-full bg-zinc-100 text-14 text-ink-primary border-0 rounded-sm h-12 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+            className="block w-full bg-white text-14 text-ink-primary border border-hairline border-zinc-200 rounded-sm h-12 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-zinc-900"
           />
         </div>
 

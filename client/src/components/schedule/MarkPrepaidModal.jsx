@@ -94,7 +94,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
+            className="flex items-center justify-center rounded-full bg-white border border-hairline border-zinc-200 u-focus-ring"
             style={{ width: 32, height: 32, fontSize: 18, lineHeight: 1 }}
           >
             ×
@@ -144,7 +144,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
                 'rounded-full u-focus-ring ' +
                 (method === m.value
                   ? 'bg-zinc-900 text-white'
-                  : 'bg-zinc-100 text-zinc-900')
+                  : 'bg-white text-zinc-900 border border-hairline border-zinc-200')
               }
               style={{ padding: '8px 14px', fontSize: 13, fontWeight: 500 }}
             >

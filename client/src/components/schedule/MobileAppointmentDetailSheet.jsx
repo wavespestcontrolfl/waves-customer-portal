@@ -200,7 +200,7 @@ export default function MobileAppointmentDetailSheet({
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-zinc-100 text-ink-primary font-medium u-focus-ring"
+          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary font-medium u-focus-ring"
           style={{ height: 44, padding: '0 18px', fontSize: 15 }}
         >
           <span style={{ fontSize: 18, lineHeight: 1 }}>✕</span>
@@ -339,7 +339,7 @@ export default function MobileAppointmentDetailSheet({
                 target="_blank"
                 rel="noreferrer"
                 aria-label="Open in Maps"
-                className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
+                className="flex items-center justify-center rounded-full bg-white border border-hairline border-zinc-200 u-focus-ring"
                 style={{ width: 40, height: 40, fontSize: 18, textDecoration: 'none', color: '#18181B' }}
               >
                 ➤
@@ -389,7 +389,7 @@ export default function MobileAppointmentDetailSheet({
             type="button"
             onClick={cancelAppointment}
             disabled={!!actionBusy}
-            className="w-full rounded-full bg-zinc-100 text-alert-fg font-medium u-focus-ring disabled:opacity-50"
+            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-alert-fg font-medium u-focus-ring disabled:opacity-50"
             style={{ padding: '14px 20px', fontSize: 16 }}
           >
             {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel appointment'}
@@ -398,7 +398,7 @@ export default function MobileAppointmentDetailSheet({
             type="button"
             onClick={markNoShow}
             disabled={!!actionBusy}
-            className="w-full rounded-full bg-zinc-100 text-alert-fg font-medium u-focus-ring disabled:opacity-50"
+            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-alert-fg font-medium u-focus-ring disabled:opacity-50"
             style={{ padding: '14px 20px', fontSize: 16 }}
           >
             {actionBusy === 'noshow' ? 'Saving…' : 'Mark as no-show'}
@@ -406,7 +406,7 @@ export default function MobileAppointmentDetailSheet({
           <button
             type="button"
             onClick={() => onBookNext?.(service)}
-            className="w-full rounded-full bg-zinc-100 text-zinc-900 font-medium u-focus-ring"
+            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring"
             style={{ padding: '14px 20px', fontSize: 16 }}
           >
             Book next appointment
