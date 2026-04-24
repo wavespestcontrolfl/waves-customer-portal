@@ -187,6 +187,35 @@ function addOneHour(hhmm) {
   return `${String(nextH).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+// Customer-facing window rotation for slots on sparse days. find-time
+// returns the earliest feasible start per (date, gap), so when a day has
+// no other stops every slot collapses to 8 AM (→ rounded to 9 AM). For
+// those days the technician is genuinely available 8a–5p, so we rotate
+// the displayed window across the working day to give customers real
+// choice. Route-optimal slots (placed adjacent to another customer for
+// drive-time savings) keep their original time — that's the whole point
+// of route optimization. Skips noon for lunch.
+const PREFERRED_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
+
+function spreadWindowsAcrossDay(slots) {
+  if (!Array.isArray(slots) || slots.length <= 1) return slots;
+  let nonOptimalIdx = 0;
+  return slots.map((s) => {
+    // Preserve the route-optimized time for slots placed near another
+    // customer — moving them to a different hour would destroy the
+    // routing benefit that earned them the "Nearby" tag.
+    if (s.routeOptimal) return s;
+    const win = PREFERRED_WINDOWS[nonOptimalIdx % PREFERRED_WINDOWS.length];
+    nonOptimalIdx += 1;
+    return {
+      ...s,
+      windowStart: win,
+      windowEnd: addOneHour(win),
+      slotId: `${s.date}_${win.replace(':', '-')}_${s.techId || 'unassigned'}`,
+    };
+  });
+}
+
 function classifySlot(slot, proximityDriveMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
@@ -324,7 +353,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   }
 
   const combined = [...routeOptimalSlots, ...interleaved].slice(0, TARGET_TOTAL);
-  const primary = combined;
+  const primary = spreadWindowsAcrossDay(combined);
   const expander = []; // kept for backward-compat with the client renderer
 
   const result = {
