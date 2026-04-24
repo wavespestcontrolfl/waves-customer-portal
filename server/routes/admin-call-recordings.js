@@ -89,8 +89,13 @@ router.get('/recording/:id', async (req, res, next) => {
 router.get('/audio/:id', async (req, res) => {
   try {
     const config = require('../config');
-    const recording = await db('call_log').where({ id: req.params.id })
-      .orWhere({ recording_sid: req.params.id })
+    // call_log.id is uuid; recording_sid is a Twilio SID (e.g. "RE…"). A combined
+    // .where({id}).orWhere({recording_sid}) fails in Postgres with "invalid input
+    // syntax for type uuid" when the param isn't UUID-shaped, so route by shape.
+    const param = req.params.id;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(param);
+    const recording = await db('call_log')
+      .where(isUuid ? { id: param } : { recording_sid: param })
       .first();
 
     if (!recording?.recording_url) return res.status(404).json({ error: 'Recording not found' });
