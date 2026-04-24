@@ -164,13 +164,22 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/admin/projects/:id/send — generate token + mark sent
+// POST /api/admin/projects/:id/send — generate token, mark sent, notify customer
 // Admin-only (prevents accidental send by tech before review).
+//
+// Notifies the customer via SMS (Twilio) and email (SendGrid) with the
+// public report link. Failures on either channel are reported back but
+// do not block the status transition — the report is still viewable
+// at the public URL.
 // ---------------------------------------------------------------------------
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const customer = project.customer_id
+      ? await db('customers').where({ id: project.customer_id }).first()
+      : null;
 
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
     await db('projects').where({ id: req.params.id }).update({
@@ -180,8 +189,79 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       updated_at: db.fn.now(),
     });
 
-    logger.info(`[projects] sent ${project.id} token=${token}`);
-    res.json({ project_id: project.id, report_token: token, report_url: `/report/project/${token}` });
+    const reportUrl = `https://portal.wavespestcontrol.com/report/project/${token}`;
+    const typeCfg = getProjectType(project.project_type);
+    const typeLabel = typeCfg?.label || 'Service';
+    const firstName = customer?.first_name || 'there';
+
+    const channels = {};
+
+    // SMS
+    if (customer?.phone) {
+      try {
+        const digits = String(customer.phone).replace(/\D/g, '');
+        const normalized = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
+          : digits.length === 10 ? `+1${digits}`
+          : null;
+        if (!normalized) {
+          channels.sms = { ok: false, error: `Invalid phone format: ${customer.phone}` };
+        } else {
+          const TwilioService = require('../services/twilio');
+          const smsBody = `Hi ${firstName}! Your Waves ${typeLabel} report is ready: ${reportUrl}\n\nQuestions? Reply here.`;
+          const result = await TwilioService.sendSMS(normalized, smsBody);
+          channels.sms = result && result.success === false
+            ? { ok: false, error: result.error || 'Twilio send failed' }
+            : { ok: true };
+        }
+      } catch (e) {
+        logger.error(`[projects] send sms failed: ${e.message}`);
+        channels.sms = { ok: false, error: e.message };
+      }
+    } else {
+      channels.sms = { ok: false, error: 'No phone on file' };
+    }
+
+    // Email (via SendGrid, service-tier ASM group)
+    if (customer?.email) {
+      try {
+        const sendgrid = require('../services/sendgrid-mail');
+        if (!sendgrid.isConfigured()) {
+          channels.email = { ok: false, error: 'SendGrid not configured' };
+        } else {
+          const serviceGid = parseInt(process.env.SENDGRID_ASM_GROUP_SERVICE) || null;
+          const html = `<div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:600px;margin:0 auto;color:#18181b;line-height:1.55;">
+  <h2 style="margin:0 0 12px;">Your Waves ${typeLabel} report is ready</h2>
+  <p>Hi ${firstName},</p>
+  <p>Your technician's report from today's visit is posted. Tap below to review photos, findings, and our recommendations.</p>
+  <p style="margin:22px 0;"><a href="${reportUrl}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Your Report</a></p>
+  <p style="color:#52525b;font-size:14px;">Questions? Reply to this email or call <a href="tel:+19412101983" style="color:#18181b;">(941) 210-1983</a>.</p>
+  <hr style="border:none;border-top:1px solid #e4e4e7;margin:24px 0;" />
+  <p style="color:#a1a1aa;font-size:12px;">Waves Pest Control, LLC · Bradenton, FL</p>
+</div>`;
+          const text = `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nQuestions? Reply to this email or call (941) 210-1983.\n\n— Waves Pest Control`;
+          const result = await sendgrid.sendOne({
+            to: customer.email,
+            fromEmail: 'reports@wavespestcontrol.com',
+            fromName: 'Waves Pest Control',
+            replyTo: 'contact@wavespestcontrol.com',
+            subject: `Your Waves ${typeLabel} report is ready`,
+            html,
+            text,
+            categories: ['project_report', `type_${project.project_type}`],
+            asmGroupId: serviceGid,
+          });
+          channels.email = { ok: true, messageId: result.messageId };
+        }
+      } catch (e) {
+        logger.error(`[projects] send email failed: ${e.message}`);
+        channels.email = { ok: false, error: e.message };
+      }
+    } else {
+      channels.email = { ok: false, error: 'No email on file' };
+    }
+
+    logger.info(`[projects] sent ${project.id} token=${token} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
+    res.json({ project_id: project.id, report_token: token, report_url: `/report/project/${token}`, channels });
   } catch (err) { next(err); }
 });
 
