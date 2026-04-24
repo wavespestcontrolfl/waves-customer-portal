@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Customer360Profile from '../../components/admin/Customer360Profile';
+import CallBridgeLink from '../../components/admin/CallBridgeLink';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { CustomerHealthSection } from './CustomerHealthTabs';
@@ -1271,11 +1272,11 @@ export default function CustomersPage() {
 
                   {/* Row 2: tappable phone */}
                   {c.phone && (
-                    <a
-                      href={`tel:${c.phone}`}
-                      onClick={e => e.stopPropagation()}
+                    <CallBridgeLink
+                      phone={c.phone}
+                      customerName={`${c.firstName || ''} ${c.lastName || ''}`.trim()}
                       style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14, color: D.teal, textDecoration: 'underline', paddingLeft: 20 }}
-                    >{c.phone}</a>
+                    >{c.phone}</CallBridgeLink>
                   )}
 
                   {/* Row 3: city + stage joined by · */}

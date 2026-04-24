@@ -9,6 +9,7 @@ import { Link } from 'react-router-dom';
 import { Phone, MessageSquare, FilePlus2, ExternalLink, ChevronLeft, PhoneCall, User, Mail, MapPin, Tag, Trash2 } from 'lucide-react';
 import { Badge, Button, cn } from '../../components/ui';
 import { adminFetch } from '../../lib/adminFetch';
+import CallBridgeLink from '../../components/admin/CallBridgeLink';
 
 const STATUS_TONES = {
   draft: 'muted',
@@ -155,7 +156,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
               {c.phone && (
                 <div className="flex items-center gap-2">
                   <Phone size={14} strokeWidth={1.75} className="text-ink-tertiary flex-shrink-0" />
-                  <a href={`tel:${c.phone}`} className="text-zinc-900 hover:underline font-mono">{c.phone}</a>
+                  <CallBridgeLink phone={c.phone} customerName={`${c.first_name || ''} ${c.last_name || ''}`.trim()} className="text-zinc-900 hover:underline font-mono">{c.phone}</CallBridgeLink>
                 </div>
               )}
               {c.email && (

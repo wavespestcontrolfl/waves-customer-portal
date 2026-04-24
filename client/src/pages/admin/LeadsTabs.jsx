@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { callViaBridge } from '../../components/admin/CallBridgeLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -476,9 +477,9 @@ export function LeadsSection() {
                         navigate(`/admin/estimates?${params}`);
                       }}>Create Estimate</Btn>
                       <Btn small color={C.amber} onClick={()=>setCallbackForm({ leadId:lead.id, date:'', time:'', notes:'' })}>Schedule Callback</Btn>
-                      {lead.phone && <a href={`tel:${lead.phone}`} style={{ textDecoration:'none' }}>
-                        <Btn small color={C.green}>Call Now</Btn>
-                      </a>}
+                      {lead.phone && (
+                        <Btn small color={C.green} onClick={() => callViaBridge(lead.phone, `${lead.first_name || ''} ${lead.last_name || ''}`.trim())}>Call Now</Btn>
+                      )}
                       <Btn small color={C.green} onClick={()=>{ setFormData({ leadId:lead.id }); setShowModal('convert'); }}>Convert to Customer</Btn>
                       <Btn small color={C.red} onClick={()=>{ setFormData({ leadId:lead.id }); setShowModal('lost'); }}>Mark Lost</Btn>
                       <Btn small color={C.purple} onClick={()=>{ setFormData({ leadId:lead.id }); setShowModal('assign'); }}>Assign</Btn>
