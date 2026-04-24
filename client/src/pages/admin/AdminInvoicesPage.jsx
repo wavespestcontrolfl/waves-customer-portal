@@ -146,6 +146,8 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
       rows = rows.filter(i => i.status !== 'paid' && i.status !== 'void');
     } else if (filter === 'paid') {
       rows = rows.filter(i => i.status === 'paid');
+    } else if (filter === 'needs_receipt') {
+      rows = rows.filter(i => i.status === 'paid' && !i.receipt_sent_at);
     }
     setInvoices(rows);
     setSelected(new Set());
@@ -289,6 +291,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
             { key: 'overdue', label: 'Overdue' },
             { key: 'unpaid', label: 'Unpaid' },
             { key: 'paid', label: 'Paid' },
+            { key: 'needs_receipt', label: 'Needs receipt' },
             { key: 'draft', label: 'Draft' },
           ]}
         />
