@@ -123,7 +123,7 @@ export function StickyBottomCTA({
             onClick={secondaryAction}
             className="btn btn-tertiary"
             style={{
-              fontSize: 13,
+              fontSize: 14,
               fontFamily: FONTS.ui,
               background: 'transparent',
               minHeight: 'auto',

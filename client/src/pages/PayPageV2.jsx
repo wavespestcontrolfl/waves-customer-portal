@@ -1,6 +1,7 @@
 import { COLORS, FONTS } from '../theme-brand';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import Icon from '../components/Icon';
 import {
   WavesShell,
   BrandCard,
@@ -285,7 +286,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         background: 'rgba(0,156,222,0.08)', border: '1px solid rgba(0,156,222,0.24)',
         fontSize: 16, lineHeight: 1.5, color: 'var(--text)',
       }}>
-        <span aria-hidden="true">💳</span>
+        <Icon name="card" size={16} strokeWidth={2} />
         <span>
           A {pct}% processing fee is added to credit/debit card and wallet payments.
           Bank transfers (ACH) pay the quoted amount with no added fee.
