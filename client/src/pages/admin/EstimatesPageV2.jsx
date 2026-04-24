@@ -13,6 +13,7 @@
 // Leads / Pricing Logic tabs still render V1 panels.
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { useSearchParams } from 'react-router-dom';
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
@@ -1208,9 +1209,38 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
 
 export default function EstimatesPageV2() {
   const isMobile = useIsMobile(768);
-  const [activeTab, setActiveTab] = useState('leads');
-  const [mobileView, setMobileView] = useState('list'); // 'list' | 'new'
-  const [mobilePrefillAddress, setMobilePrefillAddress] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Prefill from URL params — populated when arriving from a Customer/Lead
+  // row's "+ Estimate" quick action. Stays in state so consuming the params
+  // (clearing the URL) doesn't blow away the wizard the user just landed on.
+  const [prefill, setPrefill] = useState(() => ({
+    address: searchParams.get('address') || '',
+    customerName: searchParams.get('customerName') || '',
+    customerPhone: searchParams.get('customerPhone') || '',
+    customerEmail: searchParams.get('customerEmail') || '',
+  }));
+  const hasPrefill = !!(prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail);
+
+  const [activeTab, setActiveTab] = useState(hasPrefill ? 'new' : 'leads');
+  const [mobileView, setMobileView] = useState(hasPrefill ? 'new' : 'list'); // 'list' | 'new'
+
+  // Strip prefill keys from the URL once we've captured them so a refresh
+  // doesn't repeatedly snap the user into the create flow.
+  useEffect(() => {
+    if (!hasPrefill) return;
+    const next = new URLSearchParams(searchParams);
+    let changed = false;
+    ['address', 'customerName', 'customerPhone', 'customerEmail'].forEach((k) => {
+      if (next.has(k)) { next.delete(k); changed = true; }
+    });
+    if (changed) setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function clearPrefill() {
+    setPrefill({ address: '', customerName: '', customerPhone: '', customerEmail: '' });
+  }
 
   // Mobile: list (default) + create-estimate flow. Leads + Pricing Logic are
   // desktop-only per CLAUDE.md Rule 1 (mobile IA scope confirmed with owner).
@@ -1220,21 +1250,29 @@ export default function EstimatesPageV2() {
         <div>
           <button
             type="button"
-            onClick={() => { setMobileView('list'); setMobilePrefillAddress(''); }}
+            onClick={() => { setMobileView('list'); clearPrefill(); }}
             aria-label="Back to estimates"
             className="inline-flex items-center gap-1 mb-3 h-9 px-2 -ml-2 rounded-md text-14 text-zinc-700 hover:bg-zinc-100 u-focus-ring"
           >
             <ArrowLeft size={18} strokeWidth={1.75} aria-hidden />
             Back
           </button>
-          <EstimateToolViewV2 initialAddress={mobilePrefillAddress} />
+          <EstimateToolViewV2
+            initialAddress={prefill.address}
+            initialCustomerName={prefill.customerName}
+            initialCustomerPhone={prefill.customerPhone}
+            initialCustomerEmail={prefill.customerEmail}
+          />
         </div>
       );
     }
     return (
       <EstimatesMobileListView
-        onNew={() => { setMobilePrefillAddress(''); setMobileView('new'); }}
-        onCreateFromAddress={(addr) => { setMobilePrefillAddress(addr || ''); setMobileView('new'); }}
+        onNew={() => { clearPrefill(); setMobileView('new'); }}
+        onCreateFromAddress={(addr) => {
+          setPrefill({ address: addr || '', customerName: '', customerPhone: '', customerEmail: '' });
+          setMobileView('new');
+        }}
       />
     );
   }
@@ -1283,7 +1321,14 @@ export default function EstimatesPageV2() {
 
       {activeTab === 'leads' && <LeadsSection />}
       {activeTab === 'estimates' && <EstimatePipelineViewV2 />}
-      {activeTab === 'new' && <EstimateToolViewV2 />}
+      {activeTab === 'new' && (
+        <EstimateToolViewV2
+          initialAddress={prefill.address}
+          initialCustomerName={prefill.customerName}
+          initialCustomerPhone={prefill.customerPhone}
+          initialCustomerEmail={prefill.customerEmail}
+        />
+      )}
       {activeTab === 'pricing' && (
         <>
           <MarginCalculator />

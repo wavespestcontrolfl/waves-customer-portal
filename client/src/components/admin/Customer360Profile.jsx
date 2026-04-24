@@ -731,7 +731,19 @@ export default function Customer360Profile({ customerId, onClose }) {
       </div>
 
       {/* Mobile-only sticky bottom action bar — mirrors the desktop header pills */}
-      <CustomerActionBar customer={{ id: customerId, phone: c.phone }} standalone />
+      <CustomerActionBar
+        customer={{
+          id: customerId,
+          phone: c.phone,
+          email: c.email,
+          firstName: c.firstName,
+          lastName: c.lastName,
+          address: c.address
+            ? [c.address.line1, c.address.city, c.address.state, c.address.zip].filter(Boolean).join(', ')
+            : '',
+        }}
+        standalone
+      />
     </div>
   );
 }

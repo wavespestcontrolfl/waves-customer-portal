@@ -9,8 +9,8 @@
 // Pipeline / Map / Health / AI Advisor render V1 panels via named exports
 // from CustomersPage.jsx (PR #4b/#4c/#4d will reskin those in later passes).
 import { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { Filter, Phone, MessageSquare, Plus } from 'lucide-react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
+import { Filter, Phone, MessageSquare, Plus, FilePlus2 } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
 import MobileNewCustomerSheet from '../../components/admin/MobileNewCustomerSheet';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -438,8 +438,21 @@ function detectTier(c) {
   return c.tier || 'Bronze';
 }
 
+// Build the URL that opens the Estimates "Create Estimate" flow with the
+// customer's address + contact info prefilled into EstimateToolViewV2.
+function buildEstimatePrefillUrl(c) {
+  const params = new URLSearchParams();
+  const fullName = `${c.firstName || ''} ${c.lastName || ''}`.trim();
+  if (c.address) params.set('address', c.address);
+  if (fullName) params.set('customerName', fullName);
+  if (c.phone) params.set('customerPhone', c.phone);
+  if (c.email) params.set('customerEmail', c.email);
+  return `/admin/estimates?${params.toString()}`;
+}
+
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
+  const navigate = useNavigate();
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -921,6 +934,15 @@ export default function CustomersPageV2() {
                             <MessageSquare size={16} strokeWidth={1.75} />
                           </a>
                         )}
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); navigate(buildEstimatePrefillUrl(c)); }}
+                          aria-label="Create estimate"
+                          title="Create estimate from this customer"
+                          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                        >
+                          <FilePlus2 size={16} strokeWidth={1.75} />
+                        </button>
                       </div>
                     );
                   })() : (
@@ -973,6 +995,15 @@ export default function CustomersPageV2() {
                             <MessageSquare size={12} strokeWidth={1.75} />
                           </a>
                         )}
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); navigate(buildEstimatePrefillUrl(c)); }}
+                          aria-label="Create estimate"
+                          title="Create estimate from this customer"
+                          className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                        >
+                          <FilePlus2 size={12} strokeWidth={1.75} />
+                        </button>
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); startEdit(c); }}

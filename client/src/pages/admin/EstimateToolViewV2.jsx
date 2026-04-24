@@ -287,7 +287,12 @@ function SectionTitle({ children, className }) {
 // MAIN COMPONENT — EstimateToolViewV2
 // State, refs, effects, callbacks all copied verbatim from V1.
 // ═══════════════════════════════════════════════════════════════
-export default function EstimateToolViewV2({ initialAddress = '' } = {}) {
+export default function EstimateToolViewV2({
+  initialAddress = '',
+  initialCustomerName = '',
+  initialCustomerPhone = '',
+  initialCustomerEmail = '',
+} = {}) {
   // ── Google Maps script (verbatim from V1) ─────────────────────
   const addressRef = useRef(null);
   const autocompleteRef = useRef(null);
@@ -360,6 +365,9 @@ export default function EstimateToolViewV2({ initialAddress = '' } = {}) {
   // ── form state (verbatim from V1) ─────────────────────────────
   const [form, setForm] = useState({
     address: initialAddress || '',
+    customerName: initialCustomerName || '',
+    customerPhone: initialCustomerPhone || '',
+    customerEmail: initialCustomerEmail || '',
     homeSqFt: '', stories: '1', lotSqFt: '', propertyType: 'Single Family',
     hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO',
     shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',

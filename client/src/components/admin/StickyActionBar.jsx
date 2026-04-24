@@ -1,4 +1,4 @@
-import { MessageSquare, Phone, Calendar, FileText, Edit3, Send, CheckCircle2, PlayCircle, Clock, Link2, DollarSign } from 'lucide-react';
+import { MessageSquare, Phone, Calendar, FileText, FilePlus2, Edit3, Send, CheckCircle2, PlayCircle, Clock, Link2, DollarSign } from 'lucide-react';
 import { cn } from '../ui/cn';
 
 /**
@@ -77,6 +77,23 @@ function ActionColumn({ action }) {
 export function CustomerActionBar({ customer, standalone }) {
   const phone = customer?.phone;
   const customerId = customer?.id || customer?.customerId;
+
+  // Build the Estimate prefill URL from whatever customer fields we have.
+  // Falls back to /admin/estimates with no params (lands on Leads tab) when
+  // the caller didn't pass enriched customer data.
+  const estimateHref = (() => {
+    const params = new URLSearchParams();
+    const fullName = `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim()
+      || customer?.name
+      || '';
+    if (customer?.address) params.set('address', customer.address);
+    if (fullName) params.set('customerName', fullName);
+    if (phone) params.set('customerPhone', phone);
+    if (customer?.email) params.set('customerEmail', customer.email);
+    const qs = params.toString();
+    return qs ? `/admin/estimates?${qs}` : '/admin/estimates';
+  })();
+
   return (
     <StickyActionBar standalone={standalone} actions={[
       {
@@ -92,6 +109,12 @@ export function CustomerActionBar({ customer, standalone }) {
         label: 'Call',
         href: phone ? `tel:${phone}` : undefined,
         disabled: !phone,
+      },
+      {
+        key: 'estimate',
+        icon: FilePlus2,
+        label: 'Estimate',
+        href: estimateHref,
       },
       {
         key: 'book',
