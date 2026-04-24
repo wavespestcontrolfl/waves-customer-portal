@@ -763,7 +763,7 @@ export default function QuotePage() {
                 {intakeIdx === INTAKE_STEPS.length - 1 && intake.frequency === 'ongoing' && !isOtherFlow && (
                   <label style={{
                     display: 'flex', alignItems: 'flex-start', gap: 10,
-                    marginTop: 16, fontSize: 13, color: COLORS.textBody,
+                    marginTop: 16, fontSize: 14, color: COLORS.textBody,
                     lineHeight: 1.5, cursor: 'pointer',
                   }}>
                     <input
@@ -779,7 +779,7 @@ export default function QuotePage() {
                   </label>
                 )}
                 {intakeIdx === INTAKE_STEPS.length - 1 && (
-                  <p style={{ fontSize: 11, color: COLORS.textCaption, marginTop: 16, lineHeight: 1.5 }}>
+                  <p style={{ fontSize: 12, color: COLORS.textCaption, marginTop: 16, lineHeight: 1.5 }}>
                     By completing this form, you agree to the Waves{' '}
                     <a href="https://wavespestcontrol.com/terms-of-service/" style={{ textDecoration: 'underline', color: 'inherit' }}>Terms of Service</a>
                     {' '}and{' '}
@@ -881,7 +881,7 @@ export default function QuotePage() {
             {stage === 'upsell' && result && (
               <div>
                 <div style={{ textAlign: 'center', padding: '4px 0 20px' }}>
-                  <div style={{ fontSize: 13, color: COLORS.textCaption, fontWeight: 600, marginBottom: 6, fontFamily: FONTS.ui }}>Your price is ready</div>
+                  <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600, marginBottom: 6, fontFamily: FONTS.ui }}>Your price is ready</div>
                   <h2 style={sCardH2}>Level up your plan.</h2>
                   <p style={sCardSub}>Most homes in your area add one of these. Pick what you want and your specialist will include it on your confirmation call.</p>
                 </div>
@@ -931,7 +931,7 @@ export default function QuotePage() {
                   </div>
                   <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${Number(result.variance_low).toLocaleString()} – ${Number(result.variance_high).toLocaleString()}</strong> per month</div>
                   {result.confidence === 'low' && (
-                    <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
+                    <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
                   )}
                   <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${Number(result.annual_total).toLocaleString()}/yr · {result.service_interest}</div>
                   {result.has_setup_fee && (
@@ -1010,7 +1010,7 @@ export default function QuotePage() {
                       ) : (
                         <>
                           <div style={{ fontWeight: 700, marginBottom: 4 }}>Not ready to book? Get SWFL pest &amp; lawn tips monthly.</div>
-                          <div style={{ fontSize: 13, color: COLORS.textBody, marginBottom: 10 }}>
+                          <div style={{ fontSize: 14, color: COLORS.textBody, marginBottom: 10 }}>
                             Seasonal pressure alerts, timing advice, local SWFL guidance. No sales pitches.
                           </div>
                           <button
@@ -1018,7 +1018,7 @@ export default function QuotePage() {
                             onClick={handleDeferredSubscribe}
                             disabled={subscribeStatus === 'loading'}
                             style={{
-                              padding: '6px 14px', fontSize: 13, fontWeight: 600,
+                              padding: '6px 14px', fontSize: 14, fontWeight: 600,
                               background: 'transparent', color: COLORS.blueDeeper,
                               border: `1.5px solid ${COLORS.blueDeeper}`, borderRadius: 6,
                               cursor: subscribeStatus === 'loading' ? 'default' : 'pointer',
@@ -1063,7 +1063,7 @@ function LookupLoading({ status, sub, satellite, aiSources, address }) {
 
   return (
     <div style={{ textAlign: 'center', padding: '16px 0' }}>
-      <div style={{ fontSize: 13, color: COLORS.textCaption, fontWeight: 600, marginBottom: 6, fontFamily: FONTS.ui }}>Property Lookup</div>
+      <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600, marginBottom: 6, fontFamily: FONTS.ui }}>Property Lookup</div>
       <h2 style={{ margin: '0 0 8px', fontFamily: FONTS.heading, fontSize: 24, fontWeight: 700, color: COLORS.blueDeeper, lineHeight: 1.2 }}>
         {status || 'Measuring your property'}{dots}
       </h2>
@@ -1082,7 +1082,7 @@ function LookupLoading({ status, sub, satellite, aiSources, address }) {
         </div>
       )}
       {aiSources && (
-        <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 12 }}>
+        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 12 }}>
           AI sources: {aiSources.join(' + ')}
         </div>
       )}

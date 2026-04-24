@@ -138,7 +138,7 @@ export default function ReviewPage() {
 
           {/* Social proof counter */}
           {techReviewCount > 0 && (
-            <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 8 }}>
+            <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 8 }}>
               ⭐ {techReviewCount.toLocaleString()} homeowners have reviewed {techName ? techName.split(' ')[0] : 'our team'}
             </div>
           )}
@@ -150,7 +150,7 @@ export default function ReviewPage() {
             <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>
               How was your experience?
             </div>
-            <div style={{ fontSize: 13, color: COLORS.textCaption, marginBottom: 20 }}>
+            <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 20 }}>
               {customerFirstName ? `${customerFirstName}, tap` : 'Tap'} to rate
             </div>
 
@@ -180,7 +180,7 @@ export default function ReviewPage() {
               })}
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
               <span>Not great</span><span>Amazing!</span>
             </div>
           </div>
@@ -206,7 +206,7 @@ export default function ReviewPage() {
             </div>
             <div style={{ width: 36, height: 36, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.blueDark, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto' }} />
             <div style={{ marginTop: 16 }}>
-              <a href={data.googleReviewUrl} style={{ fontSize: 13, color: COLORS.blueDark, textDecoration: 'none' }}>
+              <a href={data.googleReviewUrl} style={{ fontSize: 14, color: COLORS.blueDark, textDecoration: 'none' }}>
                 Tap here if you're not redirected
               </a>
             </div>
@@ -245,7 +245,7 @@ export default function ReviewPage() {
               <button onClick={() => setPhase('thankyou')}
                 style={{
                   padding: '14px 20px', borderRadius: 12, border: `1px solid ${COLORS.grayLight}`,
-                  background: 'transparent', color: COLORS.textCaption, fontSize: 13, cursor: 'pointer',
+                  background: 'transparent', color: COLORS.textCaption, fontSize: 14, cursor: 'pointer',
                 }}>
                 Skip
               </button>
@@ -270,7 +270,7 @@ export default function ReviewPage() {
         {phase === 'rate' && (
           <div style={{ textAlign: 'center', marginTop: 24 }}>
             <button onClick={() => setPhase('feedback')}
-              style={{ background: 'none', border: 'none', color: COLORS.textCaption, fontSize: 13, cursor: 'pointer', textDecoration: 'underline' }}>
+              style={{ background: 'none', border: 'none', color: COLORS.textCaption, fontSize: 14, cursor: 'pointer', textDecoration: 'underline' }}>
               Something wasn't right? Let us know directly
             </button>
           </div>

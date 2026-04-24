@@ -156,7 +156,7 @@ function OneTimePriceCard({ oneTimePrice }) {
       borderTop: `4px solid ${COLORS.yellow}`,
       marginBottom: 16,
     }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.yellow, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.yellow, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
         Single visit
       </div>
       <div style={{ fontSize: 42, fontWeight: 700, color: COLORS.navy, lineHeight: 1.1 }}>
@@ -176,7 +176,7 @@ function CountdownLine({ secondsRemaining }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
   return (
-    <div style={{ fontSize: 13, color: COLORS.textCaption, textAlign: 'center' }}>
+    <div style={{ fontSize: 14, color: COLORS.textCaption, textAlign: 'center' }}>
       Slot held for {m}:{String(s).padStart(2, '0')}
     </div>
   );
@@ -189,7 +189,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
       borderTop: `4px solid ${COLORS.wavesBlue}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
       marginBottom: 16,
     }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.wavesBlue, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.wavesBlue, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         Confirm your booking
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
@@ -270,7 +270,7 @@ function SlotConflictBanner({ onRetry }) {
           style={{
             marginTop: 10, padding: '8px 14px',
             background: COLORS.wavesBlue, color: COLORS.white, border: 'none',
-            borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            borderRadius: 8, cursor: 'pointer', fontSize: 14, fontWeight: 600,
           }}
         >Refresh times</button>
       ) : null}

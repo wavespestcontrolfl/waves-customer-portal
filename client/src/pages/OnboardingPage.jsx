@@ -49,7 +49,7 @@ function PillSelect({ options, value, onChange, wrap }) {
     <div style={{ display: 'flex', flexWrap: wrap ? 'wrap' : 'nowrap', gap: 6 }}>
       {options.map(o => (
         <button key={o.value} onClick={() => onChange(o.value)} style={{
-          ...BUTTON_BASE, padding: '8px 14px', fontSize: 13, borderRadius: 20,
+          ...BUTTON_BASE, padding: '8px 14px', fontSize: 14, borderRadius: 20,
           background: value === o.value ? B.wavesBlue : B.blueSurface,
           color: value === o.value ? '#fff' : B.grayDark,
           border: 'none', flex: wrap ? 'none' : '1 1 auto',
@@ -360,7 +360,7 @@ export default function OnboardingPage() {
   );
 
   const fieldLabel = (text) => (
-    <div style={{ fontSize: 13, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, marginBottom: 6, marginTop: 12 }}>{text}</div>
+    <div style={{ fontSize: 14, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, marginBottom: 6, marginTop: 12 }}>{text}</div>
   );
 
   return (
@@ -416,17 +416,17 @@ export default function OnboardingPage() {
               <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{q.serviceType}</div>
               <div style={{ fontSize: 28, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui, marginTop: 8 }}>${q.monthlyRate.toFixed(2)}<span style={{ fontSize: 14, fontWeight: 400, color: B.grayMid }}>/mo</span></div>
               {q.tier && (
-                <div style={{ fontSize: 13, fontWeight: 600, color: B.green, marginTop: 4 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: B.green, marginTop: 4 }}>
                   WaveGuard {q.tier} — {q.tier === 'Platinum' ? '20%' : q.tier === 'Gold' ? '15%' : q.tier === 'Silver' ? '10%' : '0%'} bundle savings
                 </div>
               )}
               {q.depositAmount > 0 && !payAtVisit && (
-                <div style={{ fontSize: 13, color: B.grayDark, marginTop: 6 }}>
+                <div style={{ fontSize: 14, color: B.grayDark, marginTop: 6 }}>
                   50% deposit: ${q.depositAmount.toFixed(2)} due today
                 </div>
               )}
               {payAtVisit && (
-                <div style={{ fontSize: 13, color: B.grayDark, marginTop: 6 }}>
+                <div style={{ fontSize: 14, color: B.grayDark, marginTop: 6 }}>
                   Payment at the visit — nothing due today.
                 </div>
               )}
@@ -454,7 +454,7 @@ export default function OnboardingPage() {
                 <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 12 }} />
 
                 {stripeError && (
-                  <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 13, color: B.red, marginBottom: 12 }}>
+                  <div style={{ padding: 10, background: '#FFEBEE', borderRadius: 8, fontSize: 14, color: B.red, marginBottom: 12 }}>
                     {stripeError}
                   </div>
                 )}
@@ -484,7 +484,7 @@ export default function OnboardingPage() {
                   opacity: submitting ? 0.7 : 1,
                 }}>{submitting ? 'Processing...' : !stripeReady ? 'Loading payment form...' : 'Save Payment Method'}</button>
 
-                <div style={{ fontSize: 11, color: B.textCaption, marginTop: 10, textAlign: 'center' }}>
+                <div style={{ fontSize: 12, color: B.textCaption, marginTop: 10, textAlign: 'center' }}>
                   Secured by Stripe. We never store your card details directly.
                 </div>
               </div>
@@ -504,7 +504,7 @@ export default function OnboardingPage() {
               {/* Service confirmation */}
               {svc && (
                 <div style={{ marginTop: 16, padding: '14px 16px', borderRadius: 12, borderLeft: `4px solid ${B.wavesBlue}`, background: B.blueSurface }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: B.grayMid, fontFamily: FONTS.ui }}>Your first service:</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, fontFamily: FONTS.ui }}>Your first service:</div>
                   <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 4 }}>
                     {new Date(svc.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
                   </div>
@@ -514,11 +514,11 @@ export default function OnboardingPage() {
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                     {!svc.confirmed && !data.status.serviceConfirmed ? (
                       <>
-                        <button onClick={handleConfirm} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: B.yellow, color: B.blueDeeper }}> Confirm</button>
-                        <button onClick={openReschedule} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: 'transparent', color: B.wavesBlue, border: `1.5px solid ${B.wavesBlue}` }}> Reschedule</button>
+                        <button onClick={handleConfirm} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 14, background: B.yellow, color: B.blueDeeper }}> Confirm</button>
+                        <button onClick={openReschedule} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 14, background: 'transparent', color: B.wavesBlue, border: `1.5px solid ${B.wavesBlue}` }}> Reschedule</button>
                       </>
                     ) : (
-                      <span style={{ fontSize: 13, fontWeight: 700, color: B.green }}> Confirmed</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: B.green }}> Confirmed</span>
                     )}
                   </div>
                   <button onClick={generateICS} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginTop: 8, padding: 0 }}>
@@ -532,14 +532,14 @@ export default function OnboardingPage() {
                 <div style={{ marginTop: 12, padding: '14px 16px', borderRadius: 12, border: `1.5px solid ${B.wavesBlue}`, background: '#fff' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Pick a new day</div>
-                    <button onClick={() => { setShowReschedule(false); setPickedDate(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, color: B.grayMid }}></button>
+                    <button onClick={() => { setShowReschedule(false); setPickedDate(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: B.grayMid }}></button>
                   </div>
                   <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2 }}>
                     Only showing days a Waves tech is already in your neighborhood.
                   </div>
 
-                  {slotsLoading && <div style={{ marginTop: 12, fontSize: 13, color: B.grayMid }}>Loading…</div>}
-                  {slotsError && <div style={{ marginTop: 12, fontSize: 13, color: B.red }}>{slotsError}</div>}
+                  {slotsLoading && <div style={{ marginTop: 12, fontSize: 14, color: B.grayMid }}>Loading…</div>}
+                  {slotsError && <div style={{ marginTop: 12, fontSize: 14, color: B.red }}>{slotsError}</div>}
 
                   {!slotsLoading && !slotsError && slotDays.length > 0 && !pickedDate && (
                     <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))', gap: 6 }}>
@@ -548,9 +548,9 @@ export default function OnboardingPage() {
                           padding: '10px 8px', borderRadius: 10, border: `1.5px solid ${B.bluePale}`, background: '#fff',
                           cursor: 'pointer', textAlign: 'center',
                         }}>
-                          <div style={{ fontSize: 11, color: B.grayMid, textTransform: 'uppercase', fontWeight: 600 }}>{d.dayOfWeek}</div>
+                          <div style={{ fontSize: 12, color: B.grayMid, textTransform: 'uppercase', fontWeight: 600 }}>{d.dayOfWeek}</div>
                           <div style={{ fontSize: 18, fontWeight: 700, color: B.navy }}>{d.dayNum}</div>
-                          <div style={{ fontSize: 11, color: B.grayMid }}>{d.month}</div>
+                          <div style={{ fontSize: 12, color: B.grayMid }}>{d.month}</div>
                           <div style={{ fontSize: 10, color: B.wavesBlue, marginTop: 2 }}>{d.slots.length} open</div>
                         </button>
                       ))}
@@ -559,12 +559,12 @@ export default function OnboardingPage() {
 
                   {pickedDate && (
                     <div style={{ marginTop: 10 }}>
-                      <div style={{ fontSize: 13, color: B.navy, fontWeight: 600, marginBottom: 8 }}>{pickedDate.fullDate}</div>
+                      <div style={{ fontSize: 14, color: B.navy, fontWeight: 600, marginBottom: 8 }}>{pickedDate.fullDate}</div>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 6 }}>
                         {pickedDate.slots.map(s => (
                           <button key={s.startTime24} disabled={submitting} onClick={() => submitReschedule(pickedDate.date, s.startTime24)} style={{
                             padding: '10px 12px', borderRadius: 10, border: `1.5px solid ${B.wavesBlue}`, background: B.blueSurface,
-                            cursor: submitting ? 'default' : 'pointer', fontSize: 13, fontWeight: 600, color: B.navy,
+                            cursor: submitting ? 'default' : 'pointer', fontSize: 14, fontWeight: 600, color: B.navy,
                           }}>
                             {s.start} – {s.end}
                           </button>
@@ -613,7 +613,7 @@ export default function OnboardingPage() {
               {hasYardGate && (
                 <PasswordInput value={prefs.propertyGateCode} onChange={v => updatePref('propertyGateCode', v)} placeholder="e.g., Combo lock: 4821" />
               )}
-              <div style={{ fontSize: 11, color: B.textCaption, marginTop: 8 }}> Only visible to your assigned tech on service day</div>
+              <div style={{ fontSize: 12, color: B.textCaption, marginTop: 8 }}> Only visible to your assigned tech on service day</div>
 
               {/* Pets */}
               {sectionHead('', 'Pets & Household')}
@@ -646,7 +646,7 @@ export default function OnboardingPage() {
                       padding: '10px 12px', borderRadius: 10, cursor: 'pointer', textAlign: 'center',
                       border: `2px solid ${selected ? B.wavesBlue : B.bluePale}`,
                       background: selected ? B.blueSurface : '#fff',
-                      fontSize: 13, fontWeight: selected ? 600 : 400, color: B.navy,
+                      fontSize: 14, fontWeight: selected ? 600 : 400, color: B.navy,
                     }}>{f.label}</div>
                   );
                 })}
@@ -677,7 +677,7 @@ export default function OnboardingPage() {
               {referralSource === 'neighbor_referral' && (
                 <div style={{ marginTop: 8 }}>
                   <input value={referredBy} onChange={e => setReferredBy(e.target.value)} placeholder="Their name or phone — we'll credit them $25!" style={inputStyle} />
-                  <div style={{ fontSize: 11, color: B.green, marginTop: 4 }}>Your neighbor gets $25 off and so do you </div>
+                  <div style={{ fontSize: 12, color: B.green, marginTop: 4 }}>Your neighbor gets $25 off and so do you </div>
                 </div>
               )}
 
@@ -718,14 +718,14 @@ export default function OnboardingPage() {
 
             <div style={{ background: '#fff', borderRadius: 16, padding: 24, marginTop: 20, textAlign: 'left' }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>Your Plan</div>
-              <div style={{ fontSize: 13, color: B.grayDark }}>{q.serviceType}</div>
+              <div style={{ fontSize: 14, color: B.grayDark }}>{q.serviceType}</div>
               {q.tier && <span style={{ display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '3px 9px', borderRadius: 10, background: B.yellow, color: B.blueDeeper, marginTop: 4 }}>WaveGuard {q.tier}</span>}
               <div style={{ fontSize: 22, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui, marginTop: 6 }}>${q.monthlyRate.toFixed(2)}/mo</div>
 
               {svc && (
                 <>
                   <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 16, marginBottom: 4 }}>First Visit</div>
-                  <div style={{ fontSize: 13, color: B.grayDark }}>
+                  <div style={{ fontSize: 14, color: B.grayDark }}>
                     {new Date(svc.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
                     {svc.windowStart && ` · ${fmtTime(svc.windowStart)} – ${fmtTime(svc.windowEnd)}`}
                     {svc.techName && ` · ${svc.techName}`}
@@ -736,7 +736,7 @@ export default function OnboardingPage() {
               {data.card && (
                 <>
                   <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 16, marginBottom: 4 }}>Payment</div>
-                  <div style={{ fontSize: 13, color: B.grayDark }}>{data.card.brand} ····{data.card.lastFour} · Auto-pay {data.card.autopay ? 'enabled' : 'disabled'}</div>
+                  <div style={{ fontSize: 14, color: B.grayDark }}>{data.card.brand} ····{data.card.lastFour} · Auto-pay {data.card.autopay ? 'enabled' : 'disabled'}</div>
                 </>
               )}
 
@@ -762,7 +762,7 @@ export default function OnboardingPage() {
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>Know someone who needs pest control? </div>
               <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4 }}>Share your link — you both get $25</div>
               <a href={`sms:?body=${encodeURIComponent(`Hey! I just signed up with Waves Pest Control and they're awesome. Use my referral link and we both get $25 off: https://wavespestcontrol.com?ref=${c.referralCode}`)}`} style={{
-                ...BUTTON_BASE, padding: '9px 20px', fontSize: 13, marginTop: 10,
+                ...BUTTON_BASE, padding: '9px 20px', fontSize: 14, marginTop: 10,
                 borderRadius: 9999, background: B.yellow, color: B.blueDeeper,
                 textDecoration: 'none', display: 'inline-flex', fontWeight: 800,
               }}> Text a Friend</a>

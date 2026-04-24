@@ -209,8 +209,8 @@ export default function RatePage() {
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, padding: '0 2px' }}>
-            <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.textCaption }}>Not Great</span>
-            <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.textCaption }}>Amazing!</span>
+            <span style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.textCaption }}>Not Great</span>
+            <span style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.textCaption }}>Amazing!</span>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
             {[1,2,3,4,5,6,7,8,9,10].map(n => {
@@ -226,7 +226,7 @@ export default function RatePage() {
               );
             })}
           </div>
-          <div style={{ textAlign: 'center', marginTop: 10, fontSize: 13, color: COLORS.textCaption, fontWeight: 600 }}>Tap a number to rate</div>
+          <div style={{ textAlign: 'center', marginTop: 10, fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Tap a number to rate</div>
         </div>
       )}
 
@@ -257,7 +257,7 @@ export default function RatePage() {
           >
             {submitting ? 'Sending...' : 'Leave a Google Review'}
           </Button>
-          <button onClick={() => { setScreen('success'); handleSubmit(); }} style={{ display: 'block', margin: '14px auto 0', fontSize: 13, color: COLORS.textCaption, background: 'none', border: 'none', cursor: 'pointer' }}>Skip for now</button>
+          <button onClick={() => { setScreen('success'); handleSubmit(); }} style={{ display: 'block', margin: '14px auto 0', fontSize: 14, color: COLORS.textCaption, background: 'none', border: 'none', cursor: 'pointer' }}>Skip for now</button>
         </div>
       )}
 
@@ -275,13 +275,13 @@ export default function RatePage() {
 
           {/* Service selection */}
           <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>What service did you receive?</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>What service did you receive?</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {SERVICE_OPTIONS.map(s => (
                 <button key={s} onClick={() => toggleService(s)} style={{
                   padding: '9px 16px', border: `2px solid ${selectedServices.includes(s) ? COLORS.wavesBlue : COLORS.grayLight}`,
                   borderRadius: 20, background: selectedServices.includes(s) ? COLORS.wavesBlue : COLORS.white,
-                  color: selectedServices.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                  color: selectedServices.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 700, cursor: 'pointer',
                 }}>{s}</button>
               ))}
             </div>
@@ -289,14 +289,14 @@ export default function RatePage() {
 
           {/* Standout selection */}
           <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>What stood out?</div>
-            <div style={{ fontSize: 11, color: COLORS.textCaption, marginBottom: 8 }}>Pick up to 3</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>What stood out?</div>
+            <div style={{ fontSize: 12, color: COLORS.textCaption, marginBottom: 8 }}>Pick up to 3</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {STANDOUT_OPTIONS.map(s => (
                 <button key={s} onClick={() => toggleStandout(s)} style={{
                   padding: '9px 16px', border: `2px solid ${selectedStandouts.includes(s) ? COLORS.green : COLORS.grayLight}`,
                   borderRadius: 20, background: selectedStandouts.includes(s) ? COLORS.green : COLORS.white,
-                  color: selectedStandouts.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                  color: selectedStandouts.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 700, cursor: 'pointer',
                   opacity: (!selectedStandouts.includes(s) && selectedStandouts.length >= 3) ? 0.4 : 1,
                 }}>{s}</button>
               ))}
@@ -305,7 +305,7 @@ export default function RatePage() {
 
           {/* Personal note */}
           <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: COLORS.textCaption }}>(optional)</span></div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: COLORS.textCaption }}>(optional)</span></div>
             <input
               value={personalNote}
               onChange={e => setPersonalNote(e.target.value)}
@@ -361,14 +361,14 @@ export default function RatePage() {
 
               <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 12 }}>
                 <button onClick={handleGenerateReview} disabled={generating} style={{
-                  fontSize: 13, color: COLORS.wavesBlue, background: 'none', border: 'none',
+                  fontSize: 14, color: COLORS.wavesBlue, background: 'none', border: 'none',
                   cursor: 'pointer', fontWeight: 600,
                 }}>
                   {generating ? 'Rewriting…' : 'Regenerate'}
                 </button>
-                <span style={{ fontSize: 13, color: COLORS.grayLight }}>·</span>
+                <span style={{ fontSize: 14, color: COLORS.grayLight }}>·</span>
                 <button onClick={handleCopyReview} style={{
-                  fontSize: 13, color: copied ? COLORS.green : COLORS.textCaption, background: 'none',
+                  fontSize: 14, color: copied ? COLORS.green : COLORS.textCaption, background: 'none',
                   border: 'none', cursor: 'pointer', fontWeight: 600,
                 }}>
                   {copied ? 'Copied' : 'Copy only'}
@@ -379,7 +379,7 @@ export default function RatePage() {
 
           {/* Skip link */}
           <button onClick={handleSkipToGoogle} style={{
-            display: 'block', margin: '16px auto 0', fontSize: 13, color: COLORS.textCaption, background: 'none',
+            display: 'block', margin: '16px auto 0', fontSize: 14, color: COLORS.textCaption, background: 'none',
             border: 'none', cursor: 'pointer', textDecoration: 'underline',
           }}>
             Skip -- Write my own on Google
@@ -393,7 +393,7 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: score <= 3 ? '#FEE2E2' : COLORS.sand, color: score <= 3 ? COLORS.red : COLORS.orange, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Icon name={score <= 3 ? 'frown' : 'message'} size={30} strokeWidth={2} />
           </div>
-          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: COLORS.red, fontSize: 13, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>We want to make this right</div>}
+          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: COLORS.red, fontSize: 14, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>We want to make this right</div>}
           <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: COLORS.blueDeeper, marginBottom: 8 }}>
             {score <= 3 ? "We're sorry to hear that." : "Thanks for the feedback."}
           </div>
@@ -457,7 +457,7 @@ function Page({ children }) {
         }}>
           Waves <span style={{ color: COLORS.yellow }}>Lawn & Pest</span>
         </h1>
-        <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,.85)', letterSpacing: 1, fontStyle: 'italic', marginTop: 6 }}>Wave Goodbye to Pests!</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: 'rgba(255,255,255,.85)', letterSpacing: 1, fontStyle: 'italic', marginTop: 6 }}>Wave Goodbye to Pests!</div>
       </div>
       <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
         <div style={{ height: 5, background: 'linear-gradient(90deg, #C8102E, #C8102E, #F59E0B, #FFD700)' }} />

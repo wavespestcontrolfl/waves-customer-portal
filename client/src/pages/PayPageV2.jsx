@@ -283,7 +283,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 16,
         padding: '12px 14px', borderRadius: 'var(--radius-md)',
         background: 'rgba(0,156,222,0.08)', border: '1px solid rgba(0,156,222,0.24)',
-        fontSize: 13, lineHeight: 1.5, color: 'var(--text)',
+        fontSize: 14, lineHeight: 1.5, color: 'var(--text)',
       }}>
         <span aria-hidden="true">💳</span>
         <span>
@@ -312,7 +312,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         marginBottom: 16, padding: 14, borderRadius: 'var(--radius-md)',
         background: '#F8FAFB', border: '1px solid var(--border)',
         fontFamily: FONTS.mono,
-        fontSize: 13,
+        fontSize: 14,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
           <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
@@ -528,7 +528,7 @@ export default function PayPageV2() {
 
           {/* Bill-to block */}
           <div style={{ fontSize: 14, lineHeight: 1.6, color: 'var(--text)', marginBottom: 20 }}>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4 }}>
               Billed to
             </div>
             <div style={{ fontWeight: 600 }}>{customer.firstName} {customer.lastName}</div>
@@ -546,7 +546,7 @@ export default function PayPageV2() {
                 gridTemplateColumns: '1fr auto auto',
                 gap: '0 16px',
                 padding: '12px 0 8px',
-                fontSize: 11,
+                fontSize: 12,
                 color: 'var(--text-muted)',
                 letterSpacing: '0.08em',
                 textTransform: 'uppercase',
@@ -615,7 +615,7 @@ export default function PayPageV2() {
               fontWeight: 700,
               color: 'var(--text)',
             }}>
-              <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 13 }}>
+              <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 14 }}>
                 Total
               </span>
               <span>{fmtCurrency(invoice.total)}</span>
@@ -626,7 +626,7 @@ export default function PayPageV2() {
             <a
               href={`${API_BASE}/pay/${token}/invoice.pdf`}
               style={{
-                fontSize: 13,
+                fontSize: 14,
                 color: 'var(--brand)',
                 textDecoration: 'underline',
                 textUnderlineOffset: 3,
@@ -638,7 +638,7 @@ export default function PayPageV2() {
         </BrandCard>
 
         <BrandCard padding={28}>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 12 }}>
             Pay securely
           </div>
           {paymentError && (
