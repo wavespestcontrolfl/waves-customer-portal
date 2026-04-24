@@ -99,9 +99,17 @@ const InvoiceService = {
 
     const afterDiscount = subtotal - discountAmount;
 
-    // Tax — use TaxCalculator for automatic county-aware tax when taxRate not explicit
+    // Tax — use TaxCalculator for automatic county-aware tax when taxRate not explicit.
+    // Residential customers never see tax on invoices/receipts per operator
+    // policy, so we force rate + amount to zero regardless of what the
+    // caller passed. This is the single source of truth; display surfaces
+    // (pay page, receipt page, PDF) can rely on stored tax_amount == 0.
+    const isCommercial = customer.property_type === 'commercial' || customer.property_type === 'business';
     let rate, taxAmount;
-    if (taxRate !== undefined) {
+    if (!isCommercial) {
+      rate = 0;
+      taxAmount = 0;
+    } else if (taxRate !== undefined) {
       rate = taxRate;
       taxAmount = Math.round(afterDiscount * rate * 100) / 100;
     } else {
@@ -111,8 +119,7 @@ const InvoiceService = {
         taxAmount = taxResult.amount;
       } catch (err) {
         logger.warn(`[invoice] TaxCalculator failed, falling back to legacy logic: ${err.message}`);
-        const isCommercial = customer.property_type === 'commercial' || customer.property_type === 'business';
-        rate = isCommercial ? 0.07 : 0;
+        rate = 0.07;
         taxAmount = Math.round(afterDiscount * rate * 100) / 100;
       }
     }
@@ -434,13 +441,21 @@ const InvoiceService = {
       }
       const discountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
       const afterDiscount = subtotal - discountAmount;
+      // Residential customers are never taxed — force 0 regardless of
+      // what was stored or what the caller passed. Matches the guard in
+      // create() above.
       const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
-      const defaultRate = isCommercial ? 0.07 : 0;
-      const rate = updates.tax_rate !== undefined ? updates.tax_rate : (invoice.tax_rate != null ? Number(invoice.tax_rate) : defaultRate);
-      const taxAmount = Math.round(afterDiscount * rate * 100) / 100;
+      let rate = 0;
+      let taxAmount = 0;
+      if (isCommercial) {
+        const defaultRate = 0.07;
+        rate = updates.tax_rate !== undefined ? updates.tax_rate : (invoice.tax_rate != null ? Number(invoice.tax_rate) : defaultRate);
+        taxAmount = Math.round(afterDiscount * rate * 100) / 100;
+      }
       data.subtotal = subtotal;
       data.discount_amount = discountAmount;
       data.discount_label = tierDiscount > 0 ? `${customer.waveguard_tier} WaveGuard — ${Math.round(tierDiscount * 100)}% off` : null;
+      data.tax_rate = rate;
       data.tax_amount = taxAmount;
       data.total = Math.round((afterDiscount + taxAmount) * 100) / 100;
     }

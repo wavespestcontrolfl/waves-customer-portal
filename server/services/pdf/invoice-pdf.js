@@ -142,7 +142,7 @@ function lineItemsTable(doc, lineItems, x, y, width) {
 }
 
 function totalsBlock(doc, invoice, x, y, width, opts = {}) {
-  const { highlightTotal = true, paidStamp = false, refundAmount = 0 } = opts;
+  const { highlightTotal = true, paidStamp = false, refundAmount = 0, customer = null } = opts;
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 10;
@@ -151,6 +151,7 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const discount = Number(invoice.discount_amount || 0);
   const tax = Number(invoice.tax_amount || 0);
   const total = Number(invoice.total || 0);
+  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
 
   const labelX = x + width - 240;
   const valueX = x + width - 70;
@@ -164,7 +165,11 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
 
   row('Subtotal', currency(subtotal));
   if (discount > 0) row(invoice.discount_label || 'Discount', `− ${currency(discount)}`);
-  if (tax > 0) row(`Tax (${(Number(invoice.tax_rate || 0) * 100).toFixed(2)}%)`, currency(tax));
+  // Tax line is commercial-only per operator policy. Guard defends against
+  // legacy invoices that may have a non-zero tax_amount for a residential
+  // customer — we still hide the line in that case; the stored total is
+  // authoritative since the customer already agreed to it.
+  if (tax > 0 && isCommercial) row(`Tax (${(Number(invoice.tax_rate || 0) * 100).toFixed(2)}%)`, currency(tax));
 
   y += 2;
   doc.moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
@@ -235,7 +240,7 @@ function generateInvoicePDF(invoice, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   y = lineItemsTable(doc, invoice.line_items, L, y, W);
-  y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid });
+  y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer });
 
   if (invoice.notes) {
     y += 10;
@@ -275,6 +280,7 @@ function generateReceiptPDF(invoice, payment, res) {
     highlightTotal: true,
     paidStamp: !refundAmount,
     refundAmount,
+    customer,
   });
 
   // Commercial-only recordkeeping note. Most residential receipts don't
