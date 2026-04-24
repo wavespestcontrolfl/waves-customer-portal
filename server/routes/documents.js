@@ -134,9 +134,21 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   doc.save();
   doc.rect(0, 0, 612, 80).fill(NAVY);
-  doc.fontSize(22).font('Helvetica-Bold').fillColor('#fff').text('WAVES', L + 10, 18);
-  doc.fontSize(9).font('Helvetica').fillColor(TEAL).text('LAWN & PEST CONTROL', L + 10, 42);
-  doc.fontSize(8).fillColor('#ccc').text('Licensed & Insured | FL License #JF336375', L + 10, 56);
+
+  // Logo (left). Header bar is 80px tall; render at 64px with ~8px
+  // padding top/bottom. Fall back to the wordmark if the asset is
+  // missing so the PDF never breaks in production.
+  const { getLogoBuffer } = require('../services/pdf/brand-logo');
+  const logoBuf = getLogoBuffer();
+  if (logoBuf) {
+    doc.image(logoBuf, L + 2, 8, { width: 64, height: 64 });
+    doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('Licensed & Insured | FL License #JF336375', L + 72, 60);
+  } else {
+    doc.fontSize(22).font('Helvetica-Bold').fillColor('#fff').text('WAVES', L + 10, 18);
+    doc.fontSize(9).font('Helvetica').fillColor(TEAL).text('LAWN & PEST CONTROL', L + 10, 42);
+    doc.fontSize(8).fillColor('#ccc').text('Licensed & Insured | FL License #JF336375', L + 10, 56);
+  }
+
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', R - 150, 22, { width: 150, align: 'right' });
   doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('wavespestcontrol.com', R - 150, 36, { width: 150, align: 'right' });
   doc.text('Bradenton, FL 34211', R - 150, 48, { width: 150, align: 'right' });
