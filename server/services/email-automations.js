@@ -209,30 +209,55 @@ const EmailAutomationService = {
     }
 
     let beehiivResult = null;
+    let localResult = null;
     let smsResult = null;
 
-    // Step 1: Beehiiv
-    if (beehiiv.configured) {
-      try {
-        const subscriber = await beehiiv.upsertSubscriber(email, {
-          firstName: customer.first_name,
-          lastName: customer.last_name,
-          utmSource: 'waves_portal',
-          utmMedium: key,
-        });
-        if (subscriber?.id) {
-          if (auto.tags?.length) await beehiiv.addTags(subscriber.id, auto.tags);
-          if (auto.beehiivAutomationId) {
-            await beehiiv.enrollInAutomation(auto.beehiivAutomationId, { email, subscriptionId: subscriber.id });
+    // Step 1 — CUTOVER GATE:
+    //   If the v2 automation_templates row for this key has any enabled
+    //   step with a non-empty body, enroll in the local SendGrid-backed
+    //   runner. Otherwise fall back to Beehiiv. This lets the operator
+    //   migrate automations one at a time by filling step bodies in the
+    //   admin Automations editor — the moment a template has content,
+    //   the runtime switches to local sending without a code change.
+    let useLocal = false;
+    try {
+      const AutomationRunner = require('./automation-runner');
+      useLocal = await AutomationRunner.hasLocalContent(key);
+      if (useLocal) {
+        const r = await AutomationRunner.enrollCustomer({ templateKey: key, customer });
+        localResult = r;
+      }
+    } catch (err) {
+      logger.error(`[email-auto] local runner failed for ${key}: ${err.message}`);
+      localResult = { error: err.message };
+      useLocal = false;  // fall through to Beehiiv on failure
+    }
+
+    if (!useLocal) {
+      if (beehiiv.configured) {
+        try {
+          const subscriber = await beehiiv.upsertSubscriber(email, {
+            firstName: customer.first_name,
+            lastName: customer.last_name,
+            utmSource: 'waves_portal',
+            utmMedium: key,
+          });
+          if (subscriber?.id) {
+            if (auto.tags?.length) await beehiiv.addTags(subscriber.id, auto.tags);
+            if (auto.beehiivAutomationId) {
+              await beehiiv.enrollInAutomation(auto.beehiivAutomationId, { email, subscriptionId: subscriber.id });
+            }
+            beehiivResult = { subscriberId: subscriber.id, tags: auto.tags };
           }
-          beehiivResult = { subscriberId: subscriber.id, tags: auto.tags };
+        } catch (err) {
+          logger.error(`[email-auto] Beehiiv failed for ${key}: ${err.message}`);
+          beehiivResult = { error: err.message };
         }
-      } catch (err) {
-        logger.error(`[email-auto] Beehiiv failed for ${key}: ${err.message}`);
-        beehiivResult = { error: err.message };
+      } else {
+        beehiivResult = { skipped: 'BEEHIIV_API_KEY not configured' };
       }
     } else {
-      beehiivResult = { skipped: 'BEEHIIV_API_KEY not configured' };
+      beehiivResult = { skipped: 'local automation active (v2 cutover)' };
     }
 
     // Step 2: SMS — check DB template first, fall back to inline
@@ -272,13 +297,13 @@ const EmailAutomationService = {
       automation_name: auto.name,
       trigger_type: 'manual',
       trigger_value: key,
-      beehiiv_result: JSON.stringify(beehiivResult),
+      beehiiv_result: JSON.stringify({ ...beehiivResult, local: localResult }),
       sms_result: JSON.stringify(smsResult),
-      status: beehiivResult?.error || smsResult?.error ? 'partial' : 'success',
+      status: (beehiivResult?.error || localResult?.error || smsResult?.error) ? 'partial' : 'success',
     });
 
-    logger.info(`[email-auto] ${key} sent for ${customer.first_name} ${customer.last_name} (${email})`);
-    return { success: true, beehiiv: beehiivResult, sms: smsResult };
+    logger.info(`[email-auto] ${key} sent for ${customer.first_name} ${customer.last_name} (${email}) via ${useLocal ? 'local' : 'beehiiv'}`);
+    return { success: true, path: useLocal ? 'local' : 'beehiiv', local: localResult, beehiiv: beehiivResult, sms: smsResult };
   },
 
   /**

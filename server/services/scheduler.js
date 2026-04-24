@@ -94,6 +94,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY MIN — Automation runner. Fires the next step of any enrollment
+  // whose next_send_at has passed. Indexed query on automation_enrollments.
+  // =========================================================================
+  cron.schedule('* * * * *', async () => {
+    try {
+      const AutomationRunner = require('./automation-runner');
+      await AutomationRunner.processDueSteps();
+    } catch (err) {
+      logger.error(`Automation runner tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Appointment reminders (72h, 24h) from appointment_reminders table
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
