@@ -85,7 +85,7 @@ export default function ReportViewPage() {
           {data.notes && (
             <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Tech Notes</div>
-              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>{data.notes}</div>
+              <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>{data.notes}</div>
             </div>
           )}
 

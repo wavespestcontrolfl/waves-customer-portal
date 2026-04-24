@@ -447,7 +447,7 @@ export default function ReceiptPage() {
               <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
                 Notes
               </div>
-              <p style={{ margin: 0, fontSize: 14, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+              <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                 {invoice.notes}
               </p>
             </div>
@@ -490,7 +490,7 @@ export default function ReceiptPage() {
           </div>
         </BrandCard>
 
-        <div className="waves-no-print" style={{ marginTop: 28, textAlign: 'center', fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+        <div className="waves-no-print" style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
       </div>

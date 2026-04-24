@@ -338,7 +338,7 @@ function NotFoundCard() {
       <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
         Tracking link unavailable
       </div>
-      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
         This tracking link has expired or isn't valid. Call us at{' '}
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
         if you need help with your service.

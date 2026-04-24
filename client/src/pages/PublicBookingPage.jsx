@@ -188,7 +188,7 @@ export default function PublicBookingPage() {
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h2>
-            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
               {service ? <>Booking <strong>{service.icon} {service.label}</strong>. </> : null}
               Drop your address and we'll show you the next available slots — see you soon!
             </p>
@@ -264,7 +264,7 @@ export default function PublicBookingPage() {
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Pick a time
             </h2>
-            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
               ⭐ Times marked "Best fit" are when we'll already be working near you.
             </p>
 
@@ -355,7 +355,7 @@ export default function PublicBookingPage() {
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Your info
             </h2>
-            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
               We'll text you a confirmation right after you book.
             </p>
 
@@ -469,7 +469,7 @@ export default function PublicBookingPage() {
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               You're booked!
             </h2>
-            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
               We just texted a confirmation to {contact.phone}.
             </p>
             <div style={{
@@ -482,7 +482,7 @@ export default function PublicBookingPage() {
               <div style={{ fontSize: 20, fontWeight: 700, color: COLORS.wavesBlue, fontFamily: FONTS.mono, marginBottom: 14 }}>
                 {confCode}
               </div>
-              <div style={{ fontSize: 14, color: COLORS.slate600, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6 }}>
                 <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
                 <div>{availability.find(d => d.date === selectedDate)?.fullDate}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>

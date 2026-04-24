@@ -201,7 +201,7 @@ export default function ReviewPage() {
             <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>
               Thank you, {customerFirstName}!
             </div>
-            <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.6, marginBottom: 16 }}>
+            <div style={{ fontSize: 16, color: COLORS.textBody, lineHeight: 1.6, marginBottom: 16 }}>
               Taking you to Google to share your experience with other SWFL families...
             </div>
             <div style={{ width: 36, height: 36, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.blueDark, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto' }} />
@@ -220,7 +220,7 @@ export default function ReviewPage() {
             <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>
               We appreciate your honesty
             </div>
-            <div style={{ fontSize: 14, color: COLORS.textBody, marginBottom: 16, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 16, color: COLORS.textBody, marginBottom: 16, lineHeight: 1.6 }}>
               {techName ? `${techName.split(' ')[0]} would` : "We'd"} love to know how we can do better.
             </div>
             <textarea
@@ -260,7 +260,7 @@ export default function ReviewPage() {
             <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: '#2E7D32' }}>
               Thank you{customerFirstName ? `, ${customerFirstName}` : ''}!
             </div>
-            <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 8, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 8, lineHeight: 1.6 }}>
               Your feedback helps us keep getting better. See you at your next service!
             </div>
           </div>

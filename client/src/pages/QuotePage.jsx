@@ -945,7 +945,7 @@ export default function QuotePage() {
                   We already texted your local Waves team. <strong>They'll confirm the final number and book your first visit</strong> — usually within the hour.
                 </div>
 
-                <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 14, lineHeight: 1.55 }}>
+                <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 16, lineHeight: 1.55 }}>
                   <div style={{ fontWeight: 700, marginBottom: 4 }}>100% Satisfaction Guarantee</div>
                   <div>If pests return between visits, so do we — free. No contracts, cancel anytime. Licensed &amp; Insured Florida Pest Control Operator.</div>
                 </div>
@@ -989,7 +989,7 @@ export default function QuotePage() {
                     No contracts. No call centers. Just a local team that picks up the phone and gets it done.
                   </div>
 
-                  <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 14, lineHeight: 1.55 }}>
+                  <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 16, lineHeight: 1.55 }}>
                     <div style={{ fontWeight: 700, marginBottom: 4 }}>100% Satisfaction Guarantee</div>
                     <div>If the fix doesn't hold, we come back — free. Licensed &amp; Insured Florida Pest Control Operator.</div>
                   </div>
@@ -998,7 +998,7 @@ export default function QuotePage() {
                     <div style={{
                       marginTop: 12, padding: 14, borderRadius: 12,
                       background: COLORS.blueSurface, border: `1px solid ${COLORS.slate200}`,
-                      color: COLORS.navy, fontSize: 14, lineHeight: 1.55,
+                      color: COLORS.navy, fontSize: 16, lineHeight: 1.55,
                     }}>
                       {subscribeStatus === 'success' ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

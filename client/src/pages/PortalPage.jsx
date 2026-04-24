@@ -506,7 +506,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
               <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>
                 Between-Visit Tip
               </div>
-              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
                 {recommendations.customerTip}
               </div>
             </div>
@@ -519,7 +519,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
               <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginBottom: 4 }}>
                 Next Visit Focus
               </div>
-              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
                 {recommendations.nextVisitFocus}
               </div>
             </div>
@@ -534,7 +534,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
           background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
         }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
-          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
             Next visit we'll focus on strengthening turf density and applying preventive fungicide.
           </div>
         </div>
@@ -837,7 +837,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
             <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 4 }}>
               {selected.categoryLabel}
             </div>
-            <div style={{ fontSize: 14, color: B.grayDark, marginTop: 10, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 16, color: B.grayDark, marginTop: 10, lineHeight: 1.6 }}>
               {selected.description}
             </div>
 
@@ -1034,7 +1034,7 @@ function PromotionCards() {
         <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>
           You're Fully Protected
         </div>
-        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 16, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
           WaveGuard Platinum member saving {promoData.discount} on everything. Thank you for trusting Waves with your complete home protection.
         </div>
       </div>
@@ -1079,7 +1079,7 @@ function PromotionCards() {
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
                 {promo.title}
               </div>
-              <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
+              <div style={{ fontSize: 16, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
                 {promo.description}
               </div>
 
@@ -1542,7 +1542,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
                     Awesome — {satRating}/10!
                   </div>
-                  <div style={{ fontSize: 14, color: B.grayDark, marginTop: 6, lineHeight: 1.6 }}>
+                  <div style={{ fontSize: 16, color: B.grayDark, marginTop: 6, lineHeight: 1.6 }}>
                     Would you share your experience on Google? It helps your neighbors find great pest & lawn care and means the world to our {satOfficeName} team.
                   </div>
                   <div style={{ display: 'flex', gap: 10, marginTop: 16, justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -1614,7 +1614,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 6 }}>
                     Thank you for your feedback.
                   </div>
-                  <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
+                  <div style={{ fontSize: 16, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
                     {satRating <= 3
                       ? `${(pendingSatisfaction.technician_name || pendingSatisfaction.technicianName) ? (pendingSatisfaction.technician_name || pendingSatisfaction.technicianName).split(' ')[0] + ' at Waves' : 'Your team at Waves'} will personally follow up with you within 24 hours.`
                       : satRating <= 7
@@ -1675,7 +1675,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             textShadow: '0 1px 3px rgba(0,0,0,0.3)',
           }}> WaveGuard {customer.tier}</div>
         )}
-        <div style={{ position: 'relative', zIndex: 1, marginTop: 12, fontSize: 14, color: '#fff', lineHeight: 1.6 }}>
+        <div style={{ position: 'relative', zIndex: 1, marginTop: 12, fontSize: 16, color: '#fff', lineHeight: 1.6 }}>
           {customer.address?.line1}, {customer.address?.city}, {customer.address?.state} {customer.address?.zip}<br/>
           <span style={{ color: B.blueLight }}>{(customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || 'Lawn'} · {customer.property?.propertySqFt?.toLocaleString()} sq ft · {customer.property?.lotSqFt?.toLocaleString()} sq ft lot</span>
         </div>
@@ -1865,7 +1865,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           {lastService.notes || lastService.technician_notes ? (
             <div style={{
               marginTop: 10, padding: '10px 14px', borderRadius: 10,
-              background: B.offWhite, fontSize: 14, color: B.grayDark, lineHeight: 1.6,
+              background: B.offWhite, fontSize: 16, color: B.grayDark, lineHeight: 1.6,
               borderLeft: `3px solid ${B.wavesBlue}`,
             }}>
               {((lastService.notes || lastService.technician_notes) || '').slice(0, 100)}
@@ -1897,7 +1897,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           </div>
           <div style={{
             padding: 14, borderRadius: 12, background: `${B.teal}08`,
-            fontSize: 14, color: B.grayDark, lineHeight: 1.6, borderLeft: `3px solid ${B.teal}`,
+            fontSize: 16, color: B.grayDark, lineHeight: 1.6, borderLeft: `3px solid ${B.teal}`,
           }}>
             {irrigationRecs[0].text}
           </div>
@@ -1925,7 +1925,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         }}>
           <Icon name="sprout" size={28} strokeWidth={1.75} />
           <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>Lawn Health Tracking</div>
-          <div style={{ fontSize: 14, color: B.grayMid, marginTop: 6, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 16, color: B.grayMid, marginTop: 6, lineHeight: 1.6 }}>
             Your lawn health tracking will begin after your first assessment visit.
           </div>
         </div>
@@ -2143,7 +2143,7 @@ function ServicesTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {/* 1. Header */}
       <SectionHeading>Your Service History</SectionHeading>
-      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
         Every visit documented — what we applied, what we found, and what's next for your property.
       </div>
 
@@ -2275,7 +2275,7 @@ function ServicesTab() {
                               <div style={{ fontSize: 12, fontWeight: 700, color: B.wavesBlue, marginBottom: 4, fontFamily: FONTS.heading }}>
                                 {s.technician || 'Technician'} says:
                               </div>
-                              <div style={{ fontSize: 14, color: B.navy, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
+                              <div style={{ fontSize: 16, color: B.navy, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
                             </div>
                           </div>
                         )}
@@ -2361,7 +2361,7 @@ function ServicesTab() {
                         {tip && (
                           <div style={{ padding: '12px 18px', background: '#F1F8E9', borderBottom: `1px solid ${B.grayLight}` }}>
                             <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 6 }}>What's Next</div>
-                            <div style={{ fontSize: 14, color: B.navy, lineHeight: 1.6 }}>{tip}</div>
+                            <div style={{ fontSize: 16, color: B.navy, lineHeight: 1.6 }}>{tip}</div>
                           </div>
                         )}
 
@@ -2823,7 +2823,7 @@ function ScheduleTab({ customer }) {
         }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}><Icon name="leaf" size={16} strokeWidth={1.75} /></div>
           <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>No upcoming services scheduled</div>
-          <div style={{ fontSize: 14, color: B.grayMid, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 16, color: B.grayMid, lineHeight: 1.6 }}>
             Your next quarterly pest treatment will be in {nextQuarterName}.
             {mosquitoResumes && <><br />Your mosquito service resumes in {mosquitoResumes}.</>}
           </div>
@@ -3719,7 +3719,7 @@ function ServicePrefsSection() {
 
   return (
     <PropertySection title=" Service preferences">
-      <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 10, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: B.grayDark, marginBottom: 10, lineHeight: 1.5 }}>
         Both on by default. Toggle either off if you'd rather skip it — we'll update your next work order and the office will be notified.
       </div>
       {rows.map((r) => {
@@ -4551,7 +4551,7 @@ function ContentCard({ post, large }) {
             overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
           }}>{post.title}</div>
           {post.description && large && (
-            <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.5,
+            <div style={{ fontSize: 16, color: B.grayDark, marginTop: 4, lineHeight: 1.5,
               overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
             }}>{post.description}</div>
           )}
@@ -4720,7 +4720,7 @@ function LearnTab({ customer }) {
           <div style={{ fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 6 }}>
             {monthlyTip.title}
           </div>
-          <div style={{ fontSize: 14, color: '#fff', lineHeight: 1.65, marginTop: 8 }}>
+          <div style={{ fontSize: 16, color: '#fff', lineHeight: 1.65, marginTop: 8 }}>
             {monthlyTip.tip}
           </div>
           {customerServiceNames.length > 0 && (
@@ -4784,7 +4784,7 @@ function LearnTab({ customer }) {
                     </div>
                     {isOpen && (
                       <div style={{ padding: '0 14px 14px', borderTop: `1px solid ${B.grayLight}` }}>
-                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.7, marginTop: 10 }}>
+                        <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.7, marginTop: 10 }}>
                           {personalizeFaqAnswer(q.a)}
                         </div>
                         {(q.a?.toLowerCase().includes('callback') || q.a?.toLowerCase().includes('guarantee')) && (
@@ -5165,7 +5165,7 @@ function MyPlanTab({ customer }) {
 
             {expandedService === svc.id && (
               <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
-                <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.7 }}>{svc.description}</div>
+                <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.7 }}>{svc.description}</div>
                 <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.grayMid }}>Products Used</div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
                   {svc.products.map((p, i) => (
@@ -5317,7 +5317,7 @@ function MyPlanTab({ customer }) {
           </div>
           {expandedAddon === addon.id && (
             <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
-              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.7 }}>{addon.desc}</div>
+              <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.7 }}>{addon.desc}</div>
               {discount > 0 && addon.id !== 'wdo_inspection' && (
                 <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 8 }}>
                   Your price: ${(addon.price * (1 - discount)).toFixed(2)}{addon.unit} (was ${Number(addon.price).toFixed(2)}{addon.unit})
@@ -5460,7 +5460,7 @@ function MyPlanTab({ customer }) {
         <div style={{ fontSize: 36, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
           ${annualSavings.toFixed(2)}<span style={{ fontSize: 16 }}>/year</span>
         </div>
-        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 16, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
           Full price for {numServices} service{numServices > 1 ? 's' : ''}: <strong>${totalFullPrice.toFixed(2)}/yr</strong><br/>
           Your {Math.round(discount * 100)}% bundle rate: <strong>${(totalFullPrice - annualSavings).toFixed(2)}/yr</strong> (~${((totalFullPrice - annualSavings) / 12).toFixed(2)}/mo)<br/>
           You keep <strong style={{ color: B.green }}>${annualSavings.toFixed(2)}</strong> in your pocket.
@@ -5486,7 +5486,7 @@ function MyPlanTab({ customer }) {
               },
               tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },
             ].filter(Boolean).map((item, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
                 <Icon name={item.icon} size={16} strokeWidth={1.75} style={{ flexShrink: 0 }} />
                 {item.text}
               </div>
@@ -6327,7 +6327,7 @@ function ReferTab({ customer, onSwitchTab }) {
       }}>
         <div style={{ fontSize: 40, marginBottom: 8 }}></div>
         <div style={{ fontSize: 28, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em' }}>Give $25, Get $25</div>
-        <div style={{ fontSize: 14, opacity: 0.85, marginTop: 8, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 16, opacity: 0.85, marginTop: 8, lineHeight: 1.6 }}>
           Refer anyone in Southwest Florida to Waves Pest Control. When they sign up for any WaveGuard plan, you both get a <strong>$25 credit</strong> on your next bill.
         </div>
         {/* Stats pills */}
@@ -6817,7 +6817,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         background: B.offWhite, borderRadius: 14, padding: 18,
         border: `1px solid ${B.grayLight}`, textAlign: 'center',
       }}>
-        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
           Need a specific document? We'll upload it within 24 hours.
         </div>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 12 }}>
@@ -7111,7 +7111,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             </span>
           </div>
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 12 }}>Sent to Waves!</div>
-          <div style={{ fontSize: 14, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 16, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
             We'll review your request and text you when it's been assigned.
             {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized — expect a response within 2 hours.' : ''}
           </div>
@@ -7612,7 +7612,7 @@ function ChatWidget({ customer, onClose }) {
             }}>
               <div style={{
                 maxWidth: '80%', padding: '10px 14px', borderRadius: 16,
-                fontSize: 14, lineHeight: 1.5, fontFamily: FONTS.body,
+                fontSize: 16, lineHeight: 1.5, fontFamily: FONTS.body,
                 ...(msg.role === 'user' ? {
                   background: B.wavesBlue, color: '#fff',
                   borderBottomRightRadius: 4,
