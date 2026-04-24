@@ -124,7 +124,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="inline-flex items-center justify-center rounded-full bg-zinc-100 text-ink-primary u-focus-ring"
+          className="inline-flex items-center justify-center rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary u-focus-ring"
           style={{ width: 44, height: 44, fontSize: 20, lineHeight: 1 }}
         >
           ✕
@@ -221,7 +221,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
                 {txns.map((p) => (
                   <div key={p.id} className="flex items-start gap-3 py-3 border-b border-hairline border-zinc-100 last:border-b-0">
                     <div
-                      className="inline-flex items-center justify-center rounded-sm bg-zinc-100 text-ink-tertiary flex-shrink-0"
+                      className="inline-flex items-center justify-center rounded-sm bg-white border border-hairline border-zinc-200 text-ink-tertiary flex-shrink-0"
                       style={{ width: 40, height: 40 }}
                     >
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
@@ -276,7 +276,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
                     style={{ borderLeft: '3px solid #1B2C5B', paddingLeft: 12, marginLeft: -12 }}
                   >
                     <div
-                      className="inline-flex items-center justify-center rounded-sm bg-zinc-100 text-ink-tertiary flex-shrink-0"
+                      className="inline-flex items-center justify-center rounded-sm bg-white border border-hairline border-zinc-200 text-ink-tertiary flex-shrink-0"
                       style={{ width: 40, height: 40 }}
                     >
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
@@ -293,7 +293,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
                         </div>
                         {s.is_recurring && (
                           <span
-                            className="inline-flex items-center rounded-full bg-zinc-100 text-ink-secondary flex-shrink-0"
+                            className="inline-flex items-center rounded-full bg-white border border-hairline border-zinc-200 text-ink-secondary flex-shrink-0"
                             style={{ fontSize: 12, padding: '4px 10px', fontWeight: 500 }}
                           >
                             Repeating

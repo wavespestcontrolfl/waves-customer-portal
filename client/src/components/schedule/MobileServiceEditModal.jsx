@@ -249,7 +249,7 @@ export default function MobileServiceEditModal({
                 width: 120,
                 padding: '8px 10px 8px 22px',
                 fontSize: 14,
-                background: '#FAFAFA',
+                background: '#FFFFFF',
               }}
             />
           </div>
@@ -286,7 +286,7 @@ export default function MobileServiceEditModal({
           <ChevronRight size={16} className="text-ink-tertiary shrink-0" />
         </button>
         {showStaffPicker && (
-          <div className="bg-zinc-50 border-b border-hairline border-zinc-200">
+          <div className="bg-white border-b border-hairline border-zinc-200">
             <button
               type="button"
               onClick={() => { setTechnicianId(''); setShowStaffPicker(false); }}
@@ -343,7 +343,7 @@ export default function MobileServiceEditModal({
               width: 80,
               padding: '8px 10px',
               fontSize: 14,
-              background: '#FAFAFA',
+              background: '#FFFFFF',
             }}
           />
           <span

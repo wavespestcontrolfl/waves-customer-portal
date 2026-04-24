@@ -81,7 +81,7 @@ export default function MobileServicePickerSheet({ onClose, onSelect }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search All Services"
-            className="block w-full bg-zinc-100 text-14 text-ink-primary border-0 rounded-sm h-12 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+            className="block w-full bg-white text-14 text-ink-primary border border-hairline border-zinc-200 rounded-sm h-12 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-zinc-900"
           />
         </div>
 
