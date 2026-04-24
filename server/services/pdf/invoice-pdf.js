@@ -1,4 +1,6 @@
 const PDFDocument = require('pdfkit');
+const path = require('path');
+const fs = require('fs');
 
 // Brand palette — mirrors client/src/styles/brand-tokens.css + theme-brand.js
 const NAVY = '#1B2C5B';      // blueDeeper — headings, header bar
@@ -10,6 +12,19 @@ const BODY = '#334155';
 const MUTED = '#64748B';
 const RULE = '#E2E8F0';
 const SOFT = '#F1F5F9';
+
+// Logo is bundled in the client/public folder. Cache the buffer so we
+// don't re-read the file for every PDF build.
+let cachedLogoBuffer = null;
+function getLogoBuffer() {
+  if (cachedLogoBuffer !== null) return cachedLogoBuffer;
+  try {
+    cachedLogoBuffer = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'client', 'public', 'waves-logo.png'));
+  } catch {
+    cachedLogoBuffer = false;
+  }
+  return cachedLogoBuffer || null;
+}
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
 
@@ -27,9 +42,19 @@ function currency(n) {
 function headerBar(doc, title, statusLabel, statusColor) {
   doc.save();
   doc.rect(0, 0, 612, 92).fill(NAVY);
-  doc.fontSize(26).font('Helvetica-Bold').fillColor('#fff').text('WAVES', 40, 22);
-  doc.fontSize(9).font('Helvetica').fillColor('#B8D4EA').text('PEST CONTROL & LAWN CARE', 40, 52);
-  doc.fontSize(8).fillColor('#B8D4EA').text('FL License #JF336375', 40, 66);
+
+  // Logo block (left). PDF header bar is 92px tall; render the square
+  // logo at 72px so it fits with 10px padding top/bottom. If the asset
+  // is missing we silently fall back to the wordmark so the PDF never
+  // breaks in production.
+  const logoBuf = getLogoBuffer();
+  if (logoBuf) {
+    doc.image(logoBuf, 24, 10, { width: 72, height: 72 });
+  } else {
+    doc.fontSize(26).font('Helvetica-Bold').fillColor('#fff').text('WAVES', 40, 22);
+    doc.fontSize(9).font('Helvetica').fillColor('#B8D4EA').text('PEST CONTROL & LAWN CARE', 40, 52);
+  }
+  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text('FL License #JF336375', 108, 70);
 
   doc.fontSize(10).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', 430, 22, { width: 142, align: 'right' });
   doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text('wavespestcontrol.com', 430, 38, { width: 142, align: 'right' });
@@ -266,11 +291,17 @@ function generateReceiptPDF(invoice, payment, res) {
     refundAmount,
   });
 
-  y += 14;
-  doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(
-    'Keep this receipt for your records. For questions, reply to your receipt email or call (941) 318-7612.',
-    L, y, { width: W, lineGap: 3 },
-  );
+  // Commercial-only recordkeeping note. Most residential receipts don't
+  // need this boilerplate, but commercial accounts often want explicit
+  // language about keeping the receipt for accounting.
+  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+  if (isCommercial) {
+    y += 14;
+    doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(
+      'Keep this receipt for your records. For questions, reply to your receipt email or call (941) 318-7612.',
+      L, y, { width: W, lineGap: 3 },
+    );
+  }
 
   footerBar(doc, fullRefund ? 'Refund processed' : 'Thank you — payment received');
   doc.end();

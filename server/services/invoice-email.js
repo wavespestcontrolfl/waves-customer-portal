@@ -87,9 +87,8 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:${SAND};">
     <tr><td align="center" style="padding:32px 16px;">
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:560px;background:${CARD};border-radius:16px;overflow:hidden;box-shadow:0 10px 24px rgba(27,44,91,.08);">
-        <tr><td style="background:${NAVY};padding:28px 32px;">
-          <div style="font-family:Inter,Arial,sans-serif;color:#fff;font-size:22px;font-weight:800;letter-spacing:0.04em;">WAVES</div>
-          <div style="font-family:Inter,Arial,sans-serif;color:#B8D4EA;font-size:10px;letter-spacing:0.2em;margin-top:4px;">PEST CONTROL &amp; LAWN CARE</div>
+        <tr><td style="background:${NAVY};padding:24px 32px;text-align:center;">
+          <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="140" height="140" style="display:inline-block;width:140px;height:140px;max-width:140px;border:0;outline:none;text-decoration:none;" />
         </td></tr>
         <tr><td style="padding:36px 32px 8px 32px;">
           <h1 style="margin:0 0 16px 0;font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:28px;line-height:1.15;color:${INK};font-weight:400;">${heading}</h1>
@@ -114,7 +113,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
         </td></tr>
         <tr><td style="background:${SAND};padding:20px 32px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;">
-            Waves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211 · FL License #JF336375
+            Waves Pest Control, LLC · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · FL License #JF336375
           </div>
         </td></tr>
       </table>
@@ -132,7 +131,7 @@ async function sendInvoiceEmail(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip')
+    .select('first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   if (!customer?.email) return { ok: false, error: 'No customer email' };
 
@@ -214,7 +213,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
 
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip')
+    .select('first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   if (!customer?.email) return { ok: false, error: 'No customer email' };
 
