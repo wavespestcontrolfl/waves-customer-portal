@@ -1,3 +1,4 @@
+import Icon from '../components/Icon';
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
@@ -88,7 +89,7 @@ export default function ReviewPage() {
   if (error || !data) return (
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center' }}>
-        <div style={{ fontSize: 48, marginBottom: 16 }}>🌊</div>
+        <div style={{ fontSize: 48, marginBottom: 16 }}></div>
         <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 18, color: W.blueDeeper, letterSpacing: '-0.01em' }}>Link Expired</div>
         <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>This review link is no longer available. Call us at <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a>.</div>
       </div>
@@ -210,7 +211,7 @@ export default function ReviewPage() {
         {/* ── Redirecting to Google ── */}
         {phase === 'redirecting' && (
           <div style={{ background: W.white, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${W.green}` }}>
-            <div style={{ fontSize: 40, marginBottom: 12 }}>🙏</div>
+            <div style={{ fontSize: 40, marginBottom: 12 }}></div>
             <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 18, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
               Thank you, {customerFirstName}!
             </div>
@@ -229,7 +230,7 @@ export default function ReviewPage() {
         {/* ── Feedback Form (low scores) ── */}
         {phase === 'feedback' && (
           <div style={{ background: W.white, borderRadius: 20, padding: 28, textAlign: 'center', border: `1px solid ${W.border}` }}>
-            <div style={{ fontSize: 32, marginBottom: 8 }}>💬</div>
+            <div style={{ fontSize: 32, marginBottom: 8 }}></div>
             <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 17, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
               We appreciate your honesty
             </div>
@@ -269,7 +270,7 @@ export default function ReviewPage() {
         {/* ── Thank You (final state) ── */}
         {phase === 'thankyou' && (
           <div style={{ background: W.greenLight, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${W.green}` }}>
-            <div style={{ fontSize: 40, marginBottom: 8 }}>🌊</div>
+            <div style={{ fontSize: 40, marginBottom: 8 }}></div>
             <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 18, fontWeight: 700, color: '#2E7D32' }}>
               Thank you{customerFirstName ? `, ${customerFirstName}` : ''}!
             </div>

@@ -1,3 +1,4 @@
+import Icon from '../components/Icon';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
@@ -90,7 +91,7 @@ function PasswordInput({ value, onChange, placeholder }) {
       <button onClick={() => setShow(!show)} style={{
         position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
         background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: B.grayMid,
-      }}>{show ? '🙈' : '👁️'}</button>
+      }}>{show ? '' : '️'}</button>
     </div>
   );
 }
@@ -333,7 +334,7 @@ export default function OnboardingPage() {
   if (error && !data) return (
     <div style={{ minHeight: '100vh', background: B.blueDark, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
-        <div style={{ fontSize: 32 }}>😕</div>
+        <div style={{ fontSize: 32 }}></div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>{error}</div>
         <a href="tel:+19412975749" style={{ ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', display: 'inline-flex', fontWeight: 800 }}>Call (941) 297-5749</a>
       </div>
@@ -391,7 +392,7 @@ export default function OnboardingPage() {
           position: 'fixed', top: 60, left: '50%', transform: 'translateX(-50%)',
           padding: '6px 16px', borderRadius: 20, background: B.green, color: '#fff',
           fontSize: 12, fontWeight: 600, zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-        }}>Saved ✓</div>
+        }}>Saved </div>
       )}
 
       <div style={{ position: 'relative', zIndex: 1, maxWidth: 480, margin: '0 auto', padding: '0 20px 40px' }}>
@@ -405,7 +406,7 @@ export default function OnboardingPage() {
               color: '#fff', letterSpacing: '0.02em', lineHeight: 1.05,
               margin: '0 0 8px', textShadow: '0 2px 12px rgba(0,0,0,0.25)',
             }}>
-              Welcome, {c.firstName}! 🌊
+              Welcome, {c.firstName}! 
             </h1>
             <div style={{ fontSize: 16, color: B.blueLight, marginTop: 4 }}>
               Your {q.serviceType.split('—')[0].trim()} is confirmed.
@@ -495,7 +496,7 @@ export default function OnboardingPage() {
         {screen === 2 && (
           <div>
             <div style={{ background: '#fff', borderRadius: 16, padding: 24 }}>
-              <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>🏡 Set Up Your First Visit</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}> Set Up Your First Visit</div>
               <div style={{ fontSize: 15, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
                 Help your tech nail it on day one. Takes about 60 seconds.
               </div>
@@ -513,15 +514,15 @@ export default function OnboardingPage() {
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                     {!svc.confirmed && !data.status.serviceConfirmed ? (
                       <>
-                        <button onClick={handleConfirm} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: B.yellow, color: B.blueDeeper }}>✅ Confirm</button>
-                        <button onClick={openReschedule} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: 'transparent', color: B.wavesBlue, border: `1.5px solid ${B.wavesBlue}` }}>📅 Reschedule</button>
+                        <button onClick={handleConfirm} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: B.yellow, color: B.blueDeeper }}> Confirm</button>
+                        <button onClick={openReschedule} disabled={submitting} style={{ ...BUTTON_BASE, flex: 1, padding: '9px 14px', fontSize: 13, background: 'transparent', color: B.wavesBlue, border: `1.5px solid ${B.wavesBlue}` }}> Reschedule</button>
                       </>
                     ) : (
-                      <span style={{ fontSize: 13, fontWeight: 700, color: B.green }}>✅ Confirmed</span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: B.green }}> Confirmed</span>
                     )}
                   </div>
                   <button onClick={generateICS} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginTop: 8, padding: 0 }}>
-                    Add to Calendar 📅
+                    Add to Calendar 
                   </button>
                 </div>
               )}
@@ -531,7 +532,7 @@ export default function OnboardingPage() {
                 <div style={{ marginTop: 12, padding: '14px 16px', borderRadius: 12, border: `1.5px solid ${B.wavesBlue}`, background: '#fff' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Pick a new day</div>
-                    <button onClick={() => { setShowReschedule(false); setPickedDate(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, color: B.grayMid }}>✕</button>
+                    <button onClick={() => { setShowReschedule(false); setPickedDate(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, color: B.grayMid }}></button>
                   </div>
                   <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2 }}>
                     Only showing days a Waves tech is already in your neighborhood.
@@ -593,11 +594,11 @@ export default function OnboardingPage() {
 
               {fieldLabel('How should we reach you?')}
               <PillSelect wrap options={[
-                { value: 'call', label: '📞 Call' }, { value: 'text', label: '💬 Text' }, { value: 'email', label: '📧 Email' },
+                { value: 'call', label: ' Call' }, { value: 'text', label: ' Text' }, { value: 'email', label: ' Email' },
               ]} value={prefs.contactPreference} onChange={v => updatePref('contactPreference', v)} />
 
               {/* Access */}
-              {sectionHead('🔑', 'Access & Gates')}
+              {sectionHead('', 'Access & Gates')}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <span style={{ fontSize: 14, color: B.navy }}>Community gate?</span>
                 <ToggleSwitch value={hasGate} onChange={setHasGate} />
@@ -612,10 +613,10 @@ export default function OnboardingPage() {
               {hasYardGate && (
                 <PasswordInput value={prefs.propertyGateCode} onChange={v => updatePref('propertyGateCode', v)} placeholder="e.g., Combo lock: 4821" />
               )}
-              <div style={{ fontSize: 11, color: B.textCaption, marginTop: 8 }}>🔒 Only visible to your assigned tech on service day</div>
+              <div style={{ fontSize: 11, color: B.textCaption, marginTop: 8 }}> Only visible to your assigned tech on service day</div>
 
               {/* Pets */}
-              {sectionHead('🐾', 'Pets & Household')}
+              {sectionHead('', 'Pets & Household')}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <span style={{ fontSize: 14, color: B.navy }}>Any pets?</span>
                 <ToggleSwitch value={hasPets} onChange={v => { setHasPets(v); updatePref('petCount', v ? 1 : 0); }} />
@@ -628,13 +629,13 @@ export default function OnboardingPage() {
               )}
 
               {/* Property */}
-              {sectionHead('🏡', 'Property Notes')}
+              {sectionHead('', 'Property Notes')}
               {fieldLabel('Special features?')}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
                 {[
-                  { value: 'pool', label: '🏊 Pool/Spa' }, { value: 'koi_pond', label: '🐟 Koi Pond' },
-                  { value: 'vegetable_garden', label: '🥬 Veggie Garden' }, { value: 'fruit_trees', label: '🍊 Fruit Trees' },
-                  { value: 'beehives', label: '🐝 Beehives' }, { value: 'playground', label: '🛝 Playground' },
+                  { value: 'pool', label: ' Pool/Spa' }, { value: 'koi_pond', label: ' Koi Pond' },
+                  { value: 'vegetable_garden', label: ' Veggie Garden' }, { value: 'fruit_trees', label: ' Fruit Trees' },
+                  { value: 'beehives', label: ' Beehives' }, { value: 'playground', label: ' Playground' },
                 ].map(f => {
                   const selected = (prefs.specialFeatures || []).includes(f.value);
                   return (
@@ -666,7 +667,7 @@ export default function OnboardingPage() {
               <textarea value={prefs.specialInstructions} onChange={e => updatePref('specialInstructions', e.target.value)} placeholder="Anything else your tech should know..." rows={2} style={{ ...inputStyle, resize: 'vertical' }} />
 
               {/* Attribution */}
-              {sectionHead('📣', 'How Did You Find Us?')}
+              {sectionHead('', 'How Did You Find Us?')}
               <PillSelect wrap options={[
                 { value: 'google', label: 'Google' }, { value: 'facebook', label: 'Facebook' },
                 { value: 'neighbor_referral', label: 'Neighbor' }, { value: 'nextdoor', label: 'Nextdoor' },
@@ -676,7 +677,7 @@ export default function OnboardingPage() {
               {referralSource === 'neighbor_referral' && (
                 <div style={{ marginTop: 8 }}>
                   <input value={referredBy} onChange={e => setReferredBy(e.target.value)} placeholder="Their name or phone — we'll credit them $25!" style={inputStyle} />
-                  <div style={{ fontSize: 11, color: B.green, marginTop: 4 }}>Your neighbor gets $25 off and so do you 🎉</div>
+                  <div style={{ fontSize: 11, color: B.green, marginTop: 4 }}>Your neighbor gets $25 off and so do you </div>
                 </div>
               )}
 
@@ -705,7 +706,7 @@ export default function OnboardingPage() {
               }} />
             ))}
 
-            <div style={{ fontSize: 48, marginTop: 20 }}>🎉</div>
+            <div style={{ fontSize: 48, marginTop: 20 }}></div>
             <h1 style={{
               fontSize: 'clamp(36px, 7vw, 48px)', fontFamily: FONTS.display, fontWeight: 400,
               color: '#fff', letterSpacing: '0.02em', lineHeight: 1.05,
@@ -741,12 +742,12 @@ export default function OnboardingPage() {
 
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 16, marginBottom: 6 }}>Property</div>
               {[
-                prefs.neighborhoodGateCode || prefs.propertyGateCode ? '✅ Gate codes on file' : '✖ No gate codes',
-                prefs.petCount > 0 ? '✅ Pet info saved' : '✖ No pet info',
-                prefs.preferredDay !== 'no_preference' ? '✅ Scheduling preferences set' : '✖ No scheduling prefs',
-                (prefs.specialFeatures || []).length > 0 ? '✅ Property features noted' : '✖ No property features',
+                prefs.neighborhoodGateCode || prefs.propertyGateCode ? ' Gate codes on file' : ' No gate codes',
+                prefs.petCount > 0 ? ' Pet info saved' : ' No pet info',
+                prefs.preferredDay !== 'no_preference' ? ' Scheduling preferences set' : ' No scheduling prefs',
+                (prefs.specialFeatures || []).length > 0 ? ' Property features noted' : ' No property features',
               ].map((line, i) => (
-                <div key={i} style={{ fontSize: 12, color: line.startsWith('✅') ? B.grayDark : B.textCaption, marginBottom: 2 }}>{line}</div>
+                <div key={i} style={{ fontSize: 12, color: line.startsWith('') ? B.grayDark : B.textCaption, marginBottom: 2 }}>{line}</div>
               ))}
             </div>
 
@@ -758,13 +759,13 @@ export default function OnboardingPage() {
 
             {/* Referral card */}
             <div style={{ background: B.blueSurface, borderRadius: 16, padding: 18, marginTop: 16, textAlign: 'center' }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>Know someone who needs pest control? 🏡</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>Know someone who needs pest control? </div>
               <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4 }}>Share your link — you both get $25</div>
               <a href={`sms:?body=${encodeURIComponent(`Hey! I just signed up with Waves Pest Control and they're awesome. Use my referral link and we both get $25 off: https://wavespestcontrol.com?ref=${c.referralCode}`)}`} style={{
                 ...BUTTON_BASE, padding: '9px 20px', fontSize: 13, marginTop: 10,
                 borderRadius: 9999, background: B.yellow, color: B.blueDeeper,
                 textDecoration: 'none', display: 'inline-flex', fontWeight: 800,
-              }}>💬 Text a Friend</a>
+              }}> Text a Friend</a>
             </div>
 
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 20 }}>

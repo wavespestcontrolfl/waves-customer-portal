@@ -1,3 +1,4 @@
+import Icon from '../components/Icon';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
@@ -240,7 +241,7 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
         padding: '10px 14px', borderRadius: 10,
         background: W.bluePale, border: `1px solid ${W.blue}33`,
       }}>
-        <span style={{ fontSize: 18 }}>💳</span>
+        <Icon name="card" size={18} strokeWidth={1.75} />
         <span style={{ fontSize: 13, color: W.navy, fontWeight: 500 }}>
           A {pct}% processing fee is added to credit/debit card and wallet payments. Bank transfers (ACH) pay the quoted amount with no added fee.
         </span>
@@ -520,7 +521,7 @@ export default function PayPage() {
               width: 42, height: 42, borderRadius: 10, background: W.bluePale,
               display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
               fontSize: 20,
-            }}>📅</div>
+            }}></div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8 }}>Service Date</div>
               <div style={{ fontSize: 15, fontWeight: 600, color: W.navy, marginTop: 2 }}>
