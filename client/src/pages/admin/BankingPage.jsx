@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { etDateString } from '../../lib/timezone';
 
@@ -624,6 +624,22 @@ export default function BankingPage() {
     }
     setSyncing(false);
   };
+
+  const didAutoSync = useRef(false);
+  useEffect(() => {
+    if (didAutoSync.current) return;
+    didAutoSync.current = true;
+    (async () => {
+      setSyncing(true);
+      try {
+        const d = await adminFetch('/admin/banking/sync', { method: 'POST' });
+        setLastSync(d.synced_at || new Date().toISOString());
+        await loadBalance();
+        await loadStats();
+      } catch (e) { /* silent on auto-sync */ }
+      setSyncing(false);
+    })();
+  }, [loadBalance, loadStats]);
 
   const handlePayoutSuccess = () => {
     setShowPayoutModal(false);
