@@ -514,10 +514,17 @@ const StripeService = {
 
   /**
    * Create a PaymentIntent for an invoice amount (public pay page).
-   * @param {string} invoiceId — Waves invoice UUID
-   * @returns {{ clientSecret: string, paymentIntentId: string, amount: number }}
+   *
+   * When `saveCard` is true we attach the Stripe customer and set
+   * `setup_future_usage: 'off_session'` so the payment method is retained
+   * after the charge succeeds. Customer attachment is required for
+   * Stripe to persist the pm — we only do it when the customer has
+   * explicitly opted in on the pay page.
+   *
+   * @param {string} invoiceId
+   * @param {{ saveCard?: boolean }} [opts]
    */
-  async createInvoicePaymentIntent(invoiceId) {
+  async createInvoicePaymentIntent(invoiceId, opts = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -525,9 +532,7 @@ const StripeService = {
     if (!invoice) throw new Error('Invoice not found');
     if (invoice.status === 'paid') throw new Error('Invoice already paid');
 
-    // One-off charge via the public pay link. Intentionally does NOT attach
-    // a Stripe customer — Waves admin is the source of truth; we link the
-    // charge back via waves_customer_id in metadata.
+    const saveCard = !!opts.saveCard;
     const baseAmount = parseFloat(invoice.total);
     const amountCents = Math.round(baseAmount * 100);
 
@@ -542,11 +547,19 @@ const StripeService = {
         waves_customer_id: invoice.customer_id,
         base_amount: String(baseAmount),
         card_surcharge: '0',
+        save_card_opt_in: saveCard ? 'true' : 'false',
       },
     };
 
+    if (saveCard && invoice.customer_id) {
+      piParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
+      piParams.setup_future_usage = 'off_session';
+    }
+
     try {
-      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}`;
+      // Idempotency key includes saveCard so toggling regenerates the PI
+      // cleanly — same amount but different Stripe intent surface.
+      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}`;
       const paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
       await db('invoices')
@@ -582,7 +595,7 @@ const StripeService = {
    * @param {string} methodCategory — Stripe Payment Element "change" event type
    *   (e.g. 'card', 'us_bank_account', 'apple_pay', 'google_pay', 'link')
    */
-  async updateInvoicePaymentIntentMethod(invoiceId, paymentIntentId, methodCategory) {
+  async updateInvoicePaymentIntentMethod(invoiceId, paymentIntentId, methodCategory, opts = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -590,20 +603,35 @@ const StripeService = {
     if (!invoice) throw new Error('Invoice not found');
     if (invoice.status === 'paid') throw new Error('Invoice already paid');
 
+    const saveCard = !!opts.saveCard;
     const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), methodCategory);
     const amountCents = Math.round(total * 100);
 
+    const updateParams = {
+      amount: amountCents,
+      metadata: {
+        waves_invoice_id: invoiceId,
+        invoice_number: invoice.invoice_number,
+        base_amount: String(base),
+        card_surcharge: String(surcharge),
+        selected_method_category: String(methodCategory || 'unknown'),
+        save_card_opt_in: saveCard ? 'true' : 'false',
+      },
+    };
+
+    // saveCard requires a Stripe customer on the PI. Attach on first opt-in,
+    // set SFU accordingly. Unticking after opting in clears SFU (''), but we
+    // leave the customer attached — unsetting it isn't supported and it's
+    // harmless once the PI is consumed.
+    if (saveCard && invoice.customer_id) {
+      updateParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
+      updateParams.setup_future_usage = 'off_session';
+    } else {
+      updateParams.setup_future_usage = '';
+    }
+
     try {
-      const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, {
-        amount: amountCents,
-        metadata: {
-          waves_invoice_id: invoiceId,
-          invoice_number: invoice.invoice_number,
-          base_amount: String(base),
-          card_surcharge: String(surcharge),
-          selected_method_category: String(methodCategory || 'unknown'),
-        },
-      });
+      const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
       logger.info(`[stripe] PI ${paymentIntentId} updated → base=$${base} surcharge=$${surcharge} total=$${total} (method=${methodCategory})`);
       return {
         paymentIntentId: paymentIntent.id,
