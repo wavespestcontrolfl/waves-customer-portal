@@ -204,9 +204,6 @@ export default function MobileCheckoutSheet({
         >
           {minting ? 'Opening payment…' : `Charge $${total.toFixed(2)}`}
         </button>
-        <div className="text-center text-ink-tertiary" style={{ fontSize: 12, marginTop: 8 }}>
-          Card surcharge of 3% may apply.
-        </div>
         {mintError && (
           <div className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
             {mintError}
