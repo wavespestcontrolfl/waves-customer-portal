@@ -8,6 +8,7 @@ import React, {
   useState, useEffect, useCallback, useMemo,
 } from 'react';
 import { Badge, Button, Card, cn } from '../../components/ui';
+import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -29,6 +30,7 @@ const SUB_TABS = [
   { key: 'compose', label: 'Compose' },
   { key: 'history', label: 'History' },
   { key: 'subscribers', label: 'Subscribers' },
+  { key: 'automations', label: 'Automations' },
 ];
 
 export default function NewsletterTabV2() {
@@ -57,6 +59,7 @@ export default function NewsletterTabV2() {
       {view === 'compose' && <ComposeView />}
       {view === 'history' && <HistoryView />}
       {view === 'subscribers' && <SubscribersView />}
+      {view === 'automations' && <EmailAutomationsPanelV2 />}
     </div>
   );
 }
