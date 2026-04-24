@@ -40,7 +40,11 @@
 .btn:not([data-surface]) {
   border-radius: 9999px;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
+  /* Design brief: UPPERCASE CTAs are part of the brand identity on customer
+     surfaces. Applied at .btn level so every variant inherits; the tertiary
+     variant (inline text link) flips this back to "none" below. */
+  text-transform: uppercase;
 }
 .btn[data-surface="customer"]:focus-visible,
 .btn:not([data-surface]):focus-visible {
@@ -82,7 +86,8 @@
   background: #E3F5FD;
 }
 
-/* TERTIARY — text link on brand blue */
+/* TERTIARY — text link on brand blue. Reads as inline prose, so opt out of
+   the uppercase treatment inherited from .btn above. */
 .btn-tertiary[data-surface="customer"],
 .btn-tertiary:not([data-surface]) {
   background: transparent;
@@ -92,6 +97,8 @@
   line-height: 1.2;
   padding: 8px 0;
   min-height: 44px;
+  text-transform: none;
+  letter-spacing: 0.01em;
 }
 .btn-tertiary[data-surface="customer"]:hover:not(:disabled),
 .btn-tertiary:not([data-surface]):hover:not(:disabled) {
