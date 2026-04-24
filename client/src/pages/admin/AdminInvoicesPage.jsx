@@ -15,7 +15,7 @@ function adminFetch(path, options = {}) {
 }
 
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
-const sBtn = (bg, color, isMobile) => ({ padding: isMobile ? '12px 18px' : '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: isMobile ? 14 : 13, fontWeight: 600, cursor: 'pointer', minHeight: isMobile ? 44 : undefined });
+const sBtn = (bg, color, isMobile) => ({ padding: isMobile ? '12px 18px' : '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: isMobile ? 14 : 13, fontWeight: 600, cursor: 'pointer', minHeight: isMobile ? 44 : undefined, textTransform: 'uppercase', letterSpacing: '0.04em' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
 const sInput = (isMobile) => ({ width: '100%', padding: isMobile ? '12px 14px' : '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: isMobile ? 16 : 13, outline: 'none', boxSizing: 'border-box', minHeight: isMobile ? 44 : undefined });
 
@@ -479,7 +479,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               style={sBtn(inv.receipt_sent_at ? D.card : D.heading, inv.receipt_sent_at ? D.text : D.white, isMobile)}
                               title={inv.receipt_sent_at ? 'Resend receipt + log another touch' : 'Email + SMS the receipt and close the service'}
                             >
-                              {inv.receipt_sent_at ? 'Resend receipt' : 'Send receipt & close'}
+                              {inv.receipt_sent_at ? 'Resend receipt' : 'Send receipt'}
                             </button>
                           )}
                         </div>
