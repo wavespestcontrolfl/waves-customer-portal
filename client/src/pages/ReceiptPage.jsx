@@ -105,8 +105,7 @@ export default function ReceiptPage() {
           <BrandCard>
             <SerifHeading style={{ marginBottom: 12 }}>We couldn't find that receipt</SerifHeading>
             <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
-              The link may be mistyped. Give us a call and we'll pull up your records —
-              {' '}<HelpPhoneLink tone="dark" />.
+              The link may be mistyped. Give us a call and we'll pull up your records — <HelpPhoneLink tone="dark" inline />.
             </p>
           </BrandCard>
         </div>
@@ -491,7 +490,7 @@ export default function ReceiptPage() {
         </BrandCard>
 
         <div className="waves-no-print" style={{ marginTop: 28, textAlign: 'center', fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-          Questions about this receipt? <HelpPhoneLink tone="dark" /> or reply to the text or email.
+          Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
       </div>
     </WavesShell>

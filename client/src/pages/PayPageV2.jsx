@@ -419,8 +419,7 @@ export default function PayPageV2() {
           <BrandCard>
             <SerifHeading style={{ marginBottom: 12 }}>We couldn't find that invoice</SerifHeading>
             <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
-              The link may have expired or been mistyped. Give us a call and we'll sort it out —
-              <HelpPhoneLink tone="dark" />.
+              The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
             </p>
           </BrandCard>
         </div>
@@ -613,7 +612,7 @@ export default function PayPageV2() {
         </BrandCard>
 
         <div style={{ marginTop: 28, textAlign: 'center', fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-          Questions about this invoice? <HelpPhoneLink tone="dark" /> or reply to the text or email.
+          Questions about this invoice? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
       </div>
     </WavesShell>
