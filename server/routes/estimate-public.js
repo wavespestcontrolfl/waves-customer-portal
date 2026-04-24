@@ -335,11 +335,13 @@ function renderPage(token, estimate, estData) {
     ? `<tr><td>WaveGuard Membership<div class="sub">Waived if you prepay 12 months up front</div></td><td style="text-align:right">${fmtMoney(membershipFee)}</td></tr>`
     : '';
 
-  const oneTimeRows = membershipRow + oneTimeItems.map((it) => {
+  const realOneTimeRows = oneTimeItems.map((it) => {
     const price = Number(it.price || 0);
     if (price <= 0) return '';
     return `<tr><td>${escapeHtml(it.name)}${it.detail ? `<div class="sub">${escapeHtml(it.detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
   }).filter(Boolean).join('');
+  const hasRealOneTime = realOneTimeRows.length > 0;
+  const oneTimeRows = membershipRow + realOneTimeRows;
 
   const perksHtml = PERKS.map((p) => `<li>${escapeHtml(p)}</li>`).join('');
   const locationsHtml = LOCATIONS.map((l) => {
@@ -635,7 +637,7 @@ ${shellTopBar()}
     <table>${oneTimeRows}
       <tr><td><strong>One-time total</strong></td><td style="text-align:right"><strong>${fmtMoney(onetimeTotal)}</strong></td></tr>
     </table>
-    <p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>
+    ${hasRealOneTime ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
   </div>` : ''}
 
   <div class="card">
@@ -666,7 +668,7 @@ ${shellTopBar()}
   <div class="final">
     <h2>Ready to lock in <span data-monthly-echo>${fmtMoney(monthlyTotal)}</span>/mo?</h2>
     <p>No surprise increases, no hidden fees.</p>
-    ${locked ? '' : `<button class="cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B" onclick="document.getElementById('booking-card')?.scrollIntoView({behavior:'smooth',block:'start'})">Pick a time and book</button>`}
+    ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:+19412975749" style="color:#fff;font-weight:700">(941) 297-5749</a>
     </div>
@@ -1029,6 +1031,31 @@ ${shellTopBar()}
     div.querySelector('button').addEventListener('click', function () { div.remove(); });
     var wrap = document.querySelector('.wrap') || document.body;
     wrap.insertBefore(div, wrap.firstChild);
+  })();
+
+  // "Pick a time and book" — scroll to the booking card and flash it
+  // briefly so the tap is visibly confirmed (on mobile the scroll can be
+  // subtle when the user is near the bottom of a tall page). Uses
+  // addEventListener instead of inline onclick to avoid silent-fail on
+  // older iOS Safari when the handler uses optional chaining.
+  (function () {
+    var btns = document.querySelectorAll('.pick-time-cta');
+    if (!btns.length) return;
+    btns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var target = document.getElementById('booking-card');
+        if (!target) return;
+        try { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+        catch (e) { target.scrollIntoView(true); }
+        // Pulse the card border so the landing is obvious even on
+        // short viewports where the scroll barely moves.
+        target.animate([
+          { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
+          { boxShadow: '0 0 0 6px rgba(27,44,91,.18)' },
+          { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
+        ], { duration: 900, easing: 'ease-out' });
+      });
+    });
   })();
 
   async function inquireBundle(svc) {
