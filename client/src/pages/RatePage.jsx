@@ -268,7 +268,7 @@ export default function RatePage() {
             <div style={{ fontFamily: FONTS.display, fontSize: 22, fontWeight: 800, color: COLORS.blueDeeper, marginBottom: 6 }}>
               We'll write it for you!
             </div>
-            <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 16, color: COLORS.textBody, lineHeight: 1.5 }}>
               Answer a couple quick questions and we'll draft a Google review you can paste.
             </div>
           </div>

@@ -283,7 +283,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 16,
         padding: '12px 14px', borderRadius: 'var(--radius-md)',
         background: 'rgba(0,156,222,0.08)', border: '1px solid rgba(0,156,222,0.24)',
-        fontSize: 14, lineHeight: 1.5, color: 'var(--text)',
+        fontSize: 16, lineHeight: 1.5, color: 'var(--text)',
       }}>
         <span aria-hidden="true">💳</span>
         <span>
@@ -527,7 +527,7 @@ export default function PayPageV2() {
           </p>
 
           {/* Bill-to block */}
-          <div style={{ fontSize: 14, lineHeight: 1.6, color: 'var(--text)', marginBottom: 20 }}>
+          <div style={{ fontSize: 16, lineHeight: 1.6, color: 'var(--text)', marginBottom: 20 }}>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4 }}>
               Billed to
             </div>
@@ -674,7 +674,7 @@ export default function PayPageV2() {
           )}
         </BrandCard>
 
-        <div style={{ marginTop: 28, textAlign: 'center', fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+        <div style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
           Questions about this invoice? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
       </div>
