@@ -5,25 +5,9 @@ import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import StickyBottomCTA from '../components/customer/StickyBottomCTA';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
-import { FONTS } from '../theme-brand';
+import { COLORS, FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-// Waves brand palette — mirrored from wavespestcontrol.com Astro @theme tokens (van-vinyl spec)
-const W = {
-  blue: '#065A8C',                 // --color-brand-blueDark — depth accent
-  blueBright: '#009CDE',           // --color-brand-blue (PMS 2925) — primary brand
-  blueDeeper: '#1B2C5B',           // --color-brand-blueDeeper (PMS 2766) — heading text
-  bluePale: '#E3F5FD',             // --color-brand-blueLight — soft wash
-  sky: '#4DC9F6',                  // --color-brand-sky — hero bg
-  red: '#C8102E',                  // --color-brand-red (PMS 186)
-  yellow: '#FFD700',               // --color-brand-gold — primary CTA
-  yellowHover: '#FFF176',          // --color-brand-yellow — CTA hover
-  green: '#16A34A', greenLight: '#DCFCE7',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0',
-  border: '#CBD5E1', borderLight: '#F1F5F9',
-};
 
 const TIER_COLORS = {
   Bronze: { bg: '#F5E6D3', text: '#8D6E63', accent: '#A1887F' },
@@ -85,10 +69,10 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
           appearance: {
             theme: 'stripe',
             variables: {
-              colorPrimary: W.blueBright,
-              colorBackground: W.white,
-              colorText: W.blueDeeper,
-              colorDanger: W.red,
+              colorPrimary: COLORS.wavesBlue,
+              colorBackground: COLORS.white,
+              colorText: COLORS.blueDeeper,
+              colorDanger: COLORS.red,
               fontFamily: FONTS.body,
               borderRadius: '12px',
               spacingUnit: '4px',
@@ -100,21 +84,21 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
                 padding: '12px 14px',
               },
               '.Input:focus': {
-                border: `1.5px solid ${W.blueBright}`,
+                border: `1.5px solid ${COLORS.wavesBlue}`,
                 boxShadow: `0 0 0 3px rgba(0,156,222,0.15)`,
               },
               '.Label': {
                 fontSize: '13px',
                 fontWeight: '500',
-                color: W.textBody,
+                color: COLORS.textBody,
               },
               '.Tab': {
                 border: `1.5px solid #E2E8F0`,
                 borderRadius: '12px',
               },
               '.Tab--selected': {
-                borderColor: W.blueBright,
-                backgroundColor: W.bluePale,
+                borderColor: COLORS.wavesBlue,
+                backgroundColor: COLORS.blueLight,
               },
             },
           },
@@ -240,10 +224,10 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12,
         padding: '10px 14px', borderRadius: 10,
-        background: W.bluePale, border: `1px solid ${W.blue}33`,
+        background: COLORS.blueLight, border: `1px solid ${COLORS.blueDark}33`,
       }}>
         <Icon name="card" size={18} strokeWidth={1.75} />
-        <span style={{ fontSize: 13, color: W.navy, fontWeight: 500 }}>
+        <span style={{ fontSize: 13, color: COLORS.navy, fontWeight: 500 }}>
           A {pct}% processing fee is added to credit/debit card and wallet payments. Bank transfers (ACH) pay the quoted amount with no added fee.
         </span>
       </div>
@@ -260,22 +244,22 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
       {/* Live total breakdown */}
       <div style={{
         marginBottom: 16, padding: '12px 14px', borderRadius: 10,
-        background: W.offWhite, border: `1px solid ${W.border}`, fontSize: 13,
+        background: COLORS.offWhite, border: `1px solid ${COLORS.grayLight}`, fontSize: 13,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-          <span style={{ color: W.textBody }}>Invoice total</span>
-          <span style={{ color: W.navy, fontWeight: 600 }}>${displayedBase.toFixed(2)}</span>
+          <span style={{ color: COLORS.textBody }}>Invoice total</span>
+          <span style={{ color: COLORS.navy, fontWeight: 600 }}>${displayedBase.toFixed(2)}</span>
         </div>
         {isCardFamily && displayedSurcharge > 0 && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span style={{ color: W.textBody }}>Card processing fee ({pct}%)</span>
-            <span style={{ color: W.navy, fontWeight: 600 }}>+ ${displayedSurcharge.toFixed(2)}</span>
+            <span style={{ color: COLORS.textBody }}>Card processing fee ({pct}%)</span>
+            <span style={{ color: COLORS.navy, fontWeight: 600 }}>+ ${displayedSurcharge.toFixed(2)}</span>
           </div>
         )}
         <div style={{
           display: 'flex', justifyContent: 'space-between',
-          paddingTop: 6, marginTop: 6, borderTop: `1px solid ${W.border}`,
-          fontSize: 14, fontWeight: 700, color: W.navy,
+          paddingTop: 6, marginTop: 6, borderTop: `1px solid ${COLORS.grayLight}`,
+          fontSize: 14, fontWeight: 700, color: COLORS.navy,
         }}>
           <span>{isCardFamily ? 'Total charged' : 'Total (bank transfer)'}</span>
           <span>${buttonAmount.toFixed(2)}</span>
@@ -284,8 +268,8 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
 
       {elementError && (
         <div style={{
-          background: '#FFF3F3', border: `1px solid ${W.red}`, borderRadius: 10,
-          padding: '10px 14px', fontSize: 13, color: W.red, marginBottom: 12,
+          background: '#FFF3F3', border: `1px solid ${COLORS.red}`, borderRadius: 10,
+          padding: '10px 14px', fontSize: 13, color: COLORS.red, marginBottom: 12,
         }}>
           {elementError}
         </div>
@@ -299,7 +283,7 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
           width: '100%',
           padding: 16,
           fontSize: 16,
-          background: processing ? W.textCaption : undefined,
+          background: processing ? COLORS.textCaption : undefined,
           cursor: (isDisabled || syncingAmount) ? 'default' : 'pointer',
         }}
       >
@@ -312,7 +296,7 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
               : `Pay $${buttonAmount.toFixed(2)}`}
       </Button>
 
-      <div style={{ textAlign: 'center', marginTop: 12, fontSize: 11, color: W.textCaption }}>
+      <div style={{ textAlign: 'center', marginTop: 12, fontSize: 11, color: COLORS.textCaption }}>
         256-bit encrypted — Processed by Stripe
       </div>
     </div>
@@ -449,10 +433,10 @@ export default function PayPage() {
 
   // ── Loading ──
   if (loading) return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ textAlign: 'center' }}>
-        <div style={{ width: 40, height: 40, border: `3px solid ${W.border}`, borderTopColor: W.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 16px' }} />
-        <div style={{ color: W.textCaption, fontFamily: FONTS.body, fontSize: 14 }}>Loading your service details...</div>
+        <div style={{ width: 40, height: 40, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.blueDark, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 16px' }} />
+        <div style={{ color: COLORS.textCaption, fontFamily: FONTS.body, fontSize: 14 }}>Loading your service details...</div>
         <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
       </div>
     </div>
@@ -460,10 +444,10 @@ export default function PayPage() {
 
   // ── Error ──
   if (error) return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+    <div style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center', maxWidth: 400 }}>
-        <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 700, color: W.blueDeeper, marginBottom: 8, letterSpacing: '-0.01em' }}>Invoice Not Found</div>
-        <div style={{ fontFamily: FONTS.body, fontSize: 14, color: W.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a> if you need help.</div>
+        <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.01em' }}>Invoice Not Found</div>
+        <div style={{ fontFamily: FONTS.body, fontSize: 14, color: COLORS.textBody }}>This link may have expired or the invoice has been removed. Contact us at <a href="tel:+19412975749" style={{ color: COLORS.blueDark }}>(941) 297-5749</a> if you need help.</div>
       </div>
     </div>
   );
@@ -474,11 +458,11 @@ export default function PayPage() {
   const tierColors = TIER_COLORS[tier] || TIER_COLORS.Bronze;
 
   return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: FONTS.body }}>
+    <div style={{ minHeight: '100vh', background: COLORS.offWhite, fontFamily: FONTS.body }}>
       {/* Brand fonts loaded globally via client/index.html */}
 
       {/* ── Header ── */}
-      <div style={{ position: 'relative', overflow: 'hidden', background: `linear-gradient(135deg, ${W.blueBright} 0%, ${W.blueDeeper} 100%)`, padding: isMobile ? '24px 16px' : '32px 24px', textAlign: 'center' }}>
+      <div style={{ position: 'relative', overflow: 'hidden', background: `linear-gradient(135deg, ${COLORS.wavesBlue} 0%, ${COLORS.blueDeeper} 100%)`, padding: isMobile ? '24px 16px' : '32px 24px', textAlign: 'center' }}>
         {/* Hero video — waves-hero-service.mp4 */}
         <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
@@ -492,9 +476,9 @@ export default function PayPage() {
 
         {/* ── Paid Banner ── */}
         {isPaid && (
-          <div style={{ background: W.greenLight, border: `1px solid ${W.green}`, borderRadius: 12, padding: '16px 20px', marginTop: -16, marginBottom: 20, textAlign: 'center' }}>
+          <div style={{ background: COLORS.greenLight, border: `1px solid ${COLORS.green}`, borderRadius: 12, padding: '16px 20px', marginTop: -16, marginBottom: 20, textAlign: 'center' }}>
             <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
-            <div style={{ fontSize: 13, color: W.textBody, marginTop: 4 }}>
+            <div style={{ fontSize: 13, color: COLORS.textBody, marginTop: 4 }}>
               Paid {invoice.paidAt ? new Date(invoice.paidAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' }) : ''}
               {invoice.cardBrand && invoice.cardLastFour ? ` — ${invoice.cardBrand} ****${invoice.cardLastFour}` : ''}
             </div>
@@ -505,27 +489,27 @@ export default function PayPage() {
         <div style={{ marginTop: isPaid ? 16 : 24, marginBottom: 24 }}>
           <h1 style={{
             fontFamily: FONTS.display, fontWeight: 400,
-            fontSize: isMobile ? 32 : 40, color: W.blueBright,
+            fontSize: isMobile ? 32 : 40, color: COLORS.wavesBlue,
             letterSpacing: '0.02em', lineHeight: 1.05, margin: 0,
           }}>
             {isPaid ? `Thank you, ${customer.firstName}!` : `Hi ${customer.firstName}!`}
           </h1>
-          <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>
+          <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 8 }}>
             We appreciate the opportunity to serve you and thank you for choosing Waves!
           </div>
         </div>
 
         {/* ── Service Date ── */}
         {service.date && (
-          <div style={{ background: W.white, borderRadius: 12, border: `1px solid ${W.border}`, padding: '14px 18px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ background: COLORS.white, borderRadius: 12, border: `1px solid ${COLORS.grayLight}`, padding: '14px 18px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{
-              width: 42, height: 42, borderRadius: 10, background: W.bluePale,
+              width: 42, height: 42, borderRadius: 10, background: COLORS.blueLight,
               display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
               fontSize: 20,
             }}></div>
             <div>
-              <div style={{ fontSize: 11, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8 }}>Service Date</div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: W.navy, marginTop: 2 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.textCaption, textTransform: 'uppercase', letterSpacing: 0.8 }}>Service Date</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.navy, marginTop: 2 }}>
                 {new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}
               </div>
             </div>
@@ -534,10 +518,10 @@ export default function PayPage() {
 
         {/* ── Service Recap Card ── */}
         {(service.type || service.techName) && (
-          <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
-            <div style={{ background: W.bluePale, padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
-              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Service Completed</div>
-              <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 13, color: W.textBody, flexWrap: 'wrap' }}>
+          <div style={{ background: COLORS.white, borderRadius: 16, border: `1px solid ${COLORS.grayLight}`, overflow: 'hidden', marginBottom: 20 }}>
+            <div style={{ background: COLORS.blueLight, padding: '16px 20px', borderBottom: `1px solid ${COLORS.grayLight}` }}>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: COLORS.blueDeeper }}>Service Completed</div>
+              <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 13, color: COLORS.textBody, flexWrap: 'wrap' }}>
                 {service.date && <span>{new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })}</span>}
                 {service.techName && <span>Tech: {service.techName}</span>}
               </div>
@@ -546,15 +530,15 @@ export default function PayPage() {
             <div style={{ padding: isMobile ? 14 : 20 }}>
               {service.productsApplied?.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Products Applied</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Products Applied</div>
                   {service.productsApplied.map((p, i) => (
-                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '8px 0', borderBottom: i < service.productsApplied.length - 1 ? `1px solid ${W.borderLight}` : 'none' }}>
+                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '8px 0', borderBottom: i < service.productsApplied.length - 1 ? `1px solid ${COLORS.offWhite}` : 'none' }}>
                       <div>
-                        <div style={{ fontSize: 14, fontWeight: 500, color: W.navy }}>{p.product_name}</div>
-                        {p.active_ingredient && <div style={{ fontSize: 12, color: W.textCaption }}>Active: {p.active_ingredient}</div>}
+                        <div style={{ fontSize: 14, fontWeight: 500, color: COLORS.navy }}>{p.product_name}</div>
+                        {p.active_ingredient && <div style={{ fontSize: 12, color: COLORS.textCaption }}>Active: {p.active_ingredient}</div>}
                       </div>
                       {p.application_rate && (
-                        <div style={{ fontSize: 12, color: W.textCaption, whiteSpace: 'nowrap', marginLeft: 12 }}>
+                        <div style={{ fontSize: 12, color: COLORS.textCaption, whiteSpace: 'nowrap', marginLeft: 12 }}>
                           {p.application_rate} {p.rate_unit}
                         </div>
                       )}
@@ -565,8 +549,8 @@ export default function PayPage() {
 
               {service.techNotes && (
                 <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Tech Notes</div>
-                  <div style={{ fontSize: 14, color: W.textBody, lineHeight: 1.6, background: W.offWhite, padding: 14, borderRadius: 10, borderLeft: `3px solid ${W.blue}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Tech Notes</div>
+                  <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.6, background: COLORS.offWhite, padding: 14, borderRadius: 10, borderLeft: `3px solid ${COLORS.blueDark}` }}>
                     {service.techNotes}
                   </div>
                 </div>
@@ -574,15 +558,15 @@ export default function PayPage() {
 
               {service.photos?.length > 0 && (
                 <div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Service Photos</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Service Photos</div>
                   <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(auto-fill, minmax(120px, 1fr))', gap: 8 }}>
                     {service.photos.map((photo, i) => (
-                      <div key={i} style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', aspectRatio: '4/3', background: W.borderLight }}>
+                      <div key={i} style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', aspectRatio: '4/3', background: COLORS.offWhite }}>
                         <img src={photo.s3_url} alt={photo.caption || photo.photo_type} loading="lazy"
                           style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                         <div style={{
                           position: 'absolute', bottom: 0, left: 0, right: 0, padding: '4px 8px',
-                          background: 'linear-gradient(transparent, rgba(0,0,0,0.6))', fontSize: 10, color: W.white, textTransform: 'uppercase',
+                          background: 'linear-gradient(transparent, rgba(0,0,0,0.6))', fontSize: 10, color: COLORS.white, textTransform: 'uppercase',
                         }}>{photo.photo_type}</div>
                       </div>
                     ))}
@@ -594,53 +578,53 @@ export default function PayPage() {
         )}
 
         {/* ── Invoice Card ── */}
-        <div style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
-          <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ background: COLORS.white, borderRadius: 16, border: `1px solid ${COLORS.grayLight}`, overflow: 'hidden', marginBottom: 20 }}>
+          <div style={{ padding: '16px 20px', borderBottom: `1px solid ${COLORS.grayLight}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
-              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Invoice</div>
-              <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>{invoice.invoiceNumber}</div>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: COLORS.blueDeeper }}>Invoice</div>
+              <div style={{ fontSize: 12, color: COLORS.textCaption, marginTop: 2 }}>{invoice.invoiceNumber}</div>
             </div>
             {!isPaid && (() => {
-              if (!invoice.dueDate) return <div style={{ fontSize: 12, color: W.textCaption }}>Due upon receipt</div>;
+              if (!invoice.dueDate) return <div style={{ fontSize: 12, color: COLORS.textCaption }}>Due upon receipt</div>;
               const d = new Date(String(invoice.dueDate).split('T')[0] + 'T12:00:00');
-              if (isNaN(d.getTime())) return <div style={{ fontSize: 12, color: W.textCaption }}>Due upon receipt</div>;
-              return <div style={{ fontSize: 12, color: W.textCaption }}>Due {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}</div>;
+              if (isNaN(d.getTime())) return <div style={{ fontSize: 12, color: COLORS.textCaption }}>Due upon receipt</div>;
+              return <div style={{ fontSize: 12, color: COLORS.textCaption }}>Due {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}</div>;
             })()}
           </div>
 
           <div style={{ padding: isMobile ? 14 : 20 }}>
             {invoice.lineItems?.map((item, i) => (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: i < invoice.lineItems.length - 1 ? `1px solid ${W.borderLight}` : 'none' }}>
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: i < invoice.lineItems.length - 1 ? `1px solid ${COLORS.offWhite}` : 'none' }}>
                 <div>
-                  <div style={{ fontSize: 14, color: W.navy, fontWeight: 500 }}>{item.description}</div>
-                  {item.quantity > 1 && <div style={{ fontSize: 12, color: W.textCaption }}>{item.quantity} x ${item.unit_price.toFixed(2)}</div>}
+                  <div style={{ fontSize: 14, color: COLORS.navy, fontWeight: 500 }}>{item.description}</div>
+                  {item.quantity > 1 && <div style={{ fontSize: 12, color: COLORS.textCaption }}>{item.quantity} x ${item.unit_price.toFixed(2)}</div>}
                 </div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: W.navy, whiteSpace: 'nowrap' }}>${(item.quantity * item.unit_price).toFixed(2)}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy, whiteSpace: 'nowrap' }}>${(item.quantity * item.unit_price).toFixed(2)}</div>
               </div>
             ))}
 
-            <div style={{ borderTop: `2px solid ${W.border}`, marginTop: 12, paddingTop: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: W.textBody, marginBottom: 6 }}>
+            <div style={{ borderTop: `2px solid ${COLORS.grayLight}`, marginTop: 12, paddingTop: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: COLORS.textBody, marginBottom: 6 }}>
                 <span>Subtotal</span><span>${invoice.subtotal.toFixed(2)}</span>
               </div>
 
               {invoice.discountAmount > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
-                  <span style={{ color: W.green, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ color: COLORS.green, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ background: tierColors.bg, color: tierColors.text, fontSize: 10, padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>{tier}</span>
                     {invoice.discountLabel}
                   </span>
-                  <span style={{ color: W.green, fontWeight: 600 }}>-${invoice.discountAmount.toFixed(2)}</span>
+                  <span style={{ color: COLORS.green, fontWeight: 600 }}>-${invoice.discountAmount.toFixed(2)}</span>
                 </div>
               )}
 
               {invoice.taxAmount > 0 && customer.isCommercial && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: W.textBody, marginBottom: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: COLORS.textBody, marginBottom: 6 }}>
                   <span>Tax ({(invoice.taxRate * 100).toFixed(1)}%)</span><span>${invoice.taxAmount.toFixed(2)}</span>
                 </div>
               )}
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: isMobile ? 18 : 20, fontFamily: FONTS.heading, fontWeight: 800, color: W.blueDeeper, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${W.blueDeeper}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: isMobile ? 18 : 20, fontFamily: FONTS.heading, fontWeight: 800, color: COLORS.blueDeeper, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${COLORS.blueDeeper}` }}>
                 <span>Total</span><span>${invoice.total.toFixed(2)}</span>
               </div>
             </div>
@@ -649,17 +633,17 @@ export default function PayPage() {
 
         {/* ── Payment Section (Stripe Payment Element) ── */}
         {!isPaid && paymentState !== 'success' && (
-          <div ref={payNowRef} style={{ background: W.white, borderRadius: 16, border: `1px solid ${W.border}`, overflow: 'hidden', marginBottom: 20 }}>
-            <div style={{ padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
-              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Pay Now</div>
-              <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>Card, Apple Pay, Google Pay, or bank transfer</div>
+          <div ref={payNowRef} style={{ background: COLORS.white, borderRadius: 16, border: `1px solid ${COLORS.grayLight}`, overflow: 'hidden', marginBottom: 20 }}>
+            <div style={{ padding: '16px 20px', borderBottom: `1px solid ${COLORS.grayLight}` }}>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: COLORS.blueDeeper }}>Pay Now</div>
+              <div style={{ fontSize: 12, color: COLORS.textCaption, marginTop: 2 }}>Card, Apple Pay, Google Pay, or bank transfer</div>
             </div>
 
             <div style={{ padding: isMobile ? 14 : 20 }}>
               {paymentError && !stripeSetup && (
                 <div style={{
-                  background: '#FFF3F3', border: `1px solid ${W.red}`, borderRadius: 10,
-                  padding: '10px 14px', fontSize: 13, color: W.red, marginBottom: 12,
+                  background: '#FFF3F3', border: `1px solid ${COLORS.red}`, borderRadius: 10,
+                  padding: '10px 14px', fontSize: 13, color: COLORS.red, marginBottom: 12,
                 }}>
                   {paymentError}
                 </div>
@@ -667,8 +651,8 @@ export default function PayPage() {
 
               {paymentState === 'setup' && (
                 <div style={{ textAlign: 'center', padding: '24px 0' }}>
-                  <div style={{ width: 32, height: 32, border: `3px solid ${W.border}`, borderTopColor: W.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
-                  <div style={{ fontSize: 13, color: W.textCaption }}>Preparing secure checkout...</div>
+                  <div style={{ width: 32, height: 32, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.blueDark, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
+                  <div style={{ fontSize: 13, color: COLORS.textCaption }}>Preparing secure checkout...</div>
                   <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
                 </div>
               )}
@@ -693,15 +677,15 @@ export default function PayPage() {
 
         {/* ── Payment Success ── */}
         {paymentState === 'success' && (
-          <div style={{ background: W.greenLight, borderRadius: 16, border: `1px solid ${W.green}`, padding: 28, textAlign: 'center', marginBottom: 20 }}>
+          <div style={{ background: COLORS.greenLight, borderRadius: 16, border: `1px solid ${COLORS.green}`, padding: 28, textAlign: 'center', marginBottom: 20 }}>
             <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 20, color: '#2E7D32', marginBottom: 8 }}>Payment Successful!</div>
-            <div style={{ fontSize: 15, color: W.textBody, marginBottom: 4 }}>
+            <div style={{ fontSize: 15, color: COLORS.textBody, marginBottom: 4 }}>
               {paymentResult?.amount
                 ? `$${paymentResult.amount.toFixed(2)} paid for ${paymentResult.invoiceNumber || invoice.invoiceNumber}`
                 : `Payment confirmed for ${invoice.invoiceNumber}`
               }
             </div>
-            <div style={{ fontSize: 13, color: W.textCaption }}>
+            <div style={{ fontSize: 13, color: COLORS.textCaption }}>
               A receipt has been sent to your phone.
             </div>
           </div>
@@ -709,13 +693,13 @@ export default function PayPage() {
 
         {/* ── WaveGuard Upgrade Nudge (Bronze only, not paid) ── */}
         {tier === 'Bronze' && !isPaid && paymentState !== 'success' && (
-          <div style={{ background: `linear-gradient(135deg, ${W.sand} 0%, #FFF8E1 100%)`, borderRadius: 14, border: '1px solid #E8D5B7', padding: '18px 20px', marginBottom: 20 }}>
+          <div style={{ background: `linear-gradient(135deg, ${COLORS.sand} 0%, #FFF8E1 100%)`, borderRadius: 14, border: '1px solid #E8D5B7', padding: '18px 20px', marginBottom: 20 }}>
             <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: '#8D6E63', marginBottom: 4 }}>
               Save on every visit
             </div>
-            <div style={{ fontSize: 13, color: W.textBody, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 13, color: COLORS.textBody, lineHeight: 1.5 }}>
               Upgrade to <strong style={{ color: '#F9A825' }}>Gold WaveGuard</strong> and save 15% on all services — that's ${(invoice.subtotal * 0.15).toFixed(2)} off today's service alone.
-              Reply to the text from Waves or call <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a>.
+              Reply to the text from Waves or call <a href="tel:+19412975749" style={{ color: COLORS.blueDark }}>(941) 297-5749</a>.
             </div>
           </div>
         )}

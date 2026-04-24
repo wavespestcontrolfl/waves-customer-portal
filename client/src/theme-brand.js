@@ -42,6 +42,7 @@ export const COLORS = {
   grayMid: '#64748B',      // slate-500 — muted icons
   grayDark: '#334155',     // slate-700 — body text
   slate200: '#E2E8F0',
+  slate400: '#94A3B8',     // used on booking surfaces (secondary caption)
   slate600: '#475569',
   slate700: '#334155',     // explicit alias for FAQ/body answer color
 
@@ -54,8 +55,13 @@ export const COLORS = {
 
   // Status
   green: '#16A34A',
+  greenLight: '#DCFCE7',   // success wash (payment-received banner, etc.)
   orange: '#F59E0B',
   teal: '#0EA5E9',
+
+  // Customer-surface warm neutral — design brief explicitly calls out a
+  // "sand" page background; hex used across PayPage/ReviewPage/receipts.
+  sand: '#FEF7E0',
 };
 
 // Legacy aliases — keeps existing references working without mass find/replace

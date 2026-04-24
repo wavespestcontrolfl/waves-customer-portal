@@ -3,24 +3,9 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
-import { FONTS } from '../theme-brand';
+import { COLORS, FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-// Mirrored from wavespestcontrol.com Astro @theme tokens (van-vinyl spec)
-const W = {
-  blue: '#065A8C',                 // --color-brand-blueDark
-  blueBright: '#009CDE',           // --color-brand-blue (PMS 2925) — primary
-  blueDeeper: '#1B2C5B',           // --color-brand-blueDeeper (PMS 2766) — headings
-  bluePale: '#E3F5FD',             // --color-brand-blueLight
-  red: '#C8102E',                  // --color-brand-red (PMS 186)
-  yellow: '#FFD700',               // --color-brand-gold — CTA pill
-  yellowHover: '#FFF176',          // CTA hover
-  gold: '#FFD700',
-  teal: '#4DC9F6', green: '#16A34A', greenLight: '#DCFCE7',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', offWhite: '#F1F5F9', border: '#CBD5E1',
-};
-
 export default function ReviewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -81,18 +66,18 @@ export default function ReviewPage() {
 
   // ── Loading ──
   if (loading) return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ width: 36, height: 36, border: `3px solid ${W.border}`, borderTopColor: W.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+    <div style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ width: 36, height: 36, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.blueDark, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
     </div>
   );
 
   if (error || !data) return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+    <div style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}></div>
-        <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: W.blueDeeper, letterSpacing: '-0.01em' }}>Link Expired</div>
-        <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>This review link is no longer available. Call us at <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a>.</div>
+        <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: COLORS.blueDeeper, letterSpacing: '-0.01em' }}>Link Expired</div>
+        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 8 }}>This review link is no longer available. Call us at <a href="tel:+19412975749" style={{ color: COLORS.blueDark }}>(941) 297-5749</a>.</div>
       </div>
     </div>
   );
@@ -103,9 +88,9 @@ export default function ReviewPage() {
     : null;
 
   return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: FONTS.body }}>
+    <div style={{ minHeight: '100vh', background: COLORS.offWhite, fontFamily: FONTS.body }}>
       {/* Header — brand fonts loaded globally via client/index.html */}
-      <div style={{ background: `linear-gradient(135deg, ${W.blueBright} 0%, ${W.blueDeeper} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+      <div style={{ background: `linear-gradient(135deg, ${COLORS.wavesBlue} 0%, ${COLORS.blueDeeper} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
         {/* Hero video — waves-hero-service.mp4 */}
         <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
@@ -114,13 +99,13 @@ export default function ReviewPage() {
         </video>
         <div style={{ position: 'absolute', bottom: -2, left: 0, right: 0, height: 24, zIndex: 2 }}>
           <svg viewBox="0 0 1440 48" fill="none" style={{ width: '100%', height: '100%', display: 'block' }}>
-            <path d="M0 24 C360 0 720 48 1080 24 C1260 12 1380 0 1440 8 L1440 48 L0 48 Z" fill={W.offWhite} />
+            <path d="M0 24 C360 0 720 48 1080 24 C1260 12 1380 0 1440 8 L1440 48 L0 48 Z" fill={COLORS.offWhite} />
           </svg>
         </div>
         <h1 style={{
           position: 'relative', zIndex: 1,
           fontSize: 36, fontFamily: FONTS.display, fontWeight: 400,
-          color: W.white, letterSpacing: '0.04em', lineHeight: 1, margin: 0,
+          color: COLORS.white, letterSpacing: '0.04em', lineHeight: 1, margin: 0,
           textShadow: '0 2px 8px rgba(0,0,0,0.2)',
         }}>WAVES</h1>
         <div style={{ position: 'relative', zIndex: 1, fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
@@ -133,27 +118,27 @@ export default function ReviewPage() {
           {/* Tech photo or initial */}
           <div style={{
             width: 80, height: 80, borderRadius: '50%', margin: '0 auto 12px',
-            background: techPhoto ? `url(${techPhoto}) center/cover` : `linear-gradient(135deg, ${W.blue}, ${W.teal})`,
+            background: techPhoto ? `url(${techPhoto}) center/cover` : `linear-gradient(135deg, ${COLORS.blueDark}, ${COLORS.sky})`,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            border: `3px solid ${W.white}`, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+            border: `3px solid ${COLORS.white}`, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
           }}>
             {!techPhoto && (
-              <span style={{ color: W.white, fontSize: 28, fontFamily: FONTS.heading, fontWeight: 800 }}>
+              <span style={{ color: COLORS.white, fontSize: 28, fontFamily: FONTS.heading, fontWeight: 800 }}>
                 {(techName || 'W').charAt(0)}
               </span>
             )}
           </div>
 
-          <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 700, color: W.blueDeeper }}>
+          <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 700, color: COLORS.blueDeeper }}>
             {techName || 'Your Technician'}
           </div>
-          <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
+          <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 4 }}>
             {serviceType}{displayDate ? ` · ${displayDate}` : ''}
           </div>
 
           {/* Social proof counter */}
           {techReviewCount > 0 && (
-            <div style={{ fontSize: 13, color: W.textCaption, marginTop: 8 }}>
+            <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 8 }}>
               ⭐ {techReviewCount.toLocaleString()} homeowners have reviewed {techName ? techName.split(' ')[0] : 'our team'}
             </div>
           )}
@@ -161,11 +146,11 @@ export default function ReviewPage() {
 
         {/* ── Rating Phase ── */}
         {phase === 'rate' && (
-          <div style={{ background: W.white, borderRadius: 20, border: `1px solid ${W.border}`, padding: '28px 24px', textAlign: 'center', boxShadow: '0 2px 12px rgba(0,0,0,0.06)' }}>
-            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: W.blueDeeper, marginBottom: 4 }}>
+          <div style={{ background: COLORS.white, borderRadius: 20, border: `1px solid ${COLORS.grayLight}`, padding: '28px 24px', textAlign: 'center', boxShadow: '0 2px 12px rgba(0,0,0,0.06)' }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>
               How was your experience?
             </div>
-            <div style={{ fontSize: 13, color: W.textCaption, marginBottom: 20 }}>
+            <div style={{ fontSize: 13, color: COLORS.textCaption, marginBottom: 20 }}>
               {customerFirstName ? `${customerFirstName}, tap` : 'Tap'} to rate
             </div>
 
@@ -174,7 +159,7 @@ export default function ReviewPage() {
               {[1,2,3,4,5,6,7,8,9,10].map(n => {
                 const isHovered = hoveredRating === n;
                 const isSelected = selectedRating === n;
-                const color = n <= 4 ? '#EF5350' : n <= 6 ? W.gold : W.green;
+                const color = n <= 4 ? '#EF5350' : n <= 6 ? COLORS.yellow : COLORS.green;
                 return (
                   <button key={n}
                     onClick={() => handleRate(n)}
@@ -182,9 +167,9 @@ export default function ReviewPage() {
                     onMouseLeave={() => setHoveredRating(null)}
                     style={{
                       width: '100%', aspectRatio: '1', borderRadius: 12,
-                      border: `2px solid ${isHovered || isSelected ? color : W.border}`,
-                      background: isHovered || isSelected ? `${color}15` : W.white,
-                      color: isHovered || isSelected ? color : W.textBody,
+                      border: `2px solid ${isHovered || isSelected ? color : COLORS.grayLight}`,
+                      background: isHovered || isSelected ? `${color}15` : COLORS.white,
+                      color: isHovered || isSelected ? color : COLORS.textBody,
                       fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18,
                       cursor: 'pointer', transition: 'all 0.15s',
                       transform: isHovered ? 'scale(1.08)' : 'scale(1)',
@@ -195,7 +180,7 @@ export default function ReviewPage() {
               })}
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: W.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
               <span>Not great</span><span>Amazing!</span>
             </div>
           </div>
@@ -203,25 +188,25 @@ export default function ReviewPage() {
 
         {/* ── Submitting ── */}
         {phase === 'submitting' && (
-          <div style={{ background: W.white, borderRadius: 20, padding: 40, textAlign: 'center', border: `1px solid ${W.border}` }}>
-            <div style={{ width: 36, height: 36, border: `3px solid ${W.border}`, borderTopColor: W.green, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 16px' }} />
-            <div style={{ fontSize: 15, color: W.textBody }}>Submitting your rating...</div>
+          <div style={{ background: COLORS.white, borderRadius: 20, padding: 40, textAlign: 'center', border: `1px solid ${COLORS.grayLight}` }}>
+            <div style={{ width: 36, height: 36, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.green, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 16px' }} />
+            <div style={{ fontSize: 15, color: COLORS.textBody }}>Submitting your rating...</div>
           </div>
         )}
 
         {/* ── Redirecting to Google ── */}
         {phase === 'redirecting' && (
-          <div style={{ background: W.white, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${W.green}` }}>
+          <div style={{ background: COLORS.white, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${COLORS.green}` }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}></div>
-            <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>
               Thank you, {customerFirstName}!
             </div>
-            <div style={{ fontSize: 14, color: W.textBody, lineHeight: 1.6, marginBottom: 16 }}>
+            <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.6, marginBottom: 16 }}>
               Taking you to Google to share your experience with other SWFL families...
             </div>
-            <div style={{ width: 36, height: 36, border: `3px solid ${W.border}`, borderTopColor: W.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto' }} />
+            <div style={{ width: 36, height: 36, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.blueDark, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto' }} />
             <div style={{ marginTop: 16 }}>
-              <a href={data.googleReviewUrl} style={{ fontSize: 13, color: W.blue, textDecoration: 'none' }}>
+              <a href={data.googleReviewUrl} style={{ fontSize: 13, color: COLORS.blueDark, textDecoration: 'none' }}>
                 Tap here if you're not redirected
               </a>
             </div>
@@ -230,12 +215,12 @@ export default function ReviewPage() {
 
         {/* ── Feedback Form (low scores) ── */}
         {phase === 'feedback' && (
-          <div style={{ background: W.white, borderRadius: 20, padding: 28, textAlign: 'center', border: `1px solid ${W.border}` }}>
+          <div style={{ background: COLORS.white, borderRadius: 20, padding: 28, textAlign: 'center', border: `1px solid ${COLORS.grayLight}` }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}></div>
-            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>
               We appreciate your honesty
             </div>
-            <div style={{ fontSize: 14, color: W.textBody, marginBottom: 16, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 14, color: COLORS.textBody, marginBottom: 16, lineHeight: 1.6 }}>
               {techName ? `${techName.split(' ')[0]} would` : "We'd"} love to know how we can do better.
             </div>
             <textarea
@@ -243,8 +228,8 @@ export default function ReviewPage() {
               placeholder="What could we improve?"
               rows={4}
               style={{
-                width: '100%', padding: 14, borderRadius: 12, border: `1px solid ${W.border}`,
-                fontFamily: FONTS.body, fontSize: 14, color: W.navy, resize: 'vertical',
+                width: '100%', padding: 14, borderRadius: 12, border: `1px solid ${COLORS.grayLight}`,
+                fontFamily: FONTS.body, fontSize: 14, color: COLORS.navy, resize: 'vertical',
                 outline: 'none', boxSizing: 'border-box',
               }}
             />
@@ -259,8 +244,8 @@ export default function ReviewPage() {
               </Button>
               <button onClick={() => setPhase('thankyou')}
                 style={{
-                  padding: '14px 20px', borderRadius: 12, border: `1px solid ${W.border}`,
-                  background: 'transparent', color: W.textCaption, fontSize: 13, cursor: 'pointer',
+                  padding: '14px 20px', borderRadius: 12, border: `1px solid ${COLORS.grayLight}`,
+                  background: 'transparent', color: COLORS.textCaption, fontSize: 13, cursor: 'pointer',
                 }}>
                 Skip
               </button>
@@ -270,12 +255,12 @@ export default function ReviewPage() {
 
         {/* ── Thank You (final state) ── */}
         {phase === 'thankyou' && (
-          <div style={{ background: W.greenLight, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${W.green}` }}>
+          <div style={{ background: COLORS.greenLight, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${COLORS.green}` }}>
             <div style={{ fontSize: 40, marginBottom: 8 }}></div>
             <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: '#2E7D32' }}>
               Thank you{customerFirstName ? `, ${customerFirstName}` : ''}!
             </div>
-            <div style={{ fontSize: 14, color: W.textBody, marginTop: 8, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 8, lineHeight: 1.6 }}>
               Your feedback helps us keep getting better. See you at your next service!
             </div>
           </div>
@@ -285,7 +270,7 @@ export default function ReviewPage() {
         {phase === 'rate' && (
           <div style={{ textAlign: 'center', marginTop: 24 }}>
             <button onClick={() => setPhase('feedback')}
-              style={{ background: 'none', border: 'none', color: W.textCaption, fontSize: 13, cursor: 'pointer', textDecoration: 'underline' }}>
+              style={{ background: 'none', border: 'none', color: COLORS.textCaption, fontSize: 13, cursor: 'pointer', textDecoration: 'underline' }}>
               Something wasn't right? Let us know directly
             </button>
           </div>

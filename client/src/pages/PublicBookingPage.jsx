@@ -4,31 +4,9 @@ import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { Button } from '../components/Button';
 import { WavesShell } from '../components/brand';
-import { FONTS } from '../theme-brand';
+import { COLORS, FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-// Brand tokens (match existing BookingPage for visual consistency)
-// Mirrored from wavespestcontrol.com — semantic keys preserved, values swapped to brand
-const BRAND = {
-  navy: '#1B2C5B',       // brand-blueDeeper (PMS 2766) — headings, dark surfaces
-  teal: '#009CDE',       // brand-blue (PMS 2925) — primary accent
-  tealDark: '#065A8C',   // brand-blueDark
-  tealLight: '#E3F5FD',  // brand-blueLight
-  sand: '#FEF7E0',       // brand-gold light
-  warmWhite: '#FFFFFF',
-  coral: '#C8102E',      // brand-red (PMS 186)
-  gold: '#FFD700',       // brand-gold
-  goldHover: '#FFF176',  // gold CTA hover
-  green: '#16A34A',
-  greenLight: '#DCFCE7',
-  gray100: '#F1F5F9',    // slate-100
-  gray200: '#E2E8F0',    // slate-200
-  gray300: '#CBD5E1',    // slate-300
-  gray400: '#94A3B8',    // slate-400
-  gray600: '#475569',    // slate-600
-  gray800: '#1E293B',    // slate-800
-};
 
 const SERVICES = [
   { id: 'pest_control', label: 'Pest Control', duration: 45, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
@@ -173,12 +151,12 @@ export default function PublicBookingPage() {
   // CTAs use <Button variant="primary"|"tertiary"> (see usages below).
   const inputStyle = {
     width: '100%', padding: '12px 14px', borderRadius: 8,
-    border: `1.5px solid ${BRAND.gray300}`, fontSize: 15,
-    color: BRAND.gray800, background: '#fff',
+    border: `1.5px solid ${COLORS.grayLight}`, fontSize: 15,
+    color: COLORS.navy, background: '#fff',
     outline: 'none', transition: 'border-color 0.2s',
   };
   const labelStyle = {
-    fontSize: 13, fontWeight: 500, color: BRAND.gray600,
+    fontSize: 13, fontWeight: 500, color: COLORS.slate600,
     display: 'block', marginBottom: 6,
   };
 
@@ -188,14 +166,14 @@ export default function PublicBookingPage() {
         @keyframes slideUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
         @keyframes checkPop { 0% { transform:scale(0) } 60% { transform:scale(1.2) } 100% { transform:scale(1) } }
         @keyframes pulse { 0%,100% { transform:scale(1) } 50% { transform:scale(1.03) } }
-        input:focus { border-color: ${BRAND.teal} !important; }
+        input:focus { border-color: ${COLORS.wavesBlue} !important; }
       `}</style>
 
       {/* Progress bar — steps 1 (address) → 2 (time) → 3 (contact) → 4 (done) */}
       {step < 4 && (
-        <div style={{ background: BRAND.gray200, height: 3 }}>
+        <div style={{ background: COLORS.slate200, height: 3 }}>
           <div style={{
-            height: 3, background: BRAND.teal,
+            height: 3, background: COLORS.wavesBlue,
             width: `${(step / 3) * 100}%`,
             transition: 'width 0.5s cubic-bezier(.4,0,.2,1)',
           }} />
@@ -207,10 +185,10 @@ export default function PublicBookingPage() {
         {/* STEP 1 — Address */}
         {step === 1 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: BRAND.navy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h2>
-            <p style={{ fontSize: 14, color: BRAND.gray600, marginBottom: 24, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
               {service ? <>Booking <strong>{service.icon} {service.label}</strong>. </> : null}
               Drop your address and we'll show you the next available slots — see you soon!
             </p>
@@ -283,15 +261,15 @@ export default function PublicBookingPage() {
         {/* STEP 2 — Times */}
         {step === 2 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: BRAND.navy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Pick a time
             </h2>
-            <p style={{ fontSize: 14, color: BRAND.gray600, marginBottom: 20, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
               ⭐ Times marked "Best fit" are when we'll already be working near you.
             </p>
 
             {loading && (
-              <div style={{ textAlign: 'center', padding: 40, color: BRAND.gray600 }}>
+              <div style={{ textAlign: 'center', padding: 40, color: COLORS.slate600 }}>
                 <div style={{ fontSize: 13 }}>Checking the route map…</div>
               </div>
             )}
@@ -307,11 +285,11 @@ export default function PublicBookingPage() {
               <div style={{ display: 'grid', gap: 14 }}>
                 {availability.map(day => (
                   <div key={day.date} style={{
-                    background: BRAND.warmWhite, border: `1px solid ${BRAND.gray200}`,
+                    background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
                     borderRadius: 12, padding: 14,
                   }}>
                     <div style={{
-                      fontSize: 13, fontWeight: 600, color: BRAND.navy, marginBottom: 10,
+                      fontSize: 13, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 10,
                       display: 'flex', alignItems: 'baseline', gap: 8,
                     }}>
                       <span>{day.fullDate}</span>
@@ -325,16 +303,16 @@ export default function PublicBookingPage() {
                             onClick={() => { setSelectedDate(day.date); setSelectedSlot(slot); }}
                             style={{
                               padding: '10px 12px', borderRadius: 10, cursor: 'pointer',
-                              background: isSelected ? BRAND.teal : (slot.is_best_fit ? BRAND.greenLight : '#fff'),
-                              color: isSelected ? '#fff' : BRAND.navy,
-                              border: `1.5px solid ${isSelected ? BRAND.teal : (slot.is_best_fit ? BRAND.green : BRAND.gray200)}`,
+                              background: isSelected ? COLORS.wavesBlue : (slot.is_best_fit ? COLORS.greenLight : '#fff'),
+                              color: isSelected ? '#fff' : COLORS.blueDeeper,
+                              border: `1.5px solid ${isSelected ? COLORS.wavesBlue : (slot.is_best_fit ? COLORS.green : COLORS.slate200)}`,
                               textAlign: 'left', transition: 'all 0.15s',
                             }}
                           >
                             {slot.is_best_fit && (
                               <div style={{
                                 fontSize: 10, fontWeight: 700, letterSpacing: '0.5px',
-                                color: isSelected ? '#fff' : BRAND.green,
+                                color: isSelected ? '#fff' : COLORS.green,
                                 marginBottom: 2, textTransform: 'uppercase',
                               }}>⭐ Best fit</div>
                             )}
@@ -343,7 +321,7 @@ export default function PublicBookingPage() {
                             </div>
                             <div style={{
                               fontSize: 11,
-                              color: isSelected ? 'rgba(255,255,255,0.85)' : BRAND.gray600,
+                              color: isSelected ? 'rgba(255,255,255,0.85)' : COLORS.slate600,
                               lineHeight: 1.3,
                             }}>
                               {slot.reason}
@@ -374,25 +352,25 @@ export default function PublicBookingPage() {
         {/* STEP 3 — Contact */}
         {step === 3 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: BRAND.navy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Your info
             </h2>
-            <p style={{ fontSize: 14, color: BRAND.gray600, marginBottom: 20, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
               We'll text you a confirmation right after you book.
             </p>
 
             {/* Selected time summary */}
             <div style={{
-              background: BRAND.tealLight, border: `1px solid ${BRAND.teal}`,
+              background: COLORS.blueLight, border: `1px solid ${COLORS.wavesBlue}`,
               borderRadius: 10, padding: 14, marginBottom: 20,
             }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: BRAND.tealDark, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.blueDark, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
                 Your selected time
               </div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: BRAND.navy }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.blueDeeper }}>
                 {availability.find(d => d.date === selectedDate)?.fullDate} · {selectedSlot?.start_label}
               </div>
-              <div style={{ fontSize: 12, color: BRAND.gray600, marginTop: 2 }}>
+              <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 2 }}>
                 {service?.label}
               </div>
             </div>
@@ -409,7 +387,7 @@ export default function PublicBookingPage() {
                   style={inputStyle}
                 />
                 {existingCustomerId && (
-                  <div style={{ fontSize: 12, color: BRAND.green, marginTop: 6 }}>
+                  <div style={{ fontSize: 12, color: COLORS.green, marginTop: 6 }}>
                      Welcome back! We have your info on file.
                   </div>
                 )}
@@ -480,38 +458,38 @@ export default function PublicBookingPage() {
         {step === 4 && (
           <div style={{ animation: 'slideUp 0.4s ease-out', textAlign: 'center', paddingTop: 20 }}>
             <div style={{
-              width: 72, height: 72, borderRadius: '50%', background: BRAND.greenLight,
+              width: 72, height: 72, borderRadius: '50%', background: COLORS.greenLight,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               margin: '0 auto 20px', animation: 'checkPop 0.5s ease-out',
             }}>
-              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke={BRAND.green} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke={COLORS.green} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="20 6 9 17 4 12" />
               </svg>
             </div>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: BRAND.navy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               You're booked!
             </h2>
-            <p style={{ fontSize: 14, color: BRAND.gray600, marginBottom: 24, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
               We just texted a confirmation to {contact.phone}.
             </p>
             <div style={{
-              background: BRAND.warmWhite, border: `1px solid ${BRAND.gray200}`,
+              background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
               borderRadius: 12, padding: 18, marginBottom: 20, textAlign: 'left',
             }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: BRAND.gray400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
                 Confirmation
               </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: BRAND.teal, fontFamily: FONTS.mono, marginBottom: 14 }}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: COLORS.wavesBlue, fontFamily: FONTS.mono, marginBottom: 14 }}>
                 {confCode}
               </div>
-              <div style={{ fontSize: 13, color: BRAND.gray600, lineHeight: 1.6 }}>
-                <div><strong style={{ color: BRAND.navy }}>{service?.label}</strong></div>
+              <div style={{ fontSize: 13, color: COLORS.slate600, lineHeight: 1.6 }}>
+                <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
                 <div>{availability.find(d => d.date === selectedDate)?.fullDate}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>
                 <div style={{ marginTop: 6 }}>{address.line1}, {address.city} {address.zip}</div>
               </div>
             </div>
-            <p style={{ fontSize: 12, color: BRAND.gray400 }}>
+            <p style={{ fontSize: 12, color: COLORS.slate400 }}>
               Need to change it? Text us at (941) 297-5749 or reply RESCHEDULE to the confirmation text.
             </p>
           </div>
