@@ -453,7 +453,7 @@ export default function PayPage() {
           <div style={{ background: W.greenLight, border: `1px solid ${W.green}`, borderRadius: 12, padding: '16px 20px', marginTop: -16, marginBottom: 20, textAlign: 'center' }}>
             <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 16, color: '#2E7D32' }}>Payment Received</div>
             <div style={{ fontSize: 13, color: W.textBody, marginTop: 4 }}>
-              Paid {invoice.paidAt ? new Date(invoice.paidAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
+              Paid {invoice.paidAt ? new Date(invoice.paidAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' }) : ''}
               {invoice.cardBrand && invoice.cardLastFour ? ` — ${invoice.cardBrand} ****${invoice.cardLastFour}` : ''}
             </div>
           </div>
@@ -484,7 +484,7 @@ export default function PayPage() {
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: W.textCaption, textTransform: 'uppercase', letterSpacing: 0.8 }}>Service Date</div>
               <div style={{ fontSize: 15, fontWeight: 600, color: W.navy, marginTop: 2 }}>
-                {new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                {new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}
               </div>
             </div>
           </div>
@@ -496,7 +496,7 @@ export default function PayPage() {
             <div style={{ background: W.bluePale, padding: '16px 20px', borderBottom: `1px solid ${W.border}` }}>
               <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: W.blueDeeper }}>Service Completed</div>
               <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 13, color: W.textBody, flexWrap: 'wrap' }}>
-                {service.date && <span>{new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</span>}
+                {service.date && <span>{new Date(service.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })}</span>}
                 {service.techName && <span>Tech: {service.techName}</span>}
               </div>
             </div>
@@ -562,7 +562,7 @@ export default function PayPage() {
               if (!invoice.dueDate) return <div style={{ fontSize: 12, color: W.textCaption }}>Due upon receipt</div>;
               const d = new Date(String(invoice.dueDate).split('T')[0] + 'T12:00:00');
               if (isNaN(d.getTime())) return <div style={{ fontSize: 12, color: W.textCaption }}>Due upon receipt</div>;
-              return <div style={{ fontSize: 12, color: W.textCaption }}>Due {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>;
+              return <div style={{ fontSize: 12, color: W.textCaption }}>Due {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}</div>;
             })()}
           </div>
 
