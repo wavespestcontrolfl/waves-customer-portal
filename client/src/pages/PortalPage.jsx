@@ -3439,7 +3439,7 @@ function BillingTab({ customer }) {
               <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
                 {daysUntilDue === 0
                   ? 'Auto Pay is active — your payment is processing today'
-                  : `Auto Pay is active — your next charge of $${amountDue.toFixed(2)} processes on ${dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`
+                  : `Auto Pay is active — your next charge of $${amountDue.toFixed(2)} processes on ${dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })}`
                 }
               </div>
               <div style={{ fontSize: 13, color: bannerConfig.subtitleColor, marginTop: 2 }}>
