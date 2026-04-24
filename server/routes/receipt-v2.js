@@ -77,6 +77,7 @@ router.get('/:token', async (req, res, next) => {
         state: customer.state,
         zip: customer.zip,
         email: customer.email,
+        isCommercial: customer.property_type === 'commercial' || customer.property_type === 'business',
       },
       payment: payment
         ? {

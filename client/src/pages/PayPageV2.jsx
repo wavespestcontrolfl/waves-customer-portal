@@ -535,7 +535,7 @@ export default function PayPageV2() {
                 <span>− {fmtCurrency(invoice.discountAmount)}</span>
               </div>
             )}
-            {invoice.taxAmount > 0 && (
+            {invoice.taxAmount > 0 && customer?.isCommercial && (
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
                 <span style={{ color: 'var(--text-muted)', fontFamily: "'Inter', system-ui, sans-serif" }}>
                   Tax ({(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)
