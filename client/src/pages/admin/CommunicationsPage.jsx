@@ -678,7 +678,7 @@ function CallLogTab() {
                     <div style={{ marginTop: 8, marginLeft: 30, padding: '8px 12px', background: D.bg, borderRadius: 8, border: `1px solid ${D.border}` }}>
                       <div style={{ fontSize: 11, color: D.muted, marginBottom: 4, fontWeight: 600 }}>Recording {c.recording_duration_seconds ? `(${Math.floor(c.recording_duration_seconds / 60)}:${String(c.recording_duration_seconds % 60).padStart(2, '0')})` : ''}</div>
                       <audio controls preload="none" style={{ width: '100%', height: 32 }}>
-                        <source src={c.recording_url} type="audio/mpeg" />
+                        <source src={`${API_BASE}/admin/call-recordings/audio/${c.recording_sid || c.id}?token=${encodeURIComponent(localStorage.getItem('waves_admin_token') || '')}`} type="audio/mpeg" />
                       </audio>
                     </div>
                   )}

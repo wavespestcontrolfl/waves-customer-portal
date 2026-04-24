@@ -1,9 +1,59 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const CallRecordingProcessor = require('../services/call-recording-processor');
+
+// ── Audio proxy — registered BEFORE the global admin middleware because
+// <audio src> can't send Authorization headers. Accepts the JWT via ?token=
+// query param in addition to Bearer; scope is limited to this one endpoint
+// so no other admin route gains query-token auth.
+router.get('/audio/:id', async (req, res) => {
+  try {
+    const config = require('../config');
+    const headerToken = req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.slice(7)
+      : null;
+    const token = headerToken || req.query.token;
+    if (!token) return res.status(401).json({ error: 'Admin authentication required' });
+
+    let decoded;
+    try { decoded = jwt.verify(token, config.jwt.secret); }
+    catch { return res.status(401).json({ error: 'Invalid token' }); }
+    if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid admin token' });
+    const tech = await db('technicians').where({ id: decoded.technicianId }).first();
+    if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
+    if (!['admin', 'technician'].includes(tech.role)) return res.status(403).json({ error: 'Staff access required' });
+
+    // call_log.id is uuid; recording_sid is a Twilio SID (e.g. "RE…"). A combined
+    // .where({id}).orWhere({recording_sid}) fails in Postgres with "invalid input
+    // syntax for type uuid" when the param isn't UUID-shaped, so route by shape.
+    const param = req.params.id;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(param);
+    const recording = await db('call_log')
+      .where(isUuid ? { id: param } : { recording_sid: param })
+      .first();
+
+    if (!recording?.recording_url) return res.status(404).json({ error: 'Recording not found' });
+
+    let url = recording.recording_url;
+    if (!url.endsWith('.mp3')) url += '.mp3';
+    if (!url.startsWith('http')) url = `https://api.twilio.com${url}`;
+
+    const authHeader = 'Basic ' + Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
+    const audioRes = await fetch(url, { headers: { Authorization: authHeader } });
+    if (!audioRes.ok) return res.status(audioRes.status).json({ error: 'Failed to fetch recording' });
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    const buffer = await audioRes.arrayBuffer();
+    res.send(Buffer.from(buffer));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -83,40 +133,6 @@ router.get('/recording/:id', async (req, res, next) => {
     if (!recording) return res.status(404).json({ error: 'Recording not found' });
     res.json({ recording });
   } catch (err) { next(err); }
-});
-
-// GET /audio/:id — proxy Twilio recording audio (avoids auth redirect)
-router.get('/audio/:id', async (req, res) => {
-  try {
-    const config = require('../config');
-    // call_log.id is uuid; recording_sid is a Twilio SID (e.g. "RE…"). A combined
-    // .where({id}).orWhere({recording_sid}) fails in Postgres with "invalid input
-    // syntax for type uuid" when the param isn't UUID-shaped, so route by shape.
-    const param = req.params.id;
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(param);
-    const recording = await db('call_log')
-      .where(isUuid ? { id: param } : { recording_sid: param })
-      .first();
-
-    if (!recording?.recording_url) return res.status(404).json({ error: 'Recording not found' });
-
-    // Fetch from Twilio with auth
-    let url = recording.recording_url;
-    if (!url.endsWith('.mp3')) url += '.mp3';
-    if (!url.startsWith('http')) url = `https://api.twilio.com${url}`;
-
-    const authHeader = 'Basic ' + Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
-    const audioRes = await fetch(url, { headers: { Authorization: authHeader } });
-
-    if (!audioRes.ok) return res.status(audioRes.status).json({ error: 'Failed to fetch recording' });
-
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Cache-Control', 'private, max-age=3600');
-    const buffer = await audioRes.arrayBuffer();
-    res.send(Buffer.from(buffer));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // ═══════════════════════════════════════════════════════════════════

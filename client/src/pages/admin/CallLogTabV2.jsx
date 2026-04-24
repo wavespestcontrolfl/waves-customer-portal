@@ -409,7 +409,8 @@ export default function CallLogTabV2() {
                       </div>
                     )}
 
-                    {/* Recording */}
+                    {/* Recording — proxy through the admin audio endpoint so
+                        the browser gets past Twilio's Basic-auth gate. */}
                     {c.recording_url && (
                       <div className="mt-2 ml-8 p-2 bg-zinc-50 border-hairline rounded-md">
                         <div className="text-13 md:text-11 text-ink-tertiary font-medium mb-1">
@@ -418,7 +419,7 @@ export default function CallLogTabV2() {
                             : ''}
                         </div>
                         <audio controls preload="none" className="w-full h-8">
-                          <source src={c.recording_url} type="audio/mpeg" />
+                          <source src={`${API_BASE}/admin/call-recordings/audio/${c.recording_sid || c.id}?token=${encodeURIComponent(localStorage.getItem('waves_admin_token') || '')}`} type="audio/mpeg" />
                         </audio>
                       </div>
                     )}

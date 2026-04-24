@@ -920,8 +920,8 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                         {m.answeredBy && <span className="text-10 text-ink-secondary">· {m.answeredBy}</span>}
                       </div>
                       {summary && <div className="text-12 text-zinc-900 leading-relaxed">{summary}</div>}
-                      {rec?.url && (
-                        <audio controls src={rec.url} className="mt-1.5 w-full h-8" />
+                      {rec?.url && rec?.sid && (
+                        <audio controls src={`${API_BASE}/admin/call-recordings/audio/${rec.sid}?token=${encodeURIComponent(localStorage.getItem('waves_admin_token') || '')}`} className="mt-1.5 w-full h-8" />
                       )}
                       <div className="text-10 mt-1 text-right text-ink-secondary">{timeAgo(m.createdAt)}</div>
                     </div>
