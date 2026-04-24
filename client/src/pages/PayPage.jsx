@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import StickyBottomCTA from '../components/customer/StickyBottomCTA';
+import SaveCardConsent from '../components/billing/SaveCardConsent';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -49,7 +50,7 @@ function getStripe(publishableKey) {
 }
 
 // ─── Stripe Payment Element wrapper ─────────────────────────────
-function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError }) {
+function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange }) {
   const mountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
@@ -155,14 +156,18 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publishableKey, clientSecret]);
 
-  const syncAmountForMethod = async (methodCategory) => {
+  const syncAmountForMethod = async (methodCategory, saveCardOverride) => {
     if (!paymentIntentId || !token) return;
     setSyncingAmount(true);
     try {
       const res = await fetch(`${API_BASE}/pay/${token}/update-amount`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paymentIntentId, methodCategory }),
+        body: JSON.stringify({
+          paymentIntentId,
+          methodCategory,
+          saveCard: saveCardOverride !== undefined ? saveCardOverride : !!saveCard,
+        }),
       });
       const data = await res.json();
       if (res.ok) {
@@ -176,6 +181,15 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
       setSyncingAmount(false);
     }
   };
+
+  // When the customer toggles the "save card" box, push the new
+  // setup_future_usage value to the PI so Stripe's mandate language
+  // matches what we just promised.
+  useEffect(() => {
+    if (!paymentIntentId) return;
+    syncAmountForMethod(selectedMethod, !!saveCard);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveCard]);
 
   const isCardFamily = selectedMethod !== 'us_bank_account';
 
@@ -232,6 +246,14 @@ function StripePaymentForm({ publishableKey, clientSecret, amount, paymentIntent
         </span>
       </div>
       <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
+
+      {/* Save-card opt-in */}
+      <div style={{ marginBottom: 16 }}>
+        <SaveCardConsent
+          checked={!!saveCard}
+          onChange={(v) => onSaveCardChange?.(v)}
+        />
+      </div>
 
       {/* Live total breakdown */}
       <div style={{
@@ -305,6 +327,7 @@ export default function PayPage() {
   const [paymentError, setPaymentError] = useState(null);
   const [paymentResult, setPaymentResult] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
+  const [saveCard, setSaveCard] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 600);
   const payNowRef = useRef(null);
 
@@ -396,6 +419,23 @@ export default function PayPage() {
     } catch (err) {
       // Network error on confirm — Stripe already charged, webhook handles it
       console.error('Confirm call failed (webhook will reconcile):', err);
+    }
+
+    // Record card-on-file consent if the customer opted in. The Stripe
+    // webhook handles persisting the payment_methods row asynchronously
+    // and will back-fill the FK on the consent record.
+    if (saveCard && paymentIntent.payment_method) {
+      try {
+        await fetch(`${API_BASE}/pay/${token}/consent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method }),
+        });
+      } catch (err) {
+        // Non-fatal — the card is still saved (via setup_future_usage) but
+        // our audit row didn't land. Webhook logs will flag the mismatch.
+        console.error('Consent record failed:', err);
+      }
     }
 
     setPaymentState('success');
@@ -641,6 +681,8 @@ export default function PayPage() {
                   amount={stripeSetup.baseAmount ?? invoice.total}
                   onSuccess={handlePaymentSuccess}
                   onError={(msg) => setPaymentError(msg)}
+                  saveCard={saveCard}
+                  onSaveCardChange={setSaveCard}
                 />
               )}
             </div>

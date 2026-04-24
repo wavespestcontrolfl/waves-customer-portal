@@ -255,6 +255,39 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     }
   }
 
+  // ── Save payment method on the customer if they opted in ─────
+  //
+  // When the /pay/:token page sets `setup_future_usage: 'off_session'`
+  // on the PI (customer ticked "Save this card on file"), Stripe attaches
+  // the pm to the Stripe customer automatically on success. We still need
+  // to mirror it into our payment_methods table so the rest of the
+  // system (autopay, admin Card on File, portal card list) can see it.
+  //
+  // Also back-fills the payment_method_id FK on any consent rows that
+  // were recorded before this webhook landed.
+  if (
+    paymentIntent.metadata?.save_card_opt_in === 'true' &&
+    paymentIntent.setup_future_usage &&
+    paymentIntent.payment_method &&
+    paymentIntent.metadata?.waves_customer_id
+  ) {
+    const wavesCustomerId = paymentIntent.metadata.waves_customer_id;
+    const stripePmId = paymentIntent.payment_method;
+    try {
+      const StripeService = require('../services/stripe');
+      const ConsentService = require('../services/payment-method-consents');
+      // Check if we already saved this pm (e.g. from a duplicate webhook)
+      const existing = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
+      const saved = existing || await StripeService.savePaymentMethod(wavesCustomerId, stripePmId);
+      await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      logger.info(`[stripe-webhook] Save-card opt-in persisted: pm ${stripePmId} → payment_methods ${saved.id}`);
+    } catch (err) {
+      // Non-fatal — the charge already succeeded. Log loudly so we can
+      // manually reconcile if the save failed.
+      logger.error(`[stripe-webhook] Save-card persist failed for PI ${piId} (pm ${stripePmId}): ${err.message}`);
+    }
+  }
+
   // If ACH payment succeeded, resolve any pending ACH failures for this customer
   const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
   if (pmType === 'us_bank_account') {

@@ -7,6 +7,7 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
+import SaveCardConsent from '../components/billing/SaveCardConsent';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -44,7 +45,7 @@ function fmtDate(d) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange }) {
   const mountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
@@ -61,14 +62,18 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   );
   const [syncingAmount, setSyncingAmount] = useState(false);
 
-  const syncAmountForMethod = useCallback(async (methodCategory) => {
+  const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride) => {
     if (!paymentIntentId || !token) return;
     setSyncingAmount(true);
     try {
       const res = await fetch(`${API_BASE}/pay/${token}/update-amount`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paymentIntentId, methodCategory }),
+        body: JSON.stringify({
+          paymentIntentId,
+          methodCategory,
+          saveCard: saveCardOverride !== undefined ? saveCardOverride : !!saveCard,
+        }),
       });
       const data = await res.json();
       if (res.ok) {
@@ -81,7 +86,16 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     } finally {
       setSyncingAmount(false);
     }
-  }, [paymentIntentId, token]);
+  }, [paymentIntentId, token, saveCard]);
+
+  // Re-sync the PI whenever the save-card checkbox toggles — Stripe's
+  // mandate wording switches between one-time and recurring on the
+  // setup_future_usage change.
+  useEffect(() => {
+    if (!paymentIntentId) return;
+    syncAmountForMethod(selectedMethod, !!saveCard);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveCard]);
 
   useEffect(() => {
     if (!publishableKey || !clientSecret) return;
@@ -221,7 +235,15 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </span>
       </div>
 
-      <div ref={mountRef} style={{ minHeight: 90, marginBottom: 20 }} />
+      <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
+
+      {/* Save-card opt-in */}
+      <div style={{ marginBottom: 16 }}>
+        <SaveCardConsent
+          checked={!!saveCard}
+          onChange={(v) => onSaveCardChange?.(v)}
+        />
+      </div>
 
       <div style={{
         marginBottom: 16, padding: 14, borderRadius: 'var(--radius-md)',
@@ -296,6 +318,7 @@ export default function PayPageV2() {
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
+  const [saveCard, setSaveCard] = useState(false);
 
   useEffect(() => {
     fetch(`${API_BASE}/pay/${token}`)
@@ -360,6 +383,22 @@ export default function PayPageV2() {
       // Stripe already charged — webhook will reconcile if confirm failed
       console.error('Confirm call failed (webhook will reconcile):', err);
     }
+
+    // Record card-on-file consent if the customer opted in. The Stripe
+    // webhook handles persisting the payment_methods row asynchronously
+    // and will back-fill the FK on the consent record.
+    if (saveCard && paymentIntent.payment_method) {
+      try {
+        await fetch(`${API_BASE}/pay/${token}/consent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method }),
+        });
+      } catch (err) {
+        console.error('Consent record failed:', err);
+      }
+    }
+
     navigate(`/receipt/${token}?fresh=1`, { replace: true });
   };
 
@@ -563,6 +602,8 @@ export default function PayPageV2() {
               cardSurchargeRate={stripeSetup.cardSurchargeRate}
               onSuccess={handlePaymentSuccess}
               onError={(msg) => setPaymentError(msg)}
+              saveCard={saveCard}
+              onSaveCardChange={setSaveCard}
             />
           ) : paymentState === 'error' ? null : (
             <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
