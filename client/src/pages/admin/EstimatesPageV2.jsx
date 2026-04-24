@@ -365,16 +365,39 @@ function EstimatePipelineViewV2() {
   const [declineTarget, setDeclineTarget] = useState(null);
 
   const refreshEstimates = useCallback(() => {
-    adminFetch('/admin/estimates')
+    // When the "Archived" filter is picked, ask the API for archived-only;
+    // otherwise the default hides archived rows so closed/old work stops
+    // cluttering the pipeline.
+    const qs = filter === 'archived' ? '?archived=only' : '';
+    adminFetch(`/admin/estimates${qs}`)
       .then((d) => {
         setEstimates(d.estimates || []);
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, []);
+  }, [filter]);
 
   useEffect(() => {
     refreshEstimates();
+  }, [refreshEstimates]);
+
+  const archiveEstimate = useCallback(async (e) => {
+    if (!confirm(`Archive this ${e.status} estimate? It stays accessible under the Archived filter.`)) return;
+    try {
+      await adminFetch(`/admin/estimates/${e.id}/archive`, { method: 'POST' });
+      refreshEstimates();
+    } catch (err) {
+      alert('Archive failed: ' + err.message);
+    }
+  }, [refreshEstimates]);
+
+  const unarchiveEstimate = useCallback(async (e) => {
+    try {
+      await adminFetch(`/admin/estimates/${e.id}/unarchive`, { method: 'POST' });
+      refreshEstimates();
+    } catch (err) {
+      alert('Unarchive failed: ' + err.message);
+    }
   }, [refreshEstimates]);
 
   const togglePriority = useCallback(async (e) => {
@@ -802,6 +825,30 @@ function EstimatePipelineViewV2() {
                         }}
                       >
                         Copy Link
+                      </Button>
+                    )}
+
+                    {/* Archive / Unarchive — archive only shows on closed
+                        rows (declined / expired / accepted). Unarchive shows
+                        whenever archivedAt is set, regardless of status. */}
+                    {!e.archivedAt && ['declined', 'expired', 'accepted'].includes(e.status) && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={() => archiveEstimate(e)}
+                      >
+                        Archive
+                      </Button>
+                    )}
+                    {e.archivedAt && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={() => unarchiveEstimate(e)}
+                      >
+                        Unarchive
                       </Button>
                     )}
                   </div>
