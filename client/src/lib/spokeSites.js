@@ -1,21 +1,23 @@
 // Client mirror of server/services/content-astro/spoke-sites.js.
-// Keep in sync — when a spoke is added/removed, update both files AND the
-// Astro repo's site list so the blog content collection filter can honor it.
+// Keys match the Astro repo's src/data/domains.json — the same
+// production-domain string each spoke's Cloudflare Pages project sets
+// as SITE_DOMAIN at build time. Keep this list in sync across all
+// three files when a spoke is added/removed.
 
 export const SPOKE_SITES = [
-  { key: 'wavespestcontrol-astro',  label: 'Hub — wavespestcontrol.com',       group: 'Hub' },
-  { key: 'bradenton-lawn',          label: 'Bradenton Lawn',                   group: 'Lawn' },
-  { key: 'parrish-lawn',            label: 'Parrish Lawn',                     group: 'Lawn' },
-  { key: 'sarasotafllawncare',      label: 'Sarasota Lawn',                    group: 'Lawn' },
-  { key: 'venicelawncare',          label: 'Venice Lawn',                      group: 'Lawn' },
-  { key: 'bradentonflpestcontrol',  label: 'Bradenton Pest',                   group: 'Pest' },
-  { key: 'palmettoflpestcontrol',   label: 'Palmetto Pest',                    group: 'Pest' },
-  { key: 'parrishpestcontrol',      label: 'Parrish Pest',                     group: 'Pest' },
-  { key: 'sarasotaflpestcontrol',   label: 'Sarasota Pest',                    group: 'Pest' },
-  { key: 'veniceflpestcontrol',     label: 'Venice Pest',                      group: 'Pest' },
-  { key: 'bradentonflexterminator', label: 'Bradenton Exterminator',           group: 'Exterminator' },
-  { key: 'palmettoexterminator',    label: 'Palmetto Exterminator',            group: 'Exterminator' },
-  { key: 'parrishexterminator',     label: 'Parrish Exterminator',             group: 'Exterminator' },
-  { key: 'sarasotaflexterminator',  label: 'Sarasota Exterminator',            group: 'Exterminator' },
-  { key: 'veniceexterminator',      label: 'Venice Exterminator',              group: 'Exterminator' },
+  { key: 'wavespestcontrol.com',         label: 'Hub — wavespestcontrol.com',       group: 'Hub' },
+  { key: 'bradentonfllawncare.com',      label: 'Bradenton Lawn Care',              group: 'Lawn' },
+  { key: 'parrishfllawncare.com',        label: 'Parrish Lawn Care',                group: 'Lawn' },
+  { key: 'sarasotafllawncare.com',       label: 'Sarasota Lawn Care',               group: 'Lawn' },
+  { key: 'venicelawncare.com',           label: 'Venice Lawn Care',                 group: 'Lawn' },
+  { key: 'bradentonflpestcontrol.com',   label: 'Bradenton Pest Control',           group: 'Pest' },
+  { key: 'palmettoflpestcontrol.com',    label: 'Palmetto Pest Control',            group: 'Pest' },
+  { key: 'parrishpestcontrol.com',       label: 'Parrish Pest Control',             group: 'Pest' },
+  { key: 'sarasotaflpestcontrol.com',    label: 'Sarasota Pest Control',            group: 'Pest' },
+  { key: 'veniceflpestcontrol.com',      label: 'Venice Pest Control',              group: 'Pest' },
+  { key: 'bradentonflexterminator.com',  label: 'Bradenton Exterminator',           group: 'Exterminator' },
+  { key: 'palmettoexterminator.com',     label: 'Palmetto Exterminator',            group: 'Exterminator' },
+  { key: 'parrishexterminator.com',      label: 'Parrish Exterminator',             group: 'Exterminator' },
+  { key: 'sarasotaflexterminator.com',   label: 'Sarasota Exterminator',            group: 'Exterminator' },
+  { key: 'veniceexterminator.com',       label: 'Venice Exterminator',              group: 'Exterminator' },
 ];

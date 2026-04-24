@@ -562,7 +562,7 @@ Landscape orientation, 1200x630px aspect ratio.`;
       // Default new posts to hub-only so a fresh AI-generated draft
       // doesn't surprise-publish to all 15 domains on the next merge.
       // Author picks additional spokes intentionally in the editor.
-      target_sites: JSON.stringify(['wavespestcontrol-astro']),
+      target_sites: JSON.stringify(['wavespestcontrol.com']),
     };
     if (featuredImageUrl) insertData.featured_image_url = featuredImageUrl;
 
