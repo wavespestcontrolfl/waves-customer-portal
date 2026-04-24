@@ -1,6 +1,8 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
+import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 const BlogPage = lazy(() => import('./BlogPage'));
 const SEODashboardPage = lazy(() => import('./SEODashboardPage'));
+const NewsletterTabV2 = lazy(() => import('./NewsletterTabV2'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: `teal` folded to zinc-900, `purple` folded to zinc-900.
@@ -1051,6 +1053,16 @@ function SiteAuditTab() {
 // ── Main Page ──
 export default function SEOPage() {
   const [tab, setTab] = useState('dashboard');
+  const newsletterEnabled = useFeatureFlag('newsletter-v1');
+
+  const tabs = useMemo(() => {
+    const base = [...TABS];
+    if (newsletterEnabled) {
+      const blogIdx = base.findIndex(t => t.key === 'blog');
+      base.splice(blogIdx + 1, 0, { key: 'newsletter', label: 'Newsletter' });
+    }
+    return base;
+  }, [newsletterEnabled]);
 
   return (
     <div>
@@ -1080,7 +1092,7 @@ export default function SEOPage() {
       </div>
 
       <div className="seo-tab-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-        {TABS.map(t => (
+        {tabs.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
             background: tab === t.key ? '#18181B' : 'transparent',
@@ -1101,6 +1113,7 @@ export default function SEOPage() {
       {tab === 'analytics' && <AnalyticsTab />}
       {tab === 'site-audit' && <SiteAuditTab />}
       {tab === 'blog' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading content...</div>}><BlogPage domain={PRIMARY_DOMAIN} /></Suspense>}
+      {tab === 'newsletter' && newsletterEnabled && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading newsletter...</div>}><NewsletterTabV2 /></Suspense>}
     </div>
   );
 }

@@ -25,10 +25,8 @@ import {
 import CallLogTabV2 from './CallLogTabV2';
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from './CommunicationsTabsV2';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
-import NewsletterTabV2 from './NewsletterTabV2';
 import PushSettingsV2 from '../../components/admin/PushSettingsV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
-import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -1213,18 +1211,7 @@ function SmsTab() {
 
 export default function CommunicationsPageV2() {
   const [tab, setTab] = useState('sms');
-  const newsletterEnabled = useFeatureFlag('newsletter-v1');
-
-  // PR 5 — Newsletter tab appears only when the flag is on. Inserted between
-  // Email (automations) and CSR so the two email-ish surfaces are adjacent.
-  const tabs = useMemo(() => {
-    const base = [...TABS];
-    if (newsletterEnabled) {
-      const emailIdx = base.findIndex((t) => t.key === 'email');
-      base.splice(emailIdx + 1, 0, { key: 'newsletter', label: 'Newsletter', desktopOnly: true });
-    }
-    return base;
-  }, [newsletterEnabled]);
+  const tabs = TABS;
 
   return (
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900 max-w-[1200px]">
@@ -1266,7 +1253,6 @@ export default function CommunicationsPageV2() {
       {tab === 'calls' && <CallLogTabV2 />}
       {tab === 'templates' && <SmsTemplatesTabV2 />}
       {tab === 'email' && <EmailAutomationsPanelV2 />}
-      {tab === 'newsletter' && newsletterEnabled && <NewsletterTabV2 />}
       {tab === 'csr' && <CSRCoachTabV2 />}
       {tab === 'notifications' && <PushSettingsV2 />}
     </div>
