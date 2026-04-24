@@ -517,7 +517,11 @@ export default function CustomersPageV2() {
     if (filterStage !== 'all') params.set('stage', filterStage);
     if (filterTier !== 'all') params.set('tier', filterTier);
     params.set('page', String(pg));
-    params.set('limit', '100');
+    // Load up to the server's max so the full customer list lands in a
+    // single alphabetical scroll rather than A-H on page 1, I-Q on
+    // page 2, etc. Server caps at 500; any customer base above that
+    // will still paginate (Prev/Next controls stay wired below).
+    params.set('limit', '500');
     adminFetch(`/admin/customers?${params.toString()}`)
       .then((data) => {
         setCustomers(Array.isArray(data) ? data : data.customers || []);
