@@ -1,4 +1,4 @@
-import { FONTS } from '../theme-brand';
+import { COLORS, FONTS } from '../theme-brand';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -114,10 +114,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           appearance: {
             theme: 'stripe',
             variables: {
-              colorPrimary: '#1B2C5B',
-              colorBackground: '#FFFFFF',
-              colorText: '#0F172A',
-              colorDanger: '#C8102E',
+              colorPrimary: COLORS.blueDeeper,
+              colorBackground: COLORS.white,
+              colorText: COLORS.navy,
+              colorDanger: COLORS.red,
               fontFamily: FONTS.body,
               borderRadius: '8px',
               spacingUnit: '4px',
@@ -135,14 +135,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
               '.Label': {
                 fontSize: '13px',
                 fontWeight: '500',
-                color: '#334155',
+                color: COLORS.textBody,
               },
               '.Tab': {
                 border: '1px solid #E2E8F0',
                 borderRadius: '8px',
               },
               '.Tab--selected': {
-                borderColor: '#1B2C5B',
+                borderColor: COLORS.blueDeeper,
                 backgroundColor: 'rgba(27,44,91,0.08)',
               },
             },
