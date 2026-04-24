@@ -1,6 +1,5 @@
 const PDFDocument = require('pdfkit');
-const path = require('path');
-const fs = require('fs');
+const { getLogoBuffer } = require('./brand-logo');
 
 // Brand palette — mirrors client/src/styles/brand-tokens.css + theme-brand.js
 const NAVY = '#1B2C5B';      // blueDeeper — headings, header bar
@@ -12,19 +11,6 @@ const BODY = '#334155';
 const MUTED = '#64748B';
 const RULE = '#E2E8F0';
 const SOFT = '#F1F5F9';
-
-// Logo is bundled in the client/public folder. Cache the buffer so we
-// don't re-read the file for every PDF build.
-let cachedLogoBuffer = null;
-function getLogoBuffer() {
-  if (cachedLogoBuffer !== null) return cachedLogoBuffer;
-  try {
-    cachedLogoBuffer = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'client', 'public', 'waves-logo.png'));
-  } catch {
-    cachedLogoBuffer = false;
-  }
-  return cachedLogoBuffer || null;
-}
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
 

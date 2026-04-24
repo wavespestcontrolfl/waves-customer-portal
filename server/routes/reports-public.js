@@ -188,8 +188,16 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
   doc.pipe(res);
 
-  // Header
-  doc.fontSize(20).font('Helvetica-Bold').text('WAVES PEST CONTROL', { align: 'center' });
+  // Header — logo (centered) with license + contact lines beneath. Falls
+  // back to the wordmark if the logo asset is missing in this deploy.
+  const { getLogoBuffer } = require('../services/pdf/brand-logo');
+  const logoBuf = getLogoBuffer();
+  if (logoBuf) {
+    doc.image(logoBuf, 281, doc.y, { width: 50, height: 50 });  // center of 612px letter page, 50px square
+    doc.moveDown(3);
+  } else {
+    doc.fontSize(20).font('Helvetica-Bold').text('WAVES PEST CONTROL', { align: 'center' });
+  }
   doc.fontSize(9).font('Helvetica').text('Licensed & Insured · FL Pest Control License', { align: 'center' });
   doc.text('(941) 318-7612 · wavespestcontrol.com', { align: 'center' });
   doc.moveDown(0.5);
