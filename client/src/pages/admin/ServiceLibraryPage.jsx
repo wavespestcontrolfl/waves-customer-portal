@@ -199,9 +199,25 @@ function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
           {svc.default_duration_minutes > 0 && <div style={{ fontSize: 11, color: D.muted }}>{svc.default_duration_minutes} min</div>}
         </div>
       </div>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 8 }}>
         <button onClick={handleToggleActive} style={{ ...sBtn(svc.is_active ? D.green + '22' : D.red + '22', svc.is_active ? D.green : D.red), fontSize: 11, padding: '4px 10px' }}>
           {svc.is_active ? 'Active' : 'Inactive'}
+        </button>
+        <button
+          onClick={async (e) => {
+            e.stopPropagation();
+            if (!window.confirm(`Delete "${svc.name}"?\n\nThis removes it from the service catalog. Past services already invoiced keep their history. You can't undo this.`)) return;
+            try {
+              await aFetch(`/admin/services/${svc.id}`, { method: 'DELETE' });
+              onUpdate();
+            } catch (err) {
+              window.alert('Delete failed: ' + (err?.message || 'unknown error'));
+            }
+          }}
+          style={{ ...sBtn(D.red + '15', D.red), fontSize: 11, padding: '4px 10px', border: `1px solid ${D.red}44` }}
+          title="Delete this service permanently"
+        >
+          Delete
         </button>
       </div>
 

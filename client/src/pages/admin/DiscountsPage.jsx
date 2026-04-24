@@ -112,7 +112,7 @@ export default function DiscountsPage() {
         <div style={sCard}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead><tr>
-              {['', 'Name', 'Type', 'Amount', 'Eligibility', 'Stack', 'Auto', 'Used', 'Total Given', 'Active', ''].map(h => <th key={h} style={thS}>{h}</th>)}
+              {['', 'Name', 'Type', 'Amount', 'Eligibility', 'Stack', 'Auto', 'Used', 'Total Given', 'Active', '', ''].map((h, i) => <th key={`${h}-${i}`} style={thS}>{h}</th>)}
             </tr></thead>
             <tbody>
               {discounts.map(d => {
@@ -131,6 +131,23 @@ export default function DiscountsPage() {
                     <td style={tdS}>${Number(d.total_discount_given || 0).toFixed(2)}</td>
                     <td style={tdS}><button style={{ ...sBtn(d.is_active ? D.green + '20' : D.red + '20', d.is_active ? D.green : D.red), fontSize: 11 }} onClick={() => toggleActive(d)}>{d.is_active ? 'On' : 'Off'}</button></td>
                     <td style={tdS}><button style={sBtn('transparent', D.teal)} onClick={() => startEdit(d)}>Edit</button></td>
+                    <td style={tdS}>
+                      <button
+                        style={{ ...sBtn('transparent', D.red), border: `1px solid ${D.red}44` }}
+                        title="Delete this discount (soft-delete — removes from dropdowns, preserves past assignments)"
+                        onClick={async () => {
+                          if (!window.confirm(`Delete "${d.name}"?\n\nRemoves it from the discount picker and stops it from auto-applying. Past customer assignments stay on file.`)) return;
+                          try {
+                            await af(`/admin/discounts/${d.id}`, { method: 'DELETE' });
+                            load();
+                          } catch (err) {
+                            window.alert('Delete failed: ' + (err?.message || 'unknown error'));
+                          }
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
