@@ -38,6 +38,8 @@ router.get('/preferences', async (req, res, next) => {
       seasonalTips: prefs.seasonal_tips,
       smsEnabled: prefs.sms_enabled,
       emailEnabled: prefs.email_enabled,
+      billingEmail: prefs.billing_email || '',
+      paymentConfirmationSms: prefs.payment_confirmation_sms !== false,
     });
   } catch (err) {
     next(err);
@@ -57,6 +59,8 @@ router.put('/preferences', async (req, res, next) => {
       seasonalTips: Joi.boolean(),
       smsEnabled: Joi.boolean(),
       emailEnabled: Joi.boolean(),
+      billingEmail: Joi.string().trim().email().max(200).allow('', null),
+      paymentConfirmationSms: Joi.boolean(),
     }).min(1);
 
     const updates = await schema.validateAsync(req.body);
@@ -70,6 +74,8 @@ router.put('/preferences', async (req, res, next) => {
     if (updates.seasonalTips !== undefined) dbUpdates.seasonal_tips = updates.seasonalTips;
     if (updates.smsEnabled !== undefined) dbUpdates.sms_enabled = updates.smsEnabled;
     if (updates.emailEnabled !== undefined) dbUpdates.email_enabled = updates.emailEnabled;
+    if (updates.billingEmail !== undefined) dbUpdates.billing_email = updates.billingEmail || null;
+    if (updates.paymentConfirmationSms !== undefined) dbUpdates.payment_confirmation_sms = updates.paymentConfirmationSms;
     dbUpdates.updated_at = new Date();
 
     const existing = await db('notification_prefs').where({ customer_id: req.customerId }).first();
@@ -99,6 +105,8 @@ router.put('/preferences', async (req, res, next) => {
         seasonalTips: prefs.seasonal_tips,
         smsEnabled: prefs.sms_enabled,
         emailEnabled: prefs.email_enabled,
+        billingEmail: prefs.billing_email || '',
+        paymentConfirmationSms: prefs.payment_confirmation_sms !== false,
       },
     });
   } catch (err) {

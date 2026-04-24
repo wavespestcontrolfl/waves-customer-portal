@@ -209,6 +209,14 @@ router.get('/balance', async (req, res, next) => {
       .sum('total as total')
       .first();
 
+    // The portal's billing banner flips to "failed" when the most recent
+    // completed attempt failed — not when there's any failed row in history.
+    const mostRecentAttempt = await db('payments')
+      .where({ customer_id: req.customerId })
+      .whereIn('status', ['paid', 'failed', 'refunded'])
+      .orderBy('payment_date', 'desc')
+      .first();
+
     res.json({
       currentBalance: parseFloat(failed?.total || 0) + parseFloat(unpaidInvoices?.total || 0),
       upcomingCharges: parseFloat(upcoming?.total || 0),
@@ -220,6 +228,7 @@ router.get('/balance', async (req, res, next) => {
         date: nextPayment.payment_date,
         description: nextPayment.description,
       } : null,
+      lastPaymentFailed: mostRecentAttempt?.status === 'failed',
     });
   } catch (err) {
     next(err);
