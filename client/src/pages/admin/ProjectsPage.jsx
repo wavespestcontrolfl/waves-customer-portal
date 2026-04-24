@@ -282,6 +282,16 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     if (!confirm('Send report to customer? This generates a public link and marks the project as Sent.')) return;
     setSaving(true);
     try {
+      // Persist any dirty edits (including an AI-drafted Recommendations block)
+      // before we flip the project to Sent — otherwise the customer sees the
+      // pre-edit version at the public link.
+      if (dirty) {
+        await adminFetch(`/admin/projects/${projectId}`, {
+          method: 'PUT',
+          body: { title: editTitle || null, findings: editFindings, recommendations: editRecs || null },
+        });
+        setDirty(false);
+      }
       const r = await adminFetch(`/admin/projects/${projectId}/send`, { method: 'POST' });
       const d = await r.json();
       if (d.report_url) setSentLink(`${window.location.origin}${d.report_url}`);
@@ -305,8 +315,22 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d?.error || 'AI draft failed');
       if (d.report) {
-        setEditRecs(d.report.trim());
-        setDirty(true);
+        const aiText = d.report.trim();
+        setEditRecs(aiText);
+        // Autosave the AI draft so it can't be lost by hitting Send before
+        // the admin manually saves. Other pending edits (title/findings)
+        // are included in the same PUT.
+        try {
+          await adminFetch(`/admin/projects/${projectId}`, {
+            method: 'PUT',
+            body: { title: editTitle || null, findings: editFindings, recommendations: aiText },
+          });
+          setDirty(false);
+          await load();
+        } catch {
+          // Autosave failed — leave it marked dirty so manual Save still works.
+          setDirty(true);
+        }
       }
     } catch (e) {
       alert(`AI draft failed: ${e.message}`);
