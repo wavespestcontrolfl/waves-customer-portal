@@ -468,7 +468,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                           )}
                           {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
                           {inv.status === 'void' && !inv.archived_at && (
-                            <button onClick={() => handleArchive(inv.id)} style={sBtn('transparent', D.muted, isMobile)} title="Tuck this voided invoice out of the default list">Archive</button>
+                            <button onClick={() => handleArchive(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Tuck this voided invoice out of the default list">Archive</button>
                           )}
                           {inv.archived_at && (
                             <button onClick={() => handleUnarchive(inv.id)} style={sBtn('transparent', D.text, isMobile)} title="Restore to the default list">Unarchive</button>
