@@ -112,7 +112,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
     <div
       role="dialog"
       aria-label="Customer detail"
-      className="fixed inset-0 z-[60] bg-surface-page overflow-y-auto"
+      className="fixed inset-0 z-[110] bg-surface-page overflow-y-auto"
       style={{ WebkitOverflowScrolling: 'touch' }}
     >
       {/* Top bar */}

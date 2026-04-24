@@ -188,7 +188,7 @@ export default function MobileAppointmentDetailSheet({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
+    <div className="fixed inset-0 z-[100] bg-white overflow-y-auto">
       {/* Top bar: Close · Edit — both bumped to iOS-friendly tap targets (≥44px)
           and given word labels instead of a bare ✕ glyph so they read at a
           glance on mobile. */}
