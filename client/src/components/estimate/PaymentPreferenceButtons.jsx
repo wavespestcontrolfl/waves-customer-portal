@@ -32,13 +32,11 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
     opacity: disabled ? 0.65 : 1,
   };
 
-  const depositLabel = isOneTime ? 'Book + pay upfront' : 'Reserve + pay deposit now';
+  const depositLabel = isOneTime ? 'Book + save card on file' : 'Reserve + save card on file';
   const payAtVisitLabel = isOneTime ? 'Book + pay on service day' : 'Reserve + pay at visit';
-  const fineprint = isOneTime
-    ? "You'll only be charged on service day unless you pick \"pay upfront.\""
-    : offerPrepay
-      ? "You'll only be charged on service day unless you pick \"pay deposit now\" or \"pay the year upfront.\""
-      : "You'll only be charged on service day unless you pick \"pay deposit now.\"";
+  const fineprint = offerPrepay
+    ? 'Saving a card on file locks your slot — we still charge on the visit day. Pick "pay the year upfront" to settle the year now.'
+    : 'Saving a card on file locks your slot. Either way, we charge on the visit day, not now.';
 
   return (
     <div style={{

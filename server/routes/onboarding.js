@@ -252,6 +252,27 @@ router.put('/:token/details', loadSession, async (req, res, next) => {
     const { scheduling, access, pets, property, attribution } = req.body;
     const customerId = req.customer.id;
 
+    // Card-required guard. Customers who chose "deposit now with card" on
+    // the estimate page must save a payment method before they can finish
+    // onboarding — otherwise they end up with a committed scheduled visit
+    // and no card on file. The client UI enforces this via screen routing,
+    // but we re-check server-side so a direct API call (or an abandoned
+    // tab that's later resumed past Stripe) can't slip through.
+    const upcoming = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .whereNotIn('status', ['cancelled', 'completed'])
+      .orderBy('scheduled_date', 'asc')
+      .first('payment_method_preference');
+    if (upcoming?.payment_method_preference === 'deposit_now') {
+      const card = await db('payment_methods').where({ customer_id: customerId }).first('id');
+      if (!card) {
+        return res.status(409).json({
+          error: 'card_required',
+          message: 'Save a card on file before completing setup — you chose to put a card on file at booking.',
+        });
+      }
+    }
+
     // Build property_preferences upsert
     const prefUpdates = {};
     if (scheduling) {
