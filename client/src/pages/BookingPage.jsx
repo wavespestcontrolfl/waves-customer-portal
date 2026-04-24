@@ -214,20 +214,20 @@ export default function BookingPage() {
               padding: "16px 18px",
               marginBottom: 24,
             }}>
-              <div style={{ fontSize: 11, fontWeight: 500, color: COLORS.slate400, textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.slate400, textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: 10 }}>
                 Estimate #{ESTIMATE.id}
               </div>
               <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.blueDeeper, marginBottom: 4 }}>
                 {ESTIMATE.services.join(" + ")}
               </div>
-              <div style={{ fontSize: 13, color: COLORS.slate600 }}>
+              <div style={{ fontSize: 14, color: COLORS.slate600 }}>
                 {ESTIMATE.address}, {ESTIMATE.city}
               </div>
             </div>
 
             {/* City selector */}
             <div style={{ marginBottom: 28 }}>
-              <label style={{ fontSize: 13, fontWeight: 500, color: COLORS.slate600, display: "block", marginBottom: 8 }}>
+              <label style={{ fontSize: 14, fontWeight: 500, color: COLORS.slate600, display: "block", marginBottom: 8 }}>
                 Service city
               </label>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -241,7 +241,7 @@ export default function BookingPage() {
                       border: `1.5px solid ${city === c ? COLORS.wavesBlue : COLORS.grayLight}`,
                       background: city === c ? COLORS.blueLight : "transparent",
                       color: city === c ? COLORS.blueDark : COLORS.slate600,
-                      fontSize: 13,
+                      fontSize: 14,
                       fontWeight: city === c ? 600 : 400,
                       cursor: "pointer",
                       transition: "all 0.2s",
@@ -282,7 +282,7 @@ export default function BookingPage() {
             }}>
               Pick a date
             </h2>
-            <p style={{ fontSize: 13, color: COLORS.slate400, marginBottom: 20 }}>
+            <p style={{ fontSize: 14, color: COLORS.slate400, marginBottom: 20 }}>
               Showing days we're already in <span style={{ color: COLORS.wavesBlue, fontWeight: 600 }}>{city}</span>
             </p>
 
@@ -296,7 +296,7 @@ export default function BookingPage() {
                   margin: "0 auto 12px",
                 }} />
                 <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-                <div style={{ fontSize: 13, color: COLORS.slate400 }}>
+                <div style={{ fontSize: 14, color: COLORS.slate400 }}>
                   Finding available times near {city}...
                 </div>
               </div>
@@ -311,7 +311,7 @@ export default function BookingPage() {
                 <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.blueDeeper, marginBottom: 6 }}>
                   No availability this period
                 </div>
-                <div style={{ fontSize: 13, color: COLORS.slate400, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 14, color: COLORS.slate400, lineHeight: 1.5 }}>
                   We don't have techs routed near {city} in the next 2 weeks. Call us at (941) 297-5749 and we'll get you scheduled.
                 </div>
               </div>
@@ -359,7 +359,7 @@ export default function BookingPage() {
                             NEXT
                           </div>
                         )}
-                        <div style={{ fontSize: 11, color: COLORS.slate400, fontWeight: 500, marginBottom: 2, marginTop: isFirst ? 8 : 0 }}>
+                        <div style={{ fontSize: 12, color: COLORS.slate400, fontWeight: 500, marginBottom: 2, marginTop: isFirst ? 8 : 0 }}>
                           {day.dayOfWeek}
                         </div>
                         <div style={{ fontSize: 22, fontWeight: 600, color: isSelected ? COLORS.blueDark : COLORS.blueDeeper }}>
@@ -379,7 +379,7 @@ export default function BookingPage() {
                     );
                   })}
                 </div>
-                <div style={{ fontSize: 11, color: COLORS.slate400, textAlign: "center" }}>
+                <div style={{ fontSize: 12, color: COLORS.slate400, textAlign: "center" }}>
                   Scroll for more dates →
                 </div>
               </>
@@ -406,7 +406,7 @@ export default function BookingPage() {
             }}>
               {selectedDay.fullDate}
             </h2>
-            <p style={{ fontSize: 13, color: COLORS.slate400, marginBottom: 24 }}>
+            <p style={{ fontSize: 14, color: COLORS.slate400, marginBottom: 24 }}>
               {selectedDay.slots.length} opening{selectedDay.slots.length > 1 ? "s" : ""} in {selectedDay.zone}
             </p>
 
@@ -516,7 +516,7 @@ export default function BookingPage() {
                 background: COLORS.blueDeeper, padding: "20px 18px",
                 color: "#fff",
               }}>
-                <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.8px", opacity: 0.6, marginBottom: 6 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.8px", opacity: 0.6, marginBottom: 6 }}>
                   Your appointment
                 </div>
                 <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 4 }}>
@@ -542,8 +542,8 @@ export default function BookingPage() {
                       borderBottom: i < 3 ? `1px solid ${COLORS.offWhite}` : "none",
                     }}
                   >
-                    <span style={{ fontSize: 13, color: COLORS.slate400 }}>{row.label}</span>
-                    <span style={{ fontSize: 13, fontWeight: 500, color: COLORS.blueDeeper, textAlign: "right", maxWidth: "60%" }}>
+                    <span style={{ fontSize: 14, color: COLORS.slate400 }}>{row.label}</span>
+                    <span style={{ fontSize: 14, fontWeight: 500, color: COLORS.blueDeeper, textAlign: "right", maxWidth: "60%" }}>
                       {row.value}
                     </span>
                   </div>
@@ -554,7 +554,7 @@ export default function BookingPage() {
             {/* Notes */}
             <div style={{ marginBottom: 24 }}>
               <label style={{
-                fontSize: 13, fontWeight: 500, color: COLORS.slate600,
+                fontSize: 14, fontWeight: 500, color: COLORS.slate600,
                 display: "block", marginBottom: 6,
               }}>
                 Notes for your tech <span style={{ fontWeight: 400, color: COLORS.slate400 }}>(optional)</span>
@@ -650,7 +650,7 @@ export default function BookingPage() {
               borderRadius: 14, padding: "24px 20px",
               marginBottom: 24,
             }}>
-              <div style={{ fontSize: 11, fontWeight: 500, color: COLORS.slate400, textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 500, color: COLORS.slate400, textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: 8 }}>
                 Confirmation code
               </div>
               <div style={{
@@ -675,8 +675,8 @@ export default function BookingPage() {
                     display: "flex", justifyContent: "space-between",
                     padding: "8px 0", gap: 12,
                   }}>
-                    <span style={{ fontSize: 13, color: COLORS.slate400, flexShrink: 0 }}>{row.label}</span>
-                    <span style={{ fontSize: 13, fontWeight: 500, color: COLORS.blueDeeper, textAlign: "right" }}>
+                    <span style={{ fontSize: 14, color: COLORS.slate400, flexShrink: 0 }}>{row.label}</span>
+                    <span style={{ fontSize: 14, fontWeight: 500, color: COLORS.blueDeeper, textAlign: "right" }}>
                       {row.value}
                     </span>
                   </div>
@@ -697,7 +697,7 @@ export default function BookingPage() {
                 <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
                 <path d="M13.73 21a2 2 0 01-3.46 0"/>
               </svg>
-              <span style={{ fontSize: 13, color: COLORS.blueDark, lineHeight: 1.5 }}>
+              <span style={{ fontSize: 14, color: COLORS.blueDark, lineHeight: 1.5 }}>
                 We'll send you a reminder the day before. Reply <strong>RESCHEDULE</strong> to that text if anything changes.
               </span>
             </div>

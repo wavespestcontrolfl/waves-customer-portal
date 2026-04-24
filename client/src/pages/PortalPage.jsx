@@ -136,7 +136,7 @@ function BeforeAfterSlider({ beforeAfter }) {
           background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
-          <div style={{ color: '#fff', fontWeight: 800, fontSize: 13, fontFamily: FONTS.heading }}>
+          <div style={{ color: '#fff', fontWeight: 800, fontSize: 14, fontFamily: FONTS.heading }}>
             BEFORE {beforeDate ? `— ${fmtDate(beforeDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.before?.overallScore != null && (
@@ -160,7 +160,7 @@ function BeforeAfterSlider({ beforeAfter }) {
           background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
-          <div style={{ color: '#fff', fontWeight: 800, fontSize: 13, fontFamily: FONTS.heading }}>
+          <div style={{ color: '#fff', fontWeight: 800, fontSize: 14, fontFamily: FONTS.heading }}>
             AFTER {afterDate ? `— ${fmtDate(afterDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.after?.overallScore != null && (
@@ -398,7 +398,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
           )}
           {overallDelta !== 0 && (
             <div style={{
-              display: 'inline-block', marginTop: 6, fontSize: 11, fontWeight: 700,
+              display: 'inline-block', marginTop: 6, fontSize: 12, fontWeight: 700,
               color: overallDelta > 0 ? B.green : B.red,
               background: overallDelta > 0 ? `${B.green}12` : `${B.red}12`,
               padding: '3px 8px', borderRadius: 6,
@@ -413,7 +413,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
       {photos?.length > 0 && (
         <div style={{ marginBottom: 16 }}>
           <div style={{
-            fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+            fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
             marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
           }}>
             Latest Visit — {scores.assessmentDate ? fmtDate(scores.assessmentDate, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'}
@@ -475,7 +475,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
               cursor: 'pointer', padding: '8px 0',
             }}
           >
-            <div style={{ fontSize: 11, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.8 }}>
               Progress Over Time ({trend.length} visits)
             </div>
             <span style={{ fontSize: 12, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
@@ -506,7 +506,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
               <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>
                 Between-Visit Tip
               </div>
-              <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
                 {recommendations.customerTip}
               </div>
             </div>
@@ -519,7 +519,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
               <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginBottom: 4 }}>
                 Next Visit Focus
               </div>
-              <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
                 {recommendations.nextVisitFocus}
               </div>
             </div>
@@ -534,7 +534,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
           background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
         }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
-          <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
             Next visit we'll focus on strengthening turf density and applying preventive fungicide.
           </div>
         </div>
@@ -544,14 +544,14 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
       {beforeAfter && (
         <div style={{ marginTop: 18 }}>
           <div style={{
-            fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+            fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
             marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
             <span>Before &amp; After</span>
             {beforeAfter.improvement?.overall != null && beforeAfter.improvement.overall > 0 && (
               <span style={{
-                fontSize: 11, fontWeight: 700, color: B.green,
+                fontSize: 12, fontWeight: 700, color: B.green,
                 background: `${B.green}12`, padding: '2px 8px', borderRadius: 6,
               }}>
                 +{beforeAfter.improvement.overall} pts improvement
@@ -560,7 +560,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
           </div>
           <BeforeAfterSlider beforeAfter={beforeAfter} />
           {beforeAfter.improvement?.daysSinceStart > 0 && (
-            <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6, textAlign: 'center' }}>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6, textAlign: 'center' }}>
               {beforeAfter.improvement.daysSinceStart} days of progress
             </div>
           )}
@@ -571,7 +571,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
       {!beforeAfter && (
         <div style={{ marginTop: 18 }}>
           <div style={{
-            fontSize: 11, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+            fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
             marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
           }}>
             Before &amp; After
@@ -604,7 +604,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
                 : neighborBenchmark.percentile === 'top 50%' ? 'Above average for your area'
                 : 'Growing toward the neighborhood average'}
             </div>
-            <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2, lineHeight: 1.4 }}>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2, lineHeight: 1.4 }}>
               Your score of {neighborBenchmark.customerScore}% vs {neighborBenchmark.neighborhoodAvg}% neighborhood avg
               {neighborBenchmark.customerCount > 5 && ` across ${neighborBenchmark.customerCount} properties`}
             </div>
@@ -615,7 +615,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
       {/* Seasonal context — FAWN weather powered */}
       <div style={{
         marginTop: 10, padding: '10px 12px', borderRadius: 8,
-        background: `${B.wavesBlue}08`, fontSize: 11, color: B.grayMid, lineHeight: 1.5,
+        background: `${B.wavesBlue}08`, fontSize: 12, color: B.grayMid, lineHeight: 1.5,
       }}>
         {seasonalContext ? (
           <>
@@ -678,8 +678,8 @@ function BadgeRow({ badges, earnedCount, totalCount, onViewAll }) {
       border: `1px solid ${B.grayLight}`,
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Your Badges</div>
-        <div style={{ fontSize: 11, color: B.grayMid }}>{earnedCount} of {totalCount}</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Your Badges</div>
+        <div style={{ fontSize: 12, color: B.grayMid }}>{earnedCount} of {totalCount}</div>
       </div>
       <div style={{ display: 'flex', gap: 8, overflowX: 'auto', WebkitOverflowScrolling: 'touch', paddingBottom: 4 }}>
         {displayBadges.map(b => (
@@ -703,7 +703,7 @@ function BadgeRow({ badges, earnedCount, totalCount, onViewAll }) {
             width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
             background: B.offWhite, border: `1px solid ${B.grayLight}`,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 11, fontWeight: 700, color: B.grayMid, cursor: 'pointer',
+            fontSize: 12, fontWeight: 700, color: B.grayMid, cursor: 'pointer',
           }}>+{remaining}</div>
         )}
       </div>
@@ -738,7 +738,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
       }}>
         <div style={{ fontSize: 32 }}></div>
         <div style={{ fontSize: 22, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em', marginTop: 4 }}>{earnedCount} Badges Earned</div>
-        <div style={{ fontSize: 13, color: B.blueLight, marginTop: 4 }}>out of {badges.length} total</div>
+        <div style={{ fontSize: 14, color: B.blueLight, marginTop: 4 }}>out of {badges.length} total</div>
         <div style={{
           marginTop: 12, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.15)',
           overflow: 'hidden',
@@ -757,7 +757,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
         if (!catBadges) return null;
         return (
           <div key={cat}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
               {categories[cat] || cat}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
@@ -787,12 +787,12 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                     {b.reward && (
                       <span style={{
                         position: 'absolute', top: -3, right: -3,
-                        fontSize: 11, color: B.yellow, lineHeight: 1,
+                        fontSize: 12, color: B.yellow, lineHeight: 1,
                       }}></span>
                     )}
                   </div>
                   <div style={{
-                    fontSize: 11, fontWeight: 600, marginTop: 6,
+                    fontSize: 12, fontWeight: 600, marginTop: 6,
                     color: b.earned ? B.navy : B.grayMid,
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}>{b.title}</div>
@@ -837,7 +837,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
             <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 4 }}>
               {selected.categoryLabel}
             </div>
-            <div style={{ fontSize: 13, color: B.grayDark, marginTop: 10, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 14, color: B.grayDark, marginTop: 10, lineHeight: 1.6 }}>
               {selected.description}
             </div>
 
@@ -851,7 +851,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                     marginTop: 10, padding: '8px 12px', borderRadius: 8,
                     background: `${B.yellow}20`, border: '1px solid #DAA520',
                   }}>
-                    <div style={{ fontSize: 11, color: B.yellow, fontWeight: 700 }}> Reward unlocked: {selected.reward.description}</div>
+                    <div style={{ fontSize: 12, color: B.yellow, fontWeight: 700 }}> Reward unlocked: {selected.reward.description}</div>
                   </div>
                 )}
               </>
@@ -859,7 +859,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
               <>
                 {selected.progress && (
                   <div style={{ marginTop: 12 }}>
-                    <div style={{ fontSize: 11, color: B.grayMid, marginBottom: 4 }}>Progress</div>
+                    <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 4 }}>Progress</div>
                     <div style={{
                       height: 6, borderRadius: 3, background: B.grayLight, overflow: 'hidden',
                     }}>
@@ -871,7 +871,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                         })(),
                       }} />
                     </div>
-                    <div style={{ fontSize: 11, color: B.orange, fontWeight: 600, marginTop: 4 }}>{selected.progress}</div>
+                    <div style={{ fontSize: 12, color: B.orange, fontWeight: 600, marginTop: 4 }}>{selected.progress}</div>
                   </div>
                 )}
                 {selected.reward && (
@@ -879,7 +879,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                     marginTop: 10, padding: '8px 12px', borderRadius: 8,
                     background: `${B.yellow}20`, border: `1px solid ${B.yellow}33`,
                   }}>
-                    <div style={{ fontSize: 11, color: B.blueDeeper, fontWeight: 600 }}> Unlock reward: {selected.reward.description}</div>
+                    <div style={{ fontSize: 12, color: B.blueDeeper, fontWeight: 600 }}> Unlock reward: {selected.reward.description}</div>
                   </div>
                 )}
               </>
@@ -892,12 +892,12 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
               }}>
                 <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Next badge</div>
                 <div style={{ fontSize: 12, fontWeight: 600, color: B.navy, marginTop: 2 }}>{selected.nextBadgeInCategory.title}</div>
-                <div style={{ fontSize: 11, color: B.orange, marginTop: 1 }}>{selected.nextBadgeInCategory.remaining}</div>
+                <div style={{ fontSize: 12, color: B.orange, marginTop: 1 }}>{selected.nextBadgeInCategory.remaining}</div>
               </div>
             )}
 
             <button onClick={() => setSelected(null)} style={{
-              ...BUTTON_BASE, marginTop: 16, padding: '9px 24px', fontSize: 13,
+              ...BUTTON_BASE, marginTop: 16, padding: '9px 24px', fontSize: 14,
               background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
             }}>Close</button>
           </div>
@@ -967,12 +967,12 @@ function BadgeCelebrationToast({ badges }) {
               justifyContent: 'center', fontSize: 20, flexShrink: 0,
             }}>{b.icon}</div>
             <div>
-              <div style={{ fontSize: 11, color: isReward ? B.yellow : B.yellow, fontWeight: 700 }}>
+              <div style={{ fontSize: 12, color: isReward ? B.yellow : B.yellow, fontWeight: 700 }}>
                 {isReward ? ' Reward Badge Earned!' : ' New Badge Earned!'}
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{b.title}</div>
               {isReward && b.reward && (
-                <div style={{ fontSize: 11, color: B.blueDeeper, marginTop: 1 }}>{b.reward.description}</div>
+                <div style={{ fontSize: 12, color: B.blueDeeper, marginTop: 1 }}>{b.reward.description}</div>
               )}
             </div>
           </div>
@@ -1034,7 +1034,7 @@ function PromotionCards() {
         <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>
           You're Fully Protected
         </div>
-        <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
           WaveGuard Platinum member saving {promoData.discount} on everything. Thank you for trusting Waves with your complete home protection.
         </div>
       </div>
@@ -1066,7 +1066,7 @@ function PromotionCards() {
               {/* Header: urgency badge + dismiss */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                 <span style={{
-                  fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
+                  fontSize: 12, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
                   background: u.bg, color: u.color,
                 }}>{u.badge}</span>
                 <button onClick={() => handleDismiss(promo.id)} style={{
@@ -1079,7 +1079,7 @@ function PromotionCards() {
               <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
                 {promo.title}
               </div>
-              <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
+              <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
                 {promo.description}
               </div>
 
@@ -1095,7 +1095,7 @@ function PromotionCards() {
                   ${promo.discountedMonthlyPrice}/mo
                 </span>
                 {promo.savingsText && (
-                  <span style={{ fontSize: 11, color: B.green, fontWeight: 600, marginLeft: 'auto' }}>
+                  <span style={{ fontSize: 12, color: B.green, fontWeight: 600, marginLeft: 'auto' }}>
                     {promo.savingsText}
                   </span>
                 )}
@@ -1112,7 +1112,7 @@ function PromotionCards() {
                     ⬆️ Add this and unlock {promo.potentialNewTier} — {promo.potentialNewDiscount} off everything
                   </div>
                   {promo.totalMonthlySavingsAtNewTier > 0 && (
-                    <div style={{ fontSize: 11, color: B.green, fontWeight: 600, marginTop: 2 }}>
+                    <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 2 }}>
                       You'd save ${promo.totalMonthlySavingsAtNewTier.toFixed(2)}/mo total across all services
                     </div>
                   )}
@@ -1120,7 +1120,7 @@ function PromotionCards() {
               )}
 
               {/* Social proof */}
-              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>
+              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 10 }}>
                 {promo.socialProof}
               </div>
 
@@ -1267,7 +1267,7 @@ function HeroSlider({ onSwitchTab }) {
                 textShadow: '0 2px 8px rgba(0,0,0,0.5)',
               }}>{slide.title}</div>
               <div style={{
-                fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.98)', lineHeight: 1.4,
+                fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.98)', lineHeight: 1.4,
                 maxWidth: 320, marginBottom: 14,
                 textShadow: '0 1px 4px rgba(0,0,0,0.5)',
               }}>{slide.subtitle}</div>
@@ -1542,7 +1542,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
                     Awesome — {satRating}/10!
                   </div>
-                  <div style={{ fontSize: 13, color: B.grayDark, marginTop: 6, lineHeight: 1.6 }}>
+                  <div style={{ fontSize: 14, color: B.grayDark, marginTop: 6, lineHeight: 1.6 }}>
                     Would you share your experience on Google? It helps your neighbors find great pest & lawn care and means the world to our {satOfficeName} team.
                   </div>
                   <div style={{ display: 'flex', gap: 10, marginTop: 16, justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -1552,12 +1552,12 @@ function DashboardTab({ customer, onSwitchTab }) {
                       color: B.navy, textDecoration: 'none',
                     }}>Leave a Review ⭐</a>
                     <button onClick={() => setSatDismissed(true)} style={{
-                      ...BUTTON_BASE, padding: '11px 22px', fontSize: 13,
+                      ...BUTTON_BASE, padding: '11px 22px', fontSize: 14,
                       background: 'transparent', color: B.grayMid,
                       border: `1px solid ${B.grayLight}`,
                     }}>Maybe Later</button>
                   </div>
-                  <div style={{ fontSize: 11, color: B.grayMid, marginTop: 12 }}>
+                  <div style={{ fontSize: 12, color: B.grayMid, marginTop: 12 }}>
                     We also texted you the review link in case you want to do it later
                   </div>
                 </div>
@@ -1594,12 +1594,12 @@ function DashboardTab({ customer, onSwitchTab }) {
                   />
                   <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
                     <button onClick={handleSatFeedback} disabled={satSubmitting} style={{
-                      ...BUTTON_BASE, padding: '10px 20px', flex: 1, fontSize: 13,
+                      ...BUTTON_BASE, padding: '10px 20px', flex: 1, fontSize: 14,
                       background: B.yellow, color: B.blueDeeper,
                       opacity: satSubmitting ? 0.7 : 1,
                     }}>{satSubmitting ? 'Sending...' : 'Send Feedback'}</button>
                     <button onClick={() => setSatPhase('thanks')} style={{
-                      ...BUTTON_BASE, padding: '10px 20px', fontSize: 13,
+                      ...BUTTON_BASE, padding: '10px 20px', fontSize: 14,
                       background: 'transparent', color: B.grayMid,
                       border: `1px solid ${B.grayLight}`,
                     }}>Skip</button>
@@ -1614,7 +1614,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 6 }}>
                     Thank you for your feedback.
                   </div>
-                  <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
+                  <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
                     {satRating <= 3
                       ? `${(pendingSatisfaction.technician_name || pendingSatisfaction.technicianName) ? (pendingSatisfaction.technician_name || pendingSatisfaction.technicianName).split(' ')[0] + ' at Waves' : 'Your team at Waves'} will personally follow up with you within 24 hours.`
                       : satRating <= 7
@@ -1667,7 +1667,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           <div style={{
             position: 'relative', zIndex: 1,
             marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
-            padding: '5px 14px', borderRadius: 24, fontSize: 13, fontWeight: 700,
+            padding: '5px 14px', borderRadius: 24, fontSize: 14, fontWeight: 700,
             fontFamily: FONTS.heading,
             background: `linear-gradient(135deg, ${tier.gradientFrom}, ${tier.gradientTo})`,
             color: '#fff',
@@ -1675,7 +1675,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             textShadow: '0 1px 3px rgba(0,0,0,0.3)',
           }}> WaveGuard {customer.tier}</div>
         )}
-        <div style={{ position: 'relative', zIndex: 1, marginTop: 12, fontSize: 13, color: '#fff', lineHeight: 1.6 }}>
+        <div style={{ position: 'relative', zIndex: 1, marginTop: 12, fontSize: 14, color: '#fff', lineHeight: 1.6 }}>
           {customer.address?.line1}, {customer.address?.city}, {customer.address?.state} {customer.address?.zip}<br/>
           <span style={{ color: B.blueLight }}>{(customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || 'Lawn'} · {customer.property?.propertySqFt?.toLocaleString()} sq ft · {customer.property?.lotSqFt?.toLocaleString()} sq ft lot</span>
         </div>
@@ -1695,7 +1695,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             ...BUTTON_BASE, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
             padding: '14px 8px', borderRadius: 14,
             background: B.white, border: `1.5px solid ${B.bluePale}`,
-            color: B.navy, fontSize: 11, fontWeight: 600, fontFamily: FONTS.ui,
+            color: B.navy, fontSize: 12, fontWeight: 600, fontFamily: FONTS.ui,
             boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
           }}>
             <Icon name={item.icon} size={22} strokeWidth={1.75} />
@@ -1739,7 +1739,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <span style={{ fontSize: 26 }}>{isToday ? '' : isTomorrow ? '⏰' : ''}</span>
                 <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, opacity: 0.85, fontFamily: FONTS.ui }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, opacity: 0.85, fontFamily: FONTS.ui }}>
                     {isToday ? "Today's Service" : isTomorrow ? 'Tomorrow' : 'Your Next Visit'}
                   </div>
                   <div style={{ fontSize: 18, fontWeight: 800, fontFamily: FONTS.heading }}>
@@ -1774,7 +1774,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   return 'Full property inspection + targeted treatment application';
                 })()}
               </div>
-              <div style={{ fontSize: 13, color: B.grayMid, marginTop: 4 }}>
+              <div style={{ fontSize: 14, color: B.grayMid, marginTop: 4 }}>
                 Technician: <strong style={{ color: B.navy }}>{nextService.technician || 'TBD'}</strong>
                 {nextService.windowStart && ` · ${formatTime(nextService.windowStart)} – ${formatTime(nextService.windowEnd)}`}
               </div>
@@ -1784,7 +1784,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 marginTop: 16, padding: 14, borderRadius: 12,
                 background: B.offWhite, border: `1px solid ${B.grayLight}`,
               }}>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid, marginBottom: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid, marginBottom: 10 }}>
                   Communication Timeline
                 </div>
                 {[
@@ -1805,7 +1805,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                       <div style={{ fontSize: 12, fontWeight: 600, color: step.done ? B.green : step.active ? B.orange : B.grayDark }}>
                         {step.label} {step.done && ''}
                       </div>
-                      <div style={{ fontSize: 11, color: B.grayMid }}>{step.desc}</div>
+                      <div style={{ fontSize: 12, color: B.grayMid }}>{step.desc}</div>
                     </div>
                   </div>
                 ))}
@@ -1820,18 +1820,18 @@ function DashboardTab({ customer, onSwitchTab }) {
                     });
                   }} style={{
                     ...BUTTON_BASE, padding: '10px 20px', flex: 1,
-                    background: B.green, color: '#fff', fontSize: 13,
+                    background: B.green, color: '#fff', fontSize: 14,
                     boxShadow: `0 3px 10px ${B.green}30`,
                   }}> Confirm Appointment</button>
                 ) : (
                   <span style={{
                     padding: '10px 20px', borderRadius: 50, background: `${B.green}20`, flex: 1,
-                    color: B.green, fontSize: 13, fontWeight: 700, textAlign: 'center',
+                    color: B.green, fontSize: 14, fontWeight: 700, textAlign: 'center',
                   }}> Confirmed</span>
                 )}
                 <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType} on ${svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
                   ...BUTTON_BASE, padding: '10px 20px', flex: 1, textDecoration: 'none',
-                  background: 'transparent', color: B.wavesBlue, fontSize: 13,
+                  background: 'transparent', color: B.wavesBlue, fontSize: 14,
                   border: `1.5px solid ${B.wavesBlue}`,
                 }}>Reschedule</a>
               </div>
@@ -1852,20 +1852,20 @@ function DashboardTab({ customer, onSwitchTab }) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy }}>{lastService.type || lastService.serviceType}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{lastService.type || lastService.serviceType}</div>
               <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
                 {parseDate(lastService.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
               </div>
             </div>
             <span style={{
-              fontSize: 11, padding: '3px 10px', borderRadius: 6,
+              fontSize: 12, padding: '3px 10px', borderRadius: 6,
               background: `${B.green}20`, color: B.green, fontWeight: 700,
             }}>Completed</span>
           </div>
           {lastService.notes || lastService.technician_notes ? (
             <div style={{
               marginTop: 10, padding: '10px 14px', borderRadius: 10,
-              background: B.offWhite, fontSize: 13, color: B.grayDark, lineHeight: 1.6,
+              background: B.offWhite, fontSize: 14, color: B.grayDark, lineHeight: 1.6,
               borderLeft: `3px solid ${B.wavesBlue}`,
             }}>
               {((lastService.notes || lastService.technician_notes) || '').slice(0, 100)}
@@ -1892,12 +1892,12 @@ function DashboardTab({ customer, onSwitchTab }) {
             <Icon name="droplet" size={24} strokeWidth={1.75} />
             <div>
               <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Irrigation Recommendation</div>
-              <div style={{ fontSize: 11, color: B.grayMid }}>From {irrigationRecs[0].tech} · {parseDate(irrigationRecs[0].date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+              <div style={{ fontSize: 12, color: B.grayMid }}>From {irrigationRecs[0].tech} · {parseDate(irrigationRecs[0].date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
             </div>
           </div>
           <div style={{
             padding: 14, borderRadius: 12, background: `${B.teal}08`,
-            fontSize: 13, color: B.grayDark, lineHeight: 1.6, borderLeft: `3px solid ${B.teal}`,
+            fontSize: 14, color: B.grayDark, lineHeight: 1.6, borderLeft: `3px solid ${B.teal}`,
           }}>
             {irrigationRecs[0].text}
           </div>
@@ -1925,7 +1925,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         }}>
           <Icon name="sprout" size={28} strokeWidth={1.75} />
           <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>Lawn Health Tracking</div>
-          <div style={{ fontSize: 13, color: B.grayMid, marginTop: 6, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 14, color: B.grayMid, marginTop: 6, lineHeight: 1.6 }}>
             Your lawn health tracking will begin after your first assessment visit.
           </div>
         </div>
@@ -1947,9 +1947,9 @@ function DashboardTab({ customer, onSwitchTab }) {
             border: `1px solid ${B.bluePale}`,
           }}>
             <div style={{ fontSize: 20, marginBottom: 6 }}>{s.icon}</div>
-            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayDark, fontFamily: FONTS.ui }}>{s.label}</div>
+            <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayDark, fontFamily: FONTS.ui }}>{s.label}</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: B.navy, marginTop: 2, fontFamily: FONTS.ui }}>{s.value}</div>
-            <div style={{ fontSize: 11, color: B.green, fontWeight: 600, marginTop: 2 }}>{s.sub}</div>
+            <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 2 }}>{s.sub}</div>
           </div>
         ))}
       </div>
@@ -1967,7 +1967,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           }}>
             <Icon name="medal" size={28} strokeWidth={1.75} />
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Your WaveGuard Rewards</div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Your WaveGuard Rewards</div>
               <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2, lineHeight: 1.5 }}>
                 ${renewalCredit} renewal credit · ${referralCredits} referral credits · <strong style={{ color: B.wavesBlue }}>Total: ${totalCredits}</strong>
               </div>
@@ -2062,7 +2062,7 @@ function ServicesTab() {
     };
     const st = styles[status] || styles.Completed;
     return (
-      <span style={{ fontSize: 11, padding: '3px 10px', borderRadius: 6, background: st.bg, color: st.color, fontWeight: 700, whiteSpace: 'nowrap' }}>
+      <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 6, background: st.bg, color: st.color, fontWeight: 700, whiteSpace: 'nowrap' }}>
         {status}{status === 'Callback' && <span style={{ fontWeight: 500, fontSize: 10 }}> — Included with WaveGuard</span>}
       </span>
     );
@@ -2126,7 +2126,7 @@ function ServicesTab() {
   // --- Available years ---
   const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
 
-  const thSt = { padding: '8px 10px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: B.grayMid, textAlign: 'left', borderBottom: `1px solid ${B.grayLight}` };
+  const thSt = { padding: '8px 10px', fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: B.grayMid, textAlign: 'left', borderBottom: `1px solid ${B.grayLight}` };
   const tdSt = { padding: '8px 10px', fontSize: 12, color: B.navy, borderBottom: `1px solid ${B.offWhite}`, verticalAlign: 'top' };
 
   const pillStyle = (active) => ({
@@ -2143,7 +2143,7 @@ function ServicesTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {/* 1. Header */}
       <SectionHeading>Your Service History</SectionHeading>
-      <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
         Every visit documented — what we applied, what we found, and what's next for your property.
       </div>
 
@@ -2196,7 +2196,7 @@ function ServicesTab() {
 
       {/* Empty state */}
       {filtered.length === 0 && (
-        <div style={{ padding: 30, textAlign: 'center', color: B.grayMid, fontSize: 13 }}>
+        <div style={{ padding: 30, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>
           No services match your filters.
         </div>
       )}
@@ -2210,7 +2210,7 @@ function ServicesTab() {
           <div key={monthKey}>
             {/* Month header */}
             <div style={{
-              fontSize: 13, fontWeight: 700, color: B.grayMid, fontFamily: FONTS.heading,
+              fontSize: 14, fontWeight: 700, color: B.grayMid, fontFamily: FONTS.heading,
               padding: '8px 0 6px', borderBottom: `1px solid ${B.grayLight}`, marginBottom: 10,
               letterSpacing: -0.2,
             }}>
@@ -2242,7 +2242,7 @@ function ServicesTab() {
                         <div>
                           <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>
                             {s.type}
-                            {s._visitNum && <span style={{ fontSize: 11, fontWeight: 600, color: B.grayMid, marginLeft: 6 }}>#{s._visitNum}{s._visitTotal ? ` of ${s._visitTotal}` : ''}</span>}
+                            {s._visitNum && <span style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, marginLeft: 6 }}>#{s._visitNum}{s._visitTotal ? ` of ${s._visitTotal}` : ''}</span>}
                           </div>
                           <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
                             {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })} · {s.technician}
@@ -2272,10 +2272,10 @@ function ServicesTab() {
                                 borderRight: 'none', borderBottom: 'none',
                                 transform: 'rotate(45deg)',
                               }} />
-                              <div style={{ fontSize: 11, fontWeight: 700, color: B.wavesBlue, marginBottom: 4, fontFamily: FONTS.heading }}>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: B.wavesBlue, marginBottom: 4, fontFamily: FONTS.heading }}>
                                 {s.technician || 'Technician'} says:
                               </div>
-                              <div style={{ fontSize: 13, color: B.navy, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
+                              <div style={{ fontSize: 14, color: B.navy, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
                             </div>
                           </div>
                         )}
@@ -2304,7 +2304,7 @@ function ServicesTab() {
                           ].map((item, i) => (
                             <div key={i} style={{ padding: '10px 14px', borderRight: i % 2 === 0 ? `1px solid ${B.grayLight}` : 'none', borderBottom: i < 2 ? `1px solid ${B.grayLight}` : 'none' }}>
                               <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid }}>{item.label}</div>
-                              <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 2, wordBreak: 'break-word' }}>{item.value}</div>
+                              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginTop: 2, wordBreak: 'break-word' }}>{item.value}</div>
                             </div>
                           ))}
                         </div>
@@ -2312,7 +2312,7 @@ function ServicesTab() {
                         {/* Conditions */}
                         {(s.soilTemp || s.soilPh || s.thatchMeasurement || s.soilMoisture) && (
                           <div style={{ padding: '12px 18px', background: B.blueSurface, borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 6 }}>Conditions & Measurements</div>
+                            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 6 }}>Conditions & Measurements</div>
                             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                               {s.soilTemp && <div style={{ fontSize: 12, color: B.navy }}><Icon name="thermometer" size={16} strokeWidth={1.75} /> Soil Temp: <strong>{s.soilTemp}°F</strong></div>}
                               {s.soilPh && <div style={{ fontSize: 12, color: B.navy }}><Icon name="flask" size={16} strokeWidth={1.75} /> pH: <strong>{s.soilPh}</strong></div>}
@@ -2325,7 +2325,7 @@ function ServicesTab() {
                         {/* Products Applied — full table */}
                         {s.products?.length > 0 && (
                           <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 10 }}>Products Applied</div>
+                            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 10 }}>Products Applied</div>
                             <div style={{ overflowX: 'auto' }}>
                               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                                 <thead>
@@ -2343,12 +2343,12 @@ function ServicesTab() {
                                         {p.product_name}
                                         {p.product_category && <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'capitalize', marginTop: 1 }}>{p.product_category}</div>}
                                       </td>
-                                      <td style={{ ...tdSt, fontSize: 11, color: B.grayDark }}>
+                                      <td style={{ ...tdSt, fontSize: 12, color: B.grayDark }}>
                                         {p.active_ingredient || '—'}
                                         {p.moa_group && <div style={{ fontSize: 10, color: B.grayMid }}>{p.moa_group}</div>}
                                       </td>
-                                      <td style={{ ...tdSt, fontSize: 11 }}>{p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—'}</td>
-                                      <td style={{ ...tdSt, fontSize: 11 }}>{p.total_amount ? `${p.total_amount} ${p.amount_unit || ''}` : '—'}</td>
+                                      <td style={{ ...tdSt, fontSize: 12 }}>{p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—'}</td>
+                                      <td style={{ ...tdSt, fontSize: 12 }}>{p.total_amount ? `${p.total_amount} ${p.amount_unit || ''}` : '—'}</td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -2360,15 +2360,15 @@ function ServicesTab() {
                         {/* What's Next — aftercare tips */}
                         {tip && (
                           <div style={{ padding: '12px 18px', background: '#F1F8E9', borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 6 }}>What's Next</div>
-                            <div style={{ fontSize: 13, color: B.navy, lineHeight: 1.6 }}>{tip}</div>
+                            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 6 }}>What's Next</div>
+                            <div style={{ fontSize: 14, color: B.navy, lineHeight: 1.6 }}>{tip}</div>
                           </div>
                         )}
 
                         {/* Photos */}
                         {s.hasPhotos && (
                           <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 8 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 8 }}>
                               <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
                             {!photoMap[s.id] ? (
@@ -2402,7 +2402,7 @@ function ServicesTab() {
 
                         {/* Precautions */}
                         <div style={{ padding: '12px 18px', background: `${B.yellow}20`, borderBottom: `1px solid ${B.grayLight}` }}>
-                          <div style={{ fontSize: 11, color: '#F57F17', lineHeight: 1.5 }}>
+                          <div style={{ fontSize: 12, color: '#F57F17', lineHeight: 1.5 }}>
                             <Icon name="warning" size={16} strokeWidth={1.75} /> Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 297-5749.
                           </div>
                         </div>
@@ -2416,7 +2416,7 @@ function ServicesTab() {
                               target="_blank"
                               rel="noopener noreferrer"
                               style={{
-                                ...BUTTON_BASE, padding: '6px 14px', fontSize: 11,
+                                ...BUTTON_BASE, padding: '6px 14px', fontSize: 12,
                                 background: B.wavesBlue, color: B.white, textDecoration: 'none',
                                 borderRadius: 8,
                               }}
@@ -2446,7 +2446,7 @@ function ServicesTab() {
             <img src={lightbox.url} alt={lightbox.caption || 'service photo'}
               style={{ maxWidth: '95vw', maxHeight: '85vh', objectFit: 'contain', borderRadius: 10, background: '#000' }} />
             {(lightbox.caption || lightbox.type) && (
-              <div style={{ color: B.white, fontSize: 13, textAlign: 'center', maxWidth: 600 }}>
+              <div style={{ color: B.white, fontSize: 14, textAlign: 'center', maxWidth: 600 }}>
                 {lightbox.type && <span style={{ textTransform: 'uppercase', fontWeight: 700, marginRight: 8, opacity: 0.8 }}>{lightbox.type}</span>}
                 {lightbox.caption}
               </div>
@@ -2625,7 +2625,7 @@ function ScheduleTab({ customer }) {
     if (s.windowStart) return null;
     const prefTime = customer?.preferredTimeWindow;
     return (
-      <div style={{ fontSize: 11, color: B.orange, marginTop: 4, fontStyle: 'italic' }}>
+      <div style={{ fontSize: 12, color: B.orange, marginTop: 4, fontStyle: 'italic' }}>
         {prefTime
           ? `We'll aim for your preferred ${prefTime.toLowerCase()} window`
           : "We'll confirm your time window 72 hours before this visit"}
@@ -2791,12 +2791,12 @@ function ScheduleTab({ customer }) {
         <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
           {s.windowStart ? `${formatTime(s.windowStart)} – ${formatTime(s.windowEnd)}` : 'Time TBD'} · {s.technician}
         </div>
-        <div style={{ fontSize: 11, color: B.grayDark, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
         </div>
         {renderTimeTBD(s)}
         <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 11, color: B.grayMid }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
+          <span style={{ fontSize: 12, color: B.grayMid }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
           <span style={{ color: B.grayLight }}>·</span>
           {renderConfirmBtn(s, true)}
           <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
@@ -2823,12 +2823,12 @@ function ScheduleTab({ customer }) {
         }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}><Icon name="leaf" size={16} strokeWidth={1.75} /></div>
           <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>No upcoming services scheduled</div>
-          <div style={{ fontSize: 13, color: B.grayMid, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 14, color: B.grayMid, lineHeight: 1.6 }}>
             Your next quarterly pest treatment will be in {nextQuarterName}.
             {mosquitoResumes && <><br />Your mosquito service resumes in {mosquitoResumes}.</>}
           </div>
           <button onClick={() => setShowRequestForm(true)} style={{
-            ...BUTTON_BASE, padding: '10px 20px', fontSize: 13, marginTop: 16,
+            ...BUTTON_BASE, padding: '10px 20px', fontSize: 14, marginTop: 16,
             background: B.wavesBlue, color: '#fff',
           }}>+ Request a Visit</button>
         </div>
@@ -2860,12 +2860,12 @@ function ScheduleTab({ customer }) {
                 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{s.serviceType}</div>
-                    <div style={{ fontSize: 11, color: B.grayMid }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{s.serviceType}</div>
+                    <div style={{ fontSize: 12, color: B.grayMid }}>
                       {sDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                     </div>
                   </div>
-                  <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>
+                  <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
                     {s.technician}{s.productsApplied ? ` · ${s.productsApplied}` : ''}
                   </div>
                 </div>
@@ -2883,10 +2883,10 @@ function ScheduleTab({ customer }) {
             padding: '14px 20px', color: '#fff',
           }}>
             <div style={{ fontSize: 15, fontWeight: 700, fontFamily: FONTS.heading }}> SMS Notifications</div>
-            <div style={{ fontSize: 11, color: B.blueLight, marginTop: 2 }}>Powered by Twilio · We'll never show up unannounced</div>
+            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 2 }}>Powered by Twilio · We'll never show up unannounced</div>
           </div>
           <div style={{ padding: '6px 20px 16px' }}>
-            <div style={{ fontSize: 11, color: B.grayMid, padding: '10px 0 6px' }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
+            <div style={{ fontSize: 12, color: B.grayMid, padding: '10px 0 6px' }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
             {[
               { key: 'serviceReminder72h', label: '72-Hour Appointment Reminder', desc: 'Get a text 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
               { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: 'smartphone', locked: true },
@@ -2905,8 +2905,8 @@ function ScheduleTab({ customer }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
                     <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     <div>
-                      <div style={{ fontSize: 13, color: B.navy, fontWeight: 600 }}>{p.label}</div>
-                      <div style={{ fontSize: 11, color: B.grayMid }}>{p.desc}</div>
+                      <div style={{ fontSize: 14, color: B.navy, fontWeight: 600 }}>{p.label}</div>
+                      <div style={{ fontSize: 12, color: B.grayMid }}>{p.desc}</div>
                       {p.locked && (
                         <div style={{ fontSize: 10, color: B.orange, marginTop: 2, fontStyle: 'italic' }}>Required for service coordination</div>
                       )}
@@ -3201,7 +3201,7 @@ function BillingTab({ customer }) {
               <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
                 Payment failed — please update your payment method
               </div>
-              <div style={{ fontSize: 13, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
                 Your last payment could not be processed. Update your card to avoid service interruption.
               </div>
             </>
@@ -3211,7 +3211,7 @@ function BillingTab({ customer }) {
               <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
                 Your card ending in {cardExpiringSoon.last4} expires in {cardExpiringSoon.months} month{cardExpiringSoon.months !== 1 ? 's' : ''} — update now
               </div>
-              <div style={{ fontSize: 13, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
                 Update your payment method to avoid any disruption to your service.
               </div>
             </>
@@ -3224,7 +3224,7 @@ function BillingTab({ customer }) {
                   : `Auto Pay is active — your next charge of $${amountDue.toFixed(2)} processes on ${dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })}`
                 }
               </div>
-              <div style={{ fontSize: 13, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
                 {daysUntilDue === 0
                   ? `Amount: $${amountDue.toFixed(2)}`
                   : `Amount due: $${amountDue.toFixed(2)} · Due ${dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`
@@ -3244,7 +3244,7 @@ function BillingTab({ customer }) {
           <div style={{ fontSize: 12, color: B.blueLight, fontFamily: FONTS.body }}>Current Balance</div>
           <div style={{ fontSize: 36, fontWeight: 700, fontFamily: FONTS.ui }}>${balance.currentBalance.toFixed(2)}</div>
           {balance.currentBalance === 0 ? (
-            <div style={{ fontSize: 13, color: '#81C784', marginTop: 4, fontWeight: 600 }}>
+            <div style={{ fontSize: 14, color: '#81C784', marginTop: 4, fontWeight: 600 }}>
               All payments current — you're in good standing
             </div>
           ) : (
@@ -3270,21 +3270,21 @@ function BillingTab({ customer }) {
         <div style={{ position: 'absolute', top: -20, right: -20, fontSize: 80, opacity: 0.08 }}></div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
           <span style={{
-            fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
+            fontSize: 12, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
             padding: '4px 12px', borderRadius: 20,
             background: `${tier?.color || B.navy}22`,
             color: tier?.darkText ? B.navy : (tier?.color || B.navy),
           }}>{tierName} WaveGuard</span>
           <span style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${monthlyRate}/mo</span>
         </div>
-        <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginBottom: 8, fontFamily: FONTS.heading }}>Included Services</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginBottom: 8, fontFamily: FONTS.heading }}>Included Services</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {includedServices.map(svc => (
-            <div key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: B.grayDark }}>
+            <div key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: B.grayDark }}>
               <span>{svc.icon}</span>
               <span>{svc.name}</span>
               {discount > 0 && (
-                <span style={{ fontSize: 11, color: B.green, fontWeight: 600, marginLeft: 'auto' }}>
+                <span style={{ fontSize: 12, color: B.green, fontWeight: 600, marginLeft: 'auto' }}>
                   ${(svc.basePrice * (1 - discount)).toFixed(0)}/mo <span style={{ textDecoration: 'line-through', color: B.grayMid }}>${svc.basePrice}</span>
                 </span>
               )}
@@ -3315,12 +3315,12 @@ function BillingTab({ customer }) {
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Auto Pay Enrollment</div>
             <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Bank transfers have no added fee — credit/debit cards add a 3% processing fee.</div>
-            <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6, lineHeight: 1.5 }}>
               By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. Bank transfers (ACH) are charged the quoted invoice amount. Credit and debit card payments include a 3% processing fee added at checkout. To update your billing information or cancel automatic payments, contact us at (941) 297-5749 or billing@wavespestcontrol.com.
             </div>
           </div>
           <span style={{
-            fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
+            fontSize: 12, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
             padding: '4px 12px', borderRadius: 20,
             background: hasAutoPay ? `${B.green}20` : `${B.orange}20`,
             color: hasAutoPay ? B.green : B.orange,
@@ -3357,29 +3357,29 @@ function BillingTab({ customer }) {
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               {c.isDefault ? (
-                <span style={{ fontSize: 11, fontWeight: 600, color: B.green, background: `${B.green}15`, padding: '3px 8px', borderRadius: 6 }}>Default</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: B.green, background: `${B.green}15`, padding: '3px 8px', borderRadius: 6 }}>Default</span>
               ) : (
                 <button onClick={() => handleSetDefault(c.id)} style={{
                   padding: '4px 10px', borderRadius: 6, border: `1px solid ${B.wavesBlue}`,
-                  background: 'transparent', color: B.wavesBlue, fontSize: 11, cursor: 'pointer',
+                  background: 'transparent', color: B.wavesBlue, fontSize: 12, cursor: 'pointer',
                 }}>Set Default</button>
               )}
               <button onClick={() => handleRemoveCard(c.id)} style={{
                 padding: '4px 10px', borderRadius: 6, border: `1px solid ${B.grayLight}`,
-                background: 'transparent', color: B.red, fontSize: 11, cursor: 'pointer',
+                background: 'transparent', color: B.red, fontSize: 12, cursor: 'pointer',
               }}>Remove</button>
             </div>
           </div>
         ))}
 
         {cards.length === 0 && (
-          <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 13 }}>
+          <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>
             No payment methods on file. Add a card to enable Auto Pay.
           </div>
         )}
 
         {stripeError && !showAddCard && (
-          <div style={{ padding: 10, background: `${B.red}20`, borderRadius: 8, fontSize: 13, color: B.red, marginTop: 8 }}>
+          <div style={{ padding: 10, background: `${B.red}20`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 8 }}>
             {stripeError}
           </div>
         )}
@@ -3404,7 +3404,7 @@ function BillingTab({ customer }) {
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
             {stripeError && (
-              <div style={{ padding: 10, background: `${B.red}20`, borderRadius: 8, fontSize: 13, color: B.red, marginBottom: 12 }}>
+              <div style={{ padding: 10, background: `${B.red}20`, borderRadius: 8, fontSize: 14, color: B.red, marginBottom: 12 }}>
                 {stripeError}
               </div>
             )}
@@ -3420,7 +3420,7 @@ function BillingTab({ customer }) {
               color: stripeReady ? '#fff' : B.grayMid,
               opacity: stripeLoading ? 0.6 : 1,
             }}>{stripeLoading ? 'Saving...' : 'Save Card'}</button>
-            <div style={{ fontSize: 11, color: B.textCaption, marginTop: 10, textAlign: 'center' }}>
+            <div style={{ fontSize: 12, color: B.textCaption, marginTop: 10, textAlign: 'center' }}>
               Secured by Stripe. We never store your card details directly.
             </div>
           </div>
@@ -3454,14 +3454,14 @@ function BillingTab({ customer }) {
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   padding: '8px 14px', background: B.offWhite, borderRadius: 8, marginBottom: 4,
                 }}>
-                  <span style={{ fontSize: 13, color: B.grayDark }}>{cr.description || group.label}</span>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>${(cr.amount || 0).toFixed(2)}</span>
+                  <span style={{ fontSize: 14, color: B.grayDark }}>{cr.description || group.label}</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>${(cr.amount || 0).toFixed(2)}</span>
                 </div>
               ))}
             </div>
           ))}
           {credits.length === 0 && (
-            <div style={{ padding: 16, textAlign: 'center', color: B.grayMid, fontSize: 13 }}>No credits on your account</div>
+            <div style={{ padding: 16, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>No credits on your account</div>
           )}
         </div>
       )}
@@ -3472,9 +3472,9 @@ function BillingTab({ customer }) {
           {currentYear} Summary
         </div>
         <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>
-          ${ytdTotal.toFixed(2)} <span style={{ fontSize: 13, fontWeight: 500, color: B.grayMid }}>across {ytdPayments.length} payment{ytdPayments.length !== 1 ? 's' : ''}</span>
+          ${ytdTotal.toFixed(2)} <span style={{ fontSize: 14, fontWeight: 500, color: B.grayMid }}>across {ytdPayments.length} payment{ytdPayments.length !== 1 ? 's' : ''}</span>
         </div>
-        <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4 }}>
+        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4 }}>
           ${ytdRecurring.toFixed(2)} WaveGuard {tierName} · ${ytdOneTime.toFixed(2)} one-time services
         </div>
       </div>
@@ -3486,17 +3486,17 @@ function BillingTab({ customer }) {
         {/* Filters */}
         <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Year</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Year</span>
             <PillFilter options={['2025', '2026', 'All']} value={yearFilter} onChange={setYearFilter} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Type</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Type</span>
             <PillFilter options={['All', 'Recurring', 'One-Time']} value={typeFilter} onChange={setTypeFilter} />
           </div>
         </div>
 
         {filteredPayments.length === 0 && (
-          <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 13 }}>No payments match your filters</div>
+          <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>No payments match your filters</div>
         )}
         {filteredPayments.map(p => (
           <div key={p.id} style={{
@@ -3504,8 +3504,8 @@ function BillingTab({ customer }) {
             padding: '12px 0', borderBottom: `1px solid ${B.grayLight}`,
           }}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{p.description}</div>
-              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{p.description}</div>
+              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
                 {parseDate(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 {p.lastFour && ` · ${p.cardBrand} ••••${p.lastFour}`}
               </div>
@@ -3513,14 +3513,14 @@ function BillingTab({ customer }) {
               {p.status === 'failed' && (
                 <button style={{
                   marginTop: 6, padding: '4px 12px', borderRadius: 6, border: `1px solid ${B.red}`,
-                  background: 'transparent', color: B.red, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                  background: 'transparent', color: B.red, fontSize: 12, fontWeight: 600, cursor: 'pointer',
                 }}>Update Payment Method</button>
               )}
             </div>
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${p.amount.toFixed(2)}</div>
               <span style={{
-                fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
+                fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
                 padding: '3px 8px', borderRadius: 20,
                 ...statusBadge(p.status),
               }}>{p.status}</span>
@@ -3580,7 +3580,7 @@ function BillingTab({ customer }) {
 
         <button onClick={saveBillingPrefs} disabled={billingPrefsSaving} style={{
           ...BUTTON_BASE, padding: '10px 20px', background: B.wavesBlue, color: '#fff',
-          fontSize: 13, opacity: billingPrefsSaving ? 0.6 : 1, width: '100%',
+          fontSize: 14, opacity: billingPrefsSaving ? 0.6 : 1, width: '100%',
         }}>
           {billingPrefsSaving ? 'Saving...' : 'Save Billing Preferences'}
         </button>
@@ -3627,7 +3627,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
           placeholder={placeholder}
           style={{
             width: '100%', padding: '11px 40px 11px 14px', borderRadius: 10,
-            border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+            border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
             color: B.navy, outline: 'none', boxSizing: 'border-box',
           }}
           onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -3719,7 +3719,7 @@ function ServicePrefsSection() {
 
   return (
     <PropertySection title=" Service preferences">
-      <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 10, lineHeight: 1.5 }}>
         Both on by default. Toggle either off if you'd rather skip it — we'll update your next work order and the office will be notified.
       </div>
       {rows.map((r) => {
@@ -3824,7 +3824,7 @@ function PropertyTab({ customer }) {
       rows={rows}
       style={{
         width: '100%', padding: '11px 14px', borderRadius: 10,
-        border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+        border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
         color: B.navy, outline: 'none', boxSizing: 'border-box', resize: 'vertical',
       }}
       onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -3842,7 +3842,7 @@ function PropertyTab({ customer }) {
         placeholder={placeholder}
         style={{
           width: '100%', padding: '11px 14px', borderRadius: 10,
-          border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+          border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
           color: B.navy, outline: 'none', boxSizing: 'border-box',
         }}
         onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -3859,7 +3859,7 @@ function PropertyTab({ customer }) {
           position: 'fixed', top: 70, left: '50%', transform: 'translateX(-50%)',
           padding: '8px 20px', borderRadius: 20, zIndex: 200,
           background: saveStatus === 'saved' ? B.green : saveStatus === 'error' ? B.red : B.wavesBlue,
-          color: '#fff', fontSize: 13, fontWeight: 600,
+          color: '#fff', fontSize: 14, fontWeight: 600,
           boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
           transition: 'opacity 0.3s',
           opacity: saveStatus ? 1 : 0,
@@ -3895,7 +3895,7 @@ function PropertyTab({ customer }) {
           <div style={{ fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading }}>
             {customer.address?.line1}
           </div>
-          <div style={{ fontSize: 13, opacity: 0.8, marginTop: 4 }}>
+          <div style={{ fontSize: 14, opacity: 0.8, marginTop: 4 }}>
             {customer.address?.city}, {customer.address?.state} {customer.address?.zip}
           </div>
           <div style={{ display: 'flex', gap: 16, marginTop: 14, flexWrap: 'wrap' }}>
@@ -3912,7 +3912,7 @@ function PropertyTab({ customer }) {
             ))}
           </div>
           {updatedAt && (
-            <div style={{ fontSize: 11, color: B.blueLight, marginTop: 12 }}>{updatedAt}</div>
+            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 12 }}>{updatedAt}</div>
           )}
         </div>
       </div>
@@ -3951,7 +3951,7 @@ function PropertyTab({ customer }) {
           <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Parking Notes</div>
           {textArea('parkingNotes', 'e.g., Park in driveway, HOA enforces no street parking')}
         </div>
-        <div style={{ fontSize: 11, color: B.grayMid, fontStyle: 'italic', marginTop: 4 }}>
+        <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 4 }}>
            Only visible to your assigned technician on service day
         </div>
       </PropertySection>
@@ -3990,7 +3990,7 @@ function PropertyTab({ customer }) {
                   marginBottom: 14, padding: 14, borderRadius: 12,
                   background: B.offWhite, border: `1px solid ${B.grayLight}`,
                 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 10 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 10 }}>
                     Pet {idx + 1}
                   </div>
                   <div style={{ marginBottom: 10 }}>
@@ -4002,7 +4002,7 @@ function PropertyTab({ customer }) {
                       placeholder="e.g., Max"
                       style={{
                         width: '100%', padding: '11px 14px', borderRadius: 10,
-                        border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+                        border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
                         color: B.navy, outline: 'none', boxSizing: 'border-box',
                       }}
                       onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -4031,7 +4031,7 @@ function PropertyTab({ customer }) {
                       placeholder="e.g., Golden Retriever"
                       style={{
                         width: '100%', padding: '11px 14px', borderRadius: 10,
-                        border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+                        border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
                         color: B.navy, outline: 'none', boxSizing: 'border-box',
                       }}
                       onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -4116,8 +4116,8 @@ function PropertyTab({ customer }) {
           padding: 14, borderRadius: 12, background: B.offWhite,
           border: `1px solid ${B.grayLight}`,
         }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Blackout Dates</div>
-          <div style={{ fontSize: 11, color: B.grayMid, marginBottom: 10 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Blackout Dates</div>
+          <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 10 }}>
             Do not service between these dates (vacation, events, etc.)
           </div>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
@@ -4129,7 +4129,7 @@ function PropertyTab({ customer }) {
                 onChange={e => updateField('blackoutStart', e.target.value || null)}
                 style={{
                   width: '100%', padding: '11px 14px', borderRadius: 10,
-                  border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+                  border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
                   color: B.navy, outline: 'none', boxSizing: 'border-box',
                 }}
                 onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -4144,7 +4144,7 @@ function PropertyTab({ customer }) {
                 onChange={e => updateField('blackoutEnd', e.target.value || null)}
                 style={{
                   width: '100%', padding: '11px 14px', borderRadius: 10,
-                  border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+                  border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
                   color: B.navy, outline: 'none', boxSizing: 'border-box',
                 }}
                 onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -4158,7 +4158,7 @@ function PropertyTab({ customer }) {
       {/* SECTION 4 — Irrigation */}
       <PropertySection title=" Irrigation">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>Has irrigation system?</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Has irrigation system?</div>
           <div onClick={() => updateField('irrigationSystem', !prefs.irrigationSystem)} style={{
             width: 44, height: 24, borderRadius: 12, cursor: 'pointer',
             background: prefs.irrigationSystem ? B.wavesBlue : B.grayLight,
@@ -4211,7 +4211,7 @@ function PropertyTab({ customer }) {
               />
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>Rain sensor installed?</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Rain sensor installed?</div>
               <div onClick={() => updateField('rainSensor', !prefs.rainSensor)} style={{
                 width: 44, height: 24, borderRadius: 12, cursor: 'pointer',
                 background: prefs.rainSensor ? B.wavesBlue : B.grayLight,
@@ -4322,7 +4322,7 @@ function WeatherPestWidget({ customer, nextService }) {
       background: `linear-gradient(135deg, ${B.navy}, ${B.navyLight})`,
       borderRadius: 16, padding: 24, color: '#fff', textAlign: 'center',
     }}>
-      <div style={{ fontSize: 13, opacity: 0.7 }}>Loading weather data...</div>
+      <div style={{ fontSize: 14, opacity: 0.7 }}>Loading weather data...</div>
     </div>
   );
 
@@ -4367,15 +4367,15 @@ function WeatherPestWidget({ customer, nextService }) {
       {/* Weather header */}
       <div style={{ padding: '18px 20px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.blueLight }}>
+          <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.blueLight }}>
             {localizedLocation}
           </div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
             <span style={{ fontSize: 42, fontWeight: 800, fontFamily: FONTS.ui }}>{weather.temp}°</span>
             <span style={{ fontSize: 14, opacity: 0.8 }}>F</span>
           </div>
-          <div style={{ fontSize: 13, color: '#fff', marginTop: 2 }}>{weather.forecast}</div>
-          <div style={{ fontSize: 11, color: B.blueLight, marginTop: 2 }}>
+          <div style={{ fontSize: 14, color: '#fff', marginTop: 2 }}>{weather.forecast}</div>
+          <div style={{ fontSize: 12, color: B.blueLight, marginTop: 2 }}>
             Tonight: {weather.nightTemp}° · Humidity: {weather.humidity}% · Wind: {weather.wind}
           </div>
         </div>
@@ -4395,7 +4395,7 @@ function WeatherPestWidget({ customer, nextService }) {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                 <span style={{ fontSize: 12, opacity: 0.9, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon name={p.icon} size={14} strokeWidth={2} /> {p.label}</span>
                 <span style={{
-                  fontSize: 11, fontWeight: 800, letterSpacing: 0.5,
+                  fontSize: 12, fontWeight: 800, letterSpacing: 0.5,
                   padding: '2px 8px', borderRadius: 10,
                   background: `${p.color}33`, color: p.color,
                 }}>{p.level}</span>
@@ -4408,7 +4408,7 @@ function WeatherPestWidget({ customer, nextService }) {
                 }} />
               </div>
               {action && (
-                <div style={{ fontSize: 11, color: B.blueLight, marginTop: 4, lineHeight: 1.4, paddingLeft: 2 }}>
+                <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4, lineHeight: 1.4, paddingLeft: 2 }}>
                   {action}
                 </div>
               )}
@@ -4428,7 +4428,7 @@ function WeatherPestWidget({ customer, nextService }) {
           <div style={{ fontSize: 12, fontWeight: 700 }}>
             Irrigation: {weather.irrigationRecommendation.inches}" recommended
           </div>
-          <div style={{ fontSize: 11, color: B.blueLight }}>{weather.irrigationRecommendation.note}</div>
+          <div style={{ fontSize: 12, color: B.blueLight }}>{weather.irrigationRecommendation.note}</div>
         </div>
       </div>
 
@@ -4476,7 +4476,7 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
                   {p.description}{p.description.length >= 200 ? '...' : ''}
                 </div>
               )}
-              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
+              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6 }}>
                 {pubDate && !isNaN(pubDate) ? pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
                 {p.category ? ` · ${p.category}` : ''}
               </div>
@@ -4551,7 +4551,7 @@ function ContentCard({ post, large }) {
             overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
           }}>{post.title}</div>
           {post.description && large && (
-            <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4, lineHeight: 1.5,
+            <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.5,
               overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
             }}>{post.description}</div>
           )}
@@ -4756,14 +4756,14 @@ function LearnTab({ customer }) {
           </div>
 
           {filteredFaq.length === 0 && faqSearch.trim() && (
-            <div style={{ textAlign: 'center', padding: 20, color: B.grayMid, fontSize: 13 }}>
+            <div style={{ textAlign: 'center', padding: 20, color: B.grayMid, fontSize: 14 }}>
               No results for "{faqSearch}". Try different keywords or text us below.
             </div>
           )}
 
           {filteredFaq.map(cat => (
             <div key={cat.category} style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.grayDark, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.grayDark, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span>{cat.icon}</span> {cat.category}
               </div>
               {cat.questions.map((q, qi) => {
@@ -4779,12 +4779,12 @@ function LearnTab({ customer }) {
                       padding: '12px 14px', cursor: 'pointer',
                       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, flex: 1, paddingRight: 10 }}>{q.q}</div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, flex: 1, paddingRight: 10 }}>{q.q}</div>
                       <span style={{ fontSize: 14, color: B.grayMid, transform: isOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
                     </div>
                     {isOpen && (
                       <div style={{ padding: '0 14px 14px', borderTop: `1px solid ${B.grayLight}` }}>
-                        <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7, marginTop: 10 }}>
+                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.7, marginTop: 10 }}>
                           {personalizeFaqAnswer(q.a)}
                         </div>
                         {(q.a?.toLowerCase().includes('callback') || q.a?.toLowerCase().includes('guarantee')) && (
@@ -4806,9 +4806,9 @@ function LearnTab({ customer }) {
           <div style={{
             textAlign: 'center', padding: 16, background: B.blueSurface, borderRadius: 12, marginTop: 8,
           }}>
-            <div style={{ fontSize: 13, color: B.grayDark }}>Still have questions?</div>
+            <div style={{ fontSize: 14, color: B.grayDark }}>Still have questions?</div>
             <a href="sms:+19412975749" style={{
-              ...BUTTON_BASE, padding: '9px 20px', fontSize: 13, marginTop: 8,
+              ...BUTTON_BASE, padding: '9px 20px', fontSize: 14, marginTop: 8,
               borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
               display: 'inline-flex',
             }}> Text Us</a>
@@ -5050,7 +5050,7 @@ function MyPlanTab({ customer }) {
 
         {/* Bundled services one-liner */}
         <div style={{
-          fontSize: 13, fontWeight: 600, marginTop: 6, opacity: 0.9,
+          fontSize: 14, fontWeight: 600, marginTop: 6, opacity: 0.9,
           display: 'flex', alignItems: 'center', gap: 6,
         }}>
           {bundleSummary} — {numServices} service{numServices > 1 ? 's' : ''} bundled
@@ -5062,7 +5062,7 @@ function MyPlanTab({ customer }) {
             marginTop: 10, padding: '8px 14px', borderRadius: 10,
             background: 'rgba(255,255,255,0.15)', backdropFilter: 'blur(4px)',
             display: 'inline-flex', alignItems: 'center', gap: 8,
-            fontSize: 13, fontWeight: 600,
+            fontSize: 14, fontWeight: 600,
           }}>
             <Icon name="calendar" size={16} strokeWidth={1.75} />
             Next visit: {parseDate(nextService.date).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
@@ -5072,19 +5072,19 @@ function MyPlanTab({ customer }) {
 
         <div style={{ display: 'flex', gap: 20, marginTop: 16, flexWrap: 'wrap' }}>
           <div>
-            <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Monthly Rate</div>
+            <div style={{ fontSize: 12, color: tier?.darkText ? B.grayMid : B.blueLight }}>Monthly Rate</div>
             <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui }}>${Number(monthlyRate || 0).toFixed(2)}</div>
           </div>
           <div>
-            <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Bundle Discount</div>
+            <div style={{ fontSize: 12, color: tier?.darkText ? B.grayMid : B.blueLight }}>Bundle Discount</div>
             <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui }}>{Math.round(discount * 100)}%</div>
           </div>
           <div>
-            <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Member Since</div>
+            <div style={{ fontSize: 12, color: tier?.darkText ? B.grayMid : B.blueLight }}>Member Since</div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>{customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}</div>
           </div>
           <div>
-            <div style={{ fontSize: 11, color: tier?.darkText ? B.grayMid : B.blueLight }}>Loyalty</div>
+            <div style={{ fontSize: 12, color: tier?.darkText ? B.grayMid : B.blueLight }}>Loyalty</div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>{memberMonths} months</div>
           </div>
         </div>
@@ -5107,7 +5107,7 @@ function MyPlanTab({ customer }) {
 
       {/* Section 2 — Included Services Breakdown */}
       <SectionHeading>Your Included Services</SectionHeading>
-      <div style={{ fontSize: 13, color: B.grayMid }}>{tierName} includes {numServices} recurring service{numServices > 1 ? 's' : ''}</div>
+      <div style={{ fontSize: 14, color: B.grayMid }}>{tierName} includes {numServices} recurring service{numServices > 1 ? 's' : ''}</div>
 
       {includedServices.map(svc => {
         const completedMonths = getCompletedMonths(svc.id);
@@ -5127,7 +5127,7 @@ function MyPlanTab({ customer }) {
                   <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{svc.name}</div>
                   <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{svc.frequencies[0]}</div>
                   {/* Service cycle tracker */}
-                  <div style={{ fontSize: 11, color: B.wavesBlue, fontWeight: 600, marginTop: 3 }}>
+                  <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginTop: 3 }}>
                     {completedVisits} of {totalVisits} visits completed this year
                   </div>
                   {/* Inline lawn health indicator for lawn care */}
@@ -5137,7 +5137,7 @@ function MyPlanTab({ customer }) {
                     const improving = avg >= initialAvg;
                     return (
                       <div style={{
-                        fontSize: 11, fontWeight: 700, marginTop: 3,
+                        fontSize: 12, fontWeight: 700, marginTop: 3,
                         color: improving ? B.green : B.orange,
                       }}>
                          Lawn health: {avg}% {improving ? `(up from ${initialAvg}%)` : `(from ${initialAvg}%)`}
@@ -5147,7 +5147,7 @@ function MyPlanTab({ customer }) {
                 </div>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: 11, color: B.grayMid, textDecoration: 'line-through' }}>${(svc.basePrice * 12).toFixed(2)}/yr</div>
+                <div style={{ fontSize: 12, color: B.grayMid, textDecoration: 'line-through' }}>${(svc.basePrice * 12).toFixed(2)}/yr</div>
                 <div style={{ fontSize: 16, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
                   ${annualSavingsForService > 0 ? `${annualSavingsForService.toFixed(2)}/yr saved` : `${(svc.basePrice * 12).toFixed(2)}/yr`}
                 </div>
@@ -5165,12 +5165,12 @@ function MyPlanTab({ customer }) {
 
             {expandedService === svc.id && (
               <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
-                <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7 }}>{svc.description}</div>
-                <div style={{ marginTop: 12, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.grayMid }}>Products Used</div>
+                <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.7 }}>{svc.description}</div>
+                <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.grayMid }}>Products Used</div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
                   {svc.products.map((p, i) => (
                     <span key={i} style={{
-                      padding: '4px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
+                      padding: '4px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600,
                       background: `${B.wavesBlue}12`, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}22`,
                     }}>{p}</span>
                   ))}
@@ -5298,7 +5298,7 @@ function MyPlanTab({ customer }) {
 
       {/* Section 3 — Available Add-Ons */}
       <SectionHeading>Available Add-Ons</SectionHeading>
-      <div style={{ fontSize: 13, color: B.grayMid }}>Enhance your plan — your {Math.round(discount * 100)}% {tierName} discount applies</div>
+      <div style={{ fontSize: 14, color: B.grayMid }}>Enhance your plan — your {Math.round(discount * 100)}% {tierName} discount applies</div>
 
       {availableAddOns.map(addon => (
         <Card key={addon.id}>
@@ -5317,7 +5317,7 @@ function MyPlanTab({ customer }) {
           </div>
           {expandedAddon === addon.id && (
             <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
-              <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.7 }}>{addon.desc}</div>
+              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.7 }}>{addon.desc}</div>
               {discount > 0 && addon.id !== 'wdo_inspection' && (
                 <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 8 }}>
                   Your price: ${(addon.price * (1 - discount)).toFixed(2)}{addon.unit} (was ${Number(addon.price).toFixed(2)}{addon.unit})
@@ -5325,7 +5325,7 @@ function MyPlanTab({ customer }) {
               )}
               {addonRequested[addon.id] ? (
                 <div style={{
-                  marginTop: 12, padding: '10px 18px', borderRadius: 12, fontSize: 13,
+                  marginTop: 12, padding: '10px 18px', borderRadius: 12, fontSize: 14,
                   background: `${B.green}20`, color: B.green, fontWeight: 600,
                   display: 'flex', alignItems: 'center', gap: 8,
                 }}>
@@ -5349,7 +5349,7 @@ function MyPlanTab({ customer }) {
                     }
                   }}
                   style={{
-                    ...BUTTON_BASE, marginTop: 12, padding: '9px 18px', fontSize: 13,
+                    ...BUTTON_BASE, marginTop: 12, padding: '9px 18px', fontSize: 14,
                     background: B.yellow, color: B.blueDeeper,
                     opacity: addonSubmitting[addon.id] ? 0.6 : 1,
                     cursor: addonSubmitting[addon.id] ? 'wait' : 'pointer',
@@ -5386,10 +5386,10 @@ function MyPlanTab({ customer }) {
                 }}></div>
                 <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>{tn}</div>
                 <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, marginTop: 4 }}>{Math.round(disc * 100)}%</div>
-                <div style={{ fontSize: 11, color: B.grayMid }}>discount</div>
+                <div style={{ fontSize: 12, color: B.grayMid }}>discount</div>
 
                 {/* Estimated monthly cost */}
-                <div style={{ fontSize: 13, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, marginTop: 6 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, marginTop: 6 }}>
                   ~${tierMonthly.toFixed(2)}/mo
                 </div>
 
@@ -5401,10 +5401,10 @@ function MyPlanTab({ customer }) {
                 </div>
 
                 {isCurrent ? (
-                  <div style={{ marginTop: 10, fontSize: 11, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '4px 10px', borderRadius: 20 }}>Current Plan</div>
+                  <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '4px 10px', borderRadius: 20 }}>Current Plan</div>
                 ) : i > tierIdx ? (
                   upgradeRequested[tn] ? (
-                    <div style={{ marginTop: 10, fontSize: 11, fontWeight: 600, color: B.green, padding: '4px 10px' }}>
+                    <div style={{ marginTop: 10, fontSize: 12, fontWeight: 600, color: B.green, padding: '4px 10px' }}>
                        Request sent
                     </div>
                   ) : (
@@ -5424,7 +5424,7 @@ function MyPlanTab({ customer }) {
                           }
                         }}
                         style={{
-                          ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 11,
+                          ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 12,
                           background: B.yellow, color: B.blueDeeper,
                           opacity: upgradeSubmitting[tn] ? 0.6 : 1,
                           cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
@@ -5460,7 +5460,7 @@ function MyPlanTab({ customer }) {
         <div style={{ fontSize: 36, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
           ${annualSavings.toFixed(2)}<span style={{ fontSize: 16 }}>/year</span>
         </div>
-        <div style={{ fontSize: 13, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
           Full price for {numServices} service{numServices > 1 ? 's' : ''}: <strong>${totalFullPrice.toFixed(2)}/yr</strong><br/>
           Your {Math.round(discount * 100)}% bundle rate: <strong>${(totalFullPrice - annualSavings).toFixed(2)}/yr</strong> (~${((totalFullPrice - annualSavings) / 12).toFixed(2)}/mo)<br/>
           You keep <strong style={{ color: B.green }}>${annualSavings.toFixed(2)}</strong> in your pocket.
@@ -5486,7 +5486,7 @@ function MyPlanTab({ customer }) {
               },
               tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },
             ].filter(Boolean).map((item, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: B.grayDark, lineHeight: 1.5 }}>
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
                 <Icon name={item.icon} size={16} strokeWidth={1.75} style={{ flexShrink: 0 }} />
                 {item.text}
               </div>
@@ -5522,10 +5522,10 @@ function MyPlanTab({ customer }) {
                 border: `2.5px solid ${idx === planTimeline.length - 1 ? B.wavesBlue : B.blueLight}`,
                 zIndex: 1,
               }} />
-              <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 600 }}>
+              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600 }}>
                 {!isNaN(event.date) ? event.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}
               </div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: B.navy, marginTop: 2 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginTop: 2 }}>
                 {event.icon} {event.label}
               </div>
             </div>
@@ -5542,8 +5542,8 @@ function MyPlanTab({ customer }) {
               <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#fff' }} />
             </div>
             <div style={{ paddingTop: planTimeline.length > 0 ? 20 : 0 }}>
-              <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 600 }}>Now</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: B.green, marginTop: 2 }}>
+              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600 }}>Now</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.green, marginTop: 2 }}>
                 Active — {tierName} WaveGuard · No contract
               </div>
             </div>
@@ -5578,11 +5578,11 @@ function MyPlanTab({ customer }) {
               We'll hold your services and billing. Your spot stays reserved.
             </div>
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Duration</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Duration</div>
               <div style={{ display: 'flex', gap: 8 }}>
                 {['1', '2'].map(d => (
                   <button key={d} onClick={() => setPauseDuration(d)} style={{
-                    padding: '8px 18px', borderRadius: 10, fontSize: 13, fontWeight: 600,
+                    padding: '8px 18px', borderRadius: 10, fontSize: 14, fontWeight: 600,
                     border: `1.5px solid ${pauseDuration === d ? B.wavesBlue : B.grayLight}`,
                     background: pauseDuration === d ? `${B.wavesBlue}12` : B.white,
                     color: pauseDuration === d ? B.wavesBlue : B.grayMid,
@@ -5592,13 +5592,13 @@ function MyPlanTab({ customer }) {
               </div>
             </div>
             <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Reason (optional)</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Reason (optional)</div>
               <input
                 value={pauseReason}
                 onChange={e => setPauseReason(e.target.value)}
                 placeholder="Traveling, seasonal, etc."
                 style={{
-                  width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 13,
+                  width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 14,
                   border: `1px solid ${B.grayLight}`, fontFamily: FONTS.body, outline: 'none',
                   boxSizing: 'border-box',
                 }}
@@ -5625,13 +5625,13 @@ function MyPlanTab({ customer }) {
                   }
                 }}
                 style={{
-                  ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                  ...BUTTON_BASE, padding: '9px 18px', fontSize: 14,
                   background: B.orange, color: '#fff',
                   opacity: pauseSubmitting ? 0.6 : 1,
                   cursor: pauseSubmitting ? 'wait' : 'pointer',
                 }}>{pauseSubmitting ? 'Sending…' : 'Submit Pause Request'}</button>
               <button onClick={() => setShowPauseForm(false)} style={{
-                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                ...BUTTON_BASE, padding: '9px 18px', fontSize: 14,
                 background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
               }}>Never mind</button>
             </div>
@@ -5639,7 +5639,7 @@ function MyPlanTab({ customer }) {
         )}
 
         {pauseSubmitted && (
-          <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.green}20`, fontSize: 13, color: B.green, fontWeight: 600 }}>
+          <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.green}20`, fontSize: 14, color: B.green, fontWeight: 600 }}>
              Pause request submitted — we'll confirm within 1 business day.
           </div>
         )}
@@ -5652,7 +5652,7 @@ function MyPlanTab({ customer }) {
               Before you cancel, would you consider pausing instead? Your discount and spot stay reserved.
             </div>
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Tell us why</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Tell us why</div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
                   <button key={r} onClick={() => setCancelReason(r)} style={{
@@ -5672,7 +5672,7 @@ function MyPlanTab({ customer }) {
                 placeholder="Anything else you'd like us to know?"
                 rows={3}
                 style={{
-                  width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 13,
+                  width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 14,
                   border: `1px solid ${B.grayLight}`, fontFamily: FONTS.body, outline: 'none',
                   resize: 'vertical', boxSizing: 'border-box',
                 }}
@@ -5699,13 +5699,13 @@ function MyPlanTab({ customer }) {
                   }
                 }}
                 style={{
-                  ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                  ...BUTTON_BASE, padding: '9px 18px', fontSize: 14,
                   background: B.grayMid, color: '#fff',
                   opacity: cancelSubmitting ? 0.6 : 1,
                   cursor: cancelSubmitting ? 'wait' : 'pointer',
                 }}>{cancelSubmitting ? 'Sending…' : 'Submit Cancellation Request'}</button>
               <button onClick={() => setShowCancelForm(false)} style={{
-                ...BUTTON_BASE, padding: '9px 18px', fontSize: 13,
+                ...BUTTON_BASE, padding: '9px 18px', fontSize: 14,
                 background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
               }}>Keep My Plan</button>
             </div>
@@ -5713,7 +5713,7 @@ function MyPlanTab({ customer }) {
         )}
 
         {cancelSubmitted && (
-          <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.grayMid}15`, fontSize: 13, color: B.grayDark, fontWeight: 600 }}>
+          <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.grayMid}15`, fontSize: 14, color: B.grayDark, fontWeight: 600 }}>
              Cancellation request received — we'll reach out to finalize.
           </div>
         )}
@@ -6075,7 +6075,7 @@ function ServiceTracker() {
               )}
             </div>
             {stepTs && (
-              <div style={{ fontSize: 11, color: B.textCaption, marginTop: 2 }}>
+              <div style={{ fontSize: 12, color: B.textCaption, marginTop: 2 }}>
                 {techName} · {new Date(stepTs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
               </div>
             )}
@@ -6114,7 +6114,7 @@ function ServiceTracker() {
               fontSize: 14, fontWeight: 800, fontFamily: FONTS.heading, flexShrink: 0,
             }}>{techInitials}</div>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{techName}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{techName}</div>
               <span style={{ display: 'inline-block', fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: B.yellow, color: B.blueDeeper, fontFamily: FONTS.ui, marginTop: 1 }}>{svcType}</span>
             </div>
           </div>
@@ -6134,7 +6134,7 @@ function ServiceTracker() {
           {/* Pre-arrival checklist */}
           {step < 5 && (
             <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Before Your Tech Arrives</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Before Your Tech Arrives</div>
               {[
                 propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
                   ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
@@ -6165,7 +6165,7 @@ function ServiceTracker() {
                   paddingLeft: item.ok ? 0 : 6,
                 }}>
                   <Icon name={item.icon} size={12} strokeWidth={1.75} style={{ flexShrink: 0 }} />
-                  <span style={{ fontSize: 11, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.grayDark : B.navy, lineHeight: 1.3 }}>{item.text}</span>
+                  <span style={{ fontSize: 12, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.grayDark : B.navy, lineHeight: 1.3 }}>{item.text}</span>
                 </div>
               ))}
             </div>
@@ -6177,12 +6177,12 @@ function ServiceTracker() {
               padding: '7px 12px', cursor: 'pointer',
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
             }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>What to Expect</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>What to Expect</span>
               <span style={{ fontSize: 12, color: B.grayMid, transform: showExpect ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
             </div>
             {showExpect && (
               <div style={{ padding: '0 12px 8px', borderTop: `1px solid ${B.grayLight}` }}>
-                <div style={{ fontSize: 11, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>{whatToExpect}</div>
+                <div style={{ fontSize: 12, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>{whatToExpect}</div>
               </div>
             )}
           </div>
@@ -6197,7 +6197,7 @@ function ServiceTracker() {
                     <div style={{ width: 6, height: 6, borderRadius: '50%', background: B.wavesBlue }} />
                     {i < notes.length - 1 && <div style={{ width: 1.5, flex: 1, background: B.bluePale, marginTop: 1 }} />}
                   </div>
-                  <div><div style={{ fontSize: 11, color: B.navy, fontWeight: 500, lineHeight: 1.3 }}>{n.note}</div><div style={{ fontSize: 9, color: B.textCaption }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
+                  <div><div style={{ fontSize: 12, color: B.navy, fontWeight: 500, lineHeight: 1.3 }}>{n.note}</div><div style={{ fontSize: 9, color: B.textCaption }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
                 </div>
               ))}
             </div>
@@ -6206,15 +6206,15 @@ function ServiceTracker() {
           {/* Completion summary */}
           {step === 7 && summary && (
             <div style={{ padding: '8px 12px', borderRadius: 10, background: `${B.green}20`, border: `1px solid ${B.green}33` }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: B.green, marginBottom: 4 }}>Service Summary</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginBottom: 4 }}>Service Summary</div>
               {summary.productsApplied?.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
                   <div style={{ fontSize: 10, color: B.grayDark, fontWeight: 600, marginBottom: 3 }}>Products:</div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>{summary.productsApplied.map((p, i) => (<span key={i} style={{ fontSize: 9, padding: '2px 6px', borderRadius: 5, background: B.white, color: B.navy, fontWeight: 600 }}>{p}</span>))}</div>
                 </div>
               )}
-              {summary.areasTreated?.length > 0 && <div style={{ fontSize: 11, color: B.grayDark, marginBottom: 4 }}><strong>Areas:</strong> {summary.areasTreated.join(' · ')}</div>}
-              {summary.recommendations && <div style={{ fontSize: 11, color: B.grayDark, fontStyle: 'italic' }}> {summary.recommendations}</div>}
+              {summary.areasTreated?.length > 0 && <div style={{ fontSize: 12, color: B.grayDark, marginBottom: 4 }}><strong>Areas:</strong> {summary.areasTreated.join(' · ')}</div>}
+              {summary.recommendations && <div style={{ fontSize: 12, color: B.grayDark, fontStyle: 'italic' }}> {summary.recommendations}</div>}
               {summary.nextVisitDate && <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, marginTop: 4 }}>Next visit: {new Date(summary.nextVisitDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>}
             </div>
           )}
@@ -6224,9 +6224,9 @@ function ServiceTracker() {
       {/* Demo controls */}
       {step < 7 && (
         <div style={{ padding: '6px 14px 8px', background: B.white, borderTop: `1px solid ${B.grayLight}`, display: 'flex', gap: 6, alignItems: 'center' }}>
-          <button onClick={handleAdvance} style={{ ...BUTTON_BASE, padding: '8px 14px', fontSize: 11, background: B.yellow, color: B.blueDeeper, flexShrink: 0 }}>Next Step →</button>
-          <input type="text" value={demoNote} onChange={e => setDemoNote(e.target.value)} placeholder="Add note..." style={{ flex: 1, padding: '7px 10px', borderRadius: 8, fontSize: 11, border: `1px solid ${B.grayLight}`, outline: 'none', fontFamily: FONTS.body, color: B.navy, boxSizing: 'border-box' }} onKeyDown={e => e.key === 'Enter' && handleAddNote()} />
-          <button onClick={handleAddNote} disabled={!demoNote.trim()} style={{ ...BUTTON_BASE, padding: '8px 10px', fontSize: 11, background: B.wavesBlue, color: '#fff', flexShrink: 0, opacity: demoNote.trim() ? 1 : 0.5 }}>+Note</button>
+          <button onClick={handleAdvance} style={{ ...BUTTON_BASE, padding: '8px 14px', fontSize: 12, background: B.yellow, color: B.blueDeeper, flexShrink: 0 }}>Next Step →</button>
+          <input type="text" value={demoNote} onChange={e => setDemoNote(e.target.value)} placeholder="Add note..." style={{ flex: 1, padding: '7px 10px', borderRadius: 8, fontSize: 12, border: `1px solid ${B.grayLight}`, outline: 'none', fontFamily: FONTS.body, color: B.navy, boxSizing: 'border-box' }} onKeyDown={e => e.key === 'Enter' && handleAddNote()} />
+          <button onClick={handleAddNote} disabled={!demoNote.trim()} style={{ ...BUTTON_BASE, padding: '8px 10px', fontSize: 12, background: B.wavesBlue, color: '#fff', flexShrink: 0, opacity: demoNote.trim() ? 1 : 0.5 }}>+Note</button>
         </div>
       )}
     </div>
@@ -6358,7 +6358,7 @@ function ReferTab({ customer, onSwitchTab }) {
         textAlign: 'center', padding: '10px 16px', borderRadius: 12,
         background: `${B.green}08`, border: `1px solid ${B.green}22`,
       }}>
-        <div style={{ fontSize: 13, color: B.green, fontWeight: 600 }}>
+        <div style={{ fontSize: 14, color: B.green, fontWeight: 600 }}>
           247 Waves customers have referred neighbors this year
         </div>
       </div>
@@ -6372,7 +6372,7 @@ function ReferTab({ customer, onSwitchTab }) {
         }}>
           <div style={{ fontSize: 28 }}></div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>
               You're {referralsToNext} referral{referralsToNext !== 1 ? 's' : ''} away from {nextMilestone.title}!
             </div>
             <div style={{
@@ -6397,7 +6397,7 @@ function ReferTab({ customer, onSwitchTab }) {
         background: B.white, borderRadius: 16, padding: 20,
         border: `1px solid ${B.grayLight}`,
       }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>Your Referral Code</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>Your Referral Code</div>
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10,
           background: B.offWhite, borderRadius: 12, padding: '12px 16px',
@@ -6426,7 +6426,7 @@ function ReferTab({ customer, onSwitchTab }) {
             background: '#25D366', color: '#fff', textDecoration: 'none', textAlign: 'center',
           }}>WhatsApp</a>
         </div>
-        <div style={{ fontSize: 11, color: B.grayMid, marginTop: 8, textAlign: 'center' }}>
+        <div style={{ fontSize: 12, color: B.grayMid, marginTop: 8, textAlign: 'center' }}>
           Share link: {shareLink}
         </div>
       </div>
@@ -6436,7 +6436,7 @@ function ReferTab({ customer, onSwitchTab }) {
         background: B.white, borderRadius: 16, padding: 20,
         border: `1px solid ${B.grayLight}`,
       }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Send an Invite</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Send an Invite</div>
         <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 14 }}>
           Enter their name and number — we'll text them on your behalf.
         </div>
@@ -6444,7 +6444,7 @@ function ReferTab({ customer, onSwitchTab }) {
         {submitted && (
           <div style={{
             padding: 14, borderRadius: 12, background: `${B.green}20`, marginBottom: 14,
-            fontSize: 13, fontWeight: 600, color: B.green,
+            fontSize: 14, fontWeight: 600, color: B.green,
           }}>Invite sent! We texted them your referral.</div>
         )}
 
@@ -6475,7 +6475,7 @@ function ReferTab({ customer, onSwitchTab }) {
         {(name.trim() || phone.trim()) && (
           <div style={{ marginBottom: 12 }}>
             <button onClick={() => setShowPreview(!showPreview)} style={{
-              ...BUTTON_BASE, padding: '6px 12px', fontSize: 11, borderRadius: 8,
+              ...BUTTON_BASE, padding: '6px 12px', fontSize: 12, borderRadius: 8,
               background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
             }}>{showPreview ? 'Hide preview' : 'Preview what they will receive'}</button>
             {showPreview && (
@@ -6506,7 +6506,7 @@ function ReferTab({ customer, onSwitchTab }) {
           background: B.white, borderRadius: 16, padding: 20,
           border: `1px solid ${B.grayLight}`,
         }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
             Your Referrals
           </div>
           <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginBottom: 14 }}>
@@ -6523,7 +6523,7 @@ function ReferTab({ customer, onSwitchTab }) {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{r.refereeName}</div>
-                    <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>
+                    <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
                       {r.refereePhone} · {new Date(r.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                     </div>
                   </div>
@@ -6543,7 +6543,7 @@ function ReferTab({ customer, onSwitchTab }) {
                   ))}
                 </div>
                 {r.referrerCredited && (
-                  <div style={{ fontSize: 11, color: B.green, fontWeight: 600, marginTop: 6 }}>
+                  <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 6 }}>
                     ${r.creditAmount} credit applied to your bill
                   </div>
                 )}
@@ -6558,7 +6558,7 @@ function ReferTab({ customer, onSwitchTab }) {
         background: B.offWhite, borderRadius: 14, padding: 18,
         border: `1px solid ${B.grayLight}`,
       }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 10 }}>How it works</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 10 }}>How it works</div>
         {[
           { step: '1', text: 'Share your code or send an invite from above' },
           { step: '2', text: 'Your friend gets a text with your referral and $25 off' },
@@ -6574,7 +6574,7 @@ function ReferTab({ customer, onSwitchTab }) {
             <div style={{ fontSize: 12, color: B.grayDark }}>{s.text}</div>
           </div>
         ))}
-        <div style={{ fontSize: 11, color: B.grayMid, marginTop: 8 }}>
+        <div style={{ fontSize: 12, color: B.grayMid, marginTop: 8 }}>
           No limit on referrals — the more you share, the more you save.
         </div>
       </div>
@@ -6737,7 +6737,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             placeholder="Search by document name or date..."
             style={{
               width: '100%', padding: '10px 14px 10px 36px', borderRadius: 10,
-              border: `1px solid ${B.grayLight}`, fontSize: 13, fontFamily: FONTS.body,
+              border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
               color: B.navy, outline: 'none', boxSizing: 'border-box', marginBottom: 10,
             }}
             onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -6748,7 +6748,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
           {typeFilters.map(f => (
             <button key={f.value} onClick={() => setTypeFilter(f.value)} style={{
-              ...BUTTON_BASE, padding: '5px 12px', fontSize: 11, whiteSpace: 'nowrap',
+              ...BUTTON_BASE, padding: '5px 12px', fontSize: 12, whiteSpace: 'nowrap',
               background: typeFilter === f.value ? B.wavesBlue : B.white,
               color: typeFilter === f.value ? '#fff' : B.grayMid,
               border: typeFilter === f.value ? 'none' : `1px solid ${B.grayLight}`,
@@ -6765,7 +6765,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       }}>
         <div style={{ fontSize: 24 }}></div>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{thisYear} Year-to-Date</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{thisYear} Year-to-Date</div>
           <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2 }}>
             {ytdDocs.length} document{ytdDocs.length !== 1 ? 's' : ''} this year
           </div>
@@ -6802,8 +6802,8 @@ function DocumentsTab({ customer, onSwitchTab }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <Icon name="money" size={18} strokeWidth={1.75} />
           <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>Invoices & Receipts</div>
-            <div style={{ fontSize: 11, color: B.grayMid }}>View payment history and invoices</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Invoices & Receipts</div>
+            <div style={{ fontSize: 12, color: B.grayMid }}>View payment history and invoices</div>
           </div>
         </div>
         <button onClick={() => onSwitchTab?.('billing')} style={{
@@ -6817,7 +6817,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         background: B.offWhite, borderRadius: 14, padding: 18,
         border: `1px solid ${B.grayLight}`, textAlign: 'center',
       }}>
-        <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
           Need a specific document? We'll upload it within 24 hours.
         </div>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 12 }}>
@@ -6830,7 +6830,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
           }}>Text</a>
         </div>
-        <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>
+        <div style={{ fontSize: 12, color: B.grayMid, marginTop: 10 }}>
           All pesticide application records and visit reports are automatically generated from your service history.
         </div>
       </div>
@@ -6895,13 +6895,13 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
                     {/* Info — actual date primary, relative secondary */}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{
-                        fontSize: 13, fontWeight: 600, color: B.navy,
+                        fontSize: 14, fontWeight: 600, color: B.navy,
                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                       }}>{doc.title}</div>
                       <div style={{ fontSize: 12, color: B.navy, marginTop: 2, fontWeight: 500 }}>
                         {formatDate(doc.createdAt)}
-                        <span style={{ fontSize: 11, color: B.grayMid, fontWeight: 400 }}> · {relativeTime(doc.createdAt)}</span>
-                        {doc.fileSizeBytes ? <span style={{ fontSize: 11, color: B.grayMid }}> · {formatSize(doc.fileSizeBytes)}</span> : ''}
+                        <span style={{ fontSize: 12, color: B.grayMid, fontWeight: 400 }}> · {relativeTime(doc.createdAt)}</span>
+                        {doc.fileSizeBytes ? <span style={{ fontSize: 12, color: B.grayMid }}> · {formatSize(doc.fileSizeBytes)}</span> : ''}
                       </div>
                       {/* WDO expiration tracking */}
                       {expBadge && (
@@ -6913,12 +6913,12 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
                       )}
                       {/* License number on insurance cert */}
                       {isInsurance && doc.licenseNumber && (
-                        <div style={{ fontSize: 11, color: B.grayDark, marginTop: 3 }}>
+                        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 3 }}>
                           License #: <strong>{doc.licenseNumber}</strong>
                         </div>
                       )}
                       {isInsurance && customer?.licenseNumber && !doc.licenseNumber && (
-                        <div style={{ fontSize: 11, color: B.grayDark, marginTop: 3 }}>
+                        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 3 }}>
                           License #: <strong>{customer.licenseNumber}</strong>
                         </div>
                       )}
@@ -6928,14 +6928,14 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
                     <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                       {isWdo && (
                         <button onClick={() => onShare(doc)} style={{
-                          ...BUTTON_BASE, padding: '5px 8px', fontSize: 11, borderRadius: 8,
+                          ...BUTTON_BASE, padding: '5px 8px', fontSize: 12, borderRadius: 8,
                           background: share === 'copied' ? B.green : B.offWhite,
                           color: share === 'copied' ? '#fff' : B.grayDark,
                           border: share === 'copied' ? 'none' : `1px solid ${B.grayLight}`,
                         }}>{share === 'copied' ? '' : share === 'copying' ? '...' : '↗'}</button>
                       )}
                       <button onClick={() => onDownload(doc)} style={{
-                        ...BUTTON_BASE, padding: '5px 8px', fontSize: 11, borderRadius: 8,
+                        ...BUTTON_BASE, padding: '5px 8px', fontSize: 12, borderRadius: 8,
                         background: B.offWhite, color: B.navy,
                         border: `1px solid ${B.grayLight}`,
                       }}>⬇</button>
@@ -6945,7 +6945,7 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
                   {/* Share with Realtor button for WDO reports */}
                   {isWdo && (
                     <button onClick={() => onShareWithRealtor(doc)} style={{
-                      ...BUTTON_BASE, padding: '6px 14px', fontSize: 11, marginTop: 8,
+                      ...BUTTON_BASE, padding: '6px 14px', fontSize: 12, marginTop: 8,
                       background: B.offWhite, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}33`,
                       display: 'flex', alignItems: 'center', gap: 6,
                     }}>
@@ -7111,7 +7111,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             </span>
           </div>
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 12 }}>Sent to Waves!</div>
-          <div style={{ fontSize: 13, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 14, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
             We'll review your request and text you when it's been assigned.
             {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized — expect a response within 2 hours.' : ''}
           </div>
@@ -7137,7 +7137,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
           {/* Photo Upload — moved to top */}
           <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
                Photos <span style={{ fontWeight: 400, color: B.grayMid }}>(optional, up to 5)</span>
             </div>
             <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{ display: 'none' }} />
@@ -7162,7 +7162,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     position: 'absolute', top: -6, right: -6,
                     width: 22, height: 22, borderRadius: '50%',
                     background: B.red, color: '#fff', border: '2px solid #fff',
-                    cursor: 'pointer', fontSize: 11, display: 'flex',
+                    cursor: 'pointer', fontSize: 12, display: 'flex',
                     alignItems: 'center', justifyContent: 'center', padding: 0,
                   }}></button>
                 </div>
@@ -7182,7 +7182,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
               {problemCategories.map(c => (
                 <button key={c.value} onClick={() => { setCategory(c.value); if (!isProblemCategory) setUrgency('routine'); }} style={{
-                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 13, borderRadius: 12,
+                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 14, borderRadius: 12,
                   background: category === c.value ? B.wavesBlue : B.white,
                   color: category === c.value ? '#fff' : B.grayDark,
                   border: category === c.value ? 'none' : `1px solid ${B.grayLight}`,
@@ -7196,7 +7196,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {requestCategories.map(c => (
                 <button key={c.value} onClick={() => setCategory(c.value)} style={{
-                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 13, borderRadius: 12,
+                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 14, borderRadius: 12,
                   background: category === c.value ? B.teal : B.white,
                   color: category === c.value ? '#fff' : B.grayDark,
                   border: category === c.value ? 'none' : `1px solid ${B.grayLight}`,
@@ -7230,7 +7230,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
           {/* Urgency — only for problem categories */}
           {isProblemCategory && (
             <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>How urgent?</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>How urgent?</div>
               <div style={{ display: 'flex', gap: 10 }}>
                 {[
                   { value: 'routine', label: 'Routine', desc: 'Next 24 hours', color: B.wavesBlue },
@@ -7242,8 +7242,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     background: urgency === u.value ? `${u.color}10` : B.white,
                     textAlign: 'center',
                   }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: urgency === u.value ? u.color : B.grayDark }}>{u.label}</div>
-                    <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{u.desc}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: urgency === u.value ? u.color : B.grayDark }}>{u.label}</div>
+                    <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{u.desc}</div>
                   </button>
                 ))}
               </div>
@@ -7252,10 +7252,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
           {/* Merged description field (subject + details combined) */}
           <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
               Describe what's happening
             </div>
-            <div style={{ fontSize: 11, color: B.grayMid, marginBottom: 6 }}>
+            <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 6 }}>
               The more detail, the faster we can help
             </div>
             <textarea
@@ -7273,7 +7273,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               onBlur={e => e.target.style.borderColor = B.grayLight}
             />
             {description.length > 450 && (
-              <div style={{ fontSize: 11, color: B.red, marginTop: 4, textAlign: 'right' }}>
+              <div style={{ fontSize: 12, color: B.red, marginTop: 4, textAlign: 'right' }}>
                 {description.length}/500
               </div>
             )}
@@ -7282,7 +7282,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
           {/* Location on Property — multi-select */}
           {isProblemCategory && (
             <div style={{ marginBottom: 24 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 8 }}>Where on your property? <span style={{ fontWeight: 400, color: B.grayMid }}>(select all that apply)</span></div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>Where on your property? <span style={{ fontWeight: 400, color: B.grayMid }}>(select all that apply)</span></div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {locationOptions.map(l => (
                   <button key={l.value} onClick={() => toggleLocation(l.value)} style={{
@@ -7348,7 +7348,7 @@ function MyRequestsCard() {
         <Icon name="clipboard" size={18} strokeWidth={1.75} />
         <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>My Requests</div>
         <span style={{
-          marginLeft: 'auto', fontSize: 11, fontWeight: 700, padding: '2px 8px',
+          marginLeft: 'auto', fontSize: 12, fontWeight: 700, padding: '2px 8px',
           borderRadius: 10, background: B.bluePale, color: B.wavesBlue,
         }}>{open.length} open</span>
       </div>
@@ -7362,7 +7362,7 @@ function MyRequestsCard() {
             borderBottom: `1px solid ${B.grayLight}`,
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{r.subject}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{r.subject}</div>
               <span style={{
                 fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
                 padding: '3px 8px', borderRadius: 20,
@@ -7378,7 +7378,7 @@ function MyRequestsCard() {
                 }} />
               ))}
             </div>
-            <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6 }}>
               {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               {r.urgency === 'urgent' && <span style={{ color: B.red, fontWeight: 700, marginLeft: 6 }}>URGENT</span>}
               {r.assignedTechnician && <span> · Assigned: {r.assignedTechnician}</span>}
@@ -7501,7 +7501,7 @@ function VisitsTab({ customer, subTab, onSubTabChange }) {
         onClick={() => onSubTabChange(id)}
         style={{
           flex: 1, padding: '10px 14px', borderRadius: 10, border: 'none',
-          cursor: 'pointer', fontSize: 13, fontWeight: isActive ? 700 : 600,
+          cursor: 'pointer', fontSize: 14, fontWeight: isActive ? 700 : 600,
           fontFamily: FONTS.heading,
           background: isActive ? B.wavesBlue : 'transparent',
           color: isActive ? B.white : B.grayMid,
@@ -7593,7 +7593,7 @@ function ChatWidget({ customer, onClose }) {
             }}><Icon name="waves" size={16} strokeWidth={1.75} /></div>
             <div>
               <div style={{ fontSize: 15, fontWeight: 700, color: '#fff' }}>Waves Assistant</div>
-              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)' }}>Usually replies instantly</div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>Usually replies instantly</div>
             </div>
           </div>
           <button onClick={onClose} style={{
@@ -7760,7 +7760,7 @@ export default function PortalPage() {
             }}>
               <div style={{ padding: '14px 16px', borderBottom: `1px solid ${B.grayLight}` }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{customer.firstName} {customer.lastName}</div>
-                <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
+                <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
               </div>
               {[
                 { icon: 'home', label: 'Home', action: () => { switchTab('dashboard'); setShowMenu(false); } },
@@ -7779,7 +7779,7 @@ export default function PortalPage() {
                 }} onMouseEnter={e => e.currentTarget.style.background = B.offWhite}
                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
                   <Icon name={item.icon} size={18} strokeWidth={1.75} />
-                  <span style={{ fontSize: 13, fontWeight: 500, color: B.navy }}>{item.label}</span>
+                  <span style={{ fontSize: 14, fontWeight: 500, color: B.navy }}>{item.label}</span>
                 </div>
               ))}
               <div style={{ borderTop: `1px solid ${B.grayLight}` }}>
@@ -7788,7 +7788,7 @@ export default function PortalPage() {
                 }} onMouseEnter={e => e.currentTarget.style.background = B.offWhite}
                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
                   <Icon name="hand" size={16} strokeWidth={1.75} />
-                  <span style={{ fontSize: 13, fontWeight: 500, color: B.red }}>Sign Out</span>
+                  <span style={{ fontSize: 14, fontWeight: 500, color: B.red }}>Sign Out</span>
                 </div>
               </div>
             </div>

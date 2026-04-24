@@ -156,7 +156,7 @@ export default function PublicBookingPage() {
     outline: 'none', transition: 'border-color 0.2s',
   };
   const labelStyle = {
-    fontSize: 13, fontWeight: 500, color: COLORS.slate600,
+    fontSize: 14, fontWeight: 500, color: COLORS.slate600,
     display: 'block', marginBottom: 6,
   };
 
@@ -270,14 +270,14 @@ export default function PublicBookingPage() {
 
             {loading && (
               <div style={{ textAlign: 'center', padding: 40, color: COLORS.slate600 }}>
-                <div style={{ fontSize: 13 }}>Checking the route map…</div>
+                <div style={{ fontSize: 14 }}>Checking the route map…</div>
               </div>
             )}
 
             {error && !loading && (
               <div style={{
                 background: '#FEF2F2', border: '1px solid #FECACA',
-                borderRadius: 10, padding: 14, fontSize: 13, color: '#991B1B', marginBottom: 16,
+                borderRadius: 10, padding: 14, fontSize: 14, color: '#991B1B', marginBottom: 16,
               }}>{error}</div>
             )}
 
@@ -289,7 +289,7 @@ export default function PublicBookingPage() {
                     borderRadius: 12, padding: 14,
                   }}>
                     <div style={{
-                      fontSize: 13, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 10,
+                      fontSize: 14, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 10,
                       display: 'flex', alignItems: 'baseline', gap: 8,
                     }}>
                       <span>{day.fullDate}</span>
@@ -320,7 +320,7 @@ export default function PublicBookingPage() {
                               {slot.start_label}
                             </div>
                             <div style={{
-                              fontSize: 11,
+                              fontSize: 12,
                               color: isSelected ? 'rgba(255,255,255,0.85)' : COLORS.slate600,
                               lineHeight: 1.3,
                             }}>
@@ -364,7 +364,7 @@ export default function PublicBookingPage() {
               background: COLORS.blueLight, border: `1px solid ${COLORS.wavesBlue}`,
               borderRadius: 10, padding: 14, marginBottom: 20,
             }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.blueDark, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.blueDark, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
                 Your selected time
               </div>
               <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.blueDeeper }}>
@@ -436,7 +436,7 @@ export default function PublicBookingPage() {
             {error && (
               <div style={{
                 background: '#FEF2F2', border: '1px solid #FECACA',
-                borderRadius: 10, padding: 12, fontSize: 13, color: '#991B1B', marginBottom: 16,
+                borderRadius: 10, padding: 12, fontSize: 14, color: '#991B1B', marginBottom: 16,
               }}>{error}</div>
             )}
 
@@ -476,13 +476,13 @@ export default function PublicBookingPage() {
               background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
               borderRadius: 12, padding: 18, marginBottom: 20, textAlign: 'left',
             }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
                 Confirmation
               </div>
               <div style={{ fontSize: 20, fontWeight: 700, color: COLORS.wavesBlue, fontFamily: FONTS.mono, marginBottom: 14 }}>
                 {confCode}
               </div>
-              <div style={{ fontSize: 13, color: COLORS.slate600, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 14, color: COLORS.slate600, lineHeight: 1.6 }}>
                 <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
                 <div>{availability.find(d => d.date === selectedDate)?.fullDate}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>

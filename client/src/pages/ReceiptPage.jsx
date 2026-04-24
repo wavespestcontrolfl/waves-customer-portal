@@ -229,7 +229,7 @@ export default function ReceiptPage() {
                 borderRadius: 999,
                 background: 'rgba(4,120,87,0.1)',
                 color: 'var(--success)',
-                fontSize: 11,
+                fontSize: 12,
                 fontWeight: 600,
                 letterSpacing: '0.08em',
                 textTransform: 'uppercase',
@@ -244,7 +244,7 @@ export default function ReceiptPage() {
                 borderRadius: 999,
                 background: 'rgba(200,16,46,0.08)',
                 color: 'var(--danger)',
-                fontSize: 11,
+                fontSize: 12,
                 fontWeight: 600,
                 letterSpacing: '0.08em',
                 textTransform: 'uppercase',
@@ -259,7 +259,7 @@ export default function ReceiptPage() {
                 borderRadius: 999,
                 background: 'rgba(0,156,222,0.1)',
                 color: '#065A8C',
-                fontSize: 11,
+                fontSize: 12,
                 fontWeight: 600,
                 letterSpacing: '0.08em',
                 textTransform: 'uppercase',
@@ -289,7 +289,7 @@ export default function ReceiptPage() {
             color: 'var(--text)',
           }}>
             <div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
                 Billed to
               </div>
               <div style={{ fontWeight: 600 }}>{customer.firstName} {customer.lastName}</div>
@@ -301,7 +301,7 @@ export default function ReceiptPage() {
             </div>
 
             <div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
                 Payment details
               </div>
               {paidAt && (
@@ -324,7 +324,7 @@ export default function ReceiptPage() {
               )}
               <div>
                 <span style={{ color: 'var(--text-muted)' }}>Receipt #: </span>
-                <span style={{ fontFamily: FONTS.mono, fontSize: 13 }}>
+                <span style={{ fontFamily: FONTS.mono, fontSize: 14 }}>
                   {invoice.invoiceNumber}
                 </span>
               </div>
@@ -339,7 +339,7 @@ export default function ReceiptPage() {
                 gridTemplateColumns: '1fr auto auto',
                 gap: '0 16px',
                 padding: '12px 0 8px',
-                fontSize: 11,
+                fontSize: 12,
                 color: 'var(--text-muted)',
                 letterSpacing: '0.08em',
                 textTransform: 'uppercase',
@@ -408,7 +408,7 @@ export default function ReceiptPage() {
               fontWeight: 700,
               color: 'var(--text)',
             }}>
-              <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 13 }}>
+              <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 14 }}>
                 Total charged
               </span>
               <span>{fmtCurrency(payment?.amount || invoice.total)}</span>
@@ -444,7 +444,7 @@ export default function ReceiptPage() {
 
           {invoice.notes && (
             <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
                 Notes
               </div>
               <p style={{ margin: 0, fontSize: 14, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
@@ -453,7 +453,7 @@ export default function ReceiptPage() {
             </div>
           )}
 
-          <div className="waves-no-print" style={{ marginTop: 24, display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 13 }}>
+          <div className="waves-no-print" style={{ marginTop: 24, display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 14 }}>
             <a
               href={`${API_BASE}/receipt/${token}/pdf`}
               style={{ color: 'var(--brand)', textDecoration: 'underline', textUnderlineOffset: 3 }}
@@ -470,7 +470,7 @@ export default function ReceiptPage() {
                 color: 'var(--brand)',
                 textDecoration: 'underline',
                 textUnderlineOffset: 3,
-                fontSize: 13,
+                fontSize: 14,
                 cursor: 'pointer',
                 fontFamily: FONTS.body,
               }}

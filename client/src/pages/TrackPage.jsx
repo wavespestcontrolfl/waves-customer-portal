@@ -134,7 +134,7 @@ function TechBlock({ tech, size = 'md' }) {
           {tech.firstName || 'Your technician'}
         </div>
         {tech.yearsWithWaves ? (
-          <div style={{ fontSize: 13, color: COLORS.textCaption }}>
+          <div style={{ fontSize: 14, color: COLORS.textCaption }}>
             {tech.yearsWithWaves}+ years with Waves
           </div>
         ) : null}
@@ -148,7 +148,7 @@ function ServiceMeta({ data }) {
   const addr = data.property?.addressLine1;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${COLORS.offWhite}` }}>
-      <div style={{ fontSize: 13, color: COLORS.textCaption, marginBottom: 4 }}>Service</div>
+      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 4 }}>Service</div>
       <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.navy }}>{data.service?.type}</div>
       {window ? (
         <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 8 }}>{window}</div>

@@ -59,12 +59,12 @@ export default function ReportViewPage() {
               fontSize: 20, color: '#fff',
               letterSpacing: '0.02em', lineHeight: 1, margin: 0,
             }}>Service Report</h1>
-            <div style={{ fontSize: 11, color: B.blueLight, marginTop: 4 }}>{data.customerName}</div>
+            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4 }}>{data.customerName}</div>
           </div>
         </div>
         <a href={pdfUrl} download style={{
           ...BUTTON_BASE, position: 'relative', zIndex: 1,
-          padding: '0 18px', height: 36, fontSize: 13,
+          padding: '0 18px', height: 36, fontSize: 14,
           borderRadius: 999, background: B.yellow, color: B.blueDeeper,
           textDecoration: 'none', fontWeight: 800, display: 'inline-flex',
           alignItems: 'center',
@@ -75,7 +75,7 @@ export default function ReportViewPage() {
       <div style={{ maxWidth: 600, margin: '16px auto', padding: '0 16px' }}>
         <div style={{ background: '#fff', borderRadius: 16, padding: 20, border: `1px solid ${B.bluePale}` }}>
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>{data.serviceType}</div>
-          <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4 }}>
+          <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4 }}>
             {data.serviceDate && new Date(data.serviceDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
             {' · '}{data.technicianName}
           </div>
@@ -85,7 +85,7 @@ export default function ReportViewPage() {
           {data.notes && (
             <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Tech Notes</div>
-              <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6 }}>{data.notes}</div>
+              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>{data.notes}</div>
             </div>
           )}
 
@@ -96,7 +96,7 @@ export default function ReportViewPage() {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {data.products.map((p, i) => (
                   <span key={i} style={{
-                    fontSize: 11, padding: '3px 10px', borderRadius: 8,
+                    fontSize: 12, padding: '3px 10px', borderRadius: 8,
                     background: B.blueSurface, color: B.navy, fontWeight: 500,
                     border: `1px solid ${B.bluePale}`,
                   }}>{p.name}</span>
@@ -131,7 +131,7 @@ export default function ReportViewPage() {
 
         {/* CTA */}
         <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
-          <div style={{ fontSize: 13, color: B.grayDark }}>Questions about your service?</div>
+          <div style={{ fontSize: 14, color: B.grayDark }}>Questions about your service?</div>
           <a href="sms:+19412975749" style={{
             ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14, marginTop: 8,
             borderRadius: 999, background: B.yellow, color: B.blueDeeper,
