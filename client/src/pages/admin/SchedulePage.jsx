@@ -8,7 +8,6 @@ import { ViewModeSelector, WeekView, MonthView } from '../../components/schedule
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
-import { launchTapToPay } from '../../lib/tapToPay';
 import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1729,7 +1728,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     setServicePhotos(prev => prev.filter((_, i) => i !== index));
   }
 
-  async function handleSubmit({ charge = false } = {}) {
+  async function handleSubmit() {
     setSubmitting(true);
     try {
       const body = {
@@ -1755,17 +1754,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         if (soilPh) body.soilPh = parseFloat(soilPh);
         if (soilMoisture) body.soilMoisture = parseFloat(soilMoisture);
       }
-      const r = await onSubmit(service.id, body);
+      await onSubmit(service.id, body);
       setSuccess(true);
-      if (charge && r?.invoiceId && r?.invoiceTotal != null) {
-        try { await launchTapToPay(r.invoiceId); }
-        catch (tapErr) { alert(`Service completed but Tap to Pay handoff failed: ${tapErr.message}`); }
-      } else if (charge && service.waveguardTier) {
-        // Covered by WaveGuard monthly autopay — no invoice to charge against.
-        // Silent success; the completion toast is enough.
-      } else if (charge) {
-        alert('Service completed, but no invoice was generated — cannot start Tap to Pay. Check the invoice list.');
-      }
       setTimeout(() => onClose(true), 1200);
     } catch (e) {
       alert('Failed to complete service: ' + e.message);
@@ -1933,9 +1923,6 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
               }}>
                 Quick complete {quickComplete ? 'on' : 'off'}
               </button>
-              <div style={{ fontFamily: font, fontSize: 13, color: M.ink3 }}>
-                {quickComplete ? 'Minimal fields' : 'Full report'}
-              </div>
             </div>
 
             {/* Callback banner */}
@@ -2291,17 +2278,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           }}>
             <button
               type="button"
-              onClick={() => handleSubmit({ charge: true })}
-              disabled={submitting}
-              style={{ ...primaryPill, opacity: submitting ? 0.5 : 1 }}
-            >
-              {submitting ? 'Completing…' : 'Complete & charge'}
-            </button>
-            <button
-              type="button"
               onClick={() => handleSubmit()}
               disabled={submitting}
-              style={{ ...secondaryPill, opacity: submitting ? 0.5 : 1 }}
+              style={{ ...primaryPill, opacity: submitting ? 0.5 : 1 }}
             >
               {submitting ? 'Completing…' : 'Complete service'}
             </button>
@@ -2688,19 +2667,6 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button onClick={() => handleSubmit({ charge: true })} disabled={submitting} style={{
-            ...btnBase, width: '100%', background: D.text, color: '#fff', fontSize: 14, height: 52,
-            opacity: submitting ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
-          }}>
-            {submitting ? 'Completing...' : (
-              <>
-                <span style={{ fontSize: 15, fontWeight: 700 }}>Complete &amp; charge</span>
-                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
-                  Mark complete, create invoice, launch Tap to Pay
-                </span>
-              </>
-            )}
-          </button>
           <button onClick={() => handleSubmit()} disabled={submitting} style={{
             ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
             opacity: submitting ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
