@@ -3181,9 +3181,14 @@ function BillingTab({ customer }) {
   const refreshCards = () => api.getCards().then(d => setCards(d.cards)).catch(console.error);
 
   useEffect(() => {
-    Promise.all([api.getPayments(), api.getBalance(), api.getCards()])
-      .then(([payData, balData, cardData]) => {
-        setPayments(payData.payments); setBalance(balData); setCards(cardData.cards); setLoading(false);
+    Promise.all([api.getPayments(), api.getBalance(), api.getCards(), api.getNotificationPrefs()])
+      .then(([payData, balData, cardData, prefsData]) => {
+        setPayments(payData.payments); setBalance(balData); setCards(cardData.cards);
+        if (prefsData) {
+          setBillingEmail(prefsData.billingEmail || '');
+          setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
+        }
+        setLoading(false);
       }).catch(console.error);
   }, []);
 
@@ -3374,7 +3379,7 @@ function BillingTab({ customer }) {
 
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
-    api.updateNotificationPrefs?.({ billing_email: billingEmail || null, payment_confirmation_sms: paymentSmsEnabled })
+    api.updateNotificationPrefs({ billingEmail: billingEmail || '', paymentConfirmationSms: paymentSmsEnabled })
       .then(() => setBillingPrefsSaving(false))
       .catch(() => setBillingPrefsSaving(false));
   };
