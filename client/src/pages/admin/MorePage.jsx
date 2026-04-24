@@ -5,7 +5,7 @@ import {
   Wrench, Truck, Package, ClipboardCheck, Leaf,
   Library, Brain,
   Receipt, Landmark, Calculator, Ruler,
-  Award, Activity, Settings as SettingsIcon,
+  Activity, Settings as SettingsIcon,
   LogOut, ExternalLink, ChevronRight,
 } from 'lucide-react';
 import { refetchFlags } from '../../hooks/useFeatureFlag';
@@ -45,7 +45,6 @@ const SECTIONS = [
     { path: '/admin/pricing-logic', icon: Ruler, label: 'Pricing Logic' },
   ]},
   { section: 'System', items: [
-    { path: '/admin/badges', icon: Award, label: 'Badges' },
     { path: '/admin/tool-health', icon: Activity, label: 'Tool Health' },
     { path: '/admin/settings', icon: SettingsIcon, label: 'Settings' },
   ]},

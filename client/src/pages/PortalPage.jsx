@@ -736,17 +736,13 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
 // =========================================================================
 // BADGE SYSTEM — dashboard row, celebration toast, detail modal
 // =========================================================================
+// Gamification feature removed. Hook kept as a stub returning a frozen
+// "no badges" payload so every call site — BadgeRow (removed),
+// BadgeShowcase (removed), BadgeCelebrationToast (removed), admin
+// BadgesPage (removed) — compiles without widening the refactor.
+// Re-enable by restoring the original fetch call if badges return.
 function useBadges() {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    api.getBadges()
-      .then(d => { setData(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, []);
-
-  return { data, loading };
+  return { loading: false, data: null };
 }
 
 function BadgeRow({ badges, earnedCount, totalCount, onViewAll }) {
@@ -2068,16 +2064,6 @@ function DashboardTab({ customer, onSwitchTab }) {
 
       {/* My Requests — open service requests */}
       <MyRequestsCard />
-
-      {/* Badge Row */}
-      {!badgeData.loading && badgeData.data && (
-        <BadgeRow
-          badges={badgeData.data.badges}
-          earnedCount={badgeData.data.earnedCount}
-          totalCount={badgeData.data.totalCount}
-          onViewAll={() => onSwitchTab?.('plan')}
-        />
-      )}
 
       {/* Referral — compact dashboard card */}
       <div style={{
@@ -6227,17 +6213,6 @@ function MyPlanTab({ customer }) {
         </div>
       </Card>
 
-      {/* Badge Showcase — curated */}
-      {!badgeData.loading && badgeData.data && curatedBadges.length > 0 && (
-        <>
-          <div style={{ marginTop: 8 }} />
-          <BadgeShowcase
-            badges={curatedBadges}
-            categories={badgeData.data.categories}
-            categoryOrder={badgeData.data.categoryOrder}
-          />
-        </>
-      )}
 
       {/* Section — Pause / Cancel Controls */}
       <div style={{ textAlign: 'center', padding: '8px 0 4px' }}>
@@ -8412,11 +8387,6 @@ export default function PortalPage() {
 
       {/* AI Chat Widget */}
       {showChat && <ChatWidget customer={customer} onClose={() => setShowChat(false)} />}
-
-      {/* Badge Celebration Toast */}
-      {!portalBadgeData.loading && portalBadgeData.data && (
-        <BadgeCelebrationToast badges={portalBadgeData.data.badges} />
-      )}
 
       {/* Floating Action Button — Report Issue */}
       <div style={{ position: 'fixed', bottom: 76, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>

@@ -240,12 +240,15 @@ const CallRecordingProcessor = {
    * Process a call recording end-to-end.
    * Called from recording-status webhook or manually from admin.
    */
-  async processRecording(callSid) {
+  async processRecording(callSid, opts = {}) {
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) throw new Error(`Call not found: ${callSid}`);
 
-    // Dedup guard — skip if already fully processed (prevents duplicate SMS on webhook retries)
-    if (call.processing_status === 'processed') {
+    // Dedup guard — skip if already fully processed (prevents duplicate
+    // SMS on webhook retries). opts.force=true bypasses the guard so the
+    // admin "Reprocess" button can re-run extraction with updated prompts
+    // / model / customer-field backfills without hand-editing the DB.
+    if (call.processing_status === 'processed' && !opts.force) {
       logger.info(`[call-proc] Already processed ${callSid} — skipping`);
       return { success: true, skipped: true, reason: 'already_processed' };
     }
