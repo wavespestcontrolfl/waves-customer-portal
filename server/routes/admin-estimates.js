@@ -163,6 +163,29 @@ async function sendEstimateNow(estimate, sendMethod) {
   }
 
   await db('estimates').where({ id: estimate.id }).update({ status: 'sent', sent_at: db.fn.now(), scheduled_at: null, send_method: null });
+
+  // Fire-and-forget: enroll the customer in the estimate_sent follow-up
+  // automation (lands ~2h later with a neighborly "any questions?" note).
+  // Enrollment is deduped per (template_key, customer_id) inside the
+  // runner — re-sends of the same estimate won't spam.
+  if (estimate.customer_email) {
+    try {
+      const AutomationRunner = require('../services/automation-runner');
+      const parts = (estimate.customer_name || '').trim().split(/\s+/);
+      await AutomationRunner.enrollCustomer({
+        templateKey: 'estimate_sent',
+        customer: {
+          id: estimate.customer_id || null,
+          email: estimate.customer_email,
+          first_name: parts[0] || '',
+          last_name: parts.slice(1).join(' ') || '',
+        },
+      });
+    } catch (e) {
+      logger.warn(`[admin-estimates] estimate_sent enroll failed: ${e.message}`);
+    }
+  }
+
   return channels;
 }
 

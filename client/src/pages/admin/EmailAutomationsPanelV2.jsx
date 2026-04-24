@@ -244,6 +244,7 @@ function StepEditor({ step, stepIndex, totalSteps, templateKey, onSaved, onDelet
   const [enabled, setEnabled] = useState(!!step.enabled);
   const [saving, setSaving] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [status, setStatus] = useState('');
 
   const save = async () => {
@@ -291,6 +292,7 @@ function StepEditor({ step, stepIndex, totalSteps, templateKey, onSaved, onDelet
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <Button onClick={() => setPreviewOpen(true)} variant="secondary" disabled={!htmlBody}>Preview</Button>
           <Button onClick={() => setAiOpen(true)} variant="secondary">Draft with AI</Button>
           <button type="button" onClick={remove} className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-alert-fg hover:border-alert-fg u-focus-ring">Delete</button>
         </div>
@@ -367,7 +369,65 @@ function StepEditor({ step, stepIndex, totalSteps, templateKey, onSaved, onDelet
       </div>
 
       {aiOpen && <AiDraftModal onClose={() => setAiOpen(false)} onDraft={applyAiDraft} />}
+      {previewOpen && (
+        <StepPreviewModal
+          subject={subject}
+          previewText={previewText}
+          htmlBody={htmlBody}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
     </Card>
+  );
+}
+
+// ── Preview modal — renders step HTML in a sandboxed iframe with
+//    {{placeholder}} values filled in so the operator sees what the
+//    recipient would actually receive.
+function StepPreviewModal({ subject, previewText, htmlBody, onClose }) {
+  const sample = { first_name: 'Friend', last_name: 'Nguyen', email: 'friend@example.com' };
+  const fill = (s) => (s || '')
+    .replace(/\{\{\s*first_name\s*\}\}/g, sample.first_name)
+    .replace(/\{\{\s*last_name\s*\}\}/g, sample.last_name)
+    .replace(/\{\{\s*email\s*\}\}/g, sample.email)
+    .replace(/\{first_name\}/g, sample.first_name)
+    .replace(/\{last_name\}/g, sample.last_name);
+
+  const doc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>
+    body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;color:#18181b;max-width:640px;margin:24px auto;padding:0 20px;line-height:1.55;}
+    h1,h2,h3{line-height:1.2;margin-top:1.2em;}
+    h2{font-size:20px;}
+    p{margin:0 0 14px;}
+    ul,ol{margin:0 0 14px 20px;}
+    a{color:#18181b;text-decoration:underline;}
+  </style></head><body>${fill(htmlBody || '<p>(no body)</p>')}</body></html>`;
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 overflow-y-auto p-4" onClick={onClose}>
+      <div className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-3xl my-8" onClick={(e) => e.stopPropagation()}>
+        <div className="p-4 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-11 uppercase tracking-label text-ink-tertiary">Subject</div>
+            <div className="text-14 text-zinc-900 truncate">{fill(subject) || <span className="text-ink-tertiary">(no subject)</span>}</div>
+            {previewText && (
+              <>
+                <div className="text-11 uppercase tracking-label text-ink-tertiary mt-2">Preview text</div>
+                <div className="text-12 text-ink-secondary truncate">{fill(previewText)}</div>
+              </>
+            )}
+            <div className="text-11 text-ink-tertiary mt-2">Rendered with sample first name "Friend" — real sends use the subscriber's name.</div>
+          </div>
+          <button type="button" onClick={onClose} className="text-ink-tertiary hover:text-zinc-900 text-14">✕</button>
+        </div>
+        <iframe
+          srcDoc={doc}
+          sandbox=""
+          title="step preview"
+          className="w-full"
+          style={{ height: '60vh', border: 'none', background: '#fff' }}
+        />
+      </div>
+    </div>
   );
 }
 
