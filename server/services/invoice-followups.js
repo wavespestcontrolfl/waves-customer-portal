@@ -54,16 +54,38 @@ function renderBody(template, ctx) {
 
 /**
  * Compute the timestamp at which step `index` should fire for a given invoice.
- * Returns null if `index` is beyond the configured steps.
+ * Returns null if `index` is beyond the configured steps. Anchored to when the
+ * invoice was sent (so "3-day friendly nudge" = 3 days after send), lands at
+ * 10:00 AM America/New_York regardless of server timezone or DST.
  */
-function computeNextTouchAt(dueDate, stepIndex) {
+function computeNextTouchAt(anchorDate, stepIndex) {
   const step = config.steps[stepIndex];
   if (!step) return null;
-  const d = new Date(dueDate);
-  d.setDate(d.getDate() + step.daysAfterDue);
-  // Anchor to 10 AM ET on the target day
-  d.setHours(config.sendWindow.hour, 0, 0, 0);
-  return d;
+  return anchorTo10amNY(new Date(anchorDate), step.daysAfterSend, config.sendWindow.hour);
+}
+
+/**
+ * Return a Date that represents {hour}:00 America/New_York on the calendar
+ * day that is {daysAfter} days past {anchorDate} (measured in NY local time).
+ * DST-safe — probes EDT/EST on the target day and picks the right UTC offset.
+ */
+function anchorTo10amNY(anchorDate, daysAfter, hour) {
+  const nyParts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(anchorDate).map((p) => [p.type, p.value])
+  );
+  // Advance calendar days in UTC math (safe across DST day-length quirks).
+  const base = new Date(Date.UTC(+nyParts.year, +nyParts.month - 1, +nyParts.day));
+  base.setUTCDate(base.getUTCDate() + daysAfter);
+  const y = base.getUTCFullYear(), m = base.getUTCMonth(), d = base.getUTCDate();
+  // Probe DST at noon UTC on the target day (always mid-afternoon NY, never ambiguous).
+  const probe = new Date(Date.UTC(y, m, d, 12));
+  const tzName = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', timeZoneName: 'short',
+  }).format(probe).slice(-3); // "EDT" or "EST"
+  const offsetHours = tzName === 'EDT' ? 4 : 5;
+  return new Date(Date.UTC(y, m, d, hour + offsetHours));
 }
 
 /**
@@ -117,8 +139,11 @@ async function scheduleForInvoice(invoiceId) {
   const customer = await db('customers').where({ id: invoice.customer_id }).first();
   const onAutopay = await customerOnAutopay(customer);
 
-  const dueDate = invoice.due_date || invoice.created_at;
-  const nextAt = computeNextTouchAt(dueDate, 0);
+  // Anchor the cadence to when the invoice went out. Falls back through
+  // sent_at → sms_sent_at → created_at so edge cases (manual-only, email-only,
+  // or older rows without sent_at populated) still get scheduled correctly.
+  const anchorAt = invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
+  const nextAt = computeNextTouchAt(anchorAt, 0);
 
   const existing = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (existing) {
@@ -160,6 +185,8 @@ async function runPending() {
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.status as invoice_status',
       'i.service_date', 'i.due_date', 'i.invoice_number',
+      'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',
+      'i.created_at as invoice_created_at',
     );
 
   let sent = 0, skipped = 0;
@@ -222,7 +249,8 @@ async function fireStep(row) {
   });
 
   const nextIndex = row.step_index + 1;
-  const nextAt = computeNextTouchAt(row.due_date || row.created_at, nextIndex);
+  const anchorAt = row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
+  const nextAt = computeNextTouchAt(anchorAt, nextIndex);
 
   await db('invoice_followup_sequences').where({ id: row.id }).update({
     touches_sent: row.touches_sent + 1,

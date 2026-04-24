@@ -1,12 +1,12 @@
 /**
  * Invoice Follow-up Sequence Config
  *
- * Each step defines when it fires (days after the invoice's due date) and what
+ * Each step defines when it fires (days after the invoice was sent) and what
  * the SMS says. Editing this file is the ONLY place sequence behavior changes.
  *
- * The cron runs Tue–Fri at 10:00 AM America/New_York (no weekend nags).
+ * The cron runs Tue–Fri at 10:00 AM America/New_York (no weekend nags, DST-safe).
  * A step is eligible to fire when:
- *    now >= due_date + daysAfterDue
+ *    now >= sent_at + daysAfterSend
  *
  * Variables available in the `body` template:
  *    {{name}}         — customer first name (falls back to "there")
@@ -17,11 +17,11 @@
  */
 
 module.exports = {
-  // Days/hours the sequence is allowed to send SMS (America/New_York)
+  // Days/hours the sequence is allowed to send SMS (America/New_York).
   // Cron handles the day-of-week; these are the additional hour filters.
   sendWindow: {
     daysOfWeek: [2, 3, 4, 5], // Tue, Wed, Thu, Fri
-    hour: 10,                  // fires at 10 AM
+    hour: 10,                  // fires at 10 AM America/New_York (DST-safe)
   },
 
   // Thank-you SMS disabled — Stripe auto-emails a receipt and the pay link
@@ -34,11 +34,13 @@ module.exports = {
   },
 
   // The touches. Order matters; step_index maps to this array.
+  // Cadence is anchored to invoice.sent_at so labels match operator intuition:
+  // "3-day friendly nudge" = 3 days after the invoice went out.
   steps: [
     {
       id: 'd3_friendly',
       template_key: 'invoice_followup_3day',
-      daysAfterDue: 3,
+      daysAfterSend: 3,
       label: '3-day friendly nudge',
       body:
         `Hi {{name}}, still showing an open balance on your invoice for {{invoiceTitle}} — ` +
@@ -46,34 +48,34 @@ module.exports = {
         `we'll sort it. — Waves`,
     },
     {
-      id: 'd7_firmer',
-      template_key: 'late_payment_7d',
-      daysAfterDue: 7,
-      label: '7-day follow-up',
+      id: 'd7_reminder',
+      template_key: 'invoice_followup_7day',
+      daysAfterSend: 7,
+      label: '7-day reminder',
       body:
-        `Hello {{name}}, this is a reminder from Waves. Your invoice for {{invoiceTitle}}` +
-        `{{serviceDateClause}} is now 7 days overdue.\n\nPlease make your payment here: ` +
-        `{{payUrl}}\n\nQuestions? Reply to this message. Thank you for choosing Waves!`,
+        `Hi {{name}}, just a friendly reminder from Waves — your invoice for ` +
+        `{{invoiceTitle}}{{serviceDateClause}} is still open. You can pay here: ` +
+        `{{payUrl}}\n\nQuestions? Reply to this message. — Waves`,
     },
     {
-      id: 'd14_urgent',
-      template_key: 'late_payment_14d',
-      daysAfterDue: 14,
-      label: '14-day urgent',
+      id: 'd14_firmer',
+      template_key: 'invoice_followup_14day',
+      daysAfterSend: 14,
+      label: '14-day check-in',
       body:
-        `Hello {{name}}, your invoice for {{invoiceTitle}}{{serviceDateClause}} is now ` +
-        `14 days overdue. Please make payment as soon as possible: {{payUrl}}\n\n` +
-        `Questions? Reply to this message. — Waves`,
+        `Hi {{name}}, checking in on your Waves invoice for ` +
+        `{{invoiceTitle}}{{serviceDateClause}} — we'd appreciate payment at your ` +
+        `earliest convenience: {{payUrl}}\n\nReply if you need anything. — Waves`,
     },
     {
       id: 'd30_final',
-      template_key: 'late_payment_30d',
-      daysAfterDue: 30,
+      template_key: 'invoice_followup_30day',
+      daysAfterSend: 30,
       label: '30-day final notice',
       body:
-        `Hello {{name}}, this is a final reminder. Your invoice for {{invoiceTitle}}` +
-        `{{serviceDateClause}} is 30 days overdue. Please pay immediately to avoid ` +
-        `collections: {{payUrl}}\n\nReply to discuss or request a payment plan. — Waves`,
+        `Hi {{name}}, this is a final notice on your Waves invoice for ` +
+        `{{invoiceTitle}}{{serviceDateClause}}. Please pay now to keep the ` +
+        `account in good standing: {{payUrl}}\n\nReply to discuss a payment plan. — Waves`,
     },
   ],
 
