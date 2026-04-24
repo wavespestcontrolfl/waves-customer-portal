@@ -521,9 +521,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
                     >
                       <span style={{ flex: 1, fontWeight: 500 }}>{svc.name}</span>
-                      <span style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' }}>
-                        {CATEGORY_LABELS[svc.category] || svc.category}
-                      </span>
                     </div>
                   ))}
                   {!serviceLoading && serviceResults.length === 0 && (
@@ -700,68 +697,25 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 </div>
               )}
               <div style={{ marginBottom: 8 }}>
-                <label style={labelStyle}>Manual Discount (optional)</label>
-                {discountPresetId ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 10, background: D.card, borderRadius: 8, border: `1px solid ${D.border}` }}>
-                    <span style={{ flex: 1, fontSize: 14, color: '#18181B', fontWeight: 500 }}>{selectedDiscountLabel}</span>
-                    <button
-                      type="button"
-                      onClick={() => { applyDiscountPreset(''); setDiscountSearch(''); }}
-                      style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 32, minHeight: 32 }}
-                    >✕</button>
-                  </div>
-                ) : (
-                  <div>
-                    <input
-                      type="text"
-                      value={discountSearch}
-                      onChange={(e) => setDiscountSearch(e.target.value)}
-                      placeholder="Search discounts…"
-                      style={inputStyle}
-                    />
-                    {discountSearch.trim().length > 0 && (
-                      <div style={{ marginTop: 8, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-                        {filteredDiscounts.map((d) => (
-                          <div
-                            key={d.id}
-                            onClick={() => { applyDiscountPreset(d.id); setDiscountSearch(''); }}
-                            className="waves-sq-row"
-                            style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
-                          >
-                            <span style={{ flex: 1, fontWeight: 500 }}>{d.name}</span>
-                            <span style={{ fontSize: 12, color: D.muted, whiteSpace: 'nowrap' }}>
-                              {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
-                            </span>
-                          </div>
-                        ))}
-                        <div
-                          onClick={() => { applyDiscountPreset('custom'); setDiscountSearch(''); }}
-                          className="waves-sq-row"
-                          style={{ padding: '12px 14px', cursor: 'pointer', fontSize: 14, color: D.text, minHeight: 48, display: 'flex', alignItems: 'center', fontWeight: 500 }}
-                        >Custom amount…</div>
-                      </div>
-                    )}
-                  </div>
-                )}
+                <label style={labelStyle}>Discount (optional)</label>
+                <select
+                  value={discountPresetId}
+                  onChange={(e) => applyDiscountPreset(e.target.value)}
+                  style={inputStyle}
+                >
+                  <option value="">No discount</option>
+                  {discountPresets.map((d) => {
+                    const amt = d.discount_type === 'percentage'
+                      ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
+                      : `$${Number(d.amount).toFixed(2)}`;
+                    return (
+                      <option key={d.id} value={d.id}>
+                        {d.name} — {amt}
+                      </option>
+                    );
+                  })}
+                </select>
               </div>
-              {discountPresetId === 'custom' && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-                  <div>
-                    <label style={labelStyle}>Type</label>
-                    <select value={discountType} onChange={e => setDiscountType(e.target.value)} style={inputStyle}>
-                      <option value="">—</option>
-                      <option value="percentage">Percentage (%)</option>
-                      <option value="fixed_amount">Amount ($)</option>
-                    </select>
-                  </div>
-                  {discountType && (
-                    <div>
-                      <label style={labelStyle}>{discountType === 'percentage' ? 'Amount (%)' : 'Amount ($)'}</label>
-                      <input type="number" min={0} step={discountType === 'percentage' ? 1 : 0.01} value={discountAmount} onChange={e => setDiscountAmount(e.target.value)} style={inputStyle} />
-                    </div>
-                  )}
-                </div>
-              )}
               {recurringPreview() && (
                 <div style={{ fontSize: 11, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {recurringPreview().map((d, i) => (
