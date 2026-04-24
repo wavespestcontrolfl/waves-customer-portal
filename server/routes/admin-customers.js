@@ -102,7 +102,13 @@ router.post('/quick-add', async (req, res, next) => {
 // GET /api/admin/customers — directory + pipeline
 router.get('/', async (req, res, next) => {
   try {
-    const { search, stage, tier, tag, source, area, city, sort = 'lead_score', order = 'desc' } = req.query;
+    // Default sort: last name, then first name, ascending (phonebook
+    // alphabetical). The old default was lead_score desc + limit 100,
+    // which meant the client's local alphabetical re-sort only covered
+    // the top-100-by-lead-score slice. Anything beyond that fell off
+    // the end of the list — looked like "not alphabetical" to operators
+    // working large customer bases.
+    const { search, stage, tier, tag, source, area, city, sort = 'name', order = 'asc' } = req.query;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit) || 100));
 
@@ -140,8 +146,18 @@ router.get('/', async (req, res, next) => {
       this.select('*').from('customer_tags').whereRaw('customer_tags.customer_id = customers.id').where('tag', tag);
     });
 
-    const sortCol = { lead_score: 'lead_score', name: 'first_name', rate: 'monthly_rate', last_contact: 'last_contact_date', revenue: 'lifetime_revenue' }[sort] || 'lead_score';
-    query = query.orderBy(sortCol, order === 'asc' ? 'asc' : 'desc');
+    // Multi-column name sort so "Adams, Jim" and "Adams, Sarah" land next
+    // to each other instead of interleaving with whichever first name
+    // came first across the full table.
+    const dir = order === 'desc' ? 'desc' : 'asc';
+    if (sort === 'name') {
+      query = query
+        .orderByRaw(`LOWER(last_name) ${dir} NULLS LAST`)
+        .orderByRaw(`LOWER(first_name) ${dir} NULLS LAST`);
+    } else {
+      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date', revenue: 'lifetime_revenue' }[sort] || 'last_name';
+      query = query.orderBy(sortCol, dir);
+    }
 
     const total = await db('customers').whereNull('deleted_at').count('* as count').first();
     const totalCount = parseInt(total?.count || 0);
