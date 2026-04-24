@@ -99,14 +99,14 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
         <tr><td align="center" style="padding:28px 32px;">
           ${ctaButton(ctaHref, ctaLabel)}
         </td></tr>` : ''}
-        <tr><td style="padding:0 32px 28px 32px;">
-          <div style="font-family:Inter,Arial,sans-serif;font-size:13px;line-height:1.55;color:${MUTED};">
+        <tr><td align="center" style="padding:0 32px 28px 32px;">
+          <div style="font-family:Inter,Arial,sans-serif;font-size:13px;line-height:1.55;color:${MUTED};text-align:center;">
             ${footerNote || 'Questions? Reply to this email or call <a href="tel:+19412975749" style="color:' + WAVES_BLUE + ';text-decoration:none;">(941) 297-5749</a>.'}
           </div>
         </td></tr>
-        <tr><td style="background:${SAND};padding:20px 32px;border-top:1px solid ${RULE};">
-          <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;">
-            Waves Pest Control, LLC · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · FL License #JB351547
+        <tr><td align="center" style="background:${SAND};padding:20px 32px;border-top:1px solid ${RULE};">
+          <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;text-align:center;">
+            Waves Pest Control, LLC · <a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:none;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · FL License #JB351547
           </div>
         </td></tr>
       </table>

@@ -142,16 +142,14 @@ async function sendEstimateNow(estimate, sendMethod) {
         // hand-rolled inline HTML.
         const heading = 'Your Waves estimate is ready';
         const intro = `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
-        const lines = priceLine
-          ? [['Estimated total', priceLine, true]]
-          : [];
+        // Intentionally no lines block — the full pricing breakdown lives
+        // on the estimate page itself, not in the email preview.
         const html = wrapEmail({
           preheader: priceLine
             ? `Your Waves estimate is ready — ${priceLine}.`
             : 'Your Waves estimate is ready to review.',
           heading,
           intro,
-          lines,
           ctaHref: viewUrl,
           ctaLabel: 'View Your Estimate',
         });
@@ -159,8 +157,6 @@ async function sendEstimateNow(estimate, sendMethod) {
           `Hi ${firstName},`,
           '',
           'Your customized service estimate is ready for review.',
-          priceLine ? '' : null,
-          priceLine ? priceLine : null,
           '',
           `View your estimate: ${viewUrl}`,
           '',
