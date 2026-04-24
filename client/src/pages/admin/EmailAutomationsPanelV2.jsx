@@ -245,7 +245,22 @@ function StepEditor({ step, stepIndex, totalSteps, templateKey, onSaved, onDelet
   const [saving, setSaving] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
+
+  const copyShareLink = async () => {
+    if (!step.preview_token) return;
+    const url = `${window.location.origin}/api/public/automation-preview/${step.id}/${step.preview_token}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API may be unavailable (insecure context, etc.) — fall back
+      // to a simple prompt so operator can copy manually.
+      window.prompt('Copy this link:', url);
+    }
+  };
 
   const save = async () => {
     setSaving(true); setStatus('');
@@ -293,6 +308,9 @@ function StepEditor({ step, stepIndex, totalSteps, templateKey, onSaved, onDelet
         </div>
         <div className="flex items-center gap-2">
           <Button onClick={() => setPreviewOpen(true)} variant="secondary" disabled={!htmlBody}>Preview</Button>
+          <Button onClick={copyShareLink} variant="secondary" disabled={!step.preview_token || !htmlBody}>
+            {copied ? 'Link copied ✓' : 'Copy share link'}
+          </Button>
           <Button onClick={() => setAiOpen(true)} variant="secondary">Draft with AI</Button>
           <button type="button" onClick={remove} className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-alert-fg hover:border-alert-fg u-focus-ring">Delete</button>
         </div>
