@@ -10,6 +10,58 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// ── Gemini hero-image generator ─────────────────────────────────────
+//
+// Shared between POST /generate (initial draft creation) and POST
+// /blog/:id/regenerate-image (operator-triggered retry). Returns a
+// `data:` URL on success; throws a typed Error otherwise so the
+// caller can surface the reason to the UI instead of silent-failing.
+//
+// Call sites are expected to wrap this in try/catch and store the
+// error string alongside the post for display.
+async function generateFeaturedImage({ title, topic, keyword }) {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY missing — set it in Railway env to enable image generation');
+  }
+  const imgPrompt = `Create a high-quality, photorealistic hero image for a pest control blog article.
+Title: "${title}"
+Topic: ${keyword || topic || title}
+Style: Bright, professional, clean. Southwest Florida setting (palm trees, tropical landscaping, sunny).
+DO NOT include any text, words, or watermarks in the image.
+The image should feel like a professional stock photo suitable for a blog featured image.
+Landscape orientation, 1200x630px aspect ratio.`;
+
+  const imgRes = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: imgPrompt }] }],
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+      }),
+    }
+  );
+
+  if (!imgRes.ok) {
+    const body = await imgRes.text().catch(() => '');
+    throw new Error(`Gemini HTTP ${imgRes.status}: ${body.slice(0, 240)}`);
+  }
+
+  const imgData = await imgRes.json();
+  const imagePart = imgData.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+  if (!imagePart?.inlineData) {
+    // Gemini returned text only — most commonly a safety/policy response
+    // ("I can't generate that"). Expose it so the operator can edit the
+    // prompt instead of guessing why nothing came back.
+    const textPart = imgData.candidates?.[0]?.content?.parts?.find(p => p.text)?.text || '';
+    throw new Error(`Gemini returned no image${textPart ? ` — ${textPart.slice(0, 200)}` : ''}`);
+  }
+
+  logger.info(`[content] Generated featured image for "${title}"`);
+  return `data:${imagePart.inlineData.mimeType || 'image/png'};base64,${imagePart.inlineData.data}`;
+}
+
 // =========================================================================
 // BLOG POSTS — CRUD + FILTERING
 // =========================================================================
@@ -189,6 +241,35 @@ router.post('/blog/:id/optimize', async (req, res, next) => {
     const result = await BlogWriter.optimizeExistingPost(req.params.id);
     res.json({ optimization: result });
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/content/blog/:id/regenerate-image — Gemini retry.
+//
+// The create path silent-falls-back when the first image-gen attempt
+// fails (missing API key, Gemini safety block, network blip). This
+// lets the operator retry from the editor without re-running the
+// whole content pipeline.
+router.post('/blog/:id/regenerate-image', async (req, res) => {
+  try {
+    const post = await db('blog_posts').where('id', req.params.id).first();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+
+    const url = await generateFeaturedImage({
+      title: post.title,
+      topic: post.meta_description,
+      keyword: post.keyword,
+    });
+
+    const [updated] = await db('blog_posts')
+      .where('id', req.params.id)
+      .update({ featured_image_url: url, updated_at: new Date() })
+      .returning('*');
+
+    res.json({ success: true, post: updated });
+  } catch (err) {
+    logger.warn(`[content] regenerate-image failed: ${err.message}`);
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // POST /api/admin/content/blog/bulk-generate — generate content for next N posts
@@ -508,40 +589,14 @@ Then a blank line, then the full content.`
     }
     if (!autoTag && contentType === 'pest_pressure') autoTag = 'Pest Control';
 
-    // Generate featured image via Gemini
+    // Generate featured image via Gemini.
     let featuredImageUrl = null;
-    if (process.env.GEMINI_API_KEY && content) {
-      try {
-        const imgPrompt = `Create a high-quality, photorealistic hero image for a pest control blog article.
-Title: "${title}"
-Topic: ${keyword || topic}
-Style: Bright, professional, clean. Southwest Florida setting (palm trees, tropical landscaping, sunny).
-DO NOT include any text, words, or watermarks in the image.
-The image should feel like a professional stock photo suitable for a blog featured image.
-Landscape orientation, 1200x630px aspect ratio.`;
-
-        const imgRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: imgPrompt }] }],
-              generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-            }),
-          }
-        );
-        if (imgRes.ok) {
-          const imgData = await imgRes.json();
-          const imagePart = imgData.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-          if (imagePart?.inlineData) {
-            featuredImageUrl = `data:${imagePart.inlineData.mimeType || 'image/png'};base64,${imagePart.inlineData.data}`;
-            logger.info(`[content] Generated featured image for "${title}"`);
-          }
-        }
-      } catch (imgErr) {
-        logger.warn(`[content] Featured image generation failed: ${imgErr.message}`);
-      }
+    let featuredImageError = null;
+    try {
+      featuredImageUrl = await generateFeaturedImage({ title, topic, keyword });
+    } catch (imgErr) {
+      featuredImageError = imgErr.message || String(imgErr);
+      logger.warn(`[content] Featured image generation failed: ${featuredImageError}`);
     }
 
     // Create the blog post record
