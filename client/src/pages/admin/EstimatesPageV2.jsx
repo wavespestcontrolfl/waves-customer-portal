@@ -1490,18 +1490,30 @@ export default function EstimatesPageV2() {
   const [activeTab, setActiveTab] = useState(hasPrefill ? 'new' : 'leads');
   const [mobileView, setMobileView] = useState(hasPrefill ? 'new' : 'list'); // 'list' | 'new'
 
-  // Strip prefill keys from the URL once we've captured them so a refresh
-  // doesn't repeatedly snap the user into the create flow.
+  // Watch URL params for incoming prefill. Two cases this needs to handle:
+  //   1. First mount with prefill in URL (e.g. arriving from a Customer panel
+  //      "+ Estimate" link). useState initializer already captured the values;
+  //      this effect just strips the keys so a refresh doesn't re-snap.
+  //   2. Same-route navigation — user clicks the FilePlus2 icon on a row of
+  //      this very page. The component is already mounted, so the useState
+  //      initializer does NOT re-run. We have to react to searchParams here,
+  //      pull the values into prefill state, and switch into the create flow.
   useEffect(() => {
-    if (!hasPrefill) return;
-    const next = new URLSearchParams(searchParams);
-    let changed = false;
-    ['address', 'customerName', 'customerPhone', 'customerEmail'].forEach((k) => {
-      if (next.has(k)) { next.delete(k); changed = true; }
-    });
-    if (changed) setSearchParams(next, { replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const incoming = {
+      address: searchParams.get('address') || '',
+      customerName: searchParams.get('customerName') || '',
+      customerPhone: searchParams.get('customerPhone') || '',
+      customerEmail: searchParams.get('customerEmail') || '',
+    };
+    const hasIncoming = !!(incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail);
+    if (!hasIncoming) return;
+    setPrefill(incoming);
+    setActiveTab('new');
+    setMobileView('new');
+    const stripped = new URLSearchParams(searchParams);
+    ['address', 'customerName', 'customerPhone', 'customerEmail'].forEach((k) => stripped.delete(k));
+    setSearchParams(stripped, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   function clearPrefill() {
     setPrefill({ address: '', customerName: '', customerPhone: '', customerEmail: '' });
