@@ -2,47 +2,68 @@ import { useEffect, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 
 /**
- * CreateProjectModal — tech-facing form for creating a Project (inspection
- * or documentation-heavy job). Mirrors the dark tech palette; mobile-first.
+ * CreateProjectModal — form for creating a Project (inspection or
+ * documentation-heavy job). Mobile-first.
  *
  * Flow: pick type → pick customer → fill type-specific findings → attach
  * photos → save as draft. Admin reviews + sends from the admin portal.
+ *
+ * Props:
+ *   theme                      'dark' (default, tech portal) | 'light' (admin portal)
+ *   onClose, onCreated         modal callbacks
+ *   defaultCustomerId          pre-fill customer (e.g. from a scheduled service)
+ *   defaultServiceRecordId     link back to the visit being documented
+ *   defaultScheduledServiceId  link back to the scheduled visit
  */
 
-const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-  green: '#10b981',
-  red: '#ef4444',
+const PALETTES = {
+  dark: {
+    bg: '#0f1923', card: '#1e293b', border: '#334155',
+    accent: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8',
+    red: '#ef4444',
+    accentText: '#fff',
+    heading: '#e2e8f0',
+    headingFont: "'Montserrat', sans-serif",
+    bodyFont: "'Nunito Sans', sans-serif",
+  },
+  light: {
+    bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7',
+    accent: '#18181B', text: '#27272A', muted: '#71717A',
+    red: '#991B1B',
+    accentText: '#fff',
+    heading: '#09090B',
+    headingFont: "'DM Sans', sans-serif",
+    bodyFont: "'DM Sans', sans-serif",
+  },
 };
 
-const inputStyle = {
-  width: '100%',
-  background: DARK.bg,
-  color: DARK.text,
-  border: `1px solid ${DARK.border}`,
-  borderRadius: 8,
-  padding: '10px 12px',
-  fontSize: 14,
-  boxSizing: 'border-box',
-  fontFamily: "'Nunito Sans', sans-serif",
-};
+export default function CreateProjectModal({
+  onClose, onCreated,
+  defaultCustomerId, defaultServiceRecordId, defaultScheduledServiceId,
+  theme = 'dark',
+}) {
+  const P = PALETTES[theme] || PALETTES.dark;
+  const inputStyle = {
+    width: '100%',
+    background: theme === 'light' ? P.card : P.bg,
+    color: P.text,
+    border: `1px solid ${P.border}`,
+    borderRadius: 8,
+    padding: '10px 12px',
+    fontSize: 14,
+    boxSizing: 'border-box',
+    fontFamily: P.bodyFont,
+  };
+  const labelStyle = {
+    display: 'block',
+    fontSize: 12,
+    fontWeight: 700,
+    color: P.muted,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginBottom: 6,
+  };
 
-const labelStyle = {
-  display: 'block',
-  fontSize: 12,
-  fontWeight: 700,
-  color: DARK.muted,
-  textTransform: 'uppercase',
-  letterSpacing: 1,
-  marginBottom: 6,
-};
-
-export default function CreateProjectModal({ onClose, onCreated, defaultCustomerId, defaultServiceRecordId, defaultScheduledServiceId }) {
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [projectType, setProjectType] = useState('');
   const [customerId, setCustomerId] = useState(defaultCustomerId || '');
@@ -56,7 +77,7 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
   const [error, setError] = useState(null);
 
   // Photo buffer — queued locally, uploaded after project is created.
-  const [photoQueue, setPhotoQueue] = useState([]); // [{file, category, caption}]
+  const [photoQueue, setPhotoQueue] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
 
   useEffect(() => {
@@ -151,19 +172,19 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
     >
       <div style={{
         width: '100%', maxWidth: 520, margin: '0 12px',
-        background: DARK.card, border: `1px solid ${DARK.border}`, borderRadius: 14,
+        background: P.card, border: `1px solid ${P.border}`, borderRadius: 14,
         display: 'flex', flexDirection: 'column',
       }}>
         {/* Header */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 16px', borderBottom: `1px solid ${DARK.border}`,
+          padding: '14px 16px', borderBottom: `1px solid ${P.border}`,
         }}>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: DARK.text, fontFamily: "'Montserrat', sans-serif" }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: P.heading, fontFamily: P.headingFont }}>
               Create Project Report
             </div>
-            <div style={{ fontSize: 11, color: DARK.muted, marginTop: 2 }}>
+            <div style={{ fontSize: 11, color: P.muted, marginTop: 2 }}>
               Inspection or documentation-heavy job
             </div>
           </div>
@@ -172,7 +193,7 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
             onClick={() => !saving && onClose?.()}
             aria-label="Close"
             style={{
-              background: 'transparent', border: 'none', color: DARK.muted,
+              background: 'transparent', border: 'none', color: P.muted,
               fontSize: 24, cursor: 'pointer', padding: '4px 10px',
             }}
           >×</button>
@@ -193,9 +214,9 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
                     onClick={() => setProjectType(key)}
                     style={{
                       padding: '10px 10px', borderRadius: 8, cursor: 'pointer',
-                      background: active ? DARK.teal : DARK.bg,
-                      color: active ? '#fff' : DARK.text,
-                      border: `1px solid ${active ? DARK.teal : DARK.border}`,
+                      background: active ? P.accent : (theme === 'light' ? P.bg : P.bg),
+                      color: active ? P.accentText : P.text,
+                      border: `1px solid ${active ? P.accent : P.border}`,
                       fontSize: 12, fontWeight: 700, textAlign: 'left',
                     }}
                   >
@@ -205,7 +226,7 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
               })}
             </div>
             {typeCfg?.description && (
-              <div style={{ fontSize: 11, color: DARK.muted, marginTop: 6 }}>{typeCfg.description}</div>
+              <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>{typeCfg.description}</div>
             )}
           </div>
 
@@ -215,14 +236,14 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
             {customerId ? (
               <div style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '10px 12px', background: DARK.bg, borderRadius: 8,
-                border: `1px solid ${DARK.border}`,
+                padding: '10px 12px', background: theme === 'light' ? P.bg : P.bg, borderRadius: 8,
+                border: `1px solid ${P.border}`,
               }}>
-                <span style={{ fontSize: 13, color: DARK.text }}>{customerLabel || customerId}</span>
+                <span style={{ fontSize: 13, color: P.text }}>{customerLabel || customerId}</span>
                 <button
                   type="button"
                   onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); }}
-                  style={{ background: 'transparent', border: 'none', color: DARK.muted, fontSize: 12, cursor: 'pointer' }}
+                  style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
                 >Change</button>
               </div>
             ) : (
@@ -236,8 +257,8 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
                 />
                 {customerResults.length > 0 && (
                   <div style={{
-                    marginTop: 6, background: DARK.bg, borderRadius: 8,
-                    border: `1px solid ${DARK.border}`, overflow: 'hidden',
+                    marginTop: 6, background: theme === 'light' ? P.card : P.bg, borderRadius: 8,
+                    border: `1px solid ${P.border}`, overflow: 'hidden',
                   }}>
                     {customerResults.map(c => (
                       <button
@@ -249,13 +270,13 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
                         }}
                         style={{
                           width: '100%', textAlign: 'left', background: 'transparent',
-                          border: 'none', borderBottom: `1px solid ${DARK.border}`,
-                          padding: '10px 12px', cursor: 'pointer', color: DARK.text,
+                          border: 'none', borderBottom: `1px solid ${P.border}`,
+                          padding: '10px 12px', cursor: 'pointer', color: P.text,
                           fontSize: 13,
                         }}
                       >
                         <div style={{ fontWeight: 700 }}>{c.first_name} {c.last_name}</div>
-                        <div style={{ fontSize: 11, color: DARK.muted }}>
+                        <div style={{ fontSize: 11, color: P.muted }}>
                           {c.phone} {c.city ? `· ${c.city}` : ''}
                         </div>
                       </button>
@@ -331,19 +352,21 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
                   setQueue={setPhotoQueue}
                   categories={typeCfg.photoCategories}
                   onAdd={queuePhoto}
+                  palette={P}
+                  inputStyle={inputStyle}
                 />
               </div>
             </>
           )}
 
           {error && (
-            <div style={{ padding: '8px 12px', background: `${DARK.red}22`, border: `1px solid ${DARK.red}`, borderRadius: 8, color: DARK.red, fontSize: 13 }}>
+            <div style={{ padding: '8px 12px', background: `${P.red}22`, border: `1px solid ${P.red}`, borderRadius: 8, color: P.red, fontSize: 13 }}>
               {error}
             </div>
           )}
 
           {saving && uploadProgress.total > 0 && (
-            <div style={{ fontSize: 12, color: DARK.muted }}>
+            <div style={{ fontSize: 12, color: P.muted }}>
               Uploading photos… {uploadProgress.done} / {uploadProgress.total}
             </div>
           )}
@@ -351,7 +374,7 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
 
         {/* Footer */}
         <div style={{
-          padding: '12px 16px', borderTop: `1px solid ${DARK.border}`,
+          padding: '12px 16px', borderTop: `1px solid ${P.border}`,
           display: 'flex', gap: 10, justifyContent: 'flex-end',
         }}>
           <button
@@ -360,8 +383,8 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
             disabled={saving}
             style={{
               padding: '10px 16px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-              background: 'transparent', border: `1px solid ${DARK.border}`,
-              color: DARK.text, cursor: saving ? 'default' : 'pointer',
+              background: 'transparent', border: `1px solid ${P.border}`,
+              color: P.text, cursor: saving ? 'default' : 'pointer',
             }}
           >Cancel</button>
           <button
@@ -370,8 +393,8 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
             disabled={saving || !projectType || !customerId}
             style={{
               padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 800,
-              background: (!projectType || !customerId) ? DARK.muted : DARK.teal,
-              color: '#fff', border: 'none',
+              background: (!projectType || !customerId) ? P.muted : P.accent,
+              color: P.accentText, border: 'none',
               cursor: (saving || !projectType || !customerId) ? 'default' : 'pointer',
             }}
           >{saving ? 'Saving…' : 'Save Draft'}</button>
@@ -381,17 +404,13 @@ export default function CreateProjectModal({ onClose, onCreated, defaultCustomer
   );
 }
 
-function PhotoQueue({ queue, setQueue, categories, onAdd }) {
+function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle }) {
   const [selectedCategory, setSelectedCategory] = useState(categories?.[0] || '');
 
   function handleFiles(e) {
     const files = Array.from(e.target.files || []);
     files.forEach(f => onAdd(f, selectedCategory));
     e.target.value = '';
-  }
-
-  function updateItem(id, patch) {
-    setQueue(q => q.map(item => item.id === id ? { ...item, ...patch } : item));
   }
 
   function removeItem(id) {
@@ -412,7 +431,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd }) {
         </select>
         <label style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          padding: '8px 14px', borderRadius: 8, background: DARK.teal, color: '#fff',
+          padding: '8px 14px', borderRadius: 8, background: P.accent, color: P.accentText,
           fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
         }}>
           + Add
@@ -428,7 +447,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd }) {
       </div>
 
       {queue.length === 0 ? (
-        <div style={{ fontSize: 11, color: DARK.muted, padding: '10px 0' }}>
+        <div style={{ fontSize: 11, color: P.muted, padding: '10px 0' }}>
           No photos yet — pick a category and tap Add.
         </div>
       ) : (
@@ -437,13 +456,13 @@ function PhotoQueue({ queue, setQueue, categories, onAdd }) {
             <div key={item.id} style={{
               display: 'flex', alignItems: 'center', gap: 8,
               padding: '6px 8px', borderRadius: 6,
-              background: DARK.bg, border: `1px solid ${DARK.border}`,
+              background: P.bg, border: `1px solid ${P.border}`,
             }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, color: DARK.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <div style={{ fontSize: 11, color: P.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {item.file.name}
                 </div>
-                <div style={{ fontSize: 10, color: DARK.muted }}>
+                <div style={{ fontSize: 10, color: P.muted }}>
                   {item.category.replace(/_/g, ' ')} · {(item.file.size / 1024).toFixed(0)} KB
                 </div>
               </div>
@@ -451,7 +470,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd }) {
                 type="button"
                 onClick={() => removeItem(item.id)}
                 style={{
-                  background: 'transparent', border: 'none', color: DARK.muted,
+                  background: 'transparent', border: 'none', color: P.muted,
                   cursor: 'pointer', fontSize: 16, padding: '0 6px',
                 }}
                 aria-label="Remove"
