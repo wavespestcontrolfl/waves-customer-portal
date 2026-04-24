@@ -10,6 +10,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const slotReservation = require('../services/slot-reservation');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
+const { PEST, ONE_TIME } = require('../services/pricing-engine/constants');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
@@ -89,9 +90,8 @@ function visitsPerYearFromFrequency(freq) {
 // lowest visit frequency among them. Returns null if there's no pest
 // line at all (in which case we hide the prefs toggles entirely).
 // `monthlyBase` is the sum of the pest line(s) monthly total before the
-// preference toggles are applied — used to cap how much the toggles
-// can discount (tech is still doing perimeter treatment, so the pest
-// line can never drop to $0).
+// preference toggles are applied — used together with the engine's
+// PEST.floor to cap how much the toggles can discount.
 function detectPestRecurring(recurring) {
   const pest = (recurring || []).filter((s) => /pest/i.test(String(s.name || '')));
   if (!pest.length) return null;
@@ -104,18 +104,30 @@ function detectPestOneTime(oneTimeItems) {
   return (oneTimeItems || []).some((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')));
 }
 
-// Sum the one-time pest item prices for the discount-cap check.
+// Sum of one-time pest item prices on this estimate (matches the regex
+// in detectPestOneTime). Used to clamp the one-time toggle discount
+// above ONE_TIME.pest.floor.
 function pestOneTimeBase(oneTimeItems) {
   return (oneTimeItems || [])
     .filter((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')))
     .reduce((acc, it) => acc + Number(it.price || 0), 0);
 }
 
-// The tech still performs perimeter treatment when both toggles are
-// off, so the pest line cannot legitimately be free. Cap the combined
-// preference discount at half of the pest line so the final pest total
-// stays >= 50% of its original value.
-const MAX_PREF_DISCOUNT_FRACTION = 0.5;
+// Minimum monthly price for a recurring pest plan at the given cadence,
+// derived from the engine's own floor rather than a chosen fraction.
+// Mirrors service-pricing.js `pricePestControl`: basePrice is floored
+// at PEST.floor, then multiplied by the cadence's frequency multiplier
+// before being turned into a monthly. Defaults to v1 rates (the live
+// shape for admin-created estimates); v2 multipliers are slightly
+// gentler so falling back to v1 just makes the floor a touch lower,
+// which is the safer direction.
+function pestMonthlyFloor(visitsPerYear) {
+  const freqKey = visitsPerYear >= 12 ? 'monthly'
+                : visitsPerYear >= 6  ? 'bimonthly'
+                : 'quarterly';
+  const freqMult = PEST.frequencyDiscounts.v1?.[freqKey] ?? 1.0;
+  return PEST.floor * freqMult * visitsPerYear / 12;
+}
 
 function normalizePrefs(raw) {
   const out = { ...DEFAULT_PREFS };
@@ -129,9 +141,10 @@ function normalizePrefs(raw) {
 
 // Compute the monthly + one-time discount for a given set of prefs.
 // Returns { monthlyOff, oneTimeOff } in dollars (positive numbers).
-// When pest base totals are provided, the combined discount is capped
-// at MAX_PREF_DISCOUNT_FRACTION of the corresponding pest line total
-// so small estimates can't be dragged to $0 via the toggles.
+// Clamps so the remaining pest price never drops below the engine's
+// own floors (PEST.floor for recurring per-visit, ONE_TIME.pest.floor
+// for one-time). Without the clamp, a small pest estimate could be
+// dragged to $0 via the toggles.
 function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal = 0) {
   let monthlyOff = 0;
   let oneTimeOff = 0;
@@ -147,12 +160,15 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
       }
     }
   }
-  const pestMonthlyBase = Number(pestRecurring?.monthlyBase || 0);
-  if (pestMonthlyBase > 0) {
-    monthlyOff = Math.min(monthlyOff, pestMonthlyBase * MAX_PREF_DISCOUNT_FRACTION);
+  if (pestRecurring) {
+    const floor = pestMonthlyFloor(pestRecurring.visitsPerYear);
+    const pestMonthlyBase = Number(pestRecurring.monthlyBase || 0);
+    const maxMonthlyOff = Math.max(0, pestMonthlyBase - floor);
+    monthlyOff = Math.min(monthlyOff, maxMonthlyOff);
   }
   if (pestOneTimeTotal > 0) {
-    oneTimeOff = Math.min(oneTimeOff, pestOneTimeTotal * MAX_PREF_DISCOUNT_FRACTION);
+    const maxOneTimeOff = Math.max(0, pestOneTimeTotal - ONE_TIME.pest.floor);
+    oneTimeOff = Math.min(oneTimeOff, maxOneTimeOff);
   }
   return {
     monthlyOff: Math.round(monthlyOff * 100) / 100,
