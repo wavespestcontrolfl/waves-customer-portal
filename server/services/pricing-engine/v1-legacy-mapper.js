@@ -286,6 +286,10 @@ function mapV1ToLegacyShape(v1Result) {
         .map(s => ({ name: s.name, price: s.price })),
       total: oneTimeTotal,
       tmInstall,
+      // Kept out of items[] by legacy v2 convention, but surfaced
+      // explicitly so the customer-facing estimate can render it as
+      // its own line with the "waived with annual prepay" note.
+      membershipFee,
       otSubtotal: oneTimeTotal - tmInstall,
     },
     totals: {

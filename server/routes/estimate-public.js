@@ -326,7 +326,16 @@ function renderPage(token, estimate, estData) {
     return `<tr><td>${escapeHtml(s.name)}</td><td style="text-align:right">${fmtMoney(discounted)}/mo</td></tr>`;
   }).join('');
 
-  const oneTimeRows = oneTimeItems.map((it) => {
+  // WaveGuard Membership — $99 initial fee rolled into oneTimeTotal by the
+  // pricing engine but not into oneTime.items[]. Surface it as its own
+  // line so the customer sees what the fee is and the "waived with annual
+  // prepayment" note explains how to skip it.
+  const membershipFee = Number(estResult?.oneTime?.membershipFee || 0);
+  const membershipRow = membershipFee > 0
+    ? `<tr><td>WaveGuard Membership<div class="sub">Waived if you prepay 12 months up front</div></td><td style="text-align:right">${fmtMoney(membershipFee)}</td></tr>`
+    : '';
+
+  const oneTimeRows = membershipRow + oneTimeItems.map((it) => {
     const price = Number(it.price || 0);
     if (price <= 0) return '';
     return `<tr><td>${escapeHtml(it.name)}${it.detail ? `<div class="sub">${escapeHtml(it.detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
