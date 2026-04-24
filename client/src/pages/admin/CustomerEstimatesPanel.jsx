@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Phone, MessageSquare, FilePlus2, ExternalLink, X } from 'lucide-react';
+import { Phone, MessageSquare, FilePlus2, ExternalLink, ChevronLeft, PhoneCall } from 'lucide-react';
 import { Badge, Button, cn } from '../../components/ui';
 import { adminFetch } from '../../lib/adminFetch';
 
@@ -53,16 +53,26 @@ function timeAgo(d) {
 
 export default function CustomerEstimatesPanel({ customerId, onClose }) {
   const [data, setData] = useState(null);
+  const [comms, setComms] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true); setErr('');
     try {
-      const r = await adminFetch(`/admin/customers/${customerId}/estimates-summary`);
-      const d = await r.json();
-      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+      const [summaryRes, commsRes] = await Promise.all([
+        adminFetch(`/admin/customers/${customerId}/estimates-summary`),
+        adminFetch(`/admin/customers/${customerId}/comms?limit=15`).catch(() => null),
+      ]);
+      const d = await summaryRes.json();
+      if (!summaryRes.ok) throw new Error(d?.error || `HTTP ${summaryRes.status}`);
       setData(d);
+      if (commsRes && commsRes.ok) {
+        const cd = await commsRes.json();
+        setComms(cd?.comms || []);
+      } else {
+        setComms([]);
+      }
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -107,21 +117,21 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
         role="dialog"
         aria-label="Customer + estimate history"
       >
-        <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
-          <div className="min-w-0">
-            <div className="text-11 uppercase tracking-label text-ink-tertiary">Customer</div>
-            <div className="text-16 font-medium text-zinc-900 truncate">
-              {c ? `${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unknown' : loading ? 'Loading…' : 'Not found'}
-            </div>
-          </div>
+        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-hairline border-zinc-200">
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close"
-            className="text-ink-secondary hover:text-zinc-900 p-1 -mr-1"
+            aria-label="Back to estimates"
+            className="inline-flex items-center gap-1 h-9 px-2 -ml-1 rounded-sm text-ink-secondary hover:text-zinc-900 hover:bg-zinc-50 u-focus-ring"
           >
-            <X size={18} strokeWidth={1.75} />
+            <ChevronLeft size={18} strokeWidth={1.75} />
+            <span className="text-13 font-medium">Back</span>
           </button>
+          <div className="flex-1 text-center min-w-0 px-2">
+            <div className="text-11 uppercase tracking-label text-ink-tertiary">Customer</div>
+          </div>
+          {/* Spacer to balance the Back button's width and keep the eyebrow centered */}
+          <div className="w-[70px]" aria-hidden />
         </div>
 
         {loading && <div className="p-6 text-13 text-ink-secondary text-center">Loading…</div>}
@@ -129,10 +139,13 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
 
         {!loading && !err && c && (
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
-            {/* Customer card */}
+            {/* Customer card — name is the primary header, then company, then phone/email/address */}
             <section className="border border-hairline border-zinc-200 rounded-sm p-3 space-y-1 text-13">
+              <div className="text-16 font-medium text-zinc-900 mb-1">
+                {`${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unknown'}
+              </div>
               {c.company_name && (
-                <div className="text-zinc-900 font-medium">{c.company_name}</div>
+                <div className="text-ink-secondary">{c.company_name}</div>
               )}
               {c.phone && (
                 <div className="flex items-center gap-2">
@@ -224,19 +237,43 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
               </div>
             )}
 
-            {/* Last contact */}
-            {lastContact && (
-              <section className="text-12 text-ink-secondary border-t border-hairline border-zinc-200 pt-3">
-                <div className="uppercase tracking-label text-11 text-ink-tertiary mb-1">Last contact</div>
-                <div>
-                  <span className="text-zinc-900">
-                    {lastContact.channel === 'voice' ? 'Call' : 'SMS'}
-                  </span>
-                  {' '}({lastContact.direction === 'inbound' ? 'from customer' : 'from us'}) · {timeAgo(lastContact.at)}
+            {/* Communications — full chronological thread (SMS + calls) pulled
+                from /admin/customers/:id/comms. Falls back to the single
+                lastContact row from the summary endpoint when the comms call
+                is empty or failed. */}
+            {(comms.length > 0 || lastContact) && (
+              <section className="border-t border-hairline border-zinc-200 pt-3">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="uppercase tracking-label text-11 text-ink-tertiary">
+                    Communications {comms.length > 0 && `(${comms.length})`}
+                  </div>
+                  {c.phone && (
+                    <Link
+                      to={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                      className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
+                    >
+                      Open thread →
+                    </Link>
+                  )}
                 </div>
-                {lastContact.preview && lastContact.channel === 'sms' && (
-                  <div className="mt-1 text-ink-secondary italic truncate">"{lastContact.preview}"</div>
-                )}
+                {comms.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {comms.slice(0, 10).map((m) => <CommsRow key={m.id} m={m} />)}
+                    {comms.length > 10 && (
+                      <div className="text-11 text-ink-tertiary text-center pt-1">
+                        + {comms.length - 10} more — open thread to see all
+                      </div>
+                    )}
+                  </div>
+                ) : lastContact ? (
+                  <div className="text-12 text-ink-secondary">
+                    <span className="text-zinc-900">{lastContact.channel === 'voice' ? 'Call' : 'SMS'}</span>
+                    {' '}({lastContact.direction === 'inbound' ? 'from customer' : 'from us'}) · {timeAgo(lastContact.at)}
+                    {lastContact.preview && lastContact.channel === 'sms' && (
+                      <div className="mt-1 text-ink-secondary italic truncate">"{lastContact.preview}"</div>
+                    )}
+                  </div>
+                ) : null}
               </section>
             )}
 
@@ -309,6 +346,43 @@ function StatCell({ label, value, sub, accent }) {
       </div>
       <div className="text-11 text-ink-tertiary uppercase tracking-label">{label}</div>
       {sub && <div className="text-11 text-ink-secondary mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+// One row in the Communications section. Handles SMS + voice shapes from
+// /admin/customers/:id/comms. Kept minimal — body/aiSummary/duration as
+// appropriate, direction as a left-border accent (ours=zinc, theirs=blue).
+function CommsRow({ m }) {
+  const isOut = m.direction === 'outbound';
+  const isVoice = m.channel === 'voice';
+  const Icon = isVoice ? PhoneCall : MessageSquare;
+  const label = isVoice
+    ? (isOut ? 'Call placed' : (m.answeredBy === 'ai_agent' ? 'Call (AI answered)' : 'Call received'))
+    : (isOut ? 'SMS sent' : 'SMS received');
+  const subtitle = isVoice
+    ? (m.aiSummary || (m.durationSeconds ? `${Math.round(m.durationSeconds / 60)} min` : null))
+    : m.body;
+  return (
+    <div
+      className={cn(
+        'border border-hairline border-zinc-200 rounded-sm px-2.5 py-2 text-12 flex items-start gap-2',
+        !isOut && 'border-l-2 border-l-waves-blue',
+      )}
+    >
+      <Icon size={13} strokeWidth={1.75} className="text-ink-tertiary mt-0.5 flex-shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-zinc-900 font-medium">{label}</span>
+          <span className="text-11 text-ink-tertiary">· {timeAgo(m.createdAt)}</span>
+          {m.ourEndpointLabel && (
+            <span className="text-11 text-ink-tertiary">· {m.ourEndpointLabel}</span>
+          )}
+        </div>
+        {subtitle && (
+          <div className="text-ink-secondary mt-0.5 line-clamp-2">{subtitle}</div>
+        )}
+      </div>
     </div>
   );
 }
