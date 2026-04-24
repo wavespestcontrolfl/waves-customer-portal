@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { Button } from '../components/Button';
 import { WavesShell } from '../components/brand';
+import { FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -449,7 +450,7 @@ export default function PublicBookingPage() {
                   placeholder="Gate code, pets, access instructions…"
                   value={notes}
                   onChange={e => setNotes(e.target.value)}
-                  style={{ ...inputStyle, resize: 'vertical', fontFamily: "'Inter', system-ui, sans-serif" }}
+                  style={{ ...inputStyle, resize: 'vertical', fontFamily: FONTS.body }}
                 />
               </div>
             </div>
@@ -500,7 +501,7 @@ export default function PublicBookingPage() {
               <div style={{ fontSize: 11, fontWeight: 600, color: BRAND.gray400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
                 Confirmation
               </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: BRAND.teal, fontFamily: "'JetBrains Mono', monospace", marginBottom: 14 }}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: BRAND.teal, fontFamily: FONTS.mono, marginBottom: 14 }}>
                 {confCode}
               </div>
               <div style={{ fontSize: 13, color: BRAND.gray600, lineHeight: 1.6 }}>

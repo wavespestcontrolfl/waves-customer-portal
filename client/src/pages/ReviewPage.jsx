@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
+import { FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Mirrored from wavespestcontrol.com Astro @theme tokens (van-vinyl spec)
@@ -90,7 +91,7 @@ export default function ReviewPage() {
     <div style={{ minHeight: '100vh', background: W.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}></div>
-        <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 18, color: W.blueDeeper, letterSpacing: '-0.01em' }}>Link Expired</div>
+        <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: W.blueDeeper, letterSpacing: '-0.01em' }}>Link Expired</div>
         <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>This review link is no longer available. Call us at <a href="tel:+19412975749" style={{ color: W.blue }}>(941) 297-5749</a>.</div>
       </div>
     </div>
@@ -102,7 +103,7 @@ export default function ReviewPage() {
     : null;
 
   return (
-    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: "'Inter', system-ui, sans-serif" }}>
+    <div style={{ minHeight: '100vh', background: W.offWhite, fontFamily: FONTS.body }}>
       {/* Header — brand fonts loaded globally via client/index.html */}
       <div style={{ background: `linear-gradient(135deg, ${W.blueBright} 0%, ${W.blueDeeper} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
         {/* Hero video — waves-hero-service.mp4 */}
@@ -118,7 +119,7 @@ export default function ReviewPage() {
         </div>
         <h1 style={{
           position: 'relative', zIndex: 1,
-          fontSize: 36, fontFamily: "'Anton', 'Luckiest Guy', cursive", fontWeight: 400,
+          fontSize: 36, fontFamily: FONTS.display, fontWeight: 400,
           color: W.white, letterSpacing: '0.04em', lineHeight: 1, margin: 0,
           textShadow: '0 2px 8px rgba(0,0,0,0.2)',
         }}>WAVES</h1>
@@ -137,13 +138,13 @@ export default function ReviewPage() {
             border: `3px solid ${W.white}`, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
           }}>
             {!techPhoto && (
-              <span style={{ color: W.white, fontSize: 28, fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 800 }}>
+              <span style={{ color: W.white, fontSize: 28, fontFamily: FONTS.heading, fontWeight: 800 }}>
                 {(techName || 'W').charAt(0)}
               </span>
             )}
           </div>
 
-          <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 20, fontWeight: 700, color: W.blueDeeper }}>
+          <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 700, color: W.blueDeeper }}>
             {techName || 'Your Technician'}
           </div>
           <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
@@ -161,7 +162,7 @@ export default function ReviewPage() {
         {/* ── Rating Phase ── */}
         {phase === 'rate' && (
           <div style={{ background: W.white, borderRadius: 20, border: `1px solid ${W.border}`, padding: '28px 24px', textAlign: 'center', boxShadow: '0 2px 12px rgba(0,0,0,0.06)' }}>
-            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 17, fontWeight: 700, color: W.blueDeeper, marginBottom: 4 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: W.blueDeeper, marginBottom: 4 }}>
               How was your experience?
             </div>
             <div style={{ fontSize: 13, color: W.textCaption, marginBottom: 20 }}>
@@ -184,7 +185,7 @@ export default function ReviewPage() {
                       border: `2px solid ${isHovered || isSelected ? color : W.border}`,
                       background: isHovered || isSelected ? `${color}15` : W.white,
                       color: isHovered || isSelected ? color : W.textBody,
-                      fontFamily: "'Montserrat', 'Inter', sans-serif", fontWeight: 700, fontSize: 18,
+                      fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18,
                       cursor: 'pointer', transition: 'all 0.15s',
                       transform: isHovered ? 'scale(1.08)' : 'scale(1)',
                     }}>
@@ -212,7 +213,7 @@ export default function ReviewPage() {
         {phase === 'redirecting' && (
           <div style={{ background: W.white, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${W.green}` }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}></div>
-            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 18, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
               Thank you, {customerFirstName}!
             </div>
             <div style={{ fontSize: 14, color: W.textBody, lineHeight: 1.6, marginBottom: 16 }}>
@@ -231,7 +232,7 @@ export default function ReviewPage() {
         {phase === 'feedback' && (
           <div style={{ background: W.white, borderRadius: 20, padding: 28, textAlign: 'center', border: `1px solid ${W.border}` }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}></div>
-            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 17, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
               We appreciate your honesty
             </div>
             <div style={{ fontSize: 14, color: W.textBody, marginBottom: 16, lineHeight: 1.6 }}>
@@ -243,7 +244,7 @@ export default function ReviewPage() {
               rows={4}
               style={{
                 width: '100%', padding: 14, borderRadius: 12, border: `1px solid ${W.border}`,
-                fontFamily: "'Inter', system-ui, sans-serif", fontSize: 14, color: W.navy, resize: 'vertical',
+                fontFamily: FONTS.body, fontSize: 14, color: W.navy, resize: 'vertical',
                 outline: 'none', boxSizing: 'border-box',
               }}
             />
@@ -271,7 +272,7 @@ export default function ReviewPage() {
         {phase === 'thankyou' && (
           <div style={{ background: W.greenLight, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${W.green}` }}>
             <div style={{ fontSize: 40, marginBottom: 8 }}></div>
-            <div style={{ fontFamily: "'Montserrat', 'Inter', sans-serif", fontSize: 18, fontWeight: 700, color: '#2E7D32' }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: '#2E7D32' }}>
               Thank you{customerFirstName ? `, ${customerFirstName}` : ''}!
             </div>
             <div style={{ fontSize: 14, color: W.textBody, marginTop: 8, lineHeight: 1.6 }}>

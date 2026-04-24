@@ -1,3 +1,4 @@
+import { FONTS } from '../theme-brand';
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import BrandFooter from "../components/BrandFooter";
@@ -140,7 +141,7 @@ export default function BookingPage() {
   const selectedDay = availability.find((d) => d.date === selectedDate);
 
   return (
-    <div style={{ minHeight: "100vh", background: BRAND.sand, fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: BRAND.sand, fontFamily: FONTS.body }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap');
         @keyframes rippleOut { to { transform: scale(4); opacity: 0; } }
@@ -181,7 +182,7 @@ export default function BookingPage() {
         <div style={{ position: 'relative', zIndex: 1 }}>
           <h1 style={{
             color: "#fff",
-            fontFamily: "'Anton', 'Luckiest Guy', cursive",
+            fontFamily: FONTS.display,
             fontWeight: 400, fontSize: 22,
             letterSpacing: "0.02em", lineHeight: 1,
             margin: 0,
@@ -675,7 +676,7 @@ export default function BookingPage() {
               <div style={{
                 fontSize: 32, fontWeight: 600, color: BRAND.teal,
                 letterSpacing: "3px", marginBottom: 20,
-                fontFamily: "'DM Sans', monospace",
+                fontFamily: FONTS.mono,
               }}>
                 {confCode}
               </div>
