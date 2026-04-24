@@ -1315,16 +1315,27 @@ export default function DispatchPageV2() {
           invoiceToken={paymentData.invoiceToken}
           amount={paymentData.amount}
           onClose={() => setPaymentData(null)}
-          onSelectCash={(svc) => {
-            setPaymentData(null);
-            setCheckoutService(null);
-            setDetailService(null);
-            setPrepaidService(svc);
-          }}
           onInvoiceSent={() => {
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
+            fetchSchedule(date);
+          }}
+          onChargeSuccess={() => {
+            setPaymentData(null);
+            setCheckoutService(null);
+            setDetailService(null);
+            fetchSchedule(date);
+          }}
+          onPrepaidRecorded={() => {
+            // Cash / Check tender already wrote the prepayment row server-side;
+            // punch straight to the completion sheet so the tech can wrap the
+            // visit without a second step.
+            const svc = paymentData.service;
+            setPaymentData(null);
+            setCheckoutService(null);
+            setDetailService(null);
+            setCompletingService(svc);
             fetchSchedule(date);
           }}
         />
