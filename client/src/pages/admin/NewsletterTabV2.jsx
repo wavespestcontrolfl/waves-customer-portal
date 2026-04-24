@@ -639,7 +639,7 @@ function HistoryView() {
                     {s.segment_filter && <Badge tone="muted">Segmented</Badge>}
                     {s.external_source === 'beehiiv' && <Badge tone="muted">Beehiiv</Badge>}
                     <StatusChip status={s.status} />
-                    {s.external_web_url && (
+                    {s.external_web_url && s.status !== 'draft' && (
                       <a
                         href={s.external_web_url}
                         target="_blank"
