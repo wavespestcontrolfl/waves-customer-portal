@@ -93,7 +93,7 @@ export default function MobileItemDiscountPickerSheet({ onClose, onSelect }) {
   );
 
   return (
-    <div className="fixed inset-0 z-[60] bg-white overflow-y-auto md:hidden">
+    <div className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden">
       <div
         className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
         style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}
