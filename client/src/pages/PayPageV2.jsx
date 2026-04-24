@@ -47,6 +47,7 @@ function fmtDate(d) {
 // ── Stripe Payment Element wrapper ─────────────────────────────────
 function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange }) {
   const mountRef = useRef(null);
+  const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
   const [ready, setReady] = useState(false);
@@ -150,6 +151,61 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         if (cancelled) return;
         elementsRef.current = elements;
 
+        // ── Express Checkout Element — prominent wallet button
+        //
+        // Renders Apple Pay / Google Pay / Link as a branded one-tap
+        // pill at the top of the form (image reference: google-pay.png).
+        // The card preview + last-four in the button are Google's own
+        // surface, shown when the customer has a saved card in Google
+        // Pay and our domain is registered with Stripe.
+        //
+        // We pre-apply the card-family surcharge on mount so the wallet
+        // sheet displays the correct total ($X + 3%) — wallets are
+        // always card-family, and updating the PI from inside the click
+        // handler has too tight a deadline (1s).
+        const express = elements.create('expressCheckout', {
+          buttonTheme: { applePay: 'black', googlePay: 'black' },
+          buttonType:  { applePay: 'buy',   googlePay: 'buy' },
+          buttonHeight: 52,
+          paymentMethodOrder: ['applePay', 'googlePay', 'link'],
+        });
+
+        express.on('ready', async () => {
+          if (cancelled) return;
+          // Surcharge wallets = card-family × 1.03. Pre-apply now so the
+          // wallet sheet shows the right total instead of the base amount.
+          try { await syncAmountForMethod('card', saveCard); } catch { /* non-fatal */ }
+        });
+
+        express.on('confirm', async () => {
+          if (cancelled) return;
+          try {
+            const { error, paymentIntent } = await stripeRef.current.confirmPayment({
+              elements: elementsRef.current,
+              confirmParams: { return_url: window.location.href },
+              redirect: 'if_required',
+            });
+            if (error) {
+              setElementError(error.message);
+              return;
+            }
+            if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
+              onSuccess?.(paymentIntent);
+            } else if (paymentIntent && paymentIntent.status === 'requires_action') {
+              setElementError('Additional verification required. Please follow the prompts.');
+            }
+          } catch (err) {
+            setElementError(err.message || 'Payment failed');
+          }
+        });
+
+        if (expressMountRef.current) express.mount(expressMountRef.current);
+
+        // ── Payment Element — manual card + ACH
+        //
+        // Wallets moved into the Express Checkout Element above, so we
+        // hide them here (wallets: 'never') and drop them from the
+        // method order. The accordion now shows only card + ACH.
         const paymentElement = elements.create('payment', {
           layout: {
             type: 'accordion',
@@ -157,8 +213,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             radios: true,
             spacedAccordionItems: true,
           },
-          paymentMethodOrder: ['apple_pay', 'google_pay', 'card', 'us_bank_account'],
-          wallets: { applePay: 'auto', googlePay: 'auto' },
+          paymentMethodOrder: ['card', 'us_bank_account'],
+          wallets: { applePay: 'never', googlePay: 'never' },
         });
 
         paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
@@ -235,6 +291,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </span>
       </div>
 
+      {/* Express wallet button (Google Pay / Apple Pay / Link) —
+          Stripe only renders one on browser + device combos where the
+          customer actually has a wallet set up, so this div will be
+          empty for most desktop Chrome users without a Google Pay card
+          on file. That's the Stripe-recommended behavior. */}
+      <div ref={expressMountRef} style={{ marginBottom: 16 }} />
       <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
 
       {/* Save-card opt-in */}
