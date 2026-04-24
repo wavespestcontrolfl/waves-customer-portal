@@ -88,16 +88,34 @@ function visitsPerYearFromFrequency(freq) {
 // How many pest-control recurring services are in this estimate + the
 // lowest visit frequency among them. Returns null if there's no pest
 // line at all (in which case we hide the prefs toggles entirely).
+// `monthlyBase` is the sum of the pest line(s) monthly total before the
+// preference toggles are applied — used to cap how much the toggles
+// can discount (tech is still doing perimeter treatment, so the pest
+// line can never drop to $0).
 function detectPestRecurring(recurring) {
   const pest = (recurring || []).filter((s) => /pest/i.test(String(s.name || '')));
   if (!pest.length) return null;
   const vpy = pest.reduce((acc, s) => Math.max(acc, visitsPerYearFromFrequency(s.frequency || s.billing || s.cadence)), 0) || 4;
-  return { count: pest.length, visitsPerYear: vpy };
+  const monthlyBase = pest.reduce((acc, s) => acc + Number(s.mo || s.monthly || 0), 0);
+  return { count: pest.length, visitsPerYear: vpy, monthlyBase };
 }
 
 function detectPestOneTime(oneTimeItems) {
   return (oneTimeItems || []).some((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')));
 }
+
+// Sum the one-time pest item prices for the discount-cap check.
+function pestOneTimeBase(oneTimeItems) {
+  return (oneTimeItems || [])
+    .filter((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')))
+    .reduce((acc, it) => acc + Number(it.price || 0), 0);
+}
+
+// The tech still performs perimeter treatment when both toggles are
+// off, so the pest line cannot legitimately be free. Cap the combined
+// preference discount at half of the pest line so the final pest total
+// stays >= 50% of its original value.
+const MAX_PREF_DISCOUNT_FRACTION = 0.5;
 
 function normalizePrefs(raw) {
   const out = { ...DEFAULT_PREFS };
@@ -111,7 +129,10 @@ function normalizePrefs(raw) {
 
 // Compute the monthly + one-time discount for a given set of prefs.
 // Returns { monthlyOff, oneTimeOff } in dollars (positive numbers).
-function computePrefDiscount(prefs, pestRecurring, hasPestOneTime) {
+// When pest base totals are provided, the combined discount is capped
+// at MAX_PREF_DISCOUNT_FRACTION of the corresponding pest line total
+// so small estimates can't be dragged to $0 via the toggles.
+function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal = 0) {
   let monthlyOff = 0;
   let oneTimeOff = 0;
   const p = normalizePrefs(prefs);
@@ -125,6 +146,13 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime) {
         oneTimeOff += SERVICE_PREFS[k].oneTime;
       }
     }
+  }
+  const pestMonthlyBase = Number(pestRecurring?.monthlyBase || 0);
+  if (pestMonthlyBase > 0) {
+    monthlyOff = Math.min(monthlyOff, pestMonthlyBase * MAX_PREF_DISCOUNT_FRACTION);
+  }
+  if (pestOneTimeTotal > 0) {
+    oneTimeOff = Math.min(oneTimeOff, pestOneTimeTotal * MAX_PREF_DISCOUNT_FRACTION);
   }
   return {
     monthlyOff: Math.round(monthlyOff * 100) / 100,
@@ -226,9 +254,10 @@ function renderPage(token, estimate, estData) {
 
   const pestRecurring = detectPestRecurring(recurring);
   const hasPestOneTime = detectPestOneTime(oneTimeItems);
+  const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
   const showPrefs = !!(pestRecurring || hasPestOneTime);
   const prefs = normalizePrefs(estData?.preferences);
-  const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime);
+  const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
 
   const tierPrices = {};
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
@@ -1389,11 +1418,12 @@ router.put('/:token/preferences', async (req, res, next) => {
     const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
     const pestRecurring = detectPestRecurring(recurring);
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
+    const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
     const baseMonthly = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || estimate.monthly_total || 0);
     const currentTier = estimate.waveguard_tier || 'Bronze';
     const tierDiscount = TIER_DISCOUNTS[currentTier] || 0;
 
-    const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime);
+    const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
     const monthlyTotal = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount) - monthlyOff) * 100) / 100);
     const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
     const onetimeBase = Number(parsedData.onetimeTotalBase || estimate.onetime_total || 0);
