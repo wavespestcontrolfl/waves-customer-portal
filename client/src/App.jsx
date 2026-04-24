@@ -111,7 +111,6 @@ const CredentialsPage = lazyWithRetry(() => import('./pages/admin/CredentialsPag
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
 const DiscountsPage = lazyWithRetry(() => import('./pages/admin/DiscountsPage'));
 const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
-const BadgesPage = lazyWithRetry(() => import('./pages/admin/BadgesPage'));
 const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
 const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemPage'));
 const DesignSystemFlagsPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemFlagsPage'));
@@ -221,7 +220,6 @@ export default function App() {
             <Route path="newsletter" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading newsletter...</div>}><NewsletterPage /></Suspense>} />
             <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />
-            <Route path="badges" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading badges...</div>}><BadgesPage /></Suspense>} />
             <Route path="email" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading email...</div>}><AdminEmailPage /></Suspense>} />
             <Route path="banking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading banking...</div>}><AdminBankingPage /></Suspense>} />
             <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingLogicPage /></Suspense>} />

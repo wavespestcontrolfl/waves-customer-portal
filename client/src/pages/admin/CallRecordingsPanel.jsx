@@ -114,9 +114,10 @@ export default function CallRecordingsPanel() {
     setProcessing(false);
   };
 
-  const processOne = async (callSid) => {
+  const processOne = async (callSid, { force = false } = {}) => {
     try {
-      await adminFetch(`/admin/call-recordings/process/${callSid}`, { method: 'POST' });
+      const qs = force ? '?force=true' : '';
+      await adminFetch(`/admin/call-recordings/process/${callSid}${qs}`, { method: 'POST' });
       showToast('Recording processed');
       loadData();
     } catch (e) { showToast(`Failed: ${e.message}`); }
@@ -211,9 +212,16 @@ export default function CallRecordingsPanel() {
                   {action && (
                     <span style={{ color: action.color, fontWeight: 600 }}>{action.text}{action.icon}</span>
                   )}
-                  {(!r.processing_status || r.processing_status === 'pending' || r.processing_status === 'no_transcription') && (
-                    <button onClick={e => { e.stopPropagation(); processOne(r.twilio_call_sid); }} style={{ ...sBtn(D.teal, D.white), padding: '2px 8px', fontSize: 10 }}>Process</button>
-                  )}
+                  <button
+                    onClick={e => {
+                      e.stopPropagation();
+                      const force = r.processing_status === 'processed';
+                      processOne(r.twilio_call_sid, { force });
+                    }}
+                    style={{ ...sBtn(D.teal, D.white), padding: '2px 8px', fontSize: 10 }}
+                  >
+                    {r.processing_status === 'processed' ? 'Reprocess' : 'Process'}
+                  </button>
                 </div>
               </div>
             );

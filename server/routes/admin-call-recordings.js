@@ -44,10 +44,13 @@ router.get('/recordings', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /process/:callSid — process a single recording
+// POST /process/:callSid — process a single recording.
+// force=true (via query or body) bypasses the "already processed" dedup
+// guard so the admin Reprocess button can re-extract on an existing row.
 router.post('/process/:callSid', async (req, res, next) => {
   try {
-    const result = await CallRecordingProcessor.processRecording(req.params.callSid);
+    const force = req.query.force === 'true' || req.body?.force === true;
+    const result = await CallRecordingProcessor.processRecording(req.params.callSid, { force });
     res.json(result);
   } catch (err) { next(err); }
 });
