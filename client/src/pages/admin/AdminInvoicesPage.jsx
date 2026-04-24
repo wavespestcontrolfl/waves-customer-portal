@@ -135,7 +135,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [selected, setSelected] = useState(new Set());
   const [batchSending, setBatchSending] = useState(false);
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
-  const sendReceiptEnabled = useFeatureFlag('ff_invoice_send_receipt');
+  const sendReceiptEnabled = useFeatureFlag('ff_invoice_send_receipt', true);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ limit: '100' });
