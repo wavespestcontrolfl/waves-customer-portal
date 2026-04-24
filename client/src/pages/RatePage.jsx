@@ -1,8 +1,9 @@
-import { FONTS } from '../theme-brand';
+import { COLORS, FONTS } from '../theme-brand';
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
+import Icon from '../components/Icon';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -176,17 +177,17 @@ export default function RatePage() {
   if (loading) return (
     <Page>
       <div style={{ textAlign: 'center', padding: 48 }}>
-        <div style={{ width: 32, height: 32, border: '3px solid #CBD5E1', borderTopColor: '#009CDE', borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
-        <span style={{ fontSize: 14, color: '#64748B' }}>Loading...</span>
+        <div style={{ width: 32, height: 32, border: '3px solid #CBD5E1', borderTopColor: COLORS.wavesBlue, borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
+        <span style={{ fontSize: 14, color: COLORS.textCaption }}>Loading...</span>
       </div>
     </Page>
   );
 
   if (error) return (
     <Page>
-      <div style={{ textAlign: 'center', padding: 36, color: '#334155', fontSize: 15, lineHeight: 1.5 }}>
+      <div style={{ textAlign: 'center', padding: 36, color: COLORS.textBody, fontSize: 15, lineHeight: 1.5 }}>
         <p>This link may have expired or already been used.</p>
-        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: '#C8102E', fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
+        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.red, fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
       </div>
     </Page>
   );
@@ -197,52 +198,52 @@ export default function RatePage() {
       {screen === 'rating' && (
         <div>
           <div style={{ textAlign: 'center', marginBottom: 22 }}>
-            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'linear-gradient(135deg, #4DC9F6, #009CDE)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: '#fff', fontFamily: FONTS.display, boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}>
+            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'linear-gradient(135deg, #4DC9F6, #009CDE)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: COLORS.white, fontFamily: FONTS.display, boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}>
               {(techName || 'W')[0].toUpperCase()}
             </div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#1B2C5B' }}>{techName}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.blueDeeper }}>{techName}</div>
           </div>
 
-          <div style={{ fontFamily: FONTS.display, fontSize: 22, fontWeight: 700, textAlign: 'center', color: '#1B2C5B', marginBottom: 22, lineHeight: 1.3 }}>
+          <div style={{ fontFamily: FONTS.display, fontSize: 22, fontWeight: 700, textAlign: 'center', color: COLORS.blueDeeper, marginBottom: 22, lineHeight: 1.3 }}>
             Hey {firstName}, how'd we do?
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, padding: '0 2px' }}>
-            <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: '#64748B' }}>Not Great</span>
-            <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: '#64748B' }}>Amazing!</span>
+            <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.textCaption }}>Not Great</span>
+            <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.textCaption }}>Amazing!</span>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
             {[1,2,3,4,5,6,7,8,9,10].map(n => {
               const selected = score === n;
-              const bg = selected ? (n <= 3 ? '#C8102E' : n <= 7 ? '#F59E0B' : '#16A34A') : '#fff';
+              const bg = selected ? (n <= 3 ? COLORS.red : n <= 7 ? COLORS.orange : COLORS.green) : COLORS.white;
               return (
                 <button key={n} onClick={() => handleScore(n)} style={{
-                  minHeight: 44, minWidth: 44, border: `2px solid ${selected ? bg : '#CBD5E1'}`, borderRadius: 12,
+                  minHeight: 44, minWidth: 44, border: `2px solid ${selected ? bg : COLORS.grayLight}`, borderRadius: 12,
                   background: bg, fontFamily: FONTS.display, fontSize: 18, fontWeight: 700,
-                  color: selected ? '#fff' : '#334155', cursor: 'pointer', display: 'flex',
+                  color: selected ? COLORS.white : COLORS.textBody, cursor: 'pointer', display: 'flex',
                   alignItems: 'center', justifyContent: 'center', padding: 0,
                 }}>{n}</button>
               );
             })}
           </div>
-          <div style={{ textAlign: 'center', marginTop: 10, fontSize: 13, color: '#64748B', fontWeight: 600 }}>Tap a number to rate</div>
+          <div style={{ textAlign: 'center', marginTop: 10, fontSize: 13, color: COLORS.textCaption, fontWeight: 600 }}>Tap a number to rate</div>
         </div>
       )}
 
       {/* Highlights Screen (8-10) */}
       {screen === 'highlights' && (
         <div style={{ textAlign: 'center' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
-            <span role="img" aria-label="party">&#127881;</span>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: COLORS.greenLight, color: COLORS.green, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="party" size={30} strokeWidth={2} />
           </div>
-          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Awesome, thank you!</div>
-          <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55, marginBottom: 16 }}>What stood out about your experience?</div>
+          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: COLORS.blueDeeper, marginBottom: 8 }}>Awesome, thank you!</div>
+          <div style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55, marginBottom: 16 }}>What stood out about your experience?</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
             {HIGHLIGHTS.map(h => (
               <button key={h} onClick={() => toggleHighlight(h)} style={{
-                padding: '10px 16px', minHeight: 44, border: `2px solid ${highlights.includes(h) ? '#009CDE' : '#CBD5E1'}`,
-                borderRadius: 24, background: highlights.includes(h) ? '#009CDE' : '#fff',
-                color: highlights.includes(h) ? '#fff' : '#334155', fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                padding: '10px 16px', minHeight: 44, border: `2px solid ${highlights.includes(h) ? COLORS.wavesBlue : COLORS.grayLight}`,
+                borderRadius: 24, background: highlights.includes(h) ? COLORS.wavesBlue : COLORS.white,
+                color: highlights.includes(h) ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 700, cursor: 'pointer',
               }}>{h}</button>
             ))}
           </div>
@@ -256,7 +257,7 @@ export default function RatePage() {
           >
             {submitting ? 'Sending...' : 'Leave a Google Review'}
           </Button>
-          <button onClick={() => { setScreen('success'); handleSubmit(); }} style={{ display: 'block', margin: '14px auto 0', fontSize: 13, color: '#64748B', background: 'none', border: 'none', cursor: 'pointer' }}>Skip for now</button>
+          <button onClick={() => { setScreen('success'); handleSubmit(); }} style={{ display: 'block', margin: '14px auto 0', fontSize: 13, color: COLORS.textCaption, background: 'none', border: 'none', cursor: 'pointer' }}>Skip for now</button>
         </div>
       )}
 
@@ -264,23 +265,23 @@ export default function RatePage() {
       {screen === 'ai-review' && (
         <div>
           <div style={{ textAlign: 'center', marginBottom: 20 }}>
-            <div style={{ fontFamily: FONTS.display, fontSize: 22, fontWeight: 800, color: '#1B2C5B', marginBottom: 6 }}>
+            <div style={{ fontFamily: FONTS.display, fontSize: 22, fontWeight: 800, color: COLORS.blueDeeper, marginBottom: 6 }}>
               We'll write it for you!
             </div>
-            <div style={{ fontSize: 14, color: '#334155', lineHeight: 1.5 }}>
+            <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.5 }}>
               Answer a couple quick questions and we'll draft a Google review you can paste.
             </div>
           </div>
 
           {/* Service selection */}
           <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#1B2C5B', marginBottom: 8 }}>What service did you receive?</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>What service did you receive?</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {SERVICE_OPTIONS.map(s => (
                 <button key={s} onClick={() => toggleService(s)} style={{
-                  padding: '9px 16px', border: `2px solid ${selectedServices.includes(s) ? '#009CDE' : '#CBD5E1'}`,
-                  borderRadius: 20, background: selectedServices.includes(s) ? '#009CDE' : '#fff',
-                  color: selectedServices.includes(s) ? '#fff' : '#334155', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                  padding: '9px 16px', border: `2px solid ${selectedServices.includes(s) ? COLORS.wavesBlue : COLORS.grayLight}`,
+                  borderRadius: 20, background: selectedServices.includes(s) ? COLORS.wavesBlue : COLORS.white,
+                  color: selectedServices.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 13, fontWeight: 700, cursor: 'pointer',
                 }}>{s}</button>
               ))}
             </div>
@@ -288,14 +289,14 @@ export default function RatePage() {
 
           {/* Standout selection */}
           <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#1B2C5B', marginBottom: 4 }}>What stood out?</div>
-            <div style={{ fontSize: 11, color: '#64748B', marginBottom: 8 }}>Pick up to 3</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>What stood out?</div>
+            <div style={{ fontSize: 11, color: COLORS.textCaption, marginBottom: 8 }}>Pick up to 3</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {STANDOUT_OPTIONS.map(s => (
                 <button key={s} onClick={() => toggleStandout(s)} style={{
-                  padding: '9px 16px', border: `2px solid ${selectedStandouts.includes(s) ? '#16A34A' : '#CBD5E1'}`,
-                  borderRadius: 20, background: selectedStandouts.includes(s) ? '#16A34A' : '#fff',
-                  color: selectedStandouts.includes(s) ? '#fff' : '#334155', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                  padding: '9px 16px', border: `2px solid ${selectedStandouts.includes(s) ? COLORS.green : COLORS.grayLight}`,
+                  borderRadius: 20, background: selectedStandouts.includes(s) ? COLORS.green : COLORS.white,
+                  color: selectedStandouts.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 13, fontWeight: 700, cursor: 'pointer',
                   opacity: (!selectedStandouts.includes(s) && selectedStandouts.length >= 3) ? 0.4 : 1,
                 }}>{s}</button>
               ))}
@@ -304,7 +305,7 @@ export default function RatePage() {
 
           {/* Personal note */}
           <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#1B2C5B', marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: '#64748B' }}>(optional)</span></div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: COLORS.textCaption }}>(optional)</span></div>
             <input
               value={personalNote}
               onChange={e => setPersonalNote(e.target.value)}
@@ -312,7 +313,7 @@ export default function RatePage() {
               maxLength={150}
               style={{
                 width: '100%', padding: '12px 14px', border: '2px solid #CBD5E1', borderRadius: 12,
-                fontSize: 14, color: '#1B2C5B', outline: 'none', boxSizing: 'border-box',
+                fontSize: 14, color: COLORS.blueDeeper, outline: 'none', boxSizing: 'border-box',
               }}
             />
           </div>
@@ -321,8 +322,8 @@ export default function RatePage() {
           {!generatedReview && (
             <button onClick={handleGenerateReview} disabled={generating || selectedServices.length === 0} style={{
               width: '100%', padding: 14, border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 800,
-              color: '#fff', cursor: (generating || selectedServices.length === 0) ? 'default' : 'pointer',
-              background: (generating || selectedServices.length === 0) ? '#94A3B8' : '#009CDE',
+              color: COLORS.white, cursor: (generating || selectedServices.length === 0) ? 'default' : 'pointer',
+              background: (generating || selectedServices.length === 0) ? COLORS.slate400 : COLORS.wavesBlue,
               opacity: selectedServices.length === 0 ? 0.5 : 1,
               transition: 'all 0.2s',
             }}>
@@ -335,8 +336,8 @@ export default function RatePage() {
           {generatedReview && (
             <div style={{ marginTop: 4 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#1B2C5B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  Your Review <span style={{ fontWeight: 400, color: '#64748B', textTransform: 'none', letterSpacing: 0 }}>— edit if you want</span>
+                <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  Your Review <span style={{ fontWeight: 400, color: COLORS.textCaption, textTransform: 'none', letterSpacing: 0 }}>— edit if you want</span>
                 </div>
               </div>
               <textarea
@@ -344,8 +345,8 @@ export default function RatePage() {
                 onChange={(e) => setGeneratedReview(e.target.value)}
                 rows={5}
                 style={{
-                  width: '100%', background: '#E3F5FD', border: '2px solid #BAE0F1', borderRadius: 14,
-                  padding: 14, fontSize: 15, color: '#1B2C5B', lineHeight: 1.6, marginBottom: 12,
+                  width: '100%', background: COLORS.blueLight, border: '2px solid #BAE0F1', borderRadius: 14,
+                  padding: 14, fontSize: 15, color: COLORS.blueDeeper, lineHeight: 1.6, marginBottom: 12,
                   fontFamily: FONTS.body, resize: 'vertical', outline: 'none', boxSizing: 'border-box',
                 }}
               />
@@ -360,14 +361,14 @@ export default function RatePage() {
 
               <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 12 }}>
                 <button onClick={handleGenerateReview} disabled={generating} style={{
-                  fontSize: 13, color: '#009CDE', background: 'none', border: 'none',
+                  fontSize: 13, color: COLORS.wavesBlue, background: 'none', border: 'none',
                   cursor: 'pointer', fontWeight: 600,
                 }}>
                   {generating ? 'Rewriting…' : 'Regenerate'}
                 </button>
-                <span style={{ fontSize: 13, color: '#CBD5E1' }}>·</span>
+                <span style={{ fontSize: 13, color: COLORS.grayLight }}>·</span>
                 <button onClick={handleCopyReview} style={{
-                  fontSize: 13, color: copied ? '#16A34A' : '#64748B', background: 'none',
+                  fontSize: 13, color: copied ? COLORS.green : COLORS.textCaption, background: 'none',
                   border: 'none', cursor: 'pointer', fontWeight: 600,
                 }}>
                   {copied ? 'Copied' : 'Copy only'}
@@ -378,7 +379,7 @@ export default function RatePage() {
 
           {/* Skip link */}
           <button onClick={handleSkipToGoogle} style={{
-            display: 'block', margin: '16px auto 0', fontSize: 13, color: '#64748B', background: 'none',
+            display: 'block', margin: '16px auto 0', fontSize: 13, color: COLORS.textCaption, background: 'none',
             border: 'none', cursor: 'pointer', textDecoration: 'underline',
           }}>
             Skip -- Write my own on Google
@@ -389,19 +390,19 @@ export default function RatePage() {
       {/* Feedback Screen (1-7) */}
       {screen === 'feedback' && (
         <div style={{ textAlign: 'center' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: score <= 3 ? '#FEE2E2' : '#FEF7E0', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
-            {score <= 3 ? '\uD83D\uDE14' : '\uD83E\uDD14'}
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: score <= 3 ? '#FEE2E2' : COLORS.sand, color: score <= 3 ? COLORS.red : COLORS.orange, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name={score <= 3 ? 'frown' : 'message'} size={30} strokeWidth={2} />
           </div>
-          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: '#C8102E', fontSize: 13, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>We want to make this right</div>}
-          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>
+          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: COLORS.red, fontSize: 13, fontWeight: 800, padding: '6px 14px', borderRadius: 20, marginBottom: 12 }}>We want to make this right</div>}
+          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: COLORS.blueDeeper, marginBottom: 8 }}>
             {score <= 3 ? "We're sorry to hear that." : "Thanks for the feedback."}
           </div>
-          <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55, marginBottom: 16 }}>
+          <div style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55, marginBottom: 16 }}>
             {score <= 3 ? "What went wrong? We'll personally follow up." : "What could we have done better?"}
           </div>
           <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} style={{
             width: '100%', minHeight: 100, padding: 14, border: '2px solid #CBD5E1', borderRadius: 12,
-            fontSize: 15, color: '#1B2C5B', resize: 'vertical', outline: 'none', boxSizing: 'border-box',
+            fontSize: 15, color: COLORS.blueDeeper, resize: 'vertical', outline: 'none', boxSizing: 'border-box',
           }} />
           <Button
             variant="primary"
@@ -417,22 +418,22 @@ export default function RatePage() {
       {/* Redirect Screen (going to Google) */}
       {screen === 'redirect' && (
         <div style={{ textAlign: 'center', padding: '20px 0' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
-            <span role="img" aria-label="party">&#127881;</span>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: COLORS.greenLight, color: COLORS.green, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="party" size={30} strokeWidth={2} />
           </div>
-          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Taking you to Google...</div>
-          <div style={{ fontSize: 15, color: '#334155' }}>Your review means the world to our small team!</div>
+          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: COLORS.blueDeeper, marginBottom: 8 }}>Taking you to Google...</div>
+          <div style={{ fontSize: 15, color: COLORS.textBody }}>Your review means the world to our small team!</div>
         </div>
       )}
 
       {/* Success Screen */}
       {screen === 'success' && (
         <div style={{ textAlign: 'center', padding: '20px 0' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#DCFCE7', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 }}>
-            <span role="img" aria-label="check">&#9989;</span>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: COLORS.greenLight, color: COLORS.green, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="checkCircle" size={30} strokeWidth={2} />
           </div>
-          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: '#1B2C5B', marginBottom: 8 }}>Thank you!</div>
-          <div style={{ fontSize: 15, color: '#334155', lineHeight: 1.55 }}>Your feedback helps us serve you better.</div>
+          <div style={{ fontFamily: FONTS.display, fontSize: 24, fontWeight: 800, color: COLORS.blueDeeper, marginBottom: 8 }}>Thank you!</div>
+          <div style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55 }}>Your feedback helps us serve you better.</div>
         </div>
       )}
     </Page>
@@ -441,7 +442,7 @@ export default function RatePage() {
 
 function Page({ children }) {
   return (
-    <div style={{ minHeight: '100dvh', background: '#009CDE', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: FONTS.body, position: 'relative', overflow: 'hidden' }}>
+    <div style={{ minHeight: '100dvh', background: COLORS.wavesBlue, display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: FONTS.body, position: 'relative', overflow: 'hidden' }}>
       {/* Hero video — waves-hero-service.mp4 */}
       <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.25, zIndex: 0, pointerEvents: 'none' }}
@@ -451,14 +452,14 @@ function Page({ children }) {
       <div style={{ position: 'relative', zIndex: 1, width: '100%', padding: '22px 20px 12px', textAlign: 'center' }}>
         <h1 style={{
           fontFamily: FONTS.display, fontWeight: 400,
-          fontSize: 36, color: '#F1F5F9', letterSpacing: '0.03em', lineHeight: 1,
+          fontSize: 36, color: COLORS.offWhite, letterSpacing: '0.03em', lineHeight: 1,
           margin: 0, textShadow: '2px 2px 0 #1B2C5B',
         }}>
-          Waves <span style={{ color: '#FFD700' }}>Lawn & Pest</span>
+          Waves <span style={{ color: COLORS.yellow }}>Lawn & Pest</span>
         </h1>
         <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,.85)', letterSpacing: 1, fontStyle: 'italic', marginTop: 6 }}>Wave Goodbye to Pests!</div>
       </div>
-      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: '#fff', borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
+      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
         <div style={{ height: 5, background: 'linear-gradient(90deg, #C8102E, #C8102E, #F59E0B, #FFD700)' }} />
         <div style={{ padding: '28px 22px 24px' }}>{children}</div>
       </div>
