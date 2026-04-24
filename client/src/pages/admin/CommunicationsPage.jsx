@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 
-import EmailAutomationsPanel from './EmailAutomationsPanel';
 import CallRecordingsPanel from './CallRecordingsPanel';
 import PushSettings from '../../components/admin/PushSettings';
 
@@ -1592,7 +1591,7 @@ export default function CommunicationsPage() {
 
       {/* --- Tabs --- */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Calls' }, { key: 'templates', label: 'Templates' }, { key: 'email', label: 'Email' }, { key: 'csr', label: 'CSR Coach' }, { key: 'notifications', label: 'Notifications' }].map(t => (
+        {[{ key: 'sms', label: 'SMS' }, { key: 'calls', label: 'Calls' }, { key: 'templates', label: 'Templates' }, { key: 'csr', label: 'CSR Coach' }, { key: 'notifications', label: 'Notifications' }].map(t => (
           <button key={t.key} onClick={() => { setCommsTab(t.key); if (t.key === 'sms') { setSmsView('threads'); setActiveThread(null); } }} style={{
             padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
             background: commsTab === t.key ? '#18181B' : 'transparent',
@@ -1603,7 +1602,7 @@ export default function CommunicationsPage() {
         ))}
       </div>
 
-      {commsTab === 'notifications' ? <PushSettings /> : commsTab === 'email' ? <EmailAutomationsPanel /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'templates' ? (
+      {commsTab === 'notifications' ? <PushSettings /> : commsTab === 'csr' ? <CSRCoachTab /> : commsTab === 'calls' ? <CallLogTab /> : commsTab === 'templates' ? (
         <SmsTemplatesTab />
       ) : <>
 

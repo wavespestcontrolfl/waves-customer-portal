@@ -24,7 +24,6 @@ import {
 } from './CommunicationsPage';
 import CallLogTabV2 from './CallLogTabV2';
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from './CommunicationsTabsV2';
-import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 import PushSettingsV2 from '../../components/admin/PushSettingsV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
 
@@ -73,7 +72,6 @@ const TABS = [
   { key: 'sms', label: 'SMS' },
   { key: 'calls', label: 'Calls' },
   { key: 'templates', label: 'Templates', desktopOnly: true },
-  { key: 'email', label: 'Email', desktopOnly: true },
   { key: 'csr', label: 'CSR Coach', desktopOnly: true },
   { key: 'notifications', label: 'Notifications', desktopOnly: true },
 ];
@@ -1252,7 +1250,6 @@ export default function CommunicationsPageV2() {
       {tab === 'sms' && <SmsTab />}
       {tab === 'calls' && <CallLogTabV2 />}
       {tab === 'templates' && <SmsTemplatesTabV2 />}
-      {tab === 'email' && <EmailAutomationsPanelV2 />}
       {tab === 'csr' && <CSRCoachTabV2 />}
       {tab === 'notifications' && <PushSettingsV2 />}
     </div>
