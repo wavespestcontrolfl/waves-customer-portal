@@ -201,7 +201,7 @@ export default function BookingPage() {
               }}>
                 Confirm your area
               </h2>
-              <p style={{ fontSize: 14, color: COLORS.slate600, lineHeight: 1.5 }}>
+              <p style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.5 }}>
                 We'll show you appointment times when we're already working near you — no wasted drive time, fastest service.
               </p>
             </div>
@@ -311,7 +311,7 @@ export default function BookingPage() {
                 <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.blueDeeper, marginBottom: 6 }}>
                   No availability this period
                 </div>
-                <div style={{ fontSize: 14, color: COLORS.slate400, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 16, color: COLORS.slate400, lineHeight: 1.5 }}>
                   We don't have techs routed near {city} in the next 2 weeks. Call us at (941) 297-5749 and we'll get you scheduled.
                 </div>
               </div>
@@ -639,7 +639,7 @@ export default function BookingPage() {
             }}>
               You're all set
             </h2>
-            <p style={{ fontSize: 14, color: COLORS.slate600, marginBottom: 28, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 28, lineHeight: 1.5 }}>
               Your appointment is confirmed. We've texted you the details.
             </p>
 
@@ -697,7 +697,7 @@ export default function BookingPage() {
                 <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
                 <path d="M13.73 21a2 2 0 01-3.46 0"/>
               </svg>
-              <span style={{ fontSize: 14, color: COLORS.blueDark, lineHeight: 1.5 }}>
+              <span style={{ fontSize: 16, color: COLORS.blueDark, lineHeight: 1.5 }}>
                 We'll send you a reminder the day before. Reply <strong>RESCHEDULE</strong> to that text if anything changes.
               </span>
             </div>

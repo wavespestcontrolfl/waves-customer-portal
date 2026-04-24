@@ -84,7 +84,7 @@ function NotFoundCard() {
     }}>
       <div style={{ fontSize: 32 }}></div>
       <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
-      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
         This link may have expired or isn't valid. Call us at{' '}
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
         and we'll get you sorted.
@@ -163,7 +163,7 @@ function OneTimePriceCard({ oneTimePrice }) {
         {fmtMoney(oneTimePrice)}
         <span style={{ fontSize: 18, fontWeight: 500, color: COLORS.textBody, marginLeft: 6 }}>one-time</span>
       </div>
-      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
         One visit, pay on service day. No recurring schedule, no tier discount.
         Most pest problems come back — if this single treatment doesn't resolve it,
         switch to recurring and we'll credit this visit toward your first month.
@@ -236,7 +236,7 @@ function SuccessCard({ onboardingToken }) {
       <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
         You're booked.
       </div>
-      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
         Check your phone for the confirmation text.
         {onboardingToken ? ' We also sent you an onboarding link to finish setup.' : ''}
       </div>
