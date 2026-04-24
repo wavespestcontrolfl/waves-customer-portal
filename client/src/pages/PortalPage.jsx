@@ -6730,18 +6730,18 @@ function DocumentsTab({ customer, onSwitchTab }) {
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading documents...</div>;
 
-  // Use-case oriented categories (renamed tabs)
+  // Documents tab is scoped to legal / agreement / insurance paperwork.
+  // Per-visit service reports live under Visits → Completed (already linked
+  // next to the visit they document); they were removed from here to avoid
+  // the same report appearing in two places.
   const categories = [
-    { key: 'service_report', label: '📄 Visit Reports', empty: 'Reports will auto-generate from your service history.' },
     { key: 'wdo_inspection', label: '🏠 Real Estate', empty: 'No WDO inspections on file. Need one for a real estate transaction? Contact us to schedule.' },
     { key: 'service_agreement', label: '📋 Agreements', empty: 'Your service agreement will appear here after enrollment.' },
     { key: 'insurance_cert', label: '🔒 Insurance', empty: 'Insurance certificates will be uploaded by Waves.' },
   ];
 
-  // Use-case filter tabs
   const typeFilters = [
     { value: 'all', label: 'All' },
-    { value: 'service_report', label: 'Visit Reports' },
     { value: 'wdo_inspection', label: 'Real Estate' },
     { value: 'service_agreement', label: 'Agreements' },
     { value: 'insurance_cert', label: 'Insurance' },
@@ -6797,11 +6797,11 @@ function DocumentsTab({ customer, onSwitchTab }) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  // Year-to-date mini summary
-  const allDocs = Object.values(docs).flat();
+  // Year-to-date mini summary — only counts docs from the categories this
+  // tab actually renders, so the number matches what the customer sees.
   const thisYear = new Date().getFullYear();
-  const ytdDocs = allDocs.filter(d => new Date(d.createdAt).getFullYear() === thisYear);
-  const ytdReports = (docs.service_report || []).filter(d => new Date(d.createdAt).getFullYear() === thisYear);
+  const visibleDocs = categories.flatMap(c => docs[c.key] || []);
+  const ytdDocs = visibleDocs.filter(d => new Date(d.createdAt).getFullYear() === thisYear);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -6846,7 +6846,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{thisYear} Year-to-Date</div>
           <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2 }}>
-            {ytdReports.length} visit report{ytdReports.length !== 1 ? 's' : ''} · {ytdDocs.length} total document{ytdDocs.length !== 1 ? 's' : ''}
+            {ytdDocs.length} document{ytdDocs.length !== 1 ? 's' : ''} this year
           </div>
         </div>
       </div>
