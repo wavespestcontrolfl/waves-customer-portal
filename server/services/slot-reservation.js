@@ -211,6 +211,28 @@ async function commitReservation({ scheduledServiceId, customerId, paymentMethod
 }
 
 /**
+ * Release a live reservation that hasn't been committed yet. Called when
+ * the customer taps "Change my pick" in the estimate view. Narrow match —
+ * only deletes rows that are still in reservation state (no customer_id,
+ * still within reservation_expires_at) — so we can't accidentally wipe a
+ * committed booking if a client sends a stale id after accept.
+ *
+ * Returns: { released: boolean } (true if a row was actually deleted).
+ */
+async function releaseReservation({ scheduledServiceId, estimateId }) {
+  if (!scheduledServiceId) return { released: false };
+  const count = await db('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .whereNull('customer_id')
+    .whereNotNull('reservation_expires_at')
+    .modify((q) => {
+      if (estimateId) q.where({ estimate_id: estimateId });
+    })
+    .del();
+  return { released: count > 0 };
+}
+
+/**
  * Reclaim scheduled_services rows where reservation_expires_at has passed.
  *
  * Abandoned reservations accumulate when:
@@ -245,6 +267,7 @@ async function releaseExpiredReservations() {
 module.exports = {
   reserveSlot,
   commitReservation,
+  releaseReservation,
   releaseExpiredReservations,
   _internals: { parseSlotId, addMinutesToTime },
 };

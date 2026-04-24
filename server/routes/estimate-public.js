@@ -894,6 +894,13 @@ ${shellTopBar()}
 
   function cancelReservation() {
     if (bookingState.countdownTimer) { clearInterval(bookingState.countdownTimer); bookingState.countdownTimer = null; }
+    // Fire-and-forget DELETE to release the server-side hold. If the
+    // request fails (offline, etc.) the 15-min expiry will reclaim the
+    // row anyway, so we don't await or block the UI.
+    const res = bookingState.reservation;
+    if (res && res.scheduledServiceId) {
+      fetch('/api/public/estimates/' + TOKEN + '/reserve/' + encodeURIComponent(res.scheduledServiceId), { method: 'DELETE' }).catch(function () {});
+    }
     bookingState.reservation = null;
     bookingState.pickedPref = null;
     document.getElementById('review-area').style.display = 'none';

@@ -297,11 +297,28 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const primary = routeOptimalSlots.slice(0, opts.maxResults);
   const primaryIds = new Set(primary.map((s) => s.slotId));
 
-  // Expander: everything else (route-optimal leftovers + non-route-optimal
-  // mixed), sorted by date asc, capped.
-  const expander = classified
+  // Expander: everything else. First sort by date+time, then diversify
+  // by (techId, windowStart) so the operator-facing list doesn't land
+  // as "10× same time same tech" when the optimizer returns a clump.
+  // Round-robin by signature preserves chronological ordering within
+  // each bucket while spreading different time-windows to the top.
+  const leftover = classified
     .filter((s) => !primaryIds.has(s.slotId))
-    .sort((a, b) => a.date.localeCompare(b.date) || a.windowStart.localeCompare(b.windowStart))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.windowStart.localeCompare(b.windowStart));
+
+  const buckets = new Map();  // signature → [slot, slot, ...]
+  for (const s of leftover) {
+    const sig = `${s.techId || 'unassigned'}_${s.windowStart}`;
+    if (!buckets.has(sig)) buckets.set(sig, []);
+    buckets.get(sig).push(s);
+  }
+  const interleaved = [];
+  while (interleaved.length < leftover.length) {
+    for (const arr of buckets.values()) {
+      if (arr.length) interleaved.push(arr.shift());
+    }
+  }
+  const expander = interleaved
     .slice(0, opts.expanderMaxResults);
 
   const result = {
