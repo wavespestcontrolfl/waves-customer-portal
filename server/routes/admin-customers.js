@@ -447,6 +447,7 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
         'address_line1', 'city', 'state', 'zip',
         'waveguard_tier', 'active', 'created_at',
         'property_type', 'company_name',
+        'lead_source', 'lead_source_detail',
       )
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
