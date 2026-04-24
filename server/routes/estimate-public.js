@@ -10,6 +10,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const slotReservation = require('../services/slot-reservation');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
+const { PEST, ONE_TIME } = require('../services/pricing-engine/constants');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
@@ -88,15 +89,44 @@ function visitsPerYearFromFrequency(freq) {
 // How many pest-control recurring services are in this estimate + the
 // lowest visit frequency among them. Returns null if there's no pest
 // line at all (in which case we hide the prefs toggles entirely).
+// `monthlyBase` is the sum of the pest line(s) monthly total before the
+// preference toggles are applied — used together with the engine's
+// PEST.floor to cap how much the toggles can discount.
 function detectPestRecurring(recurring) {
   const pest = (recurring || []).filter((s) => /pest/i.test(String(s.name || '')));
   if (!pest.length) return null;
   const vpy = pest.reduce((acc, s) => Math.max(acc, visitsPerYearFromFrequency(s.frequency || s.billing || s.cadence)), 0) || 4;
-  return { count: pest.length, visitsPerYear: vpy };
+  const monthlyBase = pest.reduce((acc, s) => acc + Number(s.mo || s.monthly || 0), 0);
+  return { count: pest.length, visitsPerYear: vpy, monthlyBase };
 }
 
 function detectPestOneTime(oneTimeItems) {
   return (oneTimeItems || []).some((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')));
+}
+
+// Sum of one-time pest item prices on this estimate (matches the regex
+// in detectPestOneTime). Used to clamp the one-time toggle discount
+// above ONE_TIME.pest.floor.
+function pestOneTimeBase(oneTimeItems) {
+  return (oneTimeItems || [])
+    .filter((it) => /pest|ant|roach|wasp|stinging|exclusion/i.test(String(it.name || '')))
+    .reduce((acc, it) => acc + Number(it.price || 0), 0);
+}
+
+// Minimum monthly price for a recurring pest plan at the given cadence,
+// derived from the engine's own floor rather than a chosen fraction.
+// Mirrors service-pricing.js `pricePestControl`: basePrice is floored
+// at PEST.floor, then multiplied by the cadence's frequency multiplier
+// before being turned into a monthly. Defaults to v1 rates (the live
+// shape for admin-created estimates); v2 multipliers are slightly
+// gentler so falling back to v1 just makes the floor a touch lower,
+// which is the safer direction.
+function pestMonthlyFloor(visitsPerYear) {
+  const freqKey = visitsPerYear >= 12 ? 'monthly'
+                : visitsPerYear >= 6  ? 'bimonthly'
+                : 'quarterly';
+  const freqMult = PEST.frequencyDiscounts.v1?.[freqKey] ?? 1.0;
+  return PEST.floor * freqMult * visitsPerYear / 12;
 }
 
 function normalizePrefs(raw) {
@@ -111,7 +141,11 @@ function normalizePrefs(raw) {
 
 // Compute the monthly + one-time discount for a given set of prefs.
 // Returns { monthlyOff, oneTimeOff } in dollars (positive numbers).
-function computePrefDiscount(prefs, pestRecurring, hasPestOneTime) {
+// Clamps so the remaining pest price never drops below the engine's
+// own floors (PEST.floor for recurring per-visit, ONE_TIME.pest.floor
+// for one-time). Without the clamp, a small pest estimate could be
+// dragged to $0 via the toggles.
+function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal = 0) {
   let monthlyOff = 0;
   let oneTimeOff = 0;
   const p = normalizePrefs(prefs);
@@ -125,6 +159,16 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime) {
         oneTimeOff += SERVICE_PREFS[k].oneTime;
       }
     }
+  }
+  if (pestRecurring) {
+    const floor = pestMonthlyFloor(pestRecurring.visitsPerYear);
+    const pestMonthlyBase = Number(pestRecurring.monthlyBase || 0);
+    const maxMonthlyOff = Math.max(0, pestMonthlyBase - floor);
+    monthlyOff = Math.min(monthlyOff, maxMonthlyOff);
+  }
+  if (pestOneTimeTotal > 0) {
+    const maxOneTimeOff = Math.max(0, pestOneTimeTotal - ONE_TIME.pest.floor);
+    oneTimeOff = Math.min(oneTimeOff, maxOneTimeOff);
   }
   return {
     monthlyOff: Math.round(monthlyOff * 100) / 100,
@@ -226,9 +270,10 @@ function renderPage(token, estimate, estData) {
 
   const pestRecurring = detectPestRecurring(recurring);
   const hasPestOneTime = detectPestOneTime(oneTimeItems);
+  const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
   const showPrefs = !!(pestRecurring || hasPestOneTime);
   const prefs = normalizePrefs(estData?.preferences);
-  const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime);
+  const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
 
   const tierPrices = {};
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
@@ -1389,11 +1434,12 @@ router.put('/:token/preferences', async (req, res, next) => {
     const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
     const pestRecurring = detectPestRecurring(recurring);
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
+    const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
     const baseMonthly = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || estimate.monthly_total || 0);
     const currentTier = estimate.waveguard_tier || 'Bronze';
     const tierDiscount = TIER_DISCOUNTS[currentTier] || 0;
 
-    const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime);
+    const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
     const monthlyTotal = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount) - monthlyOff) * 100) / 100);
     const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
     const onetimeBase = Number(parsedData.onetimeTotalBase || estimate.onetime_total || 0);
