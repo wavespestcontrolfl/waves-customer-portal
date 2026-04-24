@@ -583,26 +583,25 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Step 6: Beehiiv — tag as lead + enroll in automation
+    // Step 6: Enroll in the local new_lead automation sequence.
+    // Variable name kept as `beehiivResult` for schema/log continuity;
+    // carries the local enrollment result now.
     let beehiivResult = null;
     if (customerId && extracted.email) {
       try {
-        const beehiiv = require('./beehiiv');
-        if (beehiiv.configured) {
-          const sub = await beehiiv.upsertSubscriber(extracted.email, {
-            firstName: extracted.first_name,
-            lastName: extracted.last_name,
-            utmSource: 'phone_call',
-          });
-          if (sub?.id) {
-            await beehiiv.addTags(sub.id, ['Lead', 'Phone Call']);
-            const autoId = process.env.BEEHIIV_AUTO_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c';
-            await beehiiv.enrollInAutomation(autoId, { email: extracted.email, subscriptionId: sub.id });
-            beehiivResult = { subscriberId: sub.id, tags: ['Lead', 'Phone Call'] };
-          }
-        }
+        const AutomationRunner = require('./automation-runner');
+        const r = await AutomationRunner.enrollCustomer({
+          templateKey: 'new_lead',
+          customer: {
+            email: extracted.email,
+            first_name: extracted.first_name,
+            last_name: extracted.last_name,
+            id: customerId,
+          },
+        });
+        beehiivResult = { local: r };
       } catch (err) {
-        logger.error(`[call-proc] Beehiiv failed: ${err.message}`);
+        logger.error(`[call-proc] new_lead enroll failed: ${err.message}`);
         beehiivResult = { error: err.message };
       }
     }

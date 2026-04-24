@@ -4,13 +4,21 @@
  * ALL TRIGGERS ARE MANUAL for now — admin clicks a button to send.
  *
  * Each automation:
- *   1. Beehiiv: upsert subscriber → add tags → enroll in automation
- *   2. SMS: send onboarding text via Twilio (if configured)
- *   3. Log: record the run in email_automation_log
+ *   1. Email: enroll the customer in the local SendGrid-backed sequence
+ *      defined in automation_templates + automation_steps. The runner
+ *      (server/services/automation-runner.js) ticks every minute and
+ *      fires steps per their delay_hours. ASM group suppression
+ *      handles unsubscribe semantics; webhook events cancel active
+ *      enrollments on bounce/spam/unsub.
+ *   2. SMS: send onboarding text via Twilio (if configured).
+ *   3. Log: record the run in email_automation_log.
+ *
+ * Beehiiv was decommissioned in migration 20260424000008 — the AUTOMATIONS
+ * map's `beehiivAutomationId` field is retained purely as historical
+ * reference and is not read at runtime.
  */
 
 const db = require('../models/db');
-const beehiiv = require('./beehiiv');
 const TwilioService = require('./twilio');
 const logger = require('./logger');
 
@@ -208,56 +216,19 @@ const EmailAutomationService = {
       return { success: false, error: 'Already sent in last 24h' };
     }
 
-    let beehiivResult = null;
     let localResult = null;
     let smsResult = null;
 
-    // Step 1 — CUTOVER GATE:
-    //   If the v2 automation_templates row for this key has any enabled
-    //   step with a non-empty body, enroll in the local SendGrid-backed
-    //   runner. Otherwise fall back to Beehiiv. This lets the operator
-    //   migrate automations one at a time by filling step bodies in the
-    //   admin Automations editor — the moment a template has content,
-    //   the runtime switches to local sending without a code change.
-    let useLocal = false;
+    // Step 1 — Enroll in the local SendGrid-backed runner. Every template
+    // has at least one seeded step (migration 000007), so enrollment
+    // succeeds unless explicitly disabled or the customer already has an
+    // active enrollment on this template (which is a no-op on purpose).
     try {
       const AutomationRunner = require('./automation-runner');
-      useLocal = await AutomationRunner.hasLocalContent(key);
-      if (useLocal) {
-        const r = await AutomationRunner.enrollCustomer({ templateKey: key, customer });
-        localResult = r;
-      }
+      localResult = await AutomationRunner.enrollCustomer({ templateKey: key, customer });
     } catch (err) {
-      logger.error(`[email-auto] local runner failed for ${key}: ${err.message}`);
+      logger.error(`[email-auto] enrollCustomer failed for ${key}: ${err.message}`);
       localResult = { error: err.message };
-      useLocal = false;  // fall through to Beehiiv on failure
-    }
-
-    if (!useLocal) {
-      if (beehiiv.configured) {
-        try {
-          const subscriber = await beehiiv.upsertSubscriber(email, {
-            firstName: customer.first_name,
-            lastName: customer.last_name,
-            utmSource: 'waves_portal',
-            utmMedium: key,
-          });
-          if (subscriber?.id) {
-            if (auto.tags?.length) await beehiiv.addTags(subscriber.id, auto.tags);
-            if (auto.beehiivAutomationId) {
-              await beehiiv.enrollInAutomation(auto.beehiivAutomationId, { email, subscriptionId: subscriber.id });
-            }
-            beehiivResult = { subscriberId: subscriber.id, tags: auto.tags };
-          }
-        } catch (err) {
-          logger.error(`[email-auto] Beehiiv failed for ${key}: ${err.message}`);
-          beehiivResult = { error: err.message };
-        }
-      } else {
-        beehiivResult = { skipped: 'BEEHIIV_API_KEY not configured' };
-      }
-    } else {
-      beehiivResult = { skipped: 'local automation active (v2 cutover)' };
     }
 
     // Step 2: SMS — check DB template first, fall back to inline
@@ -290,20 +261,21 @@ const EmailAutomationService = {
       }
     }
 
-    // Step 3: Log
+    // Step 3: Log — beehiiv_result column kept for schema compat; carries
+    // the local enrollment result now.
     await db('email_automation_log').insert({
       customer_id: customer.id,
       automation_key: key,
       automation_name: auto.name,
       trigger_type: 'manual',
       trigger_value: key,
-      beehiiv_result: JSON.stringify({ ...beehiivResult, local: localResult }),
+      beehiiv_result: JSON.stringify({ local: localResult }),
       sms_result: JSON.stringify(smsResult),
-      status: (beehiivResult?.error || localResult?.error || smsResult?.error) ? 'partial' : 'success',
+      status: (localResult?.error || smsResult?.error) ? 'partial' : 'success',
     });
 
-    logger.info(`[email-auto] ${key} sent for ${customer.first_name} ${customer.last_name} (${email}) via ${useLocal ? 'local' : 'beehiiv'}`);
-    return { success: true, path: useLocal ? 'local' : 'beehiiv', local: localResult, beehiiv: beehiivResult, sms: smsResult };
+    logger.info(`[email-auto] ${key} sent for ${customer.first_name} ${customer.last_name} (${email})`);
+    return { success: true, local: localResult, sms: smsResult };
   },
 
   /**

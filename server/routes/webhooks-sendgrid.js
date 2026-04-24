@@ -102,11 +102,29 @@ async function handleEvent(ev) {
   const messageId = ev.sg_message_id ? ev.sg_message_id.split('.')[0] : null;
   if (!messageId) return;
 
-  const delivery = await db('newsletter_send_deliveries')
+  // Events can belong to a newsletter broadcast delivery, an automation
+  // step send, or neither (transactional sends we don't track). Try each
+  // table by message id.
+  const newsletterDelivery = await db('newsletter_send_deliveries')
     .where({ resend_message_id: messageId })
     .first();
-  if (!delivery) return; // not ours, or retroactive event for a row we don't track
+  const automationSend = !newsletterDelivery ? await db('automation_step_sends')
+    .where({ sendgrid_message_id: messageId })
+    .first() : null;
 
+  if (newsletterDelivery) {
+    await handleNewsletterEvent(ev, newsletterDelivery);
+    return;
+  }
+  if (automationSend) {
+    await handleAutomationEvent(ev, automationSend);
+    return;
+  }
+  // Untracked send (transactional invoices, receipts, etc.) — ignore.
+  return;
+}
+
+async function handleNewsletterEvent(ev, delivery) {
   const now = new Date();
 
   switch (ev.event) {
@@ -202,6 +220,117 @@ async function handleEvent(ev) {
       // group_resubscribe = we don't use SG groups
       break;
   }
+}
+
+/**
+ * Same event shape as newsletter, but the row lives in automation_step_sends.
+ * Plus: on hard unsub / spam / bounce events we cancel any still-active
+ * enrollment for that email so the sequence doesn't keep ticking. Group
+ * unsubscribes only cancel enrollments whose template's asm_group matches.
+ */
+async function handleAutomationEvent(ev, sendRow) {
+  const now = new Date();
+
+  switch (ev.event) {
+    case 'delivered':
+      if (!sendRow.delivered_at) {
+        await db('automation_step_sends').where({ id: sendRow.id }).update({
+          status: 'delivered', delivered_at: now, updated_at: now,
+        });
+      }
+      break;
+
+    case 'open':
+      if (!sendRow.opened_at) {
+        await db('automation_step_sends').where({ id: sendRow.id }).update({
+          opened_at: now, updated_at: now,
+        });
+      }
+      break;
+
+    case 'click':
+      if (!sendRow.clicked_at) {
+        await db('automation_step_sends').where({ id: sendRow.id }).update({
+          clicked_at: now, updated_at: now,
+        });
+      }
+      break;
+
+    case 'bounce':
+    case 'blocked':
+    case 'dropped':
+      await db('automation_step_sends').where({ id: sendRow.id }).update({
+        status: 'bounced',
+        failure_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
+        updated_at: now,
+      });
+      // Hard-bounce → cancel ALL active enrollments for this email. The
+      // address is undeliverable across any automation group.
+      if (ev.type === 'bounce' || ev.type === 'blocked' || ev.event === 'dropped') {
+        await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' });
+      }
+      break;
+
+    case 'spamreport':
+      await db('automation_step_sends').where({ id: sendRow.id }).update({
+        status: 'complained', updated_at: now,
+      });
+      // Complaint → cancel everything + mark newsletter sub unsubscribed.
+      await cancelActiveEnrollments({ email: ev.email, reason: 'spam_report' });
+      await db('newsletter_subscribers').where({ email: ev.email }).whereNot({ status: 'unsubscribed' }).update({
+        status: 'unsubscribed', unsubscribed_at: now, updated_at: now,
+      });
+      break;
+
+    case 'unsubscribe':
+      // Global unsub — cancel every active enrollment for this email.
+      await cancelActiveEnrollments({ email: ev.email, reason: 'unsubscribe' });
+      break;
+
+    case 'group_unsubscribe': {
+      // Group unsub — cancel enrollments where template.asm_group maps to the
+      // unsubscribed ASM group id. Newsletter group = promotional; service
+      // group = transactional (shouldn't normally unsub but we honor it).
+      const gid = String(ev.asm_group_id || '');
+      const newsletterGid = String(process.env.SENDGRID_ASM_GROUP_NEWSLETTER || '');
+      const serviceGid = String(process.env.SENDGRID_ASM_GROUP_SERVICE || '');
+      let asmGroupToCancel = null;
+      if (gid && gid === newsletterGid) asmGroupToCancel = 'newsletter';
+      else if (gid && gid === serviceGid) asmGroupToCancel = 'service';
+      if (asmGroupToCancel) {
+        await cancelActiveEnrollments({ email: ev.email, reason: 'group_unsubscribe', asmGroup: asmGroupToCancel });
+      }
+      break;
+    }
+
+    case 'processed':
+    case 'deferred':
+    case 'group_resubscribe':
+    default:
+      break;
+  }
+}
+
+async function cancelActiveEnrollments({ email, reason, asmGroup }) {
+  if (!email) return;
+  let q = db('automation_enrollments as e')
+    .join('automation_templates as t', 't.key', 'e.template_key')
+    .where('e.email', email)
+    .where('e.status', 'active');
+  if (asmGroup) q = q.where('t.asm_group', asmGroup);
+
+  const rows = await q.select('e.id', 't.key as template_key');
+  if (!rows.length) return;
+
+  const ids = rows.map((r) => r.id);
+  await db('automation_enrollments').whereIn('id', ids).update({
+    status: 'cancelled',
+    next_send_at: null,
+    completed_at: new Date(),
+    metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify(reason)]),
+    updated_at: new Date(),
+  });
+  logger.info(`[sendgrid-webhook] cancelled ${rows.length} enrollment(s) for ${email} reason=${reason}${asmGroup ? ` group=${asmGroup}` : ''}`);
 }
 
 module.exports = router;

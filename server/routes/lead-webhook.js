@@ -333,21 +333,17 @@ router.post('/', async (req, res) => {
       }
     } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
 
-    // Beehiiv — create subscriber, tag as Lead, enroll in lead automation
+    // Enroll in the local new_lead automation sequence (SendGrid-backed).
     try {
-      const beehiiv = require('../services/beehiiv');
-      if (beehiiv.configured && email) {
-        const sub = await beehiiv.upsertSubscriber(email, {
-          firstName, lastName, utmSource: landingUrl || pageUrl, utmMedium: 'website_quote',
+      if (email) {
+        const AutomationRunner = require('../services/automation-runner');
+        const r = await AutomationRunner.enrollCustomer({
+          templateKey: 'new_lead',
+          customer: { email, first_name: firstName, last_name: lastName, id: customer?.id || null },
         });
-        if (sub?.id) {
-          await beehiiv.addTags(sub.id, ['Lead']);
-          const autoId = process.env.BEEHIIV_AUTO_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c';
-          await beehiiv.enrollInAutomation(autoId, { email, subscriptionId: sub.id });
-          logger.info(`[lead-webhook] Beehiiv: subscribed ${email}, tagged Lead, enrolled in automation`);
-        }
+        logger.info(`[lead-webhook] enrolled ${email} in new_lead: ${JSON.stringify(r)}`);
       }
-    } catch (e) { logger.error(`Lead Beehiiv failed: ${e.message}`); }
+    } catch (e) { logger.error(`Lead enroll failed: ${e.message}`); }
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     try {

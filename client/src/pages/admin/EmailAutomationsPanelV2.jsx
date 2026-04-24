@@ -1,6 +1,6 @@
 // client/src/pages/admin/EmailAutomationsPanelV2.jsx
 // Automations v2 — in-house SendGrid-backed automation sequences.
-// Replaces the Beehiiv-facing panel. Endpoints:
+// Endpoints:
 //   GET    /admin/automations/templates
 //   GET    /admin/automations/templates/:key
 //   PUT    /admin/automations/templates/:key
@@ -11,9 +11,6 @@
 //   POST   /admin/automations/templates/:key/test
 //   POST   /admin/automations/templates/:key/trigger
 //   GET    /admin/automations/enrollments
-//
-// Legacy /admin/email-automations/* kept working behind the scenes;
-// this UI is the v2 surface.
 
 import { useState, useEffect, useCallback } from 'react';
 import { Badge, Button, Card, Switch, cn } from '../../components/ui';
@@ -62,7 +59,7 @@ export default function EmailAutomationsPanelV2() {
         <div>
           <h2 className="text-18 font-medium text-zinc-900">Automations</h2>
           <p className="text-12 text-ink-secondary mt-0.5">
-            Transactional email sequences sent via SendGrid. Fill in step content per automation — once a template has a step with a body, the runtime switches that automation off Beehiiv and onto local send automatically.
+            Transactional email sequences sent via SendGrid. Each template has one or more steps; the runner ticks every minute and fires steps per their delay. Unsubscribe / bounce / spam events cancel active enrollments automatically.
           </p>
         </div>
         {toast && <span className="text-11 text-ink-secondary">{toast}</span>}
@@ -78,7 +75,6 @@ export default function EmailAutomationsPanelV2() {
                 <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Name</th>
                 <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Group</th>
                 <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Steps</th>
-                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Runtime</th>
                 <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Active</th>
                 <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Enabled</th>
                 <th className="px-4 py-2"></th>
@@ -96,13 +92,9 @@ export default function EmailAutomationsPanelV2() {
                     <td className="px-4 py-3">
                       <Badge tone={t.asm_group === 'newsletter' ? 'muted' : 'neutral'}>{t.asm_group}</Badge>
                     </td>
-                    <td className="px-4 py-3 u-nums text-zinc-900">{t.step_count}</td>
                     <td className="px-4 py-3">
-                      {t.has_local_content ? (
-                        <Badge tone="strong">Local (SendGrid)</Badge>
-                      ) : (
-                        <Badge tone="muted">Beehiiv</Badge>
-                      )}
+                      <span className="u-nums text-zinc-900 mr-2">{t.step_count}</span>
+                      {t.step_count === 0 && <Badge tone="alert">No steps — won't send</Badge>}
                     </td>
                     <td className="px-4 py-3 u-nums text-ink-secondary">{activeCount}</td>
                     <td className="px-4 py-3">
@@ -200,8 +192,8 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
 
         <div className="p-5 space-y-4">
           {steps.length === 0 ? (
-            <div className="text-13 text-ink-secondary p-6 text-center border-hairline border-zinc-200 border-dashed rounded-sm">
-              No steps yet. Add the first step to define what the first email says. While this template has no steps, enrollments still run on Beehiiv.
+            <div className="text-13 text-alert-fg p-6 text-center border-hairline border-zinc-200 border-dashed rounded-sm">
+              No steps yet. Add the first step to define what the email says. Until then, new enrollments on this template will not send any emails.
             </div>
           ) : (
             <div className="space-y-3">
