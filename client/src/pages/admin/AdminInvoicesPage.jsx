@@ -173,19 +173,33 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
     if (next.has(id)) next.delete(id); else next.add(id);
     setSelected(next);
   };
-  const sendableInvoices = invoices.filter(i => i.status === 'draft' || i.status === 'sent' || i.status === 'viewed');
-  const selectAllSendable = () => setSelected(new Set(sendableInvoices.map(i => i.id)));
+  // Under the Needs-receipt filter the selection target flips from
+  // "invoices we can send" to "paid invoices that still owe a receipt".
+  const receiptMode = filter === 'needs_receipt';
+  const BATCH_RECEIPT_MAX = 25;
+  const sendableInvoices = receiptMode
+    ? invoices.filter(i => i.status === 'paid' && !i.receipt_sent_at)
+    : invoices.filter(i => i.status === 'draft' || i.status === 'sent' || i.status === 'viewed');
+  const selectAllSendable = () => setSelected(new Set(sendableInvoices.slice(0, receiptMode ? BATCH_RECEIPT_MAX : sendableInvoices.length).map(i => i.id)));
   const clearSelection = () => setSelected(new Set());
   const handleBatchSend = async () => {
     const ids = Array.from(selected);
     if (ids.length === 0) return;
-    if (!confirm(`Send ${ids.length} invoice${ids.length === 1 ? '' : 's'} via SMS + email?`)) return;
+    if (receiptMode) {
+      if (ids.length > BATCH_RECEIPT_MAX) {
+        showToast(`Pick at most ${BATCH_RECEIPT_MAX} receipts per batch`);
+        return;
+      }
+      if (!confirm(`Send ${ids.length} receipt${ids.length === 1 ? '' : 's'} via SMS + email?`)) return;
+    } else if (!confirm(`Send ${ids.length} invoice${ids.length === 1 ? '' : 's'} via SMS + email?`)) return;
     setBatchSending(true);
     try {
-      const result = await adminFetch('/admin/invoices/batch/send', {
+      const endpoint = receiptMode ? '/admin/invoices/batch/send-receipts' : '/admin/invoices/batch/send';
+      const result = await adminFetch(endpoint, {
         method: 'POST', body: JSON.stringify({ invoiceIds: ids }),
       });
-      showToast(`Sent ${result.sent_count} of ${result.total}${result.failed_count ? ` (${result.failed_count} failed)` : ''}`);
+      const noun = receiptMode ? 'receipt' : 'invoice';
+      showToast(`Sent ${result.sent_count} of ${result.total} ${noun}${result.total === 1 ? '' : 's'}${result.failed_count ? ` (${result.failed_count} failed)` : ''}`);
       clearSelection(); load(); onRefresh();
     } catch (err) {
       showToast(`Batch send failed: ${err.message}`);
@@ -324,7 +338,11 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
           <button onClick={selectAllSendable} style={{
             padding: '10px 16px', borderRadius: 999, border: `1px solid ${D.border}`,
             background: D.card, color: D.muted, fontSize: 13, cursor: 'pointer',
-          }}>Select sendable ({sendableInvoices.length})</button>
+          }}>
+            {receiptMode
+              ? `Select ${Math.min(sendableInvoices.length, BATCH_RECEIPT_MAX)} to receipt`
+              : `Select sendable (${sendableInvoices.length})`}
+          </button>
         )}
         {stats && !isMobile && (
           <span style={{ marginLeft: 'auto', fontSize: 12, color: D.muted }}>
@@ -347,7 +365,9 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
               }}>{g.label}</div>
               {g.items.map(inv => {
                 const lineItems = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
-                const canSelect = inv.status === 'draft' || inv.status === 'sent' || inv.status === 'viewed';
+                const canSelect = receiptMode
+                  ? (inv.status === 'paid' && !inv.receipt_sent_at)
+                  : (inv.status === 'draft' || inv.status === 'sent' || inv.status === 'viewed');
                 const isSelected = selected.has(inv.id);
                 const display = getDisplayStatus(inv);
                 const isOpen = expanded === inv.id;
@@ -454,7 +474,11 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
         }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}>{selected.size} selected</span>
           <button onClick={handleBatchSend} disabled={batchSending} style={{ ...sBtn(D.white, D.heading, isMobile), opacity: batchSending ? 0.6 : 1 }}>
-            {batchSending ? 'Sending…' : `Send ${selected.size}`}
+            {batchSending
+              ? 'Sending…'
+              : receiptMode
+                ? `Send ${selected.size} receipt${selected.size === 1 ? '' : 's'}`
+                : `Send ${selected.size}`}
           </button>
           <button onClick={clearSelection} style={sBtn('transparent', D.white, isMobile)}>Clear</button>
         </div>
