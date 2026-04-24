@@ -24,7 +24,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
-    const { customerId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl } = req.body;
+    const { customerId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl, showOneTimeOption, billByInvoice } = req.body;
 
     const shortId = crypto.randomBytes(4).toString('hex');
     const nameSlug = (customerName || 'customer').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -39,6 +39,8 @@ router.post('/', async (req, res, next) => {
       address, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail,
       monthly_total: monthlyTotal, annual_total: annualTotal, onetime_total: onetimeTotal,
       waveguard_tier: waveguardTier, token, expires_at: expiresAt, notes, satellite_url: satelliteUrl,
+      show_one_time_option: !!showOneTimeOption,
+      bill_by_invoice: !!billByInvoice,
     }).returning('*');
 
     res.status(201).json({ id: estimate.id, token, viewUrl: `https://portal.wavespestcontrol.com/estimate/${token}` });

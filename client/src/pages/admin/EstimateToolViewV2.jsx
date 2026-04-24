@@ -387,6 +387,7 @@ export default function EstimateToolViewV2({
     svcPlugging: false, svcTopdress: false, svcDethatch: false, svcTrenching: false,
     svcBoracare: false, svcPreslab: false, svcFoam: false, svcRodentTrap: false,
     svcFlea: false, svcWasp: false, svcRoach: false, svcBedbug: false, svcExclusion: false,
+    showOneTimeOption: false, billByInvoice: false,
   });
 
   // ── live preview (verbatim from V1) ───────────────────────────
@@ -495,7 +496,11 @@ export default function EstimateToolViewV2({
         const r = await adminFetch('/admin/discounts');
         if (!r.ok) return;
         const rows = await r.json();
-        const manual = (rows || []).filter((d) => d.is_active && !d.is_auto_apply);
+        // Exclude WaveGuard tier discounts — those are auto-assigned by
+        // the engine based on service count, not manually picked here.
+        const manual = (rows || [])
+          .filter((d) => d.is_active && !d.is_waveguard_tier_discount)
+          .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
         setDiscountPresets(manual);
       } catch { /* ignore */ }
     })();
@@ -513,7 +518,7 @@ export default function EstimateToolViewV2({
       manualDiscountPreset: key,
       manualDiscountType: d.discount_type === 'percentage' ? 'PERCENT' : 'FIXED',
       manualDiscountValue: String(d.amount || 0),
-      manualDiscountLabel: `${d.icon || ''} ${d.name}`.trim(),
+      manualDiscountLabel: d.name,
     }));
   }
 
@@ -840,6 +845,8 @@ export default function EstimateToolViewV2({
           waveguardTier: E.recurring?.tier || 'Bronze',
           notes: form.notes || '',
           satelliteUrl: satelliteData?.imageUrl || null,
+          showOneTimeOption: !!form.showOneTimeOption,
+          billByInvoice: !!form.billByInvoice,
         }),
       });
       if (!r.ok) throw new Error('Save failed: ' + r.status);
@@ -1233,13 +1240,27 @@ export default function EstimateToolViewV2({
                 >
                   <option value="">— None —</option>
                   {discountPresets.map((d) => {
-                    const amt = d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(0)}%` : `$${Number(d.amount).toFixed(2)}`;
-                    return <option key={d.id} value={d.discount_key}>{d.icon ? `${d.icon} ` : ''}{d.name} — {amt}</option>;
+                    const amt = d.discount_type === 'percentage'
+                      ? `${Number(d.amount).toFixed(0)}%`
+                      : `$${Number(d.amount).toFixed(2)}`;
+                    return (
+                      <option key={d.id} value={d.discount_key}>
+                        {d.name} — {amt}
+                      </option>
+                    );
                   })}
                   <option value="__custom__">Custom…</option>
                 </select>
               </FieldV2>
-              <div className="grid grid-cols-2 sm:grid-cols-[140px_120px_1fr] gap-2">
+
+              {form.manualDiscountPreset && form.manualDiscountPreset !== '__custom__' && (() => {
+                const d = discountPresets.find((x) => x.discount_key === form.manualDiscountPreset);
+                return d?.description ? (
+                  <div className="text-11 text-ink-secondary -mt-1 mb-3">{d.description}</div>
+                ) : null;
+              })()}
+
+              <div className="grid grid-cols-2 gap-2">
                 <FieldV2 label="Type">
                   <SelectV2 k="manualDiscountType" options={[
                     { value: 'NONE', label: 'None' },
@@ -1247,11 +1268,16 @@ export default function EstimateToolViewV2({
                     { value: 'FIXED', label: 'Dollar $' },
                   ]} />
                 </FieldV2>
-                <FieldV2 label="Amount"><InputV2 k="manualDiscountValue" type="number" min="0" placeholder="0" /></FieldV2>
-                <div className="col-span-2 sm:col-span-1">
-                  <FieldV2 label="Label (shown on estimate)"><InputV2 k="manualDiscountLabel" placeholder="e.g. Military, Referral" /></FieldV2>
+                <FieldV2 label="Amount">
+                  <InputV2 k="manualDiscountValue" type="number" min="0" placeholder="0" />
+                </FieldV2>
+                <div className="col-span-2">
+                  <FieldV2 label="Label (shown on estimate)">
+                    <InputV2 k="manualDiscountLabel" placeholder="e.g. Military, Referral" />
+                  </FieldV2>
                 </div>
               </div>
+
               <div className="text-11 text-ink-tertiary mt-2">
                 Applies after WaveGuard bundle discount. Re-click Generate Estimate to recalculate.
               </div>
@@ -1321,6 +1347,40 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>
                 )}
+                <div className="mb-3 p-3 border-hairline border-zinc-300 rounded-xs bg-zinc-50">
+                  <div className="text-11 font-medium text-zinc-900 mb-2 uppercase tracking-label">
+                    Customer options
+                  </div>
+                  <label className="flex items-start gap-2 cursor-pointer text-12 text-zinc-900 select-none mb-2">
+                    <input
+                      type="checkbox"
+                      checked={form.showOneTimeOption || false}
+                      onChange={(e) => set('showOneTimeOption', e.target.checked)}
+                      className="accent-zinc-900 mt-0.5"
+                    />
+                    <span>
+                      <span className="font-medium">Offer one-time option</span>
+                      <span className="block text-11 text-ink-secondary">
+                        Customer sees a Recurring / One-time toggle and picks either.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer text-12 text-zinc-900 select-none">
+                    <input
+                      type="checkbox"
+                      checked={form.billByInvoice || false}
+                      onChange={(e) => set('billByInvoice', e.target.checked)}
+                      className="accent-zinc-900 mt-0.5"
+                    />
+                    <span>
+                      <span className="font-medium">Bill by invoice</span>
+                      <span className="block text-11 text-ink-secondary">
+                        Skip onboarding / payment up front — auto-email an invoice (due immediately) once they pick.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
                 <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <label className="flex items-center gap-2 cursor-pointer text-12 text-ink-secondary select-none">
                     <input
