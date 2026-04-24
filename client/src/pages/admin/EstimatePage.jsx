@@ -371,7 +371,9 @@ function EstimateToolView() {
         const r = await adminFetch('/admin/discounts');
         if (!r.ok) return;
         const rows = await r.json();
-        const manual = (rows || []).filter(d => d.is_active && !d.is_auto_apply);
+        const manual = (rows || [])
+          .filter(d => d.is_active && !d.is_waveguard_tier_discount)
+          .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
         setDiscountPresets(manual);
       } catch { /* ignore */ }
     })();
@@ -389,7 +391,7 @@ function EstimateToolView() {
       manualDiscountPreset: key,
       manualDiscountType: d.discount_type === 'percentage' ? 'PERCENT' : 'FIXED',
       manualDiscountValue: String(d.amount || 0),
-      manualDiscountLabel: `${d.icon || ''} ${d.name}`.trim(),
+      manualDiscountLabel: d.name,
     }));
   }
 
@@ -1140,9 +1142,9 @@ function EstimateToolView() {
                   <option value="">— None —</option>
                   {discountPresets.map(d => {
                     const amt = d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(0)}%` : `$${Number(d.amount).toFixed(2)}`;
-                    return <option key={d.id} value={d.discount_key}>{d.icon ? `${d.icon} ` : ''}{d.name} — {amt}</option>;
+                    return <option key={d.id} value={d.discount_key}>{d.name} — {amt}</option>;
                   })}
-                  <option value="__custom__">✏️ Custom…</option>
+                  <option value="__custom__">Custom…</option>
                 </select>
               </Field>
             </div>
