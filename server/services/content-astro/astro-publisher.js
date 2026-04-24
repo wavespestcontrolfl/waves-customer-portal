@@ -75,12 +75,18 @@ async function buildFrontmatter(post) {
       : (post.service_areas_tag ? safeJson(post.service_areas_tag, []) : undefined),
     related_services: Array.isArray(post.related_services) ? post.related_services
       : (post.related_services ? safeJson(post.related_services, []) : undefined),
-    // Per-post spoke targeting. Astro content collection filter on each
-    // spoke skips posts whose target_sites doesn't include its SITE_KEY.
-    // undefined / empty array / ['all'] → render on every site
-    // (backward-compat with posts authored before this field existed).
-    target_sites: Array.isArray(post.target_sites) ? post.target_sites
-      : (post.target_sites ? safeJson(post.target_sites, []) : undefined),
+    // Per-post spoke targeting. Written as `domains` to match the existing
+    // Astro convention — src/pages/[...slug].astro already has a
+    // `domainMatches()` filter that reads this field. Absent/empty keeps
+    // the astro defaults ("hub sees it, spokes don't") so old posts that
+    // never set target_sites keep their current behavior on the detail
+    // route. The list route (src/pages/blog.astro) is being updated in a
+    // matching commit in the astro repo to honor `domains` too.
+    domains: Array.isArray(post.target_sites) && post.target_sites.length > 0
+      ? post.target_sites
+      : (post.target_sites
+          ? (safeJson(post.target_sites, []).length > 0 ? safeJson(post.target_sites, []) : undefined)
+          : undefined),
     author: author ? {
       name: author.name,
       role: author.role,
