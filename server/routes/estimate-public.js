@@ -299,8 +299,26 @@ function renderPage(token, estimate, estData) {
     lawnSqFt ? `${Math.round(lawnSqFt).toLocaleString()} sq ft treatable lawn` : null,
   ].filter(Boolean).join(' \u00B7 ');
 
-  const showUpsell = recurring.length === 1;
-  const upsellService = showUpsell ? (recurring[0].name === 'Pest Control' ? 'Lawn Care' : 'Pest Control') : null;
+  // Bundle upsell ladder:
+  //   1 svc  → offer the complementary one  → Silver (10%)
+  //   2 svc  → offer Mosquito if missing    → Gold   (15%)
+  //   3+ svc → no upsell                    → already Gold+/Platinum
+  // Future-proof: the "next tier" copy comes from the service count
+  // after adding, not a hardcoded string.
+  const recurringNames = recurring.map((s) => String(s.name || '').toLowerCase());
+  const hasName = (needle) => recurringNames.some((n) => n.includes(needle));
+
+  let upsellService = null;
+  if (recurring.length === 1) {
+    upsellService = recurring[0].name === 'Pest Control' ? 'Lawn Care' : 'Pest Control';
+  } else if (recurring.length === 2 && !hasName('mosquito')) {
+    upsellService = 'WaveGuard Mosquito';
+  }
+  const showUpsell = !!upsellService;
+
+  const nextTierCount = recurring.length + 1;
+  const nextTierName = nextTierCount >= 4 ? 'Platinum' : nextTierCount === 3 ? 'Gold' : 'Silver';
+  const nextTierPct = nextTierCount >= 4 ? 20 : nextTierCount === 3 ? 15 : 10;
 
   const recurringRows = recurring.map((s) => {
     const mo = Number(s.mo || s.monthly || 0);
@@ -569,7 +587,7 @@ ${shellTopBar()}
   <div class="upsell">
     <div class="txt">
       <h3>Add ${escapeHtml(upsellService)} and save more</h3>
-      <div style="font-size:14px">Bundling unlocks Silver tier pricing (10% off everything). Curious what that looks like?</div>
+      <div style="font-size:14px">Bundling unlocks ${escapeHtml(nextTierName)} tier pricing (${nextTierPct}% off everything). Curious what that looks like?</div>
     </div>
     <button class="upsell-btn" onclick="inquireBundle('${escapeHtml(upsellService)}')">Get a bundle quote</button>
   </div>` : ''}
@@ -1547,12 +1565,19 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
 
         const addLawn = /lawn/i.test(suggestedService);
         const addPest = /pest/i.test(suggestedService);
+        const addMosquito = /mosquito/i.test(suggestedService);
 
         if (addLawn && !updatedInputs.services.lawn) {
-          // Need a lawn area. Prefer explicit input, fall back to engine-derived.
-          const lawnSqFt = Number(updatedInputs.lawnSqFt || estData?.result?.property?.lawnSqFt || 0);
-          if (lawnSqFt > 0) {
-            updatedInputs.lawnSqFt = lawnSqFt;
+          // Lawn area: prefer explicit input → engine-derived result →
+          // property-calculator will auto-derive from lotSqFt if neither
+          // is present. Only bail if we have no lot info to work with.
+          const existingLawn = Number(updatedInputs.lawnSqFt || estData?.result?.property?.lawnSqFt || 0);
+          if (existingLawn > 0) updatedInputs.lawnSqFt = existingLawn;
+          const hasLot = Number(updatedInputs.lotSqFt || estData?.result?.property?.lotSqFt || 0) > 0;
+          if (existingLawn > 0 || hasLot) {
+            if (!updatedInputs.lotSqFt && hasLot) {
+              updatedInputs.lotSqFt = Number(estData?.result?.property?.lotSqFt || 0);
+            }
             updatedInputs.services.lawn = {
               track: 'st_augustine',
               tier: 'enhanced',
@@ -1561,10 +1586,15 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
           }
         } else if (addPest && !updatedInputs.services.pest) {
           updatedInputs.services.pest = { frequency: 'quarterly', version: 'v1', roachType: 'none' };
+        } else if (addMosquito && !updatedInputs.services.mosquito) {
+          updatedInputs.services.mosquito = { tier: 'silver' };
         }
 
         // Only re-price if we actually added a service this round.
-        const didAdd = (addLawn && updatedInputs.services.lawn) || (addPest && updatedInputs.services.pest);
+        const didAdd =
+          (addLawn && updatedInputs.services.lawn)
+          || (addPest && updatedInputs.services.pest)
+          || (addMosquito && updatedInputs.services.mosquito);
         if (didAdd) {
           const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
           const v1Result = generateEstimate(updatedInputs);
