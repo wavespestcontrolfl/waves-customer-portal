@@ -641,8 +641,19 @@ export default function CustomersPageV2() {
     <div>
       {/* ======================= HEADER ======================= */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <div className="flex items-baseline gap-3">
+        <div className="flex items-center justify-between gap-3 w-full sm:w-auto">
           <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Customers</h1>
+          {view === 'directory' && (
+            <button
+              type="button"
+              onClick={() => setShowAddModal(true)}
+              aria-label="Add customer"
+              className="sm:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring"
+              style={{ width: 36, height: 36 }}
+            >
+              <Plus size={20} strokeWidth={2} />
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
           {view === 'directory' && (
@@ -658,17 +669,6 @@ export default function CustomersPageV2() {
             <Button variant="primary" onClick={() => setShowAddModal(true)} className="hidden sm:inline-flex">
               + Add Customer
             </Button>
-          )}
-          {view === 'directory' && (
-            <button
-              type="button"
-              onClick={() => setShowAddModal(true)}
-              aria-label="Add customer"
-              className="sm:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring"
-              style={{ width: 36, height: 36 }}
-            >
-              <Plus size={20} strokeWidth={2} />
-            </button>
           )}
           {view === 'directory' && (
             <button
