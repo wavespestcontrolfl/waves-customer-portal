@@ -248,6 +248,34 @@ class BouncieService {
     }
   }
   /**
+   * Get live vehicle location for a specific IMEI (tech-specific).
+   * Used by the customer-facing service tracker to show the assigned
+   * tech's truck on the live map — not a random running vehicle.
+   * Returns null if the IMEI doesn't match any current vehicle or no
+   * location is available.
+   */
+  async getLocationByImei(imei) {
+    if (!imei) return null;
+    try {
+      const vehicles = await this.getVehicles();
+      const match = vehicles.find((v) => String(v.imei || v.id) === String(imei));
+      if (!match || !match.lastLocation) return null;
+      return {
+        vehicleId: match.id,
+        vehicleName: match.nickname,
+        lat: match.lastLocation.lat,
+        lng: match.lastLocation.lon || match.lastLocation.lng,
+        isRunning: !!match.isRunning,
+        heading: match.lastLocation.heading ?? null,
+        updatedAt: match.lastLocation.timestamp || null,
+      };
+    } catch (err) {
+      logger.error(`[bouncie] getLocationByImei failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Get live vehicle location for ETA calculation.
    * Returns { lat, lng, isRunning, speed } for the first running vehicle,
    * or the most recently active vehicle if none are running.

@@ -67,8 +67,83 @@ function formatTracker(row, service, tech, customer) {
       initials: tech?.name ? tech.name.split(' ').map(n => n[0]).join('') : '?',
     },
     office: resolveOffice(customer),
+    // customerLocation is set when we have the customer's geocoded
+    // lat/lng AND the tracker is en route — lets the client drop a
+    // destination marker on the live map. GOOGLE_MAPS_API_KEY is
+    // exposed separately via /api/portal/env so the map can bootstrap.
+    customerLocation: null,
+    techPosition: null,
   };
 }
+
+// When the tracker is in the EN ROUTE step, enrich the response with
+// the live bouncie position for the assigned tech's truck + the
+// customer's geocoded home + an ETA from Google Distance Matrix (or
+// haversine fallback). Bails silently if bouncie_imei is missing on
+// the tech or geocode is missing on the customer — the client falls
+// back to the existing en-route card.
+async function enrichWithLiveMap(tracker, service, tech, customer) {
+  if (!tracker || tracker.currentStep !== 3) return tracker;
+  try {
+    const custLat = Number(customer?.latitude);
+    const custLng = Number(customer?.longitude);
+    if (Number.isFinite(custLat) && Number.isFinite(custLng)) {
+      tracker.customerLocation = { lat: custLat, lng: custLng };
+    }
+
+    const imei = tech?.bouncie_imei;
+    if (!imei) return tracker;
+
+    const BouncieService = require('../services/bouncie');
+    const pos = await BouncieService.getLocationByImei(imei);
+    if (!pos) return tracker;
+
+    let eta = null;
+    if (tracker.customerLocation) {
+      try {
+        // calculateETA() has its own fallback chain (Google → haversine
+        // → default 15min). Safe to call even without the Google key.
+        const etaData = await BouncieService.calculateETA(custLat, custLng);
+        if (etaData) {
+          eta = {
+            minutes: etaData.etaMinutes,
+            distanceMiles: etaData.distanceMiles,
+            source: etaData.source,
+          };
+          if (etaData.etaMinutes && (!tracker.etaMinutes || Math.abs(tracker.etaMinutes - etaData.etaMinutes) > 2)) {
+            tracker.etaMinutes = etaData.etaMinutes;
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    tracker.techPosition = {
+      lat: pos.lat,
+      lng: pos.lng,
+      heading: pos.heading,
+      isRunning: pos.isRunning,
+      updatedAt: pos.updatedAt,
+      eta,
+    };
+  } catch {
+    // Live-map enrichment is entirely best-effort; never let it break
+    // the tracker response for a customer who just wants to see the
+    // stepper.
+  }
+  return tracker;
+}
+
+// =========================================================================
+// GET /api/tracking/maps-key — public Google Maps key for the live
+// en-route map. Safe to expose in-browser: Google Maps JS API keys are
+// restricted at the Cloud Console by HTTP referrer, not treated as
+// secret. Separate endpoint so we don't pepper every tracker response
+// with it when the customer isn't in the en_route state.
+// =========================================================================
+router.get('/maps-key', (req, res) => {
+  const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
+  res.json({ key });
+});
 
 // =========================================================================
 // GET /api/tracking/active — active tracker for customer
@@ -91,7 +166,9 @@ router.get('/active', async (req, res, next) => {
     const service = await db('scheduled_services').where({ id: tracker.scheduled_service_id }).first();
     const tech = tracker.technician_id ? await db('technicians').where({ id: tracker.technician_id }).first() : null;
 
-    res.json({ tracker: formatTracker(tracker, service, tech, req.customer) });
+    const formatted = formatTracker(tracker, service, tech, req.customer);
+    await enrichWithLiveMap(formatted, service, tech, req.customer);
+    res.json({ tracker: formatted });
   } catch (err) { next(err); }
 });
 
@@ -112,7 +189,9 @@ router.get('/today', async (req, res, next) => {
     if (tracker) {
       const service = await db('scheduled_services').where({ id: tracker.scheduled_service_id }).first();
       const tech = tracker.technician_id ? await db('technicians').where({ id: tracker.technician_id }).first() : null;
-      return res.json({ tracker: formatTracker(tracker, service, tech, req.customer) });
+      const formatted = formatTracker(tracker, service, tech, req.customer);
+      await enrichWithLiveMap(formatted, service, tech, req.customer);
+      return res.json({ tracker: formatted });
     }
 
     // Find today's scheduled service
@@ -135,7 +214,9 @@ router.get('/today', async (req, res, next) => {
 
     const tech = scheduled.technician_id ? await db('technicians').where({ id: scheduled.technician_id }).first() : null;
 
-    res.json({ tracker: formatTracker(newTracker, scheduled, tech, req.customer) });
+    const formatted = formatTracker(newTracker, scheduled, tech, req.customer);
+    await enrichWithLiveMap(formatted, scheduled, tech, req.customer);
+    res.json({ tracker: formatted });
   } catch (err) { next(err); }
 });
 

@@ -6410,6 +6410,134 @@ function MyPlanTab({ customer }) {
 }
 
 // =========================================================================
+// EN-ROUTE LIVE MAP — Google Map with moving truck + customer pin.
+//
+// Rendered inside ServiceTracker when step === 3 AND both the tech's
+// Bouncie position and the customer's geocode lat/lng are available
+// on the tracker response. Parent ServiceTracker polls every 15s and
+// passes fresh `techPosition` down; this component just animates the
+// truck marker on each new prop. Falls back to null if anything's
+// missing (no Maps key, no bouncie imei on tech, no geocoded customer,
+// Maps script blocked) — the existing ETA card below handles the
+// "no map" case.
+// =========================================================================
+function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
+  const mapRef = useRef(null);
+  const mapInstRef = useRef(null);
+  const truckMarkerRef = useRef(null);
+  const customerMarkerRef = useRef(null);
+  const [mapsKey, setMapsKey] = useState(null);
+  const [mapReady, setMapReady] = useState(false);
+
+  // Fetch the Maps key once on mount.
+  useEffect(() => {
+    api.request('/tracking/maps-key')
+      .then((d) => setMapsKey(d?.key || ''))
+      .catch(() => setMapsKey(''));
+  }, []);
+
+  // Load Google Maps JS once the key is in hand.
+  useEffect(() => {
+    if (!mapsKey) return;
+    if (window.google?.maps) { setMapReady(true); return; }
+    const existing = document.querySelector('script[data-waves-maps-loader]');
+    if (existing) {
+      existing.addEventListener('load', () => setMapReady(true));
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsKey)}`;
+    script.async = true;
+    script.defer = true;
+    script.setAttribute('data-waves-maps-loader', '1');
+    script.onload = () => setMapReady(true);
+    script.onerror = () => setMapReady(false);
+    document.head.appendChild(script);
+  }, [mapsKey]);
+
+  // Create map + customer marker once the script + both positions exist.
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || !techPosition || !customerLocation) return;
+    if (!mapInstRef.current) {
+      const map = new window.google.maps.Map(mapRef.current, {
+        center: { lat: techPosition.lat, lng: techPosition.lng },
+        zoom: 13,
+        disableDefaultUI: true,
+        zoomControl: true,
+        gestureHandling: 'cooperative',
+        styles: [
+          { featureType: 'poi.business', stylers: [{ visibility: 'off' }] },
+          { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+        ],
+      });
+      mapInstRef.current = map;
+
+      customerMarkerRef.current = new window.google.maps.Marker({
+        map,
+        position: customerLocation,
+        title: 'Your property',
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 11,
+          fillColor: '#16A34A',
+          fillOpacity: 1,
+          strokeColor: '#fff',
+          strokeWeight: 3,
+        },
+      });
+
+      // Fit map to both points with a little padding.
+      const bounds = new window.google.maps.LatLngBounds();
+      bounds.extend({ lat: techPosition.lat, lng: techPosition.lng });
+      bounds.extend(customerLocation);
+      map.fitBounds(bounds, 48);
+    }
+
+    // Truck marker — create on first render, update position afterward.
+    const truckPos = { lat: techPosition.lat, lng: techPosition.lng };
+    if (!truckMarkerRef.current) {
+      truckMarkerRef.current = new window.google.maps.Marker({
+        map: mapInstRef.current,
+        position: truckPos,
+        title: `${techName || 'Tech'} is on the way`,
+        icon: {
+          path: 'M -1.6,-1 L 1.6,-1 L 1.8,-0.5 L 1.8,0.7 L 1.6,1 L -1.6,1 L -1.8,0.7 L -1.8,-0.5 Z',
+          scale: 9,
+          fillColor: '#1B2C5B',
+          fillOpacity: 1,
+          strokeColor: '#FFD700',
+          strokeWeight: 2,
+          rotation: techPosition.heading || 0,
+        },
+      });
+    } else {
+      truckMarkerRef.current.setPosition(truckPos);
+      if (techPosition.heading != null) {
+        const icon = truckMarkerRef.current.getIcon();
+        truckMarkerRef.current.setIcon({ ...icon, rotation: techPosition.heading });
+      }
+    }
+  }, [mapReady, techPosition, customerLocation, techName]);
+
+  if (!techPosition || !customerLocation) return null;
+  if (mapsKey === '') return null; // no Maps key configured — silently skip the map
+  return (
+    <div
+      ref={mapRef}
+      aria-label="Live tech location map"
+      style={{
+        width: '100%',
+        height: 240,
+        borderRadius: 12,
+        overflow: 'hidden',
+        background: '#E3F5FD',
+        border: '1px solid #E7E2D7',
+      }}
+    />
+  );
+}
+
+// =========================================================================
 // WAVES SERVICE TRACKER — Domino's-style real-time tracker
 // =========================================================================
 function ServiceTracker() {
@@ -6643,6 +6771,17 @@ function ServiceTracker() {
 
         {/* Full-width stacked cards */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+          {/* Live map — only while EN ROUTE and the server returned a
+              live bouncie position + geocoded customer address. Falls
+              back silently to the ETA/tech/office cards below when any
+              piece is missing. */}
+          {step === 3 && tracker.techPosition && tracker.customerLocation && (
+            <EnRouteLiveMap
+              techPosition={tracker.techPosition}
+              customerLocation={tracker.customerLocation}
+              techName={techName}
+            />
+          )}
           {/* ETA */}
           {step === 3 && eta && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
