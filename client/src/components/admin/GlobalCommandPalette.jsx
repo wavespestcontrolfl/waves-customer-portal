@@ -361,7 +361,7 @@ function GlobalCommandPalette(_props, ref) {
                 onMouseEnter={e => { e.target.style.borderColor = accentColor + '55'; e.target.style.color = accentColor; }}
                 onMouseLeave={e => { e.target.style.borderColor = D.border; e.target.style.color = D.muted; }}
               >
-                <span style={{ fontSize: 13 }}>{a.icon}</span>{a.label}
+                {a.icon && <span style={{ fontSize: 13 }}>{a.icon}</span>}{a.label}
               </button>
             ))}
           </div>
@@ -571,7 +571,7 @@ function MobileSheet({
             <Section label="Quick actions">
               {quickActions.map(a => (
                 <SheetRow key={a.id} onClick={() => { setPrompt(a.prompt); submit(a.prompt); }}>
-                  <span style={{ fontSize: 16 }}>{a.icon}</span>
+                  {a.icon && <span style={{ fontSize: 16 }}>{a.icon}</span>}
                   <span style={{ fontSize: 14, color: '#18181B' }}>{a.label}</span>
                 </SheetRow>
               ))}

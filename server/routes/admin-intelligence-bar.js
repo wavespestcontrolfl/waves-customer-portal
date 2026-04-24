@@ -941,11 +941,11 @@ router.get('/quick-actions', async (req, res) => {
     ] });
   } else if (context === 'estimates') {
     res.json({ actions: [
-      { id: 'quote_address', group: 'Draft', label: 'Quote an Address', prompt: 'I want to draft a quote. The address is __ , customer is __ , phone __ , services they want: __ . Walk me through it.', icon: '🤖' },
-      { id: 'commercial', group: 'Draft', label: 'Commercial Scenario', prompt: 'Help me think through a commercial quote — gather the info you need first, then tell me whether the engine can handle it or if we need to do this manually.', icon: '🏢' },
-      { id: 'comp_check', group: 'Context', label: 'Find Comps', prompt: 'Find recent estimates around $__/mo so I can sanity-check what we usually charge for that range', icon: '📊' },
-      { id: 'recent_changes', group: 'Context', label: 'Recent Pricing Changes', prompt: 'What pricing changes happened recently? Anything that would affect a quote I am about to draft?', icon: '📜' },
-      { id: 'review_drafts', group: 'Review', label: 'My Agent Drafts', prompt: 'Show me agent-created draft estimates that need review', icon: '📋' },
+      { id: 'quote_address', group: 'Draft', label: 'Quote an Address', prompt: 'I want to draft a quote. The address is __ , customer is __ , phone __ , services they want: __ . Walk me through it.' },
+      { id: 'commercial', group: 'Draft', label: 'Commercial Scenario', prompt: 'Help me think through a commercial quote — gather the info you need first, then tell me whether the engine can handle it or if we need to do this manually.' },
+      { id: 'comp_check', group: 'Context', label: 'Find Comps', prompt: 'Find recent estimates around $__/mo so I can sanity-check what we usually charge for that range' },
+      { id: 'recent_changes', group: 'Context', label: 'Recent Pricing Changes', prompt: 'What pricing changes happened recently? Anything that would affect a quote I am about to draft?' },
+      { id: 'review_drafts', group: 'Review', label: 'My Agent Drafts', prompt: 'Show me agent-created draft estimates that need review' },
     ] });
   } else if (context === 'banking') {
     res.json({ actions: [
