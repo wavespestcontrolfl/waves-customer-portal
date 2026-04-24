@@ -17,7 +17,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { lookupStoriesFromZillow } = require('../services/property-lookup/zillow-fallback');
+const { lookupStoriesFromAI } = require('../services/property-lookup/ai-stories-lookup');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -202,20 +202,21 @@ async function performPropertyLookup(address) {
     result.errors.push({ source: 'ai', message: 'Satellite images not available — cannot run AI analysis' });
   }
 
-  // ── STEP 3.5: Stories fallback — Zillow via Apify when RentCast had none.
-  // Stamp `_storiesSource` on the rentcast object so buildEnrichedProfile can
-  // surface provenance to the client without a signature change.
+  // ── STEP 3.5: Stories fallback — Claude w/ web_search when RentCast had
+  // none. Stamp `_storiesSource` on the rentcast object so
+  // buildEnrichedProfile can surface provenance to the client without a
+  // signature change.
   if (result.rentcast) {
     if (result.rentcast.stories) {
       result.rentcast._storiesSource = 'rentcast';
     } else {
-      const zillowStories = await lookupStoriesFromZillow(address).catch((err) => {
-        result.errors.push({ source: 'zillow-fallback', message: err?.message || String(err) });
+      const aiStories = await lookupStoriesFromAI(address).catch((err) => {
+        result.errors.push({ source: 'ai-stories', message: err?.message || String(err) });
         return null;
       });
-      if (zillowStories) {
-        result.rentcast.stories = zillowStories;
-        result.rentcast._storiesSource = 'zillow';
+      if (aiStories) {
+        result.rentcast.stories = aiStories;
+        result.rentcast._storiesSource = 'ai';
       } else {
         result.rentcast._storiesSource = 'default';
       }
@@ -622,8 +623,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     lotSqFt: rc?.lotSize || 0,
     stories: rc?.stories || 1,
     // Provenance for the `stories` value so the client can decide whether to
-    // amber-nudge the estimator to eyeball the photos. 'rentcast' / 'zillow'
-    // = verified data source; 'default' = nobody knew, we fell back to 1.
+    // amber-nudge the estimator to eyeball the photos. 'rentcast' / 'ai' =
+    // verified data source; 'default' = nobody knew, we fell back to 1.
     storiesSource: rc?._storiesSource || (rc?.stories ? 'rentcast' : 'default'),
     footprint: rc?.squareFootage
       ? Math.round(rc.squareFootage / (rc.stories || 1))
