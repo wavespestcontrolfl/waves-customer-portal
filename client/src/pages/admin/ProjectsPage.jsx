@@ -238,6 +238,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   const [editTitle, setEditTitle] = useState('');
   const [dirty, setDirty] = useState(false);
   const [sentLink, setSentLink] = useState('');
+  const [aiWriting, setAiWriting] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -288,6 +289,30 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       onChanged?.();
     } catch { /* ignore */ }
     finally { setSaving(false); }
+  }
+
+  async function handleAiWrite() {
+    // Drafts into the Recommendations field. Replaces existing content so the
+    // admin can tell what came from AI vs. what they kept by-hand; if the
+    // admin liked prior text, Cmd-Z restores it before save.
+    if (editRecs && editRecs.trim() && !confirm('Replace the current Recommendations text with an AI-drafted version?\n\nThe tech\'s original notes will still be used as context for the AI.')) return;
+    setAiWriting(true);
+    try {
+      const r = await adminFetch(`/admin/projects/${projectId}/ai-write`, {
+        method: 'POST',
+        body: { findings: editFindings, recommendations: editRecs },
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || 'AI draft failed');
+      if (d.report) {
+        setEditRecs(d.report.trim());
+        setDirty(true);
+      }
+    } catch (e) {
+      alert(`AI draft failed: ${e.message}`);
+    } finally {
+      setAiWriting(false);
+    }
   }
 
   async function handleClose() {
@@ -430,12 +455,31 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
 
         {/* Recommendations */}
         <div>
-          <Label>Recommendations / notes</Label>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <Label style={{ margin: 0 }}>Recommendations / notes</Label>
+            <button
+              type="button"
+              onClick={handleAiWrite}
+              disabled={aiWriting || saving}
+              title="Claude drafts What We Inspected / Found / Recommend from the findings and tech notes."
+              style={{
+                padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                background: aiWriting ? D.muted : D.card, color: D.heading,
+                border: `1px solid ${D.inputBorder}`,
+                cursor: (aiWriting || saving) ? 'default' : 'pointer',
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+              }}
+            >
+              <span aria-hidden="true">✨</span>
+              {aiWriting ? 'Drafting…' : 'Write with AI'}
+            </button>
+          </div>
           <textarea
             value={editRecs}
             onChange={(e) => { setEditRecs(e.target.value); setDirty(true); }}
-            rows={4}
-            style={{ ...inputStyle, resize: 'vertical', minHeight: 96 }}
+            rows={8}
+            placeholder={`Write freely, or tap "Write with AI" to draft the three customer-facing sections from the findings above.`}
+            style={{ ...inputStyle, resize: 'vertical', minHeight: 160, fontFamily: "'DM Sans', sans-serif" }}
           />
         </div>
 
