@@ -147,6 +147,8 @@ function PostEditor({ post, onBack, onUpdate }) {
   const [astroMerging, setAstroMerging] = useState(false);
   const [astroRefreshing, setAstroRefreshing] = useState(false);
   const [astroUnpublishing, setAstroUnpublishing] = useState(false);
+  const [regeneratingImage, setRegeneratingImage] = useState(false);
+  const [imageError, setImageError] = useState(null);
   const [authors, setAuthors] = useState([]);
   const [serviceAreas, setServiceAreas] = useState([]);
   const [optimization, setOptimization] = useState(
@@ -182,6 +184,27 @@ function PostEditor({ post, onBack, onUpdate }) {
       ? targetSites.filter((k) => k !== key)
       : [...targetSites, key];
     setEditing(prev => ({ ...prev, target_sites: next }));
+  };
+
+  const handleRegenerateImage = async () => {
+    if (regeneratingImage) return;
+    setRegeneratingImage(true);
+    setImageError(null);
+    try {
+      const r = await fetch(`${API_BASE}/admin/content/blog/${post.id}/regenerate-image`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      if (d.post) setEditing(prev => ({ ...prev, ...d.post }));
+    } catch (err) {
+      setImageError(err.message || 'Image generation failed');
+    }
+    setRegeneratingImage(false);
   };
 
   const handleGenerate = async () => {
@@ -530,12 +553,39 @@ function PostEditor({ post, onBack, onUpdate }) {
         </div>
 
         {/* Featured Image */}
-        {editing.featured_image_url && (
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Featured Image (AI-generated)</label>
-            <img src={editing.featured_image_url} alt="Featured" style={{ width: '100%', maxHeight: 300, objectFit: 'cover', borderRadius: 10, border: `1px solid ${D.border}` }} />
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <label style={{ fontSize: 11, color: D.muted }}>Featured Image (AI-generated)</label>
+            <button
+              type="button"
+              onClick={handleRegenerateImage}
+              disabled={regeneratingImage}
+              style={{
+                padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                border: `1px solid ${D.teal}`, background: 'transparent', color: D.teal,
+                cursor: 'pointer', opacity: regeneratingImage ? 0.5 : 1,
+              }}
+            >
+              {regeneratingImage ? 'Generating…' : (editing.featured_image_url ? 'Regenerate image' : 'Generate image')}
+            </button>
           </div>
-        )}
+          {editing.featured_image_url ? (
+            <img src={editing.featured_image_url} alt="Featured" style={{ width: '100%', maxHeight: 300, objectFit: 'cover', borderRadius: 10, border: `1px solid ${D.border}` }} />
+          ) : (
+            <div style={{
+              padding: '16px 14px', borderRadius: 8,
+              background: `${D.amber}15`, border: `1px solid ${D.amber}66`,
+              color: D.amber, fontSize: 12, lineHeight: 1.5,
+            }}>
+              No hero image yet. The post will publish without a hero image unless you generate one.
+              {imageError && (
+                <div style={{ marginTop: 6, color: D.red, fontFamily: MONO, fontSize: 11 }}>
+                  Last attempt: {imageError}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {editing.content ? (
           <textarea value={editing.content} onChange={e => setEditing(prev => ({ ...prev, content: e.target.value }))} style={{
