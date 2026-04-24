@@ -33,7 +33,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
-  Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, SlidersHorizontal,
+  Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, Send, SlidersHorizontal,
   Check, X, ArrowLeft, Plus,
 } from 'lucide-react';
 
@@ -598,37 +598,64 @@ function EstimatePipelineViewV2() {
                   </div>
                 </div>
 
-                {/* Call + text trailing buttons — match CustomersPageV2 list row */}
-                {e.customerPhone && (
+                {/* Call + text + send-estimate trailing buttons — matches the
+                    CustomersPageV2 list row's icon trio. Send is shown for
+                    states where it's a real action (draft / sent / viewed);
+                    accepted/declined/expired hide it. */}
+                {(e.customerPhone || ['draft', 'sent', 'viewed'].includes(e.status)) && (
                   <div className="flex gap-1.5">
-                    <button
-                      type="button"
-                      onClick={async (evt) => {
-                        evt.stopPropagation();
-                        if (!window.confirm(`Call ${e.customerName || 'customer'} at ${e.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
-                        try {
-                          const r = await adminFetch('/admin/communications/call', {
+                    {e.customerPhone && (
+                      <button
+                        type="button"
+                        onClick={async (evt) => {
+                          evt.stopPropagation();
+                          if (!window.confirm(`Call ${e.customerName || 'customer'} at ${e.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+                          try {
+                            const r = await adminFetch('/admin/communications/call', {
+                              method: 'POST',
+                              body: JSON.stringify({ to: e.customerPhone, fromNumber: '+19412975749' }),
+                            });
+                            if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
+                          } catch (err) { alert('Call failed: ' + err.message); }
+                        }}
+                        aria-label={`Call ${e.customerName || 'customer'} via Waves`}
+                        title="Call via Waves — rings your phone first, press 1 to connect"
+                        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                      >
+                        <Phone size={16} strokeWidth={1.75} />
+                      </button>
+                    )}
+                    {e.customerPhone && (
+                      <a
+                        href={`/admin/communications?phone=${encodeURIComponent(e.customerPhone)}`}
+                        onClick={(evt) => evt.stopPropagation()}
+                        aria-label={`Message ${e.customerName || 'customer'}`}
+                        title={`Message ${e.customerPhone}`}
+                        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                      >
+                        <MessageSquare size={16} strokeWidth={1.75} />
+                      </a>
+                    )}
+                    {['draft', 'sent', 'viewed'].includes(e.status) && (
+                      <button
+                        type="button"
+                        onClick={async (evt) => {
+                          evt.stopPropagation();
+                          const action = e.status === 'draft' ? 'Send' : 'Resend';
+                          if (!window.confirm(`${action} estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
+                          await adminFetch(`/admin/estimates/${e.id}/send`, {
                             method: 'POST',
-                            body: JSON.stringify({ to: e.customerPhone, fromNumber: '+19412975749' }),
-                          });
-                          if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
-                        } catch (err) { alert('Call failed: ' + err.message); }
-                      }}
-                      aria-label={`Call ${e.customerName || 'customer'} via Waves`}
-                      title="Call via Waves — rings your phone first, press 1 to connect"
-                      className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                    >
-                      <Phone size={16} strokeWidth={1.75} />
-                    </button>
-                    <a
-                      href={`/admin/communications?phone=${encodeURIComponent(e.customerPhone)}`}
-                      onClick={(evt) => evt.stopPropagation()}
-                      aria-label={`Message ${e.customerName || 'customer'}`}
-                      title={`Message ${e.customerPhone}`}
-                      className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                    >
-                      <MessageSquare size={16} strokeWidth={1.75} />
-                    </a>
+                            body: JSON.stringify({ sendMethod: 'both' }),
+                          }).catch(() => {});
+                          refreshEstimates();
+                        }}
+                        aria-label={`${e.status === 'draft' ? 'Send' : 'Resend'} estimate to ${e.customerName || 'customer'}`}
+                        title={e.status === 'draft' ? 'Send estimate via SMS + email' : 'Resend estimate via SMS + email'}
+                        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                      >
+                        <Send size={16} strokeWidth={1.75} />
+                      </button>
+                    )}
                   </div>
                 )}
 
