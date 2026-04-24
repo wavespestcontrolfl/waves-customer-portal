@@ -124,6 +124,23 @@ router.post('/cards', async (req, res, next) => {
 
     const card = await StripeService.savePaymentMethod(req.customerId, paymentMethodId);
 
+    // Record consent — the portal add-card modal shows SaveCardConsent
+    // as locked + checked because saving is the whole point of the
+    // modal. Arriving here means the customer saw the copy.
+    try {
+      const ConsentService = require('../services/payment-method-consents');
+      await ConsentService.recordConsent({
+        customerId: req.customerId,
+        paymentMethodId: card.id,
+        stripePaymentMethodId: paymentMethodId,
+        source: 'portal_add_card',
+        ip: req.ip,
+        userAgent: req.get('user-agent') || null,
+      });
+    } catch (consentErr) {
+      require('../services/logger').error(`[billing-v2] Consent record failed: ${consentErr.message}`);
+    }
+
     res.json({
       success: true,
       card: {

@@ -165,7 +165,25 @@ router.post('/:token/save-card', loadSession, async (req, res, next) => {
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
 
     const StripeService = require('../services/stripe');
+    const ConsentService = require('../services/payment-method-consents');
     const card = await StripeService.savePaymentMethod(req.customer.id, paymentMethodId);
+
+    // Record consent — the onboarding flow shows SaveCardConsent as
+    // locked + checked because saving is a precondition of finishing
+    // sign-up, so arriving here means the customer saw the copy.
+    try {
+      await ConsentService.recordConsent({
+        customerId: req.customer.id,
+        paymentMethodId: card.id,
+        stripePaymentMethodId: paymentMethodId,
+        source: 'onboarding',
+        ip: req.ip,
+        userAgent: req.get('user-agent') || null,
+      });
+    } catch (consentErr) {
+      // Non-fatal — the card saved fine. Log loudly for reconciliation.
+      require('../services/logger').error(`[onboarding] Consent record failed: ${consentErr.message}`);
+    }
 
     await db('onboarding_sessions')
       .where({ id: req.session.id })
