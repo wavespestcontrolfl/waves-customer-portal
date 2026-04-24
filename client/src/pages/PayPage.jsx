@@ -550,7 +550,7 @@ export default function PayPage() {
               {service.techNotes && (
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.textCaption, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Tech Notes</div>
-                  <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.6, background: COLORS.offWhite, padding: 14, borderRadius: 10, borderLeft: `3px solid ${COLORS.blueDark}` }}>
+                  <div style={{ fontSize: 16, color: COLORS.textBody, lineHeight: 1.6, background: COLORS.offWhite, padding: 14, borderRadius: 10, borderLeft: `3px solid ${COLORS.blueDark}` }}>
                     {service.techNotes}
                   </div>
                 </div>
@@ -697,7 +697,7 @@ export default function PayPage() {
             <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: '#8D6E63', marginBottom: 4 }}>
               Save on every visit
             </div>
-            <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 16, color: COLORS.textBody, lineHeight: 1.5 }}>
               Upgrade to <strong style={{ color: '#F9A825' }}>Gold WaveGuard</strong> and save 15% on all services — that's ${(invoice.subtotal * 0.15).toFixed(2)} off today's service alone.
               Reply to the text from Waves or call <a href="tel:+19412975749" style={{ color: COLORS.blueDark }}>(941) 297-5749</a>.
             </div>
