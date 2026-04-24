@@ -187,26 +187,29 @@ export default function MobileAppointmentDetailSheet({
 
   return (
     <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
-      {/* Top bar: X close · Edit */}
+      {/* Top bar: Close · Edit — both bumped to iOS-friendly tap targets (≥44px)
+          and given word labels instead of a bare ✕ glyph so they read at a
+          glance on mobile. */}
       <div
-        className="sticky top-0 bg-white flex items-center justify-between px-3 border-b border-hairline border-zinc-200"
+        className="sticky top-0 bg-white flex items-center justify-between gap-3 px-4 border-b border-hairline border-zinc-200"
         style={{ height: 64, paddingTop: 'env(safe-area-inset-top, 0)' }}
       >
         <button
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
-          style={{ width: 40, height: 40, fontSize: 18, lineHeight: 1 }}
+          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-zinc-100 text-ink-primary font-medium u-focus-ring"
+          style={{ height: 44, padding: '0 18px', fontSize: 15 }}
         >
-          ✕
+          <span style={{ fontSize: 18, lineHeight: 1 }}>✕</span>
+          <span>Close</span>
         </button>
         <button
           type="button"
           onClick={() => onEdit?.(service)}
           aria-label="Edit appointment"
           className="rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
-          style={{ padding: '8px 22px', fontSize: 14 }}
+          style={{ height: 44, padding: '0 26px', fontSize: 15 }}
         >
           Edit
         </button>
@@ -350,9 +353,8 @@ export default function MobileAppointmentDetailSheet({
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="Note for staff"
             rows={4}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm px-3 py-3 text-ink-primary placeholder:text-ink-tertiary focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm px-3 py-3 text-ink-primary focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
             style={{ fontSize: 15, resize: 'vertical', minHeight: 96 }}
           />
           <div className="flex items-center justify-between mt-2">
