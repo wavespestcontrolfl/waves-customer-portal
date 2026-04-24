@@ -83,7 +83,7 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
   }
 
   return (
-    <div className="fixed inset-0 z-[60] bg-white overflow-y-auto md:hidden">
+    <div className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden">
       {/* Sticky header: X left, Save pill right. 56px tall. */}
       <div
         className="sticky top-0 bg-white flex items-center px-3"
