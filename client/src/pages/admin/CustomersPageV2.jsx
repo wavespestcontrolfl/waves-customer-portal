@@ -569,18 +569,13 @@ export default function CustomersPageV2() {
     } catch (e) { window.alert('Delete failed: ' + e.message); }
   };
 
-  // Push customers with no sortable name to the end of the list instead
-  // of the top (which is where '' lands in a naive string sort). ￿
-  // is the highest BMP code point — it sorts after every letter, so any
-  // real name beats it in ascending order.
-  const phonebookKey = (c) => {
-    const lastKey = (c.lastName || '').toString().toLowerCase().trim();
-    const firstKey = (c.firstName || '').toString().toLowerCase().trim();
-    if (lastKey || firstKey) return `${lastKey || '￿'} ${firstKey || '￿'}`;
-    // Blank first + last: fall back to company / email so businesses
-    // with no rep name still land in an intuitive A-Z slot.
-    const fallback = (c.companyName || c.email || '').toString().toLowerCase().trim();
-    return fallback || '￿￿';
+  // First name only, no fallback — operator preference. Blank first
+  // names pin to the end of the list via a max-BMP sentinel so they
+  // don't leak to the top of an ascending sort (matches server's
+  // ORDER BY lower(first_name) NULLS LAST).
+  const firstNameKey = (c) => {
+    const k = (c.firstName || '').toString().toLowerCase().trim();
+    return k || '￿';
   };
 
   const sorted = [...customers].sort((a, b) => {
@@ -588,7 +583,8 @@ export default function CustomersPageV2() {
     switch (sortBy) {
       case 'name':
       case 'lastName':
-        aVal = phonebookKey(a); bVal = phonebookKey(b);
+      case 'firstName':
+        aVal = firstNameKey(a); bVal = firstNameKey(b);
         break;
       case 'leadScore': aVal = a.leadScore || 0; bVal = b.leadScore || 0; break;
       case 'monthlyRate': aVal = a.monthlyRate || 0; bVal = b.monthlyRate || 0; break;
