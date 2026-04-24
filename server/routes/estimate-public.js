@@ -611,7 +611,7 @@ ${shellTopBar()}
   <section class="card booking-card" id="booking-card">
     <div class="eyebrow">Pick a time</div>
     <h2>Reserve your first visit</h2>
-    <p class="card-sub">The 3 times below fit the tech route closest to you. We will hold your pick for 15 minutes while you confirm.</p>
+    <p class="card-sub">Here are the next open times nearest your address. We will hold your pick for 15 minutes while you confirm.</p>
     <div id="slot-area" class="booking-state">Loading available times...</div>
     <div id="pay-pref-area" style="display:none">
       <h3 style="margin:20px 0 4px">How would you like to pay?</h3>

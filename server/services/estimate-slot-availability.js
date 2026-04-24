@@ -295,19 +295,22 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       return a.date.localeCompare(b.date);
     });
 
-  const primary = routeOptimalSlots.slice(0, opts.maxResults);
-  const primaryIds = new Set(primary.map((s) => s.slotId));
+  // Target: always show up to TARGET_TOTAL slots. Prefer route-optimal
+  // (detour within proximityDriveMinutes); fill any shortfall from the
+  // rest. Dropping the primary/expander split so customers aren't left
+  // staring at "2 slots and no way to see more" when the route-optimal
+  // filter is tight.
+  const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
+  const routeIds = new Set(routeOptimalSlots.map((s) => s.slotId));
 
-  // Expander: everything else. First sort by date+time, then diversify
-  // by (techId, windowStart) so the operator-facing list doesn't land
-  // as "10× same time same tech" when the optimizer returns a clump.
-  // Round-robin by signature preserves chronological ordering within
-  // each bucket while spreading different time-windows to the top.
+  // Fallback: everything that missed the route-optimal cut. Sort by
+  // date+time, then diversify by (techId, windowStart) so we don't
+  // land as "N× same time same tech" on a clumpy optimizer output.
   const leftover = classified
-    .filter((s) => !primaryIds.has(s.slotId))
+    .filter((s) => !routeIds.has(s.slotId))
     .sort((a, b) => a.date.localeCompare(b.date) || a.windowStart.localeCompare(b.windowStart));
 
-  const buckets = new Map();  // signature → [slot, slot, ...]
+  const buckets = new Map();
   for (const s of leftover) {
     const sig = `${s.techId || 'unassigned'}_${s.windowStart}`;
     if (!buckets.has(sig)) buckets.set(sig, []);
@@ -319,8 +322,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       if (arr.length) interleaved.push(arr.shift());
     }
   }
-  const expander = interleaved
-    .slice(0, opts.expanderMaxResults);
+
+  const combined = [...routeOptimalSlots, ...interleaved].slice(0, TARGET_TOTAL);
+  const primary = combined;
+  const expander = []; // kept for backward-compat with the client renderer
 
   const result = {
     primary,
