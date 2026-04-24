@@ -1,5 +1,6 @@
 import { MessageSquare, Phone, Calendar, FileText, FilePlus2, Edit3, Send, CheckCircle2, PlayCircle, Clock, Link2, DollarSign } from 'lucide-react';
 import { cn } from '../ui/cn';
+import { callViaBridge } from './CallBridgeLink';
 
 /**
  * Persistent bottom action bar for mobile admin detail views.
@@ -107,7 +108,7 @@ export function CustomerActionBar({ customer, standalone }) {
         key: 'call',
         icon: Phone,
         label: 'Call',
-        href: phone ? `tel:${phone}` : undefined,
+        onClick: phone ? () => callViaBridge(phone, fullName) : undefined,
         disabled: !phone,
       },
       {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import JobFormSection from '../../components/admin/JobFormSection';
 import ExpenseCapture from '../../components/admin/ExpenseCapture';
+import CallBridgeLink from '../../components/admin/CallBridgeLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
@@ -347,11 +348,13 @@ function ServiceCard({ service, onStatusChange, onComplete, onReschedule, cardRe
 
       {/* Phone */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <a href={`tel:${service.customerPhone}`} style={{
-          fontSize: 13, color: D.teal, textDecoration: 'none',
-        }}>
+        <CallBridgeLink
+          phone={service.customerPhone}
+          customerName={service.customerName || service.customer_name || ''}
+          style={{ fontSize: 13, color: D.teal, textDecoration: 'none' }}
+        >
           {service.customerPhone}
-        </a>
+        </CallBridgeLink>
         <a href={`sms:${service.customerPhone}`} style={{
           fontSize: 14, textDecoration: 'none', cursor: 'pointer',
         }}>

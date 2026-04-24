@@ -25,6 +25,7 @@ import { useState, useEffect, useRef } from 'react';
 import { ChevronLeft, MoreHorizontal, Trash2 } from 'lucide-react';
 import { CustomerActionBar } from './StickyActionBar';
 import { Card, CardBody, Badge, Button, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
+import CallBridgeLink from './CallBridgeLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -453,7 +454,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
             </div>
             {(c.phone || c.email) && (
               <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-1.5">
-                {c.phone && <a href={`tel:${c.phone}`} className="u-nums text-zinc-900 hover:underline">{c.phone}</a>}
+                {c.phone && <CallBridgeLink phone={c.phone} customerName={`${c.firstName || ''} ${c.lastName || ''}`.trim()} className="u-nums text-zinc-900 hover:underline">{c.phone}</CallBridgeLink>}
                 {c.email && <a href={`mailto:${c.email}`} className="text-zinc-900 hover:underline">{c.email}</a>}
               </div>
             )}
@@ -462,7 +463,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                 <span className="text-ink-tertiary mr-1">Service contact:</span>
                 {c.serviceContactName && <span className="text-zinc-900 mr-2">{c.serviceContactName}</span>}
                 {c.serviceContactPhone && (
-                  <a href={`tel:${c.serviceContactPhone}`} className="u-nums text-zinc-900 hover:underline mr-3">{c.serviceContactPhone}</a>
+                  <CallBridgeLink phone={c.serviceContactPhone} customerName={c.serviceContactName || `${c.firstName || ''} ${c.lastName || ''}`.trim()} className="u-nums text-zinc-900 hover:underline mr-3">{c.serviceContactPhone}</CallBridgeLink>
                 )}
                 {c.serviceContactEmail && (
                   <a href={`mailto:${c.serviceContactEmail}`} className="text-zinc-900 hover:underline">{c.serviceContactEmail}</a>
@@ -479,8 +480,8 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
               {c.phone && <>
                 <a href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
                   className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white hover:bg-zinc-800 u-focus-ring">Text</a>
-                <a href={`tel:${c.phone}`}
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Call</a>
+                <CallBridgeLink phone={c.phone} customerName={`${c.firstName || ''} ${c.lastName || ''}`.trim()}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Call</CallBridgeLink>
               </>}
               <a href={`/admin/schedule?customer=${customerId}`}
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Book Appt</a>
@@ -531,12 +532,13 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                   </a>
                 )}
                 {c.phone && (
-                  <a
-                    href={`tel:${c.phone}`}
+                  <CallBridgeLink
+                    phone={c.phone}
+                    customerName={`${c.firstName || ''} ${c.lastName || ''}`.trim()}
                     className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
                   >
                     Call
-                  </a>
+                  </CallBridgeLink>
                 )}
                 <div ref={menuRef} className="relative">
                   <button

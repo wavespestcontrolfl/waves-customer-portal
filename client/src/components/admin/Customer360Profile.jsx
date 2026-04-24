@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { CustomerActionBar } from './StickyActionBar';
+import CallBridgeLink from './CallBridgeLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#fff' };
@@ -266,7 +267,7 @@ export default function Customer360Profile({ customerId, onClose }) {
           </div>
           {(c.phone || c.email) && (
             <div className="c360-header-meta" style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: D.muted, marginBottom: 6 }}>
-              {c.phone && <a href={`tel:${c.phone}`} style={{ color: D.teal, textDecoration: 'none', fontFamily: MONO }}>{c.phone}</a>}
+              {c.phone && <CallBridgeLink phone={c.phone} customerName={`${c.firstName || ''} ${c.lastName || ''}`.trim()} style={{ color: D.teal, textDecoration: 'none', fontFamily: MONO }}>{c.phone}</CallBridgeLink>}
               {c.email && <a href={`mailto:${c.email}`} style={{ color: D.teal, textDecoration: 'none' }}>{c.email}</a>}
             </div>
           )}
@@ -279,7 +280,7 @@ export default function Customer360Profile({ customerId, onClose }) {
           <div className="c360-header-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {c.phone && <>
               <a href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`} style={actionBtnStyle(D.teal)}>Text</a>
-              <a href={`tel:${c.phone}`} style={actionBtnStyle(D.border)}>Call</a>
+              <CallBridgeLink phone={c.phone} customerName={`${c.firstName || ''} ${c.lastName || ''}`.trim()} style={actionBtnStyle(D.border)}>Call</CallBridgeLink>
             </>}
             <a href={`/admin/schedule?customer=${customerId}`} style={actionBtnStyle(D.border)}>Book Appt</a>
             <a href={`/admin/invoices?customer=${customerId}`} style={actionBtnStyle(D.border)}>Invoice</a>

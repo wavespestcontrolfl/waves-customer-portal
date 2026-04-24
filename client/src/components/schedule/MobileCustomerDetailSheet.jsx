@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { adminFetch } from '../../lib/adminFetch';
+import CallBridgeLink from '../admin/CallBridgeLink';
 
 function fmtMonthDay(d) {
   if (!d) return '';
@@ -169,7 +170,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
             {/* Phone */}
             {c.phone && (
               <ContactRow label="Phone number">
-                <a href={`tel:${c.phone}`} className="text-ink-primary" style={{ fontSize: 17 }}>{c.phone}</a>
+                <CallBridgeLink phone={c.phone} customerName={`${c.first_name || c.firstName || ''} ${c.last_name || c.lastName || ''}`.trim()} className="text-ink-primary" style={{ fontSize: 17 }}>{c.phone}</CallBridgeLink>
               </ContactRow>
             )}
             {c.email && (
