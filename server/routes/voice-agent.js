@@ -64,6 +64,15 @@ const WAVES_OWNED_NUMBERS = new Set([
 // ── Missed call SMS — fires when call goes to voicemail ──
 // Rate limited: max 1 per customer per day
 async function sendMissedCallSMS(callerPhone, callerName, callSid) {
+  // Delay the send so the parent call + recording webhooks have time to
+  // land their final state. If the DialCallDuration on the /voice-agent
+  // action URL was misleading (e.g., Twilio's 15s carrier-VM threshold
+  // treated a real conversation as voicemail), the recording-status
+  // webhook will eventually record the full conversation duration, and
+  // we can skip the SMS. 90s is comfortably longer than Twilio's normal
+  // webhook latency and longer than most short calls.
+  await new Promise((resolve) => setTimeout(resolve, 90 * 1000));
+
   try {
     const TwilioService = require('../services/twilio');
 
@@ -71,11 +80,12 @@ async function sendMissedCallSMS(callerPhone, callerName, callSid) {
     // Twilio's <Dial action> callback retains the parent From, but fall back to
     // call_log.from_phone if callerPhone is missing or looks like one of our own numbers.
     let linkedCustomer = null;
+    let answeredAlready = false;
     try {
       if (callSid) {
         const logRow = await db('call_log')
           .where(function () { this.where('twilio_call_sid', callSid).orWhere('call_sid', callSid); })
-          .select('customer_id', 'from_phone')
+          .select('customer_id', 'from_phone', 'answered_by', 'duration_seconds', 'recording_duration_seconds', 'transcription')
           .first();
         if (logRow?.from_phone && (!callerPhone || WAVES_OWNED_NUMBERS.has(callerPhone))) {
           callerPhone = logRow.from_phone;
@@ -83,8 +93,25 @@ async function sendMissedCallSMS(callerPhone, callerName, callSid) {
         if (logRow?.customer_id) {
           linkedCustomer = await db('customers').where({ id: logRow.customer_id }).first();
         }
+        // Post-delay answered check: by now other webhooks (call-status,
+        // recording-status) have updated the row. A real conversation will
+        // show answered_by='human' OR a duration > 30s OR a recording of
+        // the same length. Trust that over the short DialCallDuration
+        // that originally triggered this function.
+        if (
+          logRow?.answered_by === 'human'
+          || Number(logRow?.duration_seconds || 0) > 30
+          || Number(logRow?.recording_duration_seconds || 0) > 30
+        ) {
+          answeredAlready = true;
+        }
       }
     } catch { /* non-critical */ }
+
+    if (answeredAlready) {
+      console.log(`[VoiceAgent] Skip missed-call SMS — call_log shows ${callSid} was answered`);
+      return;
+    }
 
     // Loopback guard (HARD-CODED): never SMS one of our own Twilio numbers
     if (!callerPhone || WAVES_OWNED_NUMBERS.has(callerPhone)) {

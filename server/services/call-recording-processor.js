@@ -253,6 +253,24 @@ const CallRecordingProcessor = {
       return { success: true, skipped: true, reason: 'already_processed' };
     }
 
+    // Concurrent-run guard: the ring-first flow can fire two
+    // recording-status webhooks for one call (outer <Dial record> + inner
+    // voicemail <Record> share the same CallSid), and both schedule
+    // processRecording on a 5s delay. Without this atomic claim, both
+    // race through extraction and both send the confirmation SMS. Atomic
+    // UPDATE → conditional exit: the first run wins, the second bails.
+    if (!opts.force) {
+      const claimed = await db('call_log')
+        .where({ twilio_call_sid: callSid })
+        .whereNot('processing_status', 'processing')
+        .whereNot('processing_status', 'processed')
+        .update({ processing_status: 'processing', updated_at: new Date() });
+      if (claimed === 0) {
+        logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
+        return { success: true, skipped: true, reason: 'already_processing' };
+      }
+    }
+
     logger.info(`[call-proc] Processing recording for ${callSid}`);
 
     // Step 1: Transcribe — Gemini is the source of truth. Twilio's built-in is fallback only.
@@ -532,8 +550,25 @@ const CallRecordingProcessor = {
               `— Waves Pest Control 🌊`;
           }
 
-          await TwilioService.sendSMS(customer.phone, smsBody, { messageType: 'confirmation' });
-          logger.info(`[call-proc] Appointment SMS sent to ${customer.phone}`);
+          // Content-level dedup: even if the concurrent-run guard above
+          // misses (e.g., admin reprocess inside the same minute), don't
+          // fire an identical confirmation that the customer just got.
+          let alreadySent = false;
+          try {
+            const existing = await db('sms_log')
+              .where({ to_phone: customer.phone, message_type: 'confirmation' })
+              .where('message_body', smsBody)
+              .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
+              .first();
+            if (existing) alreadySent = true;
+          } catch { /* sms_log query issue — send anyway */ }
+
+          if (!alreadySent) {
+            await TwilioService.sendSMS(customer.phone, smsBody, { messageType: 'confirmation' });
+            logger.info(`[call-proc] Appointment SMS sent to ${customer.phone}`);
+          } else {
+            logger.info(`[call-proc] Skipping duplicate appointment SMS to ${customer.phone} (sent within last 10 min)`);
+          }
 
           // Create the scheduled_services record so it appears on the schedule
           try {
