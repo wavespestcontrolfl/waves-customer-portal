@@ -13,7 +13,7 @@
 // Leads / Pricing Logic tabs still render V1 panels.
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
@@ -34,7 +34,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
-  Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, Send, SlidersHorizontal,
+  Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, Send, FilePlus2, SlidersHorizontal,
   Check, X, ArrowLeft, Plus,
 } from 'lucide-react';
 
@@ -356,6 +356,7 @@ const SOURCE_ICON = {
 
 function EstimatePipelineViewV2() {
   const v3Flag = useFeatureFlag('estimates_v2_status_pills');
+  const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [customerPanelId, setCustomerPanelId] = useState(null);
@@ -638,6 +639,29 @@ function EstimatePipelineViewV2() {
                       >
                         <MessageSquare size={16} strokeWidth={1.75} />
                       </a>
+                    )}
+                    {/* Create-estimate icon — carries customer fields into the
+                        new-estimate form via query string. Always shown when
+                        we have a customerId so the operator can start a
+                        follow-up quote without leaving the list. */}
+                    {e.customerId && (
+                      <button
+                        type="button"
+                        onClick={(evt) => {
+                          evt.stopPropagation();
+                          const params = new URLSearchParams();
+                          if (e.address) params.set('address', e.address);
+                          if (e.customerName) params.set('customerName', e.customerName);
+                          if (e.customerPhone) params.set('customerPhone', e.customerPhone);
+                          if (e.customerEmail) params.set('customerEmail', e.customerEmail);
+                          navigate(`/admin/estimates?${params.toString()}`);
+                        }}
+                        aria-label={`Create new estimate for ${e.customerName || 'customer'}`}
+                        title="Create a new estimate for this customer"
+                        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                      >
+                        <FilePlus2 size={16} strokeWidth={1.75} />
+                      </button>
                     )}
                     {['draft', 'sent', 'viewed'].includes(e.status) && (
                       <button
@@ -1159,11 +1183,8 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
         </button>
       </div>
 
-      {/* Labeled search + Add/filter row — mirrors Customers mobile block. */}
+      {/* Search + Add/filter row — mirrors Customers mobile block. */}
       <div className="mb-3">
-        <h2 className="text-12 font-medium text-ink-primary mb-1.5">
-          Search estimates
-        </h2>
         <input
           type="search"
           inputMode="search"
