@@ -23,6 +23,7 @@
  * mobile-first stacked layout, two-column desktop via grid.
  */
 import Icon from '../components/Icon';
+import { COLORS } from '../theme-brand';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
@@ -35,15 +36,6 @@ import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceBu
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-
-const W = {
-  blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
-  bluePale: '#E3F5FD', sky: '#4DC9F6', red: '#C8102E',
-  yellow: '#FFD700', green: '#16A34A', greenLight: '#DCFCE7',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0',
-  border: '#CBD5E1', borderLight: '#F1F5F9',
-};
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -59,8 +51,8 @@ function fmtMoney(n) {
 function Page({ children }) {
   return (
     <div style={{
-      minHeight: '100vh', background: W.offWhite,
-      fontFamily: FONT_BODY, color: W.navy,
+      minHeight: '100vh', background: COLORS.offWhite,
+      fontFamily: FONT_BODY, color: COLORS.navy,
       display: 'flex', flexDirection: 'column',
     }}>
       <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 780, width: '100%', margin: '0 auto' }}>
@@ -74,12 +66,12 @@ function Page({ children }) {
 function SkeletonBlock() {
   return (
     <div style={{
-      background: W.white, borderRadius: 16, padding: 24,
-      border: `1px solid ${W.border}`, marginBottom: 16,
+      background: COLORS.white, borderRadius: 16, padding: 24,
+      border: `1px solid ${COLORS.grayLight}`, marginBottom: 16,
     }}>
-      <div style={{ height: 12, width: 120, background: W.borderLight, borderRadius: 4 }} />
-      <div style={{ height: 32, width: '60%', background: W.borderLight, borderRadius: 4, marginTop: 14 }} />
-      <div style={{ height: 14, width: '40%', background: W.borderLight, borderRadius: 4, marginTop: 10 }} />
+      <div style={{ height: 12, width: 120, background: COLORS.offWhite, borderRadius: 4 }} />
+      <div style={{ height: 32, width: '60%', background: COLORS.offWhite, borderRadius: 4, marginTop: 14 }} />
+      <div style={{ height: 14, width: '40%', background: COLORS.offWhite, borderRadius: 4, marginTop: 10 }} />
     </div>
   );
 }
@@ -87,14 +79,14 @@ function SkeletonBlock() {
 function NotFoundCard() {
   return (
     <div style={{
-      background: W.white, borderRadius: 16, padding: 32, textAlign: 'center',
-      border: `1px solid ${W.border}`, marginTop: 40,
+      background: COLORS.white, borderRadius: 16, padding: 32, textAlign: 'center',
+      border: `1px solid ${COLORS.grayLight}`, marginTop: 40,
     }}>
       <div style={{ fontSize: 32 }}></div>
       <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
-      <div style={{ fontSize: 14, color: W.textBody, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
         This link may have expired or isn't valid. Call us at{' '}
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE_DISPLAY}</a>{' '}
+        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
         and we'll get you sorted.
       </div>
     </div>
@@ -104,14 +96,14 @@ function NotFoundCard() {
 function Header({ customerFirstName, address }) {
   return (
     <div style={{ marginBottom: 20, textAlign: 'center' }}>
-      <div style={{ fontSize: 14, color: W.textCaption, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+      <div style={{ fontSize: 14, color: COLORS.textCaption, letterSpacing: 0.5, textTransform: 'uppercase' }}>
         Waves Pest Control
       </div>
-      <div style={{ fontSize: 28, fontWeight: 700, color: W.blueDeeper, marginTop: 8 }}>
+      <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.blueDeeper, marginTop: 8 }}>
         {customerFirstName ? `Hi ${customerFirstName}` : 'Your estimate'}
       </div>
       {address ? (
-        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 4 }}>{address}</div>
+        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>{address}</div>
       ) : null}
     </div>
   );
@@ -130,8 +122,8 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
   };
   return (
     <div style={{
-      background: W.white, borderRadius: 999, padding: 4,
-      border: `1px solid ${W.border}`, marginBottom: 12,
+      background: COLORS.white, borderRadius: 999, padding: 4,
+      border: `1px solid ${COLORS.grayLight}`, marginBottom: 12,
       display: 'flex', gap: 4,
     }}>
       <button
@@ -139,8 +131,8 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         onClick={() => onChange('recurring')}
         style={{
           ...pillBase,
-          background: mode === 'recurring' ? W.blueBright : 'transparent',
-          color: mode === 'recurring' ? W.white : W.textBody,
+          background: mode === 'recurring' ? COLORS.wavesBlue : 'transparent',
+          color: mode === 'recurring' ? COLORS.white : COLORS.textBody,
         }}
       >Recurring</button>
       <button
@@ -148,8 +140,8 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         onClick={() => onChange('one_time')}
         style={{
           ...pillBase,
-          background: mode === 'one_time' ? W.blueBright : 'transparent',
-          color: mode === 'one_time' ? W.white : W.textBody,
+          background: mode === 'one_time' ? COLORS.wavesBlue : 'transparent',
+          color: mode === 'one_time' ? COLORS.white : COLORS.textBody,
         }}
       >One-time</button>
     </div>
@@ -159,19 +151,19 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
 function OneTimePriceCard({ oneTimePrice }) {
   return (
     <div style={{
-      background: W.white, borderRadius: 16, padding: 24,
+      background: COLORS.white, borderRadius: 16, padding: 24,
       boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-      borderTop: `4px solid ${W.yellow}`,
+      borderTop: `4px solid ${COLORS.yellow}`,
       marginBottom: 16,
     }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.yellow, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.yellow, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
         Single visit
       </div>
-      <div style={{ fontSize: 42, fontWeight: 700, color: W.navy, lineHeight: 1.1 }}>
+      <div style={{ fontSize: 42, fontWeight: 700, color: COLORS.navy, lineHeight: 1.1 }}>
         {fmtMoney(oneTimePrice)}
-        <span style={{ fontSize: 18, fontWeight: 500, color: W.textBody, marginLeft: 6 }}>one-time</span>
+        <span style={{ fontSize: 18, fontWeight: 500, color: COLORS.textBody, marginLeft: 6 }}>one-time</span>
       </div>
-      <div style={{ fontSize: 14, color: W.textBody, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
         One visit, pay on service day. No recurring schedule, no tier discount.
         Most pest problems come back — if this single treatment doesn't resolve it,
         switch to recurring and we'll credit this visit toward your first month.
@@ -184,7 +176,7 @@ function CountdownLine({ secondsRemaining }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
   return (
-    <div style={{ fontSize: 13, color: W.textCaption, textAlign: 'center' }}>
+    <div style={{ fontSize: 13, color: COLORS.textCaption, textAlign: 'center' }}>
       Slot held for {m}:{String(s).padStart(2, '0')}
     </div>
   );
@@ -193,21 +185,21 @@ function CountdownLine({ secondsRemaining }) {
 function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, onCancel }) {
   return (
     <div style={{
-      background: W.white, borderRadius: 16, padding: 24,
-      borderTop: `4px solid ${W.blueBright}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+      background: COLORS.white, borderRadius: 16, padding: 24,
+      borderTop: `4px solid ${COLORS.wavesBlue}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
       marginBottom: 16,
     }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.blueBright, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.wavesBlue, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         Confirm your booking
       </div>
-      <div style={{ fontSize: 18, color: W.navy, marginTop: 10, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
         Pay option: <strong>{
           paymentPreference === 'deposit_now' ? 'Deposit now'
           : paymentPreference === 'prepay_annual' ? 'Pay the year upfront'
           : 'At the visit'
         }</strong>
       </div>
-      <div style={{ fontSize: 14, color: W.textBody, marginTop: 4 }}>
+      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 4 }}>
         Slot: {slotId}
       </div>
       <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div>
@@ -216,7 +208,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
           type="button"
           onClick={onConfirm}
           style={{
-            padding: '16px 20px', background: W.blueBright, color: W.white,
+            padding: '16px 20px', background: COLORS.wavesBlue, color: COLORS.white,
             border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
           }}
         >Confirm booking</button>
@@ -224,8 +216,8 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
           type="button"
           onClick={onCancel}
           style={{
-            padding: '12px 20px', background: 'transparent', color: W.textBody,
-            border: `1px solid ${W.border}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+            padding: '12px 20px', background: 'transparent', color: COLORS.textBody,
+            border: `1px solid ${COLORS.grayLight}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
           }}
         >Go back</button>
       </div>
@@ -236,15 +228,15 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
 function SuccessCard({ onboardingToken }) {
   return (
     <div style={{
-      background: W.white, borderRadius: 16, padding: 28, textAlign: 'center',
-      borderTop: `4px solid ${W.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+      background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
+      borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 40 }}></div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: W.navy, marginTop: 8 }}>
+      <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
         You're booked.
       </div>
-      <div style={{ fontSize: 14, color: W.textBody, marginTop: 10, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
         Check your phone for the confirmation text.
         {onboardingToken ? ' We also sent you an onboarding link to finish setup.' : ''}
       </div>
@@ -253,7 +245,7 @@ function SuccessCard({ onboardingToken }) {
           href={`/onboard/${onboardingToken}`}
           style={{
             display: 'inline-block', marginTop: 16, padding: '14px 20px',
-            background: W.blueBright, color: W.white, textDecoration: 'none',
+            background: COLORS.wavesBlue, color: COLORS.white, textDecoration: 'none',
             borderRadius: 12, fontWeight: 600, fontSize: 15,
           }}
         >Continue to setup</a>
@@ -268,7 +260,7 @@ function SlotConflictBanner({ onRetry }) {
       background: '#fff4e5', borderRadius: 12, padding: 14,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
-      <div style={{ fontSize: 14, color: W.navy }}>
+      <div style={{ fontSize: 14, color: COLORS.navy }}>
         That slot was just taken. We've refreshed the options below — pick another.
       </div>
       {onRetry ? (
@@ -277,7 +269,7 @@ function SlotConflictBanner({ onRetry }) {
           onClick={onRetry}
           style={{
             marginTop: 10, padding: '8px 14px',
-            background: W.blueBright, color: W.white, border: 'none',
+            background: COLORS.wavesBlue, color: COLORS.white, border: 'none',
             borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600,
           }}
         >Refresh times</button>
@@ -540,15 +532,15 @@ export default function EstimateViewPage() {
 
               {pricing.setupFee && (
                 <div style={{
-                  background: W.white, borderRadius: 12,
+                  background: COLORS.white, borderRadius: 12,
                   padding: '12px 16px', marginBottom: 16,
                   border: `1px solid rgba(15,23,42,0.08)`,
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
                 }}>
-                  <div style={{ fontSize: 14, color: W.textBody, lineHeight: 1.4 }}>
-                    <span style={{ fontWeight: 600, color: W.navy }}>+ {fmtMoney(pricing.setupFee.amount)} one-time {pricing.setupFee.label}</span>
+                  <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.4 }}>
+                    <span style={{ fontWeight: 600, color: COLORS.navy }}>+ {fmtMoney(pricing.setupFee.amount)} one-time {pricing.setupFee.label}</span>
                     {pricing.setupFee.waivedWithPrepay && (
-                      <span style={{ display: 'block', fontSize: 12, color: W.textCaption || W.textBody, marginTop: 2 }}>
+                      <span style={{ display: 'block', fontSize: 12, color: COLORS.textCaption || COLORS.textBody, marginTop: 2 }}>
                         Waived when you prepay the year upfront.
                       </span>
                     )}
@@ -587,11 +579,11 @@ export default function EstimateViewPage() {
           {error ? (
             <div style={{
               background: '#fee', borderRadius: 12, padding: 12,
-              border: `1px solid ${W.red}`, marginBottom: 16,
-              color: W.red, fontSize: 14,
+              border: `1px solid ${COLORS.red}`, marginBottom: 16,
+              color: COLORS.red, fontSize: 14,
             }}>
               Something went wrong: {error}. Try again or call{' '}
-              <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
+              <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.red }}>{WAVES_PHONE_DISPLAY}</a>.
             </div>
           ) : null}
         </>

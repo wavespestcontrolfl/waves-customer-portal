@@ -1,25 +1,10 @@
 import Icon from '../components/Icon';
+import { COLORS } from '../theme-brand';
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-// Waves brand palette — mirrored from PayPage / ReviewPage.
-const W = {
-  blue: '#065A8C',
-  blueBright: '#009CDE',
-  blueDeeper: '#1B2C5B',
-  bluePale: '#E3F5FD',
-  sky: '#4DC9F6',
-  red: '#C8102E',
-  yellow: '#FFD700',
-  yellowHover: '#FFF176',
-  green: '#16A34A', greenLight: '#DCFCE7',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0',
-  border: '#CBD5E1', borderLight: '#F1F5F9',
-};
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -82,9 +67,9 @@ function Page({ children }) {
   return (
     <div style={{
       minHeight: '100vh',
-      background: W.offWhite,
+      background: COLORS.offWhite,
       fontFamily: FONT_BODY,
-      color: W.navy,
+      color: COLORS.navy,
       display: 'flex',
       flexDirection: 'column',
     }}>
@@ -99,7 +84,7 @@ function Page({ children }) {
 function Card({ children, accent }) {
   return (
     <div style={{
-      background: W.white,
+      background: COLORS.white,
       borderRadius: 16,
       padding: 24,
       boxShadow: '0 2px 12px rgba(15, 23, 42, 0.06)',
@@ -118,9 +103,9 @@ function TechBlock({ tech, size = 'md' }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         <div style={{
           width: px, height: px, borderRadius: '50%',
-          background: W.bluePale,
+          background: COLORS.blueLight,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: px * 0.5, color: W.blueBright,
+          fontSize: px * 0.5, color: COLORS.wavesBlue,
         }}></div>
         <div style={{ fontSize: 18, fontWeight: 600 }}>Your Waves technician</div>
       </div>
@@ -132,12 +117,12 @@ function TechBlock({ tech, size = 'md' }) {
         <img
           src={tech.photoUrl}
           alt={tech.firstName || ''}
-          style={{ width: px, height: px, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${W.borderLight}` }}
+          style={{ width: px, height: px, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${COLORS.offWhite}` }}
         />
       ) : (
         <div style={{
           width: px, height: px, borderRadius: '50%',
-          background: W.blueDeeper, color: W.white,
+          background: COLORS.blueDeeper, color: COLORS.white,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: px * 0.4, fontWeight: 600,
         }}>
@@ -145,11 +130,11 @@ function TechBlock({ tech, size = 'md' }) {
         </div>
       )}
       <div>
-        <div style={{ fontSize: size === 'lg' ? 22 : 18, fontWeight: 600, color: W.navy }}>
+        <div style={{ fontSize: size === 'lg' ? 22 : 18, fontWeight: 600, color: COLORS.navy }}>
           {tech.firstName || 'Your technician'}
         </div>
         {tech.yearsWithWaves ? (
-          <div style={{ fontSize: 13, color: W.textCaption }}>
+          <div style={{ fontSize: 13, color: COLORS.textCaption }}>
             {tech.yearsWithWaves}+ years with Waves
           </div>
         ) : null}
@@ -162,14 +147,14 @@ function ServiceMeta({ data }) {
   const window = formatWindow(data.window?.start, data.window?.end);
   const addr = data.property?.addressLine1;
   return (
-    <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${W.borderLight}` }}>
-      <div style={{ fontSize: 13, color: W.textCaption, marginBottom: 4 }}>Service</div>
-      <div style={{ fontSize: 15, fontWeight: 500, color: W.navy }}>{data.service?.type}</div>
+    <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${COLORS.offWhite}` }}>
+      <div style={{ fontSize: 13, color: COLORS.textCaption, marginBottom: 4 }}>Service</div>
+      <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.navy }}>{data.service?.type}</div>
       {window ? (
-        <div style={{ fontSize: 14, color: W.textBody, marginTop: 8 }}>{window}</div>
+        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 8 }}>{window}</div>
       ) : null}
       {addr ? (
-        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 4 }}>{addr}</div>
+        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>{addr}</div>
       ) : null}
     </div>
   );
@@ -180,19 +165,19 @@ function ScheduledCard({ data }) {
   const techFirst = data.tech?.firstName || 'your tech';
   const window = formatWindow(data.window?.start, data.window?.end);
   return (
-    <Card accent={W.blueBright}>
-      <div style={{ fontSize: 14, color: W.textCaption, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+    <Card accent={COLORS.wavesBlue}>
+      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         Scheduled
       </div>
       <div style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3 }}>
         {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
         your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
       </div>
-      <div style={{ fontSize: 15, color: W.textBody, marginTop: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
       {data.property?.addressLine1 ? (
-        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 16 }}>
+        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 16 }}>
           {data.property.addressLine1}
         </div>
       ) : null}
@@ -203,8 +188,8 @@ function ScheduledCard({ data }) {
 function EnRouteCard({ data }) {
   const techFirst = data.tech?.firstName || 'Your technician';
   return (
-    <Card accent={W.blueBright}>
-      <div style={{ fontSize: 14, color: W.blueBright, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
+    <Card accent={COLORS.wavesBlue}>
+      <div style={{ fontSize: 14, color: COLORS.wavesBlue, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
         On the way
       </div>
       <TechBlock tech={data.tech} size="lg" />
@@ -220,8 +205,8 @@ function OnPropertyCard({ data }) {
   const techFirst = data.tech?.firstName || 'Your technician';
   const elapsed = useElapsed(data.arrivedAt);
   return (
-    <Card accent={W.green}>
-      <div style={{ fontSize: 14, color: W.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
+    <Card accent={COLORS.green}>
+      <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
         On property
       </div>
       <TechBlock tech={data.tech} size="lg" />
@@ -229,7 +214,7 @@ function OnPropertyCard({ data }) {
         {techFirst} is servicing your property.
       </div>
       {elapsed ? (
-        <div style={{ fontSize: 14, color: W.textBody, marginTop: 10 }}>
+        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10 }}>
           On site for {elapsed}.
         </div>
       ) : null}
@@ -243,8 +228,8 @@ function CompleteCard({ data }) {
   const photos = Array.isArray(summary.photos) ? summary.photos.slice(0, 6) : [];
   return (
     <>
-      <Card accent={W.green}>
-        <div style={{ fontSize: 14, color: W.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
+      <Card accent={COLORS.green}>
+        <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
           Service complete
         </div>
         <TechBlock tech={data.tech} size="lg" />
@@ -252,7 +237,7 @@ function CompleteCard({ data }) {
           Thanks for choosing Waves
           {data.customerFirstName ? `, ${data.customerFirstName}` : ''}.
         </div>
-        <div style={{ fontSize: 15, color: W.textBody, marginTop: 8 }}>
+        <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 8 }}>
           {data.service?.type} completed{summary.completedAt ? ` on ${formatCompleteDate(summary.completedAt)}` : ''}.
         </div>
 
@@ -275,7 +260,7 @@ function CompleteCard({ data }) {
           <a
             href={`/report/${summary.serviceReportToken}`}
             style={{
-              display: 'block', padding: '16px 20px', background: W.blueBright, color: W.white,
+              display: 'block', padding: '16px 20px', background: COLORS.wavesBlue, color: COLORS.white,
               textAlign: 'center', borderRadius: 12, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
@@ -285,7 +270,7 @@ function CompleteCard({ data }) {
           <a
             href={summary.reviewUrl}
             style={{
-              display: 'block', padding: '16px 20px', background: W.yellow, color: W.navy,
+              display: 'block', padding: '16px 20px', background: COLORS.yellow, color: COLORS.navy,
               textAlign: 'center', borderRadius: 12, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
@@ -295,9 +280,9 @@ function CompleteCard({ data }) {
           <a
             href={`/pay/${summary.invoiceToken}`}
             style={{
-              display: 'block', padding: '14px 20px', background: W.white, color: W.blue,
+              display: 'block', padding: '14px 20px', background: COLORS.white, color: COLORS.blueDark,
               textAlign: 'center', borderRadius: 12, fontWeight: 600, fontSize: 15,
-              textDecoration: 'none', border: `1px solid ${W.border}`,
+              textDecoration: 'none', border: `1px solid ${COLORS.grayLight}`,
             }}
           >View invoice</a>
         ) : null}
@@ -310,23 +295,23 @@ function CancelledCard({ data }) {
   const when = data.window?.start ? formatCompleteDate(data.window.start) : null;
   const reason = data.cancellation?.reason || null;
   return (
-    <Card accent={W.red}>
-      <div style={{ fontSize: 14, color: W.red, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
+    <Card accent={COLORS.red}>
+      <div style={{ fontSize: 14, color: COLORS.red, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
         Cancelled
       </div>
       <div style={{ fontSize: 20, fontWeight: 600, lineHeight: 1.3 }}>
         Your {data.service?.type?.toLowerCase() || 'service'}{when ? ` on ${when}` : ''} was cancelled.
       </div>
       {reason ? (
-        <div style={{ fontSize: 14, color: W.textBody, marginTop: 12 }}>
-          <span style={{ color: W.textCaption }}>Reason: </span>{reason}
+        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12 }}>
+          <span style={{ color: COLORS.textCaption }}>Reason: </span>{reason}
         </div>
       ) : null}
       <a
         href={`tel:${WAVES_PHONE_TEL}`}
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
-          background: W.blueBright, color: W.white,
+          background: COLORS.wavesBlue, color: COLORS.white,
           textAlign: 'center', borderRadius: 12, fontWeight: 600, fontSize: 15,
           textDecoration: 'none',
         }}
@@ -339,9 +324,9 @@ function CancelledCard({ data }) {
 function SkeletonCard() {
   return (
     <Card>
-      <div style={{ height: 12, width: 80, background: W.borderLight, borderRadius: 4 }} />
-      <div style={{ height: 24, width: '80%', background: W.borderLight, borderRadius: 4, marginTop: 16 }} />
-      <div style={{ height: 16, width: '60%', background: W.borderLight, borderRadius: 4, marginTop: 12 }} />
+      <div style={{ height: 12, width: 80, background: COLORS.offWhite, borderRadius: 4 }} />
+      <div style={{ height: 24, width: '80%', background: COLORS.offWhite, borderRadius: 4, marginTop: 16 }} />
+      <div style={{ height: 16, width: '60%', background: COLORS.offWhite, borderRadius: 4, marginTop: 12 }} />
     </Card>
   );
 }
@@ -353,9 +338,9 @@ function NotFoundCard() {
       <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
         Tracking link unavailable
       </div>
-      <div style={{ fontSize: 14, color: W.textBody, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
+      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
         This tracking link has expired or isn't valid. Call us at{' '}
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE_DISPLAY}</a>{' '}
+        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
         if you need help with your service.
       </div>
     </Card>
