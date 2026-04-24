@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Phone, MessageSquare, FilePlus2, ExternalLink, ChevronLeft, PhoneCall, User, Mail, MapPin, Tag } from 'lucide-react';
+import { Phone, MessageSquare, FilePlus2, ExternalLink, ChevronLeft, PhoneCall, User, Mail, MapPin, Tag, Trash2 } from 'lucide-react';
 import { Badge, Button, cn } from '../../components/ui';
 import { adminFetch } from '../../lib/adminFetch';
 
@@ -289,20 +289,44 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                             <div className="text-12 text-alert-fg mt-0.5">Declined: {e.decline_reason}</div>
                           )}
                         </div>
-                        <div className="text-right flex-shrink-0">
+                        <div className="text-right flex-shrink-0 flex flex-col items-end gap-1">
                           <div className={cn('text-14 font-medium u-nums', Number(e.monthly_total || 0) > 0 ? 'text-zinc-900' : 'text-ink-tertiary')}>
                             {fmtMoney(e.monthly_total)}<span className="text-11 text-ink-tertiary">/mo</span>
                           </div>
-                          {e.token && (
-                            <a
-                              href={`/estimate/${e.token}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
+                          <div className="flex items-center gap-3">
+                            {e.token && (
+                              <a
+                                href={`/estimate/${e.token}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
+                              >
+                                View →
+                              </a>
+                            )}
+                            <button
+                              type="button"
+                              aria-label="Delete estimate"
+                              title="Delete this estimate"
+                              onClick={async () => {
+                                const ok = window.confirm(`Delete this estimate?\n\nThis permanently removes it from the admin portal. Customers who were sent this link will no longer be able to view or accept it.`);
+                                if (!ok) return;
+                                try {
+                                  const r = await adminFetch(`/admin/estimates/${e.id}`, { method: 'DELETE' });
+                                  if (!r.ok) {
+                                    const err = await r.json().catch(() => ({}));
+                                    throw new Error(err.error || `HTTP ${r.status}`);
+                                  }
+                                  load();
+                                } catch (err) {
+                                  window.alert('Delete failed: ' + err.message);
+                                }
+                              }}
+                              className="inline-flex items-center justify-center h-7 w-7 rounded-sm text-alert-fg hover:bg-alert-bg u-focus-ring"
                             >
-                              View →
-                            </a>
-                          )}
+                              <Trash2 size={14} strokeWidth={1.75} />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
