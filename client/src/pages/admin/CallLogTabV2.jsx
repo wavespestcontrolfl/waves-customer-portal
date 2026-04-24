@@ -121,7 +121,11 @@ export default function CallLogTabV2() {
     if (!callSid || processingCallSid) return;
     setProcessingCallSid(callSid);
     setProcessResult(null);
-    const force = alreadyProcessed;
+    // Always force on user-initiated taps — the concurrent-run guard exists
+    // to dedup webhook double-fires, not to block a manual retry. Without
+    // force, a row stuck at processing_status='processing' (e.g. an earlier
+    // run that crashed before reaching a terminal state) is unrecoverable.
+    const force = true;
     try {
       const res = await adminFetch(
         `/admin/call-recordings/process/${callSid}${force ? '?force=true' : ''}`,

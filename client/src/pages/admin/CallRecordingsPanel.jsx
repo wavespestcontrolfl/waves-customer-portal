@@ -215,8 +215,10 @@ export default function CallRecordingsPanel() {
                   <button
                     onClick={e => {
                       e.stopPropagation();
-                      const force = r.processing_status === 'processed';
-                      processOne(r.twilio_call_sid, { force });
+                      // User-initiated tap → always force, so a row wedged at
+                      // 'processing' from a crashed run isn't blocked by the
+                      // concurrent-run guard.
+                      processOne(r.twilio_call_sid, { force: true });
                     }}
                     style={{ ...sBtn(D.teal, D.white), padding: '2px 8px', fontSize: 10 }}
                   >
