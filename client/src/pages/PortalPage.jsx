@@ -7096,11 +7096,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
       }}>
         <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>New Request</div>
-        <button onClick={onClose} style={{
-          background: B.offWhite, border: 'none', cursor: 'pointer', fontSize: 18,
+        <button onClick={onClose} aria-label="Close" style={{
+          background: B.offWhite, border: 'none', cursor: 'pointer',
           color: B.grayMid, width: 32, height: 32, borderRadius: '50%',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}></button>
+        }}><Icon name="close" size={16} strokeWidth={2} /></button>
       </div>
 
       {submitted ? (
@@ -7415,6 +7415,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
     <button
       key={t.id}
       onClick={onClick}
+      aria-current={isActive ? 'page' : undefined}
       style={{
         flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
         justifyContent: 'center', gap: 2, padding: '6px 2px', border: 'none',
@@ -7428,7 +7429,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
     </button>
   );
   return (
-    <div style={{
+    <nav aria-label="Main" style={{
       position: 'fixed', bottom: 60, left: 0, right: 0, zIndex: 98,
       background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(12px)',
       borderTop: `1px solid ${B.grayLight}`,
@@ -7437,15 +7438,21 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
     }}>
       {PRIMARY_TABS.map(t => button(t, () => onSelect(t.id), activeTab === t.id))}
       {button(
-        { id: 'more', label: 'More', icon: '⋯' },
+        { id: 'more', label: 'More', icon: 'more' },
         onOpenMore,
         moreActive || MORE_TABS.some(m => m.id === activeTab),
       )}
-    </div>
+    </nav>
   );
 }
 
 function MoreSheet({ activeTab, onSelect, onClose }) {
+  // Close on Esc for keyboard users.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -7455,7 +7462,7 @@ function MoreSheet({ activeTab, onSelect, onClose }) {
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
-      <div style={{
+      <div role="dialog" aria-modal="true" aria-label="More navigation" style={{
         background: B.white, borderRadius: '20px 20px 0 0', padding: '18px 20px 28px',
         boxShadow: '0 -4px 30px rgba(0,0,0,0.15)',
         animation: 'moreSheetUp 0.25s ease',
@@ -7596,9 +7603,9 @@ function ChatWidget({ customer, onClose }) {
               <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>Usually replies instantly</div>
             </div>
           </div>
-          <button onClick={onClose} style={{
+          <button onClick={onClose} aria-label="Close chat" style={{
             background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
-            width: 32, height: 32, borderRadius: 16, cursor: 'pointer', fontSize: 16,
+            width: 32, height: 32, borderRadius: 16, cursor: 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}><Icon name="close" size={16} strokeWidth={1.75} /></button>
         </div>
@@ -7745,12 +7752,18 @@ export default function PortalPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <NotificationBell type="customer" />
           <div ref={menuRef} style={{ position: 'relative' }}>
-          <div onClick={() => setShowMenu(!showMenu)} style={{
-            width: 36, height: 36, borderRadius: '50%',
-            background: B.yellow,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: B.navy, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: FONTS.heading,
-          }}>{initials}</div>
+          <button
+            onClick={() => setShowMenu(!showMenu)}
+            aria-label="Account menu"
+            aria-haspopup="menu"
+            aria-expanded={showMenu}
+            style={{
+              width: 36, height: 36, borderRadius: '50%',
+              background: B.yellow, border: 'none', padding: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: B.navy, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: FONTS.heading,
+            }}
+          >{initials}</button>
           {showMenu && (
             <div style={{
               position: 'absolute', right: 0, top: 44, minWidth: 200,
@@ -7882,7 +7895,7 @@ export default function PortalPage() {
           boxShadow: '0 4px 15px rgba(0,0,0,0.2)',
           whiteSpace: 'nowrap',
         }}>New Request</div>
-        <button onClick={() => setShowReportIssue(true)} style={{
+        <button onClick={() => setShowReportIssue(true)} aria-label="New request" style={{
           width: 56, height: 56, borderRadius: '50%',
           background: B.red, color: '#fff', border: 'none', cursor: 'pointer',
           boxShadow: `0 4px 20px ${B.red}60`,

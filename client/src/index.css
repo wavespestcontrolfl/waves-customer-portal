@@ -16,3 +16,14 @@
 /* Hide scrollbar on HorizontalScroll component */
 .horizontal-scroll::-webkit-scrollbar { display: none; }
 .horizontal-scroll > * { flex-shrink: 0; white-space: nowrap; }
+
+/* Global focus-visible ring for interactive elements. The .btn system in
+   buttons.css already has its own focus style; this catches every inline
+   <button> and <a> (customer portal is full of them) so keyboard users
+   see where they are. Intentionally light — a branded 2px ring with a
+   2px offset so it stands clear without reflowing layout. */
+:where(button, a, [role="button"]):focus-visible {
+  outline: 2px solid #009CDE;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
