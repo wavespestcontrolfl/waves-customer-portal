@@ -3,12 +3,16 @@
 //
 // Tap to Pay launches the existing Stripe Terminal → WavesPay iOS deep
 // link flow via launchTapToPay(invoiceId). Cash hands back to the parent
-// so it can open MarkPrepaidModal (existing prepaid flow). The remaining
-// methods are stubbed — Square wants them visually present in this slot
-// but actual implementation lands in a follow-up.
+// so it can open MarkPrepaidModal (existing prepaid flow). Manual CC +
+// Cash App open the /pay/:token public pay page in a new tab. Invoice
+// fires the existing /admin/invoices/:id/send endpoint.
+//
+// Card on File lights up when the customer has saved payment methods
+// (consent captured during onboarding / portal / pay page). Tapping a
+// saved card charges it off-session via Stripe.
 
-import { X, ChevronRight } from 'lucide-react';
-import { useState } from 'react';
+import { X, ChevronRight, CreditCard } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
 
 export default function MobilePaymentSheet({
@@ -19,14 +23,33 @@ export default function MobilePaymentSheet({
   onClose,
   onSelectCash,
   onInvoiceSent,
+  onChargeSuccess,
 }) {
   const [charging, setCharging] = useState(false);
   const [sendingInvoice, setSendingInvoice] = useState(false);
+  const [cards, setCards] = useState([]);
+  const [cardsLoading, setCardsLoading] = useState(false);
+  const [chargingCardId, setChargingCardId] = useState(null);
   const [error, setError] = useState(null);
 
-  if (!service || !invoiceId) return null;
-
   const API_BASE = import.meta.env.VITE_API_URL || '/api';
+  const customerId = service?.customerId || service?.customer_id;
+
+  useEffect(() => {
+    if (!customerId) return;
+    let cancelled = false;
+    setCardsLoading(true);
+    fetch(`${API_BASE}/admin/customers/${customerId}/cards`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => { if (!cancelled) setCards(Array.isArray(d.cards) ? d.cards : []); })
+      .catch(() => { if (!cancelled) setCards([]); })
+      .finally(() => { if (!cancelled) setCardsLoading(false); });
+    return () => { cancelled = true; };
+  }, [customerId, API_BASE]);
+
+  if (!service || !invoiceId) return null;
 
   async function handleSendInvoice() {
     if (sendingInvoice) return;
@@ -83,6 +106,37 @@ export default function MobilePaymentSheet({
     onSelectCash?.(service);
   }
 
+  async function handleChargeCard(card) {
+    if (chargingCardId) return;
+    setChargingCardId(card.id);
+    setError(null);
+    try {
+      const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/charge-card`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+        },
+        body: JSON.stringify({ paymentMethodId: card.id }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'Charge failed');
+      onChargeSuccess?.(d);
+      onClose?.();
+    } catch (e) {
+      setError(e.message || 'Charge failed');
+      setChargingCardId(null);
+    }
+  }
+
+  function formatCardLabel(c) {
+    if (c.method_type === 'ach') {
+      return `${c.bank_name || 'Bank'} •${c.last_four}`;
+    }
+    const brand = c.brand ? c.brand.toUpperCase() : 'Card';
+    return `${brand} •${c.last_four}`;
+  }
+
   // Gift Card removed per operator request — not a tender Waves accepts.
   // Manual CC + Cash App open the /pay/:token public pay page in a new tab
   // which already handles Stripe Elements for every supported method.
@@ -91,7 +145,6 @@ export default function MobilePaymentSheet({
   const methods = [
     { key: 'cash', label: 'Cash', onClick: handleCash },
     { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => openPayPage() },
-    { key: 'card_on_file', label: 'Card on File', subtitle: 'Unable to load cards', disabled: true },
     {
       key: 'invoice',
       label: 'Invoice',
@@ -174,11 +227,69 @@ export default function MobilePaymentSheet({
           </div>
         )}
 
-        {/* Other methods — explicit white on every row so no ancestor
-            default (grid gray, UA stylesheet, browser default) leaks
-            through. Pressed state switches to very light gray for a
-            visual tap confirmation. */}
+        {/* Card on File — one row per saved payment method. Empty state
+            renders a disabled "No cards on file" row so the slot is
+            still visible to the tech. */}
         <div className="mt-6 bg-white">
+          {cardsLoading && (
+            <div
+              className="w-full flex items-center justify-between py-4 border-b border-hairline border-zinc-200 text-left bg-white"
+            >
+              <span className="font-medium text-ink-tertiary" style={{ fontSize: 15 }}>
+                Card on File
+              </span>
+              <span className="text-ink-tertiary" style={{ fontSize: 14 }}>Loading…</span>
+            </div>
+          )}
+          {!cardsLoading && cards.length === 0 && (
+            <div
+              className="w-full flex items-center justify-between py-4 border-b border-hairline border-zinc-200 text-left bg-white opacity-60"
+            >
+              <span className="font-medium text-ink-tertiary" style={{ fontSize: 15 }}>
+                Card on File
+              </span>
+              <span className="text-ink-tertiary" style={{ fontSize: 14 }}>No cards on file</span>
+            </div>
+          )}
+          {!cardsLoading && cards.map((c) => {
+            const isCharging = chargingCardId === c.id;
+            const anotherCharging = chargingCardId && chargingCardId !== c.id;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => handleChargeCard(c)}
+                disabled={isCharging || anotherCharging}
+                className={
+                  'w-full flex items-center justify-between py-4 border-b border-hairline border-zinc-200 text-left u-focus-ring bg-white ' +
+                  ((isCharging || anotherCharging) ? 'opacity-60 cursor-not-allowed' : 'active:bg-zinc-50')
+                }
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <CreditCard size={18} strokeWidth={1.75} className="text-zinc-600 shrink-0" />
+                  <span className="font-medium text-zinc-900 truncate" style={{ fontSize: 15 }}>
+                    {formatCardLabel(c)}
+                  </span>
+                  {c.is_default && (
+                    <span
+                      className="text-ink-tertiary"
+                      style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.3 }}
+                    >
+                      Default
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-ink-tertiary" style={{ fontSize: 14 }}>
+                    {isCharging ? 'Charging…' : `Charge $${surcharge.toFixed(2)}`}
+                  </span>
+                  <ChevronRight size={16} className="text-ink-tertiary" />
+                </div>
+              </button>
+            );
+          })}
+
+          {/* Other methods */}
           {methods.map((m) => (
             <button
               key={m.key}
