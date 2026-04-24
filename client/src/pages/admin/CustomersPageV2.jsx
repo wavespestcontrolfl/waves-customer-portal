@@ -10,7 +10,7 @@
 // from CustomersPage.jsx (PR #4b/#4c/#4d will reskin those in later passes).
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Filter, Phone, MessageSquare, Plus, FilePlus2 } from 'lucide-react';
+import { Filter, Phone, MessageSquare, Plus } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
 import MobileNewCustomerSheet from '../../components/admin/MobileNewCustomerSheet';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -365,10 +365,13 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
 }
 
 // --- View toggle (flat pill row, no emoji) ---
-// Directory was removed — Map is the new default. Map no longer uses
-// the desktopOnly gate so mobile users land somewhere useful.
+// Mobile lands on Directory with no visible toggle (it's the only
+// mobile view). Desktop gets the full pill strip of Map / Pipeline /
+// Health / AI Advisor. Directory carries mobileOnly so it doesn't
+// appear in the desktop strip even if state says view === 'directory'.
 const VIEWS = [
-  { key: 'map', label: 'Map' },
+  { key: 'directory', label: 'Directory', mobileOnly: true },
+  { key: 'map', label: 'Map', desktopOnly: true },
   { key: 'pipeline', label: 'Pipeline', desktopOnly: true },
   { key: 'health', label: 'Health', desktopOnly: true },
   { key: 'intelligence', label: 'AI Advisor', desktopOnly: true },
@@ -376,7 +379,9 @@ const VIEWS = [
 
 function ViewToggleV2({ view, onChange }) {
   return (
-    <div className="flex w-full sm:inline-flex sm:w-auto bg-white border-hairline border-zinc-200 rounded-sm overflow-hidden">
+    // Hidden on mobile entirely — Directory is the only mobile view, no
+    // toggle needed. Desktop renders the pill strip as before.
+    <div className="hidden sm:inline-flex sm:w-auto bg-white border-hairline border-zinc-200 rounded-sm overflow-hidden">
       {VIEWS.map((v) => {
         const active = v.key === view;
         return (
@@ -385,8 +390,9 @@ function ViewToggleV2({ view, onChange }) {
             type="button"
             onClick={() => onChange(v.key)}
             className={cn(
-              'flex-1 sm:flex-none u-label px-2 sm:px-3 h-11 sm:h-8 border-r-hairline border-zinc-200 last:border-r-0 transition-colors u-focus-ring',
+              'sm:flex-none u-label px-2 sm:px-3 h-11 sm:h-8 border-r-hairline border-zinc-200 last:border-r-0 transition-colors u-focus-ring',
               v.desktopOnly && 'hidden md:inline-flex items-center justify-center',
+              v.mobileOnly && 'hidden',
               active
                 ? 'bg-zinc-900 text-white'
                 : 'bg-white text-ink-secondary hover:bg-zinc-50'
@@ -439,18 +445,6 @@ function detectTier(c) {
   return c.tier || 'Bronze';
 }
 
-// Build the URL that opens the Estimates "Create Estimate" flow with the
-// customer's address + contact info prefilled into EstimateToolViewV2.
-function buildEstimatePrefillUrl(c) {
-  const params = new URLSearchParams();
-  const fullName = `${c.firstName || ''} ${c.lastName || ''}`.trim();
-  if (c.address) params.set('address', c.address);
-  if (fullName) params.set('customerName', fullName);
-  if (c.phone) params.set('customerPhone', c.phone);
-  if (c.email) params.set('customerEmail', c.email);
-  return `/admin/estimates?${params.toString()}`;
-}
-
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
@@ -459,11 +453,14 @@ export default function CustomersPageV2() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchParams] = useSearchParams();
-  // Default changed from 'directory' (removed) to 'map'. Legacy URLs still
-  // carrying ?view=directory silently land on map instead.
+  // Default is Directory on mobile (only mobile view) and Map on desktop.
+  // Explicit ?view=… URLs win — so deep-links to a specific view still work.
   const [view, setView] = useState(() => {
     const raw = searchParams.get('view');
-    return raw && raw !== 'directory' ? raw : 'map';
+    if (raw) return raw;
+    return typeof window !== 'undefined' && window.matchMedia?.('(max-width: 767px)').matches
+      ? 'directory'
+      : 'map';
   });
   const [search, setSearch] = useState('');
   const [filterStage, setFilterStage] = useState('all');
@@ -703,7 +700,6 @@ export default function CustomersPageV2() {
       <div className="sm:hidden mb-3">
         {view === 'directory' && (
           <>
-            <h2 className="text-12 font-medium text-ink-primary mb-1.5">Search customers</h2>
             <input
               type="text"
               value={search}
@@ -940,15 +936,6 @@ export default function CustomersPageV2() {
                             <MessageSquare size={16} strokeWidth={1.75} />
                           </a>
                         )}
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); navigate(buildEstimatePrefillUrl(c)); }}
-                          aria-label="Create estimate"
-                          title="Create estimate from this customer"
-                          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                        >
-                          <FilePlus2 size={16} strokeWidth={1.75} />
-                        </button>
                       </div>
                     );
                   })() : (
@@ -1001,15 +988,6 @@ export default function CustomersPageV2() {
                             <MessageSquare size={12} strokeWidth={1.75} />
                           </a>
                         )}
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); navigate(buildEstimatePrefillUrl(c)); }}
-                          aria-label="Create estimate"
-                          title="Create estimate from this customer"
-                          className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
-                        >
-                          <FilePlus2 size={12} strokeWidth={1.75} />
-                        </button>
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); startEdit(c); }}
