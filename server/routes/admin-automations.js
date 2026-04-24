@@ -2,8 +2,9 @@
  * Admin automation routes — CRUD on templates + steps, enrollment log,
  * test-send, and AI drafting. Mounted at /api/admin/automations.
  *
- * The legacy /admin/email-automations/* routes keep running on the old
- * Beehiiv-backed path; the two coexist during cutover.
+ * Authoritative surface for the Automations tab. Legacy
+ * /admin/email-automations and the Beehiiv service were removed
+ * in the teardown (migration 20260424000008).
  */
 
 const express = require('express');

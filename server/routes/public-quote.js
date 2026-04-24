@@ -216,21 +216,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     if (newsletterOptIn && emailLc) {
       try {
-        const beehiiv = require('../services/beehiiv');
-        if (beehiiv.configured) {
-          const sub = await beehiiv.upsertSubscriber(emailLc, {
-            firstName, lastName,
-            utmSource: attr?.landing_url || attr?.utm?.source || 'waves_portal',
-            utmMedium: 'quote_wizard',
-          });
-          if (sub?.id) {
-            await beehiiv.addTags(sub.id, ['Lead', 'quote wizard']);
-            const autoId = process.env.BEEHIIV_AUTO_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c';
-            await beehiiv.enrollInAutomation(autoId, { email: emailLc, subscriptionId: sub.id });
-            logger.info(`[public-quote] Beehiiv: subscribed ${emailLc}, enrolled in lead automation`);
-          }
-        }
-      } catch (e) { logger.error(`[public-quote] Beehiiv enroll failed: ${e.message}`); }
+        const AutomationRunner = require('../services/automation-runner');
+        const r = await AutomationRunner.enrollCustomer({
+          templateKey: 'new_lead',
+          customer: { email: emailLc, first_name: firstName, last_name: lastName, id: null },
+        });
+        logger.info(`[public-quote] enrolled ${emailLc} in new_lead: ${JSON.stringify(r)}`);
+      } catch (e) { logger.error(`[public-quote] new_lead enroll failed: ${e.message}`); }
 
       // SendGrid side: dual-write into newsletter_subscribers. Mirrors
       // /api/public/newsletter/subscribe — resubscribe if previously unsubbed,

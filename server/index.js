@@ -261,7 +261,6 @@ app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthen
 });
 app.use('/api/admin/drafts', require('./routes/admin-drafts'));
 app.use('/api/admin/gbp', require('./routes/admin-gbp'));
-app.use('/api/admin/email-automations', require('./routes/admin-email-automations'));
 app.use('/api/admin/automations', require('./routes/admin-automations'));
 app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 app.use('/api/admin/call-recordings', require('./routes/admin-call-recordings'));
