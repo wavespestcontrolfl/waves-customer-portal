@@ -75,6 +75,12 @@ async function buildFrontmatter(post) {
       : (post.service_areas_tag ? safeJson(post.service_areas_tag, []) : undefined),
     related_services: Array.isArray(post.related_services) ? post.related_services
       : (post.related_services ? safeJson(post.related_services, []) : undefined),
+    // Per-post spoke targeting. Astro content collection filter on each
+    // spoke skips posts whose target_sites doesn't include its SITE_KEY.
+    // undefined / empty array / ['all'] → render on every site
+    // (backward-compat with posts authored before this field existed).
+    target_sites: Array.isArray(post.target_sites) ? post.target_sites
+      : (post.target_sites ? safeJson(post.target_sites, []) : undefined),
     author: author ? {
       name: author.name,
       role: author.role,

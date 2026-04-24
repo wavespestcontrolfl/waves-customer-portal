@@ -559,6 +559,10 @@ Landscape orientation, 1200x630px aspect ratio.`;
       content,
       word_count: wordCount,
       source: 'ai_generated',
+      // Default new posts to hub-only so a fresh AI-generated draft
+      // doesn't surprise-publish to all 15 domains on the next merge.
+      // Author picks additional spokes intentionally in the editor.
+      target_sites: JSON.stringify(['wavespestcontrol-astro']),
     };
     if (featuredImageUrl) insertData.featured_image_url = featuredImageUrl;
 
@@ -566,8 +570,11 @@ Landscape orientation, 1200x630px aspect ratio.`;
     try {
       [post] = await db('blog_posts').insert(insertData).returning('*');
     } catch (insErr) {
-      // featured_image_url column may not exist
+      // featured_image_url or target_sites columns may not exist on
+      // older DBs that haven't run the migrations yet. Drop the
+      // optional columns and retry.
       delete insertData.featured_image_url;
+      delete insertData.target_sites;
       [post] = await db('blog_posts').insert(insertData).returning('*');
     }
 

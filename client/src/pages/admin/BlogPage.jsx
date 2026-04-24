@@ -1,4 +1,5 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
+import { SPOKE_SITES } from '../../lib/spokeSites';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
@@ -167,12 +168,20 @@ function PostEditor({ post, onBack, onUpdate }) {
   };
   const serviceAreaTags = toArray(editing.service_areas_tag);
   const relatedServices = toArray(editing.related_services);
+  const targetSites = toArray(editing.target_sites);
 
   const toggleServiceArea = (city) => {
     const next = serviceAreaTags.includes(city)
       ? serviceAreaTags.filter(c => c !== city)
       : [...serviceAreaTags, city];
     setEditing(prev => ({ ...prev, service_areas_tag: next }));
+  };
+
+  const toggleTargetSite = (key) => {
+    const next = targetSites.includes(key)
+      ? targetSites.filter((k) => k !== key)
+      : [...targetSites, key];
+    setEditing(prev => ({ ...prev, target_sites: next }));
   };
 
   const handleGenerate = async () => {
@@ -206,6 +215,7 @@ function PostEditor({ post, onBack, onUpdate }) {
       post_type: editing.post_type || null,
       service_areas_tag: serviceAreaTags,
       related_services: relatedServices,
+      target_sites: targetSites,
       hero_image_alt: editing.hero_image_alt || null,
     });
     if (onUpdate) onUpdate(updated.post);
@@ -444,6 +454,52 @@ function PostEditor({ post, onBack, onUpdate }) {
               );
             })}
           </div>
+        </div>
+
+        {/* Publish targets — controls which spoke sites will render this
+            post. Empty = render everywhere (backward-compat with older
+            posts). Typically pick one domain to avoid duplicate-content
+            SEO penalty across the fleet. */}
+        <div style={{ marginTop: 14 }}>
+          <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 6 }}>
+            Publish to sites
+            {targetSites.length === 0 && (
+              <span style={{ marginLeft: 8, color: D.amber, fontWeight: 600 }}>
+                — no sites selected → will publish to ALL 15 domains (duplicate-content risk)
+              </span>
+            )}
+          </label>
+          {['Hub', 'Lawn', 'Pest', 'Exterminator'].map((group) => (
+            <div key={group} style={{ marginBottom: 6 }}>
+              <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
+                {group}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {SPOKE_SITES.filter((s) => s.group === group).map((s) => {
+                  const active = targetSites.includes(s.key);
+                  return (
+                    <button
+                      key={s.key}
+                      type="button"
+                      onClick={() => toggleTargetSite(s.key)}
+                      style={{
+                        padding: '4px 10px',
+                        borderRadius: 999,
+                        fontSize: 11,
+                        cursor: 'pointer',
+                        border: `1px solid ${active ? D.green : D.border}`,
+                        background: active ? D.green : 'transparent',
+                        color: active ? D.white : D.muted,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {s.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       </Card>
 
