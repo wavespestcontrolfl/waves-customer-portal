@@ -21,88 +21,6 @@ function fmtDate(d, opts) {
 }
 
 // =========================================================================
-// TAB BAR — scrollable for 6 tabs on mobile
-// =========================================================================
-function TabBar({ tabs, active, onSelect }) {
-  const scrollRef = useRef(null);
-  const [hovered, setHovered] = useState(null);
-  const rafRef = useRef(null);
-  const velocityRef = useRef(0);
-
-  const handleMouseMove = useCallback((e) => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const pct = x / rect.width;
-    const edge = 0.12;
-
-    if (pct < edge) {
-      velocityRef.current = -(1 - pct / edge) * 6;
-    } else if (pct > 1 - edge) {
-      velocityRef.current = ((pct - (1 - edge)) / edge) * 6;
-    } else {
-      velocityRef.current = 0;
-    }
-  }, []);
-
-  useEffect(() => {
-    const tick = () => {
-      const el = scrollRef.current;
-      if (el && velocityRef.current !== 0) {
-        el.scrollLeft += velocityRef.current;
-      }
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, []);
-
-  return (
-    <>
-      <style>{`.tabs-scroll::-webkit-scrollbar{display:none}`}</style>
-      <div
-        ref={scrollRef}
-        className="tabs-scroll"
-        onMouseMove={handleMouseMove}
-        onMouseLeave={() => { velocityRef.current = 0; setHovered(null); }}
-        style={{
-          display: 'flex', gap: 4, background: B.white, borderRadius: 14,
-          padding: 5, maxWidth: 700, margin: '0 auto', overflowX: 'auto',
-          WebkitOverflowScrolling: 'touch',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-          scrollbarWidth: 'none', scrollBehavior: 'smooth',
-        }}
-      >
-        {tabs.map(t => {
-          const isActive = active === t.id;
-          const isHovered = hovered === t.id;
-          return (
-            <button
-              key={t.id}
-              onClick={() => onSelect(t.id)}
-              onMouseEnter={() => setHovered(t.id)}
-              onMouseLeave={() => setHovered(null)}
-              style={{
-                flex: '0 0 auto', padding: '11px 16px', borderRadius: 11, border: 'none',
-                cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap',
-                fontWeight: isActive ? 700 : 600,
-                fontFamily: FONTS.heading,
-                background: isActive ? B.wavesBlue : isHovered ? `${B.wavesBlue}18` : 'transparent',
-                color: isActive ? B.white : isHovered ? B.wavesBlue : B.grayMid,
-                boxShadow: isActive ? `0 2px 8px ${B.wavesBlue}30` : 'none',
-                transition: 'all 0.2s ease',
-                transform: isHovered && !isActive ? 'scale(1.04)' : 'scale(1)',
-              }}
-            >{t.icon} {t.label}</button>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
-// =========================================================================
 // SECTION HEADING HELPER
 // =========================================================================
 function SectionHeading({ children }) {
@@ -7472,16 +7390,100 @@ function MyRequestsCard() {
 // =========================================================================
 // MAIN PORTAL
 // =========================================================================
-const TABS = [
+// Bottom nav pins the five most-used destinations; the rest live behind a
+// "More" sheet. Short labels picked specifically for the 5-across layout.
+const PRIMARY_TABS = [
   { id: 'dashboard', label: 'Home', icon: '🏠' },
-  { id: 'plan', label: 'My Plan', icon: '🛡️' },
+  { id: 'plan', label: 'Plan', icon: '🛡️' },
   { id: 'visits', label: 'Visits', icon: '📅' },
   { id: 'billing', label: 'Billing', icon: '💳' },
-  { id: 'refer', label: 'Refer & Earn', icon: '🎁' },
+  { id: 'refer', label: 'Refer', icon: '🎁' },
+];
+const MORE_TABS = [
   { id: 'documents', label: 'Documents', icon: '📄' },
   { id: 'property', label: 'My Property', icon: '🏡' },
   { id: 'learn', label: 'Learn', icon: '💡' },
 ];
+
+// The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
+// whether the customer is on Upcoming or Completed.
+function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
+  const button = (t, onClick, isActive) => (
+    <button
+      key={t.id}
+      onClick={onClick}
+      style={{
+        flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+        justifyContent: 'center', gap: 2, padding: '6px 2px', border: 'none',
+        background: 'transparent', cursor: 'pointer', minHeight: 56,
+        color: isActive ? B.wavesBlue : B.grayMid,
+        fontFamily: FONTS.heading, transition: 'color 0.15s ease',
+      }}
+    >
+      <span style={{ fontSize: 20, lineHeight: 1, filter: isActive ? 'none' : 'grayscale(0.3)' }}>{t.icon}</span>
+      <span style={{ fontSize: 10, fontWeight: isActive ? 700 : 600, letterSpacing: 0.2 }}>{t.label}</span>
+    </button>
+  );
+  return (
+    <div style={{
+      position: 'fixed', bottom: 60, left: 0, right: 0, zIndex: 98,
+      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(12px)',
+      borderTop: `1px solid ${B.grayLight}`,
+      boxShadow: '0 -2px 10px rgba(0,0,0,0.04)',
+      display: 'flex', maxWidth: 700, margin: '0 auto',
+    }}>
+      {PRIMARY_TABS.map(t => button(t, () => onSelect(t.id), activeTab === t.id))}
+      {button(
+        { id: 'more', label: 'More', icon: '⋯' },
+        onOpenMore,
+        moreActive || MORE_TABS.some(m => m.id === activeTab),
+      )}
+    </div>
+  );
+}
+
+function MoreSheet({ activeTab, onSelect, onClose }) {
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 150,
+        background: 'rgba(0,0,0,0.4)',
+        display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+      }}
+    >
+      <div style={{
+        background: B.white, borderRadius: '20px 20px 0 0', padding: '18px 20px 28px',
+        boxShadow: '0 -4px 30px rgba(0,0,0,0.15)',
+        animation: 'moreSheetUp 0.25s ease',
+      }}>
+        <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
+        <div style={{
+          width: 36, height: 4, borderRadius: 2, background: B.grayLight,
+          margin: '0 auto 14px',
+        }} />
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>More</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {MORE_TABS.map(t => {
+            const isActive = activeTab === t.id;
+            return (
+              <button key={t.id} onClick={() => onSelect(t.id)} style={{
+                display: 'flex', alignItems: 'center', gap: 14, padding: '12px 14px',
+                border: 'none', background: isActive ? `${B.wavesBlue}10` : 'transparent',
+                borderRadius: 12, cursor: 'pointer', textAlign: 'left',
+                color: isActive ? B.wavesBlue : B.navy,
+                fontFamily: FONTS.body, fontSize: 14, fontWeight: isActive ? 700 : 500,
+              }}>
+                <span style={{ fontSize: 20 }}>{t.icon}</span>
+                <span>{t.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
@@ -7696,6 +7698,7 @@ export default function PortalPage() {
     setActiveTab(id);
   };
   const [showChat, setShowChat] = useState(false);
+  const [showMoreSheet, setShowMoreSheet] = useState(false);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const menuRef = useRef(null);
   const portalBadgeData = useBadges();
@@ -7791,13 +7794,9 @@ export default function PortalPage() {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div style={{ padding: '14px 16px 0' }}>
-        <TabBar tabs={TABS} active={activeTab} onSelect={switchTab} />
-      </div>
-
-      {/* Content */}
-      <div style={{ padding: '16px 16px 100px', maxWidth: 700, margin: '0 auto' }}>
+      {/* Content — bottom padding clears the CTA bar (60px) + bottom nav
+          (60px) stack so fixed UI doesn't hide the last section. */}
+      <div style={{ padding: '16px 16px 150px', maxWidth: 700, margin: '0 auto' }}>
         {activeTab === 'dashboard' && <DashboardTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab customer={customer} />}
         {activeTab === 'visits' && <VisitsTab customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} />}
@@ -7812,6 +7811,22 @@ export default function PortalPage() {
       <div style={{ maxWidth: 700, margin: '0 auto', padding: '0 20px 80px' }}>
         <BrandFooter />
       </div>
+
+      {/* Bottom nav — primary destinations pinned as icons, rest behind
+          "More". Sits above the CTA bar (which stays anchored at bottom:0). */}
+      <BottomNav
+        activeTab={activeTab}
+        onSelect={switchTab}
+        onOpenMore={() => setShowMoreSheet(true)}
+        moreActive={showMoreSheet}
+      />
+      {showMoreSheet && (
+        <MoreSheet
+          activeTab={activeTab}
+          onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
+          onClose={() => setShowMoreSheet(false)}
+        />
+      )}
 
       {/* Bottom CTA */}
       <div style={{
@@ -7855,8 +7870,9 @@ export default function PortalPage() {
       {/* AI Chat Widget */}
       {showChat && <ChatWidget customer={customer} onClose={() => setShowChat(false)} />}
 
-      {/* Floating Action Button — Report Issue */}
-      <div style={{ position: 'fixed', bottom: 76, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
+      {/* Floating Action Button — New Request. Sits above the bottom nav +
+          CTA bar stack so it doesn't collide with either. */}
+      <div style={{ position: 'fixed', bottom: 140, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
         <div style={{
           background: B.navy, color: '#fff', padding: '8px 14px', borderRadius: 10,
           fontSize: 12, fontWeight: 700, fontFamily: FONTS.heading,
