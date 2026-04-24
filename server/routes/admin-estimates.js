@@ -265,6 +265,8 @@ router.get('/', async (req, res, next) => {
         declineReason: e.decline_reason,
         token: e.token,
         archivedAt: e.archived_at,
+        showOneTimeOption: e.show_one_time_option,
+        billByInvoice: e.bill_by_invoice,
       })),
     });
   } catch (err) { next(err); }
@@ -345,6 +347,8 @@ router.patch('/:id', async (req, res, next) => {
     const updates = {};
     if (req.body.isPriority !== undefined) updates.is_priority = req.body.isPriority;
     if (req.body.declineReason !== undefined) updates.decline_reason = req.body.declineReason;
+    if (req.body.showOneTimeOption !== undefined) updates.show_one_time_option = !!req.body.showOneTimeOption;
+    if (req.body.billByInvoice !== undefined) updates.bill_by_invoice = !!req.body.billByInvoice;
     if (req.body.status !== undefined) {
       updates.status = req.body.status;
       if (req.body.status === 'declined') updates.declined_at = db.fn.now();

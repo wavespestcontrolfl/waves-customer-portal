@@ -76,6 +76,7 @@ const EstimateConverter = {
    */
   async convertEstimate(estimateId, opts = {}) {
     const billingTerm = opts.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
+    const skipSetupInvoice = opts.skipSetupInvoice === true;
     const estimate = await db('estimates').where({ id: estimateId }).first();
     if (!estimate) throw new Error(`Estimate ${estimateId} not found`);
     if (estimate.status !== 'accepted') throw new Error(`Estimate ${estimateId} is not accepted (status: ${estimate.status})`);
@@ -175,7 +176,7 @@ const EstimateConverter = {
     let draftInvoiceId = null;
     let draftInvoiceAmount = null;
     try {
-      if (monthlyRate > 0) {
+      if (monthlyRate > 0 && !skipSetupInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
           const annualAmount = Math.round(monthlyRate * 12 * 100) / 100;

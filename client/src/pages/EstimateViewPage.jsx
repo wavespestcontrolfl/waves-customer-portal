@@ -225,7 +225,24 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
   );
 }
 
-function SuccessCard({ onboardingToken }) {
+function SuccessCard({ onboardingToken, invoiceMode }) {
+  if (invoiceMode) {
+    return (
+      <div style={{
+        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
+        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          Thanks — we'll send your invoice shortly.
+        </div>
+        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+          Check your phone and email for the pay link. Once it's paid
+          we'll get you on the schedule.
+        </div>
+      </div>
+    );
+  }
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
@@ -296,6 +313,7 @@ export default function EstimateViewPage() {
   const [ctaPhase, setCtaPhase] = useState('configure');
   const [reservation, setReservation] = useState(null);
   const [onboardingToken, setOnboardingToken] = useState(null);
+  const [invoiceMode, setInvoiceMode] = useState(false);
   const [error, setError] = useState(null);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
 
@@ -427,6 +445,7 @@ export default function EstimateViewPage() {
       }
       const body = await r.json();
       setOnboardingToken(body.onboardingToken || null);
+      setInvoiceMode(!!body.invoiceMode);
       setCtaPhase('success');
       setReservation(null);
     } catch (err) {
@@ -473,7 +492,7 @@ export default function EstimateViewPage() {
     return (
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
-        <SuccessCard onboardingToken={onboardingToken} />
+        <SuccessCard onboardingToken={onboardingToken} invoiceMode={invoiceMode} />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
     );

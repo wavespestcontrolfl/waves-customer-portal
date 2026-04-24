@@ -415,6 +415,39 @@ function EstimatePipelineViewV2() {
     }
   }, []);
 
+  const toggleOneTimeOption = useCallback(async (e) => {
+    const newVal = !e.showOneTimeOption;
+    try {
+      await adminFetch(`/admin/estimates/${e.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ showOneTimeOption: newVal }),
+      });
+      setEstimates((prev) =>
+        prev.map((est) => (est.id === e.id ? { ...est, showOneTimeOption: newVal } : est)),
+      );
+    } catch {
+      alert('Failed to update one-time option');
+    }
+  }, []);
+
+  const toggleBillByInvoice = useCallback(async (e) => {
+    const newVal = !e.billByInvoice;
+    if (newVal && !window.confirm(
+      'Invoice mode: when the customer picks their option, an invoice (due immediately) will be auto-sent to their phone + email — no onboarding or payment method up front.\n\nContinue?',
+    )) return;
+    try {
+      await adminFetch(`/admin/estimates/${e.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ billByInvoice: newVal }),
+      });
+      setEstimates((prev) =>
+        prev.map((est) => (est.id === e.id ? { ...est, billByInvoice: newVal } : est)),
+      );
+    } catch {
+      alert('Failed to update invoice mode');
+    }
+  }, []);
+
   if (loading) {
     return (
       <div className="p-10 text-center text-13 text-ink-secondary">
@@ -758,6 +791,38 @@ function EstimatePipelineViewV2() {
                   </button>
 
                   <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1">
+                    {['draft', 'sent', 'viewed'].includes(e.status) && (
+                      <Button
+                        size="sm"
+                        variant={e.showOneTimeOption ? 'secondary' : 'ghost'}
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={() => toggleOneTimeOption(e)}
+                        title={
+                          e.showOneTimeOption
+                            ? 'One-time option is visible to the customer. Click to hide.'
+                            : 'Let the customer choose one-time instead of recurring.'
+                        }
+                      >
+                        {e.showOneTimeOption ? '1x Option: On' : '1x Option: Off'}
+                      </Button>
+                    )}
+
+                    {['draft', 'sent', 'viewed'].includes(e.status) && (
+                      <Button
+                        size="sm"
+                        variant={e.billByInvoice ? 'secondary' : 'ghost'}
+                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                        onClick={() => toggleBillByInvoice(e)}
+                        title={
+                          e.billByInvoice
+                            ? 'Invoice mode is ON — picking an option auto-sends an invoice (due immediately). Click to switch back to the normal onboarding flow.'
+                            : 'Switch to invoice mode — skip onboarding / payment up front and auto-send an invoice when the customer picks their option.'
+                        }
+                      >
+                        {e.billByInvoice ? 'Invoice: On' : 'Invoice: Off'}
+                      </Button>
+                    )}
+
                     {e.status === 'draft' && e.monthlyTotal > 0 && (
                       <Button
                         size="sm"

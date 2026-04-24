@@ -1279,6 +1279,11 @@ router.put('/:token/accept', async (req, res, next) => {
     // Gates post-commit behavior: no onboarding session, no customer tier
     // upgrade, no EstimateConverter recurring schedule creation.
     const serviceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
+    // Invoice-mode: admin opted the estimate into auto-invoicing. Skips
+    // onboarding/SetupIntent; after commit we generate an invoice (due
+    // immediately) for the first visit's amount and send SMS + email
+    // with the pay link.
+    const billByInvoice = !!estimate.bill_by_invoice;
 
     let reservationRow = null;
     if (slotId) {
@@ -1397,7 +1402,10 @@ router.put('/:token/accept', async (req, res, next) => {
       }
 
       let onboardingToken = null;
-      if (customerId && !treatAsOneTime) {
+      // Invoice-mode skips onboarding entirely — the payment method gets
+      // captured on the /pay page when they click the invoice link, not
+      // through a SetupIntent up front.
+      if (customerId && !treatAsOneTime && !billByInvoice) {
         const obToken = crypto.randomUUID();
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 7);
@@ -1440,9 +1448,12 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`Estimate accept SMS failed: ${e.message}`); }
     }
 
-    // Send acceptance SMS to customer
+    // Send acceptance SMS to customer. Invoice-mode sends its own SMS
+    // via InvoiceService.sendViaSMS later (pay link, not onboarding /
+    // booking link) — so skip this branch entirely when bill_by_invoice
+    // is set to avoid a double-text.
     let bookingUrl = null;
-    if (estimate.customer_phone) {
+    if (estimate.customer_phone && !billByInvoice) {
       try {
         if (treatAsOneTime) {
           const primarySvc = bookingServiceFor(oneTimeList[0]?.name || '');
@@ -1502,14 +1513,79 @@ router.put('/:token/accept', async (req, res, next) => {
     if (customerId && !treatAsOneTime) {
       try {
         const EstimateConverter = require('../services/estimate-converter');
-        await EstimateConverter.convertEstimate(estimate.id, { billingTerm });
-        logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm})`);
+        // In invoice-mode we generate our own "first quarter" invoice
+        // below — the converter's $99 setup / annual-prepay draft would
+        // either duplicate or conflict, so we suppress it.
+        await EstimateConverter.convertEstimate(estimate.id, {
+          billingTerm,
+          skipSetupInvoice: billByInvoice,
+        });
+        logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm}, invoiceMode=${billByInvoice})`);
       } catch (e) { logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`); }
     } else if (customerId && treatAsOneTime) {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
     }
 
-    res.json({ success: true, onboardingToken });
+    // Invoice-mode: auto-generate + send an invoice due immediately based
+    // on the customer's pick. Recurring → first quarter (monthly × 3);
+    // one-time → the one-time total. SMS + email both go out with the
+    // pay link; no onboarding, no payment-method capture up front.
+    let invoiceMode = false;
+    let invoiceId = null;
+    let invoiceAmount = null;
+    if (customerId && billByInvoice) {
+      try {
+        const InvoiceService = require('../services/invoice');
+        const { sendInvoiceEmail } = require('../services/invoice-email');
+
+        let title; let lineItems; let notes;
+        if (treatAsOneTime) {
+          const oneTimeLabel = oneTimeList[0]?.name || 'One-time pest control';
+          const amount = Math.round((parseFloat(estimate.onetime_total || 0)) * 100) / 100;
+          invoiceAmount = amount;
+          title = `${oneTimeLabel} — one-time service`;
+          lineItems = [{ description: oneTimeLabel, quantity: 1, unit_price: amount }];
+          notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode one-time).`;
+        } else {
+          const monthly = parseFloat(estimate.monthly_total || 0);
+          const quarterAmount = Math.round(monthly * 3 * 100) / 100;
+          invoiceAmount = quarterAmount;
+          const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
+          title = `${svcType} — first quarterly visit`;
+          lineItems = [{
+            description: `${svcType} (quarterly recurring — first visit)`,
+            quantity: 1,
+            unit_price: quarterAmount,
+          }];
+          notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`;
+        }
+
+        if (invoiceAmount > 0) {
+          const inv = await InvoiceService.create({
+            customerId,
+            title,
+            lineItems,
+            notes,
+            dueDate: etDateString(),  // due immediately
+          });
+          invoiceId = inv?.id || null;
+          if (invoiceId) {
+            try { await InvoiceService.sendViaSMS(invoiceId); }
+            catch (smsErr) { logger.error(`[estimate-accept] Invoice SMS failed: ${smsErr.message}`); }
+            try { await sendInvoiceEmail(invoiceId); }
+            catch (emailErr) { logger.error(`[estimate-accept] Invoice email failed: ${emailErr.message}`); }
+            invoiceMode = true;
+            logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created + sent for estimate ${estimate.id} — $${invoiceAmount}`);
+          }
+        } else {
+          logger.warn(`[estimate-accept] Invoice-mode skipped for estimate ${estimate.id} — amount is 0 (monthly=${estimate.monthly_total}, onetime=${estimate.onetime_total})`);
+        }
+      } catch (e) {
+        logger.error(`[estimate-accept] Invoice-mode failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
+
+    res.json({ success: true, onboardingToken, invoiceMode, invoiceId, invoiceAmount });
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
