@@ -338,12 +338,35 @@ export default function CallLogTabV2() {
                       </div>
                     </div>
 
-                    {/* Action row — Create Lead only shown for unknown inbound callers */}
-                    {isUnknown && c.from_phone && (
+                    {/* Action row — Create Lead for unknown inbound callers,
+                        plus Process/Reprocess for any call with a Twilio SID
+                        so the operator can re-run Gemini extraction at any
+                        time (fills first_name / last_name / email / address
+                        into the matched customer record). */}
+                    {((isUnknown && c.from_phone) || c.twilio_call_sid) && (
                       <div className="mt-2 ml-8 flex gap-2 flex-wrap items-center">
-                        <Button variant="secondary" size="sm" onClick={() => handleCreateLead(c.from_phone, c.caller_city, c.caller_state)}>
-                          Create Lead
-                        </Button>
+                        {isUnknown && c.from_phone && (
+                          <Button variant="secondary" size="sm" onClick={() => handleCreateLead(c.from_phone, c.caller_city, c.caller_state)}>
+                            Create Lead
+                          </Button>
+                        )}
+                        {c.twilio_call_sid && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={async () => {
+                              const force = c.processing_status === 'processed';
+                              try {
+                                await adminFetch(`/admin/call-recordings/process/${c.twilio_call_sid}${force ? '?force=true' : ''}`, { method: 'POST' });
+                                loadCalls(callLogSearch.trim());
+                              } catch (err) {
+                                alert('Process failed: ' + (err.message || 'unknown error'));
+                              }
+                            }}
+                          >
+                            {c.processing_status === 'processed' ? 'Reprocess' : 'Process'}
+                          </Button>
+                        )}
                       </div>
                     )}
 
