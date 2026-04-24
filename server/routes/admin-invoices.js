@@ -204,6 +204,87 @@ router.post('/batch/send', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /batch/send-receipts — resend receipts for multiple paid invoices.
+// Same shape as /batch/send but gated to status='paid' (skipped otherwise)
+// and capped at BATCH_RECEIPT_MAX to prevent accidental mass-sends from
+// the Needs-receipt filter. Each invoice goes through the same email +
+// SMS pipeline as /:id/send-receipt so behavior matches single-send.
+const BATCH_RECEIPT_MAX = 25;
+router.post('/batch/send-receipts', async (req, res, next) => {
+  try {
+    const { invoiceIds } = req.body || {};
+    if (!Array.isArray(invoiceIds) || invoiceIds.length === 0) {
+      return res.status(400).json({ error: 'invoiceIds[] required' });
+    }
+    if (invoiceIds.length > BATCH_RECEIPT_MAX) {
+      return res.status(400).json({ error: `Batch receipt send limited to ${BATCH_RECEIPT_MAX} invoices at a time` });
+    }
+
+    const { sendReceiptEmail } = require('../services/invoice-email');
+    const sent = [];
+    const failed = [];
+    const skipped = [];
+
+    for (const invoiceId of invoiceIds) {
+      const invoice = await db('invoices').where({ id: invoiceId }).first();
+      if (!invoice) {
+        failed.push({ invoiceId, error: 'not found' });
+        continue;
+      }
+      if (invoice.status !== 'paid') {
+        skipped.push({ invoiceId, reason: `status=${invoice.status}` });
+        continue;
+      }
+
+      let emailOk = false;
+      let smsOk = false;
+      const errs = [];
+
+      try {
+        const r = await sendReceiptEmail(invoiceId);
+        if (r?.ok) emailOk = true;
+        else if (r?.error) errs.push(`email: ${r.error}`);
+      } catch (err) {
+        errs.push(`email: ${err.message}`);
+      }
+
+      try {
+        await InvoiceService.sendReceipt(invoiceId);
+        smsOk = true;
+      } catch (err) {
+        errs.push(`sms: ${err.message}`);
+      }
+
+      if (emailOk || smsOk) {
+        await db('invoices').where({ id: invoiceId }).update({
+          receipt_sent_at: db.fn.now(),
+        });
+        await db('activity_log').insert({
+          customer_id: invoice.customer_id,
+          action: 'invoice_receipt_sent',
+          description: `Receipt sent for invoice ${invoice.invoice_number}`
+            + ` (${[emailOk && 'email', smsOk && 'sms'].filter(Boolean).join(' + ')})`
+            + ' — batch',
+        }).catch((err) => logger.warn(`[admin-invoices:batch-send-receipts] activity_log insert failed: ${err.message}`));
+        sent.push({ invoiceId, channels: { email: emailOk, sms: smsOk } });
+      } else {
+        logger.error(`[admin-invoices:batch-send-receipts] ${invoiceId}: ${errs.join(' | ')}`);
+        failed.push({ invoiceId, error: errs.join(' | ') || 'no channel succeeded' });
+      }
+    }
+
+    res.json({
+      total: invoiceIds.length,
+      sent_count: sent.length,
+      failed_count: failed.length,
+      skipped_count: skipped.length,
+      sent,
+      failed,
+      skipped,
+    });
+  } catch (err) { next(err); }
+});
+
 // PUT /:id — update invoice
 router.put('/:id', async (req, res, next) => {
   try {
