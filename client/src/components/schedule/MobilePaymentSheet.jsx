@@ -14,14 +14,52 @@ import { launchTapToPay } from '../../lib/tapToPay';
 export default function MobilePaymentSheet({
   service,
   invoiceId,
+  invoiceToken,
   amount,
   onClose,
   onSelectCash,
+  onInvoiceSent,
 }) {
   const [charging, setCharging] = useState(false);
+  const [sendingInvoice, setSendingInvoice] = useState(false);
   const [error, setError] = useState(null);
 
   if (!service || !invoiceId) return null;
+
+  const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+  async function handleSendInvoice() {
+    if (sendingInvoice) return;
+    setSendingInvoice(true);
+    setError(null);
+    try {
+      const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/send`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+        },
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || 'Failed to send invoice');
+      }
+      onInvoiceSent?.();
+    } catch (e) {
+      setError(e.message || 'Failed to send invoice');
+      setSendingInvoice(false);
+    }
+  }
+
+  function openPayPage(methodHint) {
+    if (!invoiceToken) {
+      setError('Missing invoice token — refresh and try again');
+      return;
+    }
+    const base = `${window.location.origin}/pay/${invoiceToken}`;
+    const url = methodHint ? `${base}#${encodeURIComponent(methodHint)}` : base;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
 
   const surcharge = Math.round(amount * 1.03 * 100) / 100;
 
@@ -45,17 +83,23 @@ export default function MobilePaymentSheet({
     onSelectCash?.(service);
   }
 
-  function stub(label) {
-    alert(`${label} — coming soon`);
-  }
-
+  // Gift Card removed per operator request — not a tender Waves accepts.
+  // Manual CC + Cash App open the /pay/:token public pay page in a new tab
+  // which already handles Stripe Elements for every supported method.
+  // Invoice fires the existing /admin/invoices/:id/send endpoint so the
+  // customer gets the pay link by SMS + email; the sheet closes on success.
   const methods = [
     { key: 'cash', label: 'Cash', onClick: handleCash },
-    { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => stub('Manual Credit Card Entry') },
-    { key: 'gift_card', label: 'Gift Card', onClick: () => stub('Gift Card') },
+    { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => openPayPage() },
     { key: 'card_on_file', label: 'Card on File', subtitle: 'Unable to load cards', disabled: true },
-    { key: 'invoice', label: 'Invoice', onClick: () => stub('Invoice') },
-    { key: 'cash_app', label: 'Cash App Pay', onClick: () => stub('Cash App Pay') },
+    {
+      key: 'invoice',
+      label: 'Invoice',
+      subtitle: sendingInvoice ? 'Sending…' : 'Send SMS + email',
+      onClick: handleSendInvoice,
+      disabled: sendingInvoice,
+    },
+    { key: 'cash_app', label: 'Cash App Pay', onClick: () => openPayPage('cashapp') },
   ];
 
   return (
