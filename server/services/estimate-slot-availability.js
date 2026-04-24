@@ -3,8 +3,8 @@
  * for the customer-facing estimate view.
  *
  * Given an estimate token's underlying row, returns the 3 best route-optimal
- * time slots over the next 14 days plus an expander list with up to 3
- * additional options (6 total visible). Route-optimality is detour-based
+ * time slots over the next 14 days plus an expander list with up to 2
+ * additional options (5 total visible). Route-optimality is detour-based
  * (the cost the fleet
  * actually pays, not raw distance to the nearest stop) because find-time
  * already computed it that way and the signal is honest.
@@ -37,7 +37,7 @@ const DEFAULT_OPTS = {
   windowDays: 14,
   maxResults: 3,
   proximityDriveMinutes: 20,
-  expanderMaxResults: 3,
+  expanderMaxResults: 2,
   durationMinutes: 60,
 };
 
