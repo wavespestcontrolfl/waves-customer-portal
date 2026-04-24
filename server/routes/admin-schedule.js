@@ -873,7 +873,7 @@ router.post('/:id/invoice', async (req, res, next) => {
 // PUT /api/admin/schedule/:id/status — change status with automations
 router.put('/:id/status', async (req, res, next) => {
   try {
-    const { status, notes } = req.body;
+    const { status, notes, requestReview } = req.body;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -938,8 +938,13 @@ router.put('/:id/status', async (req, res, next) => {
         updates.actual_duration_minutes = Math.round((Date.now() - new Date(svc.check_in_time)) / 60000);
       }
 
-      // Schedule a review request SMS for 2 hours after completion
-      scheduleReviewRequest(svc);
+      // Schedule a review request SMS for 2 hours after completion.
+      // Honor the "Send review request" toggle if the caller passed it.
+      // Default to true so older callers (that don't send the flag) keep
+      // the existing auto-ask behavior.
+      if (requestReview !== false) {
+        scheduleReviewRequest(svc);
+      }
 
       // In-app notification: service completed
       try {
