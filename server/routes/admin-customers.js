@@ -407,6 +407,74 @@ router.get('/:id/comms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/estimates-summary — compact payload for the
+// Estimates page's customer slide-over. Returns customer basics, the full
+// estimate history for that customer, aggregate conversion stats, and the
+// most recent comms touchpoint. Much cheaper than /api/admin/customers/:id
+// which pulls 16 parallel tables; this endpoint is the 4 we actually need.
+router.get('/:id/estimates-summary', async (req, res, next) => {
+  try {
+    const customer = await db('customers')
+      .where({ id: req.params.id })
+      .whereNull('deleted_at')
+      .select(
+        'id', 'first_name', 'last_name', 'phone', 'email',
+        'address_line1', 'city', 'state', 'zip',
+        'waveguard_tier', 'active', 'created_at',
+        'property_type', 'company_name',
+      )
+      .first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const [estimates, lastMessage] = await Promise.all([
+      db('estimates')
+        .where({ customer_id: customer.id })
+        .orderBy('created_at', 'desc')
+        .select(
+          'id', 'status', 'token', 'service_interest', 'decline_reason',
+          'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
+          'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at',
+        ),
+      db('messages')
+        .where({ customer_id: customer.id })
+        .whereIn('channel', ['sms', 'voice'])
+        .orderBy('created_at', 'desc')
+        .select('channel', 'direction', 'created_at', 'body')
+        .first()
+        .catch(() => null),
+    ]);
+
+    // Conversion math. "Decided" = accepted + declined. Pipeline count
+    // includes draft/sent/viewed/expired so the rate isn't inflated by
+    // still-open quotes. Accepted lifetime monthly is the sum of monthly
+    // totals at acceptance time — useful proxy for recurring CLV.
+    const accepted = estimates.filter((e) => e.status === 'accepted');
+    const declined = estimates.filter((e) => e.status === 'declined');
+    const acceptedLifetimeMonthly = accepted.reduce((s, e) => s + Number(e.monthly_total || 0), 0);
+    const decided = accepted.length + declined.length;
+    const stats = {
+      total: estimates.length,
+      accepted: accepted.length,
+      declined: declined.length,
+      open: estimates.filter((e) => ['draft', 'sent', 'viewed'].includes(e.status)).length,
+      conversionRate: decided > 0 ? Math.round((accepted.length / decided) * 100) / 100 : null,
+      acceptedLifetimeMonthly: Math.round(acceptedLifetimeMonthly * 100) / 100,
+    };
+
+    res.json({
+      customer,
+      estimates,
+      stats,
+      lastContact: lastMessage ? {
+        channel: lastMessage.channel,
+        direction: lastMessage.direction,
+        at: lastMessage.created_at,
+        preview: lastMessage.body ? String(lastMessage.body).slice(0, 140) : null,
+      } : null,
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id — full detail
 router.get('/:id', async (req, res, next) => {
   try {
