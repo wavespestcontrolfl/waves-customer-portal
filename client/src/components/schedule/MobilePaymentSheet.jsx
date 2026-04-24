@@ -174,8 +174,11 @@ export default function MobilePaymentSheet({
           </div>
         )}
 
-        {/* Other methods */}
-        <div className="mt-6">
+        {/* Other methods — explicit white on every row so no ancestor
+            default (grid gray, UA stylesheet, browser default) leaks
+            through. Pressed state switches to very light gray for a
+            visual tap confirmation. */}
+        <div className="mt-6 bg-white">
           {methods.map((m) => (
             <button
               key={m.key}
@@ -183,7 +186,7 @@ export default function MobilePaymentSheet({
               onClick={m.onClick}
               disabled={m.disabled}
               className={
-                'w-full flex items-center justify-between py-4 border-b border-hairline border-zinc-200 text-left u-focus-ring ' +
+                'w-full flex items-center justify-between py-4 border-b border-hairline border-zinc-200 text-left u-focus-ring bg-white ' +
                 (m.disabled ? 'opacity-60 cursor-not-allowed' : 'active:bg-zinc-50')
               }
             >
