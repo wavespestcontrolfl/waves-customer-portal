@@ -22,7 +22,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { ChevronLeft, MoreHorizontal } from 'lucide-react';
+import { ChevronLeft, MoreHorizontal, Trash2 } from 'lucide-react';
 import { CustomerActionBar } from './StickyActionBar';
 import { Card, CardBody, Badge, Button, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
 
@@ -280,6 +280,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [editErr, setEditErr] = useState('');
+  const [deletingCustomer, setDeletingCustomer] = useState(false);
   const panelRef = useRef(null);
   const menuRef = useRef(null);
 
@@ -1191,31 +1192,57 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
             {editErr && (
               <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{editErr}</div>
             )}
-            <div className="flex justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
-              <Button variant="secondary" onClick={() => setEditOpen(false)} disabled={savingEdit}>Cancel</Button>
-              <Button
+            <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
+              <button
+                type="button"
                 onClick={async () => {
-                  setSavingEdit(true); setEditErr('');
+                  if (deletingCustomer || savingEdit) return;
+                  const name = [editForm.firstName, editForm.lastName].filter(Boolean).join(' ').trim() || 'this customer';
+                  const ok = window.confirm(`Delete ${name}?\n\nThis removes them from the active customer list. Their history (services, invoices, payments) is preserved and can be restored.`);
+                  if (!ok) return;
+                  setDeletingCustomer(true); setEditErr('');
                   try {
-                    const payload = {
-                      ...editForm,
-                      monthlyRate: editForm.monthlyRate === '' ? null : parseFloat(editForm.monthlyRate),
-                      tier: editForm.tier || null,
-                    };
-                    await adminFetch(`/admin/customers/${customerId}`, {
-                      method: 'PUT', body: JSON.stringify(payload),
-                    });
-                    await reloadCustomer();
+                    await adminFetch(`/admin/customers/${customerId}`, { method: 'DELETE' });
                     setEditOpen(false);
+                    onClose?.();
                   } catch (e) {
-                    setEditErr(e.message || 'Save failed');
+                    setEditErr(e.message || 'Delete failed');
                   }
-                  setSavingEdit(false);
+                  setDeletingCustomer(false);
                 }}
-                disabled={savingEdit}
+                disabled={deletingCustomer || savingEdit}
+                aria-label="Delete customer"
+                title="Delete this customer (soft-delete, restorable)"
+                className="inline-flex items-center justify-center h-9 w-9 border-hairline border-alert-fg/60 rounded-sm text-alert-fg bg-white hover:bg-alert-bg disabled:opacity-50 disabled:cursor-not-allowed u-focus-ring"
               >
-                {savingEdit ? 'Saving…' : 'Save'}
-              </Button>
+                <Trash2 size={16} strokeWidth={1.75} />
+              </button>
+              <div className="flex gap-2">
+                <Button variant="secondary" onClick={() => setEditOpen(false)} disabled={savingEdit || deletingCustomer}>Cancel</Button>
+                <Button
+                  onClick={async () => {
+                    setSavingEdit(true); setEditErr('');
+                    try {
+                      const payload = {
+                        ...editForm,
+                        monthlyRate: editForm.monthlyRate === '' ? null : parseFloat(editForm.monthlyRate),
+                        tier: editForm.tier || null,
+                      };
+                      await adminFetch(`/admin/customers/${customerId}`, {
+                        method: 'PUT', body: JSON.stringify(payload),
+                      });
+                      await reloadCustomer();
+                      setEditOpen(false);
+                    } catch (e) {
+                      setEditErr(e.message || 'Save failed');
+                    }
+                    setSavingEdit(false);
+                  }}
+                  disabled={savingEdit || deletingCustomer}
+                >
+                  {savingEdit ? 'Saving…' : 'Save'}
+                </Button>
+              </div>
             </div>
           </div>
         </div>
