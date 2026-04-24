@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
+import CreateProjectModal from '../../components/tech/CreateProjectModal';
 
 /**
  * Projects — post-service inspection / documentation reports.
@@ -45,6 +46,7 @@ export default function ProjectsPage() {
   const [filterType, setFilterType] = useState('');
   const [selectedId, setSelectedId] = useState(null);
   const [typesRegistry, setTypesRegistry] = useState(null);
+  const [showCreate, setShowCreate] = useState(false);
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
@@ -69,11 +71,25 @@ export default function ProjectsPage() {
 
   return (
     <div style={{ minHeight: '100vh', background: D.bg, padding: '16px 4px', color: D.text, fontFamily: "'DM Sans', sans-serif" }}>
-      <header style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0 }}>Projects</h1>
-        <p style={{ fontSize: 13, color: D.muted, margin: '2px 0 0' }}>
-          Inspection & documentation reports — WDO, termite, pest, rodent, bed bug.
-        </p>
+      <header style={{
+        marginBottom: 16,
+        display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
+      }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0 }}>Projects</h1>
+          <p style={{ fontSize: 13, color: D.muted, margin: '2px 0 0' }}>
+            Inspection & documentation reports — WDO, termite, pest, rodent, bed bug.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowCreate(true)}
+          style={{
+            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+            background: D.accent, color: '#fff', border: 'none', cursor: 'pointer',
+            whiteSpace: 'nowrap', flexShrink: 0,
+          }}
+        >+ New project</button>
       </header>
 
       {/* Filters */}
@@ -136,6 +152,18 @@ export default function ProjectsPage() {
           />
         )}
       </div>
+
+      {showCreate && (
+        <CreateProjectModal
+          theme="light"
+          onClose={() => setShowCreate(false)}
+          onCreated={(p) => {
+            setShowCreate(false);
+            loadProjects();
+            if (p?.id) setSelectedId(p.id);
+          }}
+        />
+      )}
     </div>
   );
 }
