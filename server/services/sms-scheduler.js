@@ -36,7 +36,7 @@ RULES:
 - If the customer mentions a specific day, try to match it. If no slots exist that day, suggest the closest alternatives.
 - If the customer picks a slot, confirm it clearly with date, time, and address.
 - If the customer's message is unrelated to scheduling, set intent to "off_topic".
-- Always include the 🌊 emoji at the end of your messages.
+- Do NOT use emojis. Keep the tone neighborly-professional — no wave icons, no calendar / clock / pin icons, no enclosed-alphanumeric digits.
 
 OUTPUT FORMAT — respond with ONLY a JSON object (no markdown, no backticks):
 {
@@ -94,14 +94,14 @@ class SmsScheduler {
         case 'confirm_no':
         case 'cancel':
           await this.updateSession(session.id, { state: 'idle' });
-          const cancelReply = `No problem, ${customer.first_name}! Just text us whenever you're ready to reschedule. 🌊`;
+          const cancelReply = `No problem, ${customer.first_name}. Just text us whenever you're ready to reschedule.`;
           await this.sendReply(fromPhone, toPhone, cancelReply, customerId);
           return { handled: true, reply: cancelReply };
 
         case 'unclear':
         default:
           // Ask Claude to clarify
-          const clarifyReply = result.reply || `Sorry ${customer.first_name}, I didn't catch that. Would you like to see available appointment times? 🌊`;
+          const clarifyReply = result.reply || `Sorry ${customer.first_name}, I didn't catch that. Would you like to see available appointment times?`;
           await this.sendReply(fromPhone, toPhone, clarifyReply, customerId);
           return { handled: true, reply: clarifyReply };
       }
@@ -188,7 +188,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
     const availability = await AvailabilityEngine.getAvailableSlots(city);
 
     if (!availability.days || availability.days.length === 0) {
-      const reply = `Hey ${customer.first_name}, we're fully booked in the ${city} area for the next 2 weeks. Call us at (941) 318-7612 and we'll work something out! 🌊`;
+      const reply = `Hey ${customer.first_name}, we're fully booked in the ${city} area for the next 2 weeks. Call us at (941) 318-7612 and we'll work something out.`;
       await this.sendReply(fromPhone, toPhone, reply, customer.id);
       await this.expireSession(session.id);
       return { handled: true, reply };
@@ -230,7 +230,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
     }
 
     if (options.length === 0) {
-      const reply = `Sorry ${customer.first_name}, no openings for that day/time. Want me to check other days? 🌊`;
+      const reply = `Sorry ${customer.first_name}, no openings for that day/time. Want me to check other days?`;
       await this.sendReply(fromPhone, toPhone, reply, customer.id);
       return { handled: true, reply };
     }
@@ -244,9 +244,9 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
     // Build SMS
     let reply = `Here's what we have, ${customer.first_name}:\n`;
     options.forEach((o, i) => {
-      reply += `\n${i + 1}️⃣ ${o.label}`;
+      reply += `\n${i + 1}. ${o.label}`;
     });
-    reply += `\n\nReply with the number to book, or tell me another day! 🌊`;
+    reply += `\n\nReply with the number to book, or tell me another day.`;
 
     await this.sendReply(fromPhone, toPhone, reply, customer.id);
     return { handled: true, reply };
@@ -260,7 +260,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
     const idx = (result.picked_slot_index || 0) - 1; // convert 1-indexed to 0-indexed
 
     if (idx < 0 || idx >= offered.length) {
-      const reply = `Hmm, I didn't get which one. Reply 1-${offered.length} to pick a time, or tell me a different day! 🌊`;
+      const reply = `Hmm, I didn't get which one. Reply 1-${offered.length} to pick a time, or tell me a different day.`;
       await this.sendReply(fromPhone, toPhone, reply, customer.id);
       return { handled: true, reply };
     }
@@ -273,7 +273,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
       pending_slot: JSON.stringify(slot),
     });
 
-    const reply = `Got it! I'll book you for:\n\n📅 ${slot.fullDate}\n⏰ ${slot.start} – ${slot.end}\n📍 ${customer.address_line1 || ''}, ${customer.city || ''}\n\nReply YES to confirm or NO to pick a different time. 🌊`;
+    const reply = `Got it, ${customer.first_name}. I'll book you for:\n\nDate: ${slot.fullDate}\nTime: ${slot.start} – ${slot.end}\nAddress: ${customer.address_line1 || ''}, ${customer.city || ''}\n\nReply YES to confirm or NO to pick a different time.`;
     await this.sendReply(fromPhone, toPhone, reply, customer.id);
     return { handled: true, reply };
   }
@@ -284,7 +284,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
   async handleConfirm(session, customer, fromPhone, toPhone) {
     const slot = session.pending_slot || null;
     if (!slot) {
-      const reply = `I don't have a pending time to confirm. Want to see available slots? 🌊`;
+      const reply = `I don't have a pending time to confirm. Want to see available slots?`;
       await this.sendReply(fromPhone, toPhone, reply, customer.id);
       return { handled: true, reply };
     }
@@ -338,7 +338,7 @@ ${context.offeredSlots ? `AVAILABLE_SLOTS (indices start at 1):\n${context.offer
 
     } catch (err) {
       logger.error(`[sms-scheduler] Booking failed: ${err.message}`);
-      const reply = `Sorry ${customer.first_name}, there was an issue booking that slot. Call us at (941) 318-7612 and we'll get you sorted! 🌊`;
+      const reply = `Sorry ${customer.first_name}, there was an issue booking that slot. Call us at (941) 318-7612 and we'll get you sorted.`;
       await this.sendReply(fromPhone, toPhone, reply, customer.id);
       return { handled: true, reply };
     }

@@ -117,19 +117,25 @@ class AvailabilityEngine {
     const slots = [];
     let cursor = dayStart;
 
+    // Round minutes-since-midnight UP to the next clean hour. Customer-
+    // facing slot starts like 1:15 / 2:45 felt like "we're squeezing you
+    // into a travel gap" — the operator wants every quoted time to land
+    // on the hour (1:00, 2:00). The buffer still applies but the slot
+    // only starts at the next :00 after buffer.
+    const roundUpToHour = (min) => Math.ceil(min / 60) * 60;
+
     for (const block of occupied) {
-      const gapStart = cursor + buffer;
+      const gapStart = roundUpToHour(cursor + buffer);
       const gapEnd = block.start - buffer;
 
       if (gapEnd - gapStart >= slotDuration) {
-        // Can fit a slot here
         slots.push({ start: gapStart, end: gapStart + slotDuration });
       }
       cursor = Math.max(cursor, block.end);
     }
 
-    // Check gap after last occupied block
-    const finalStart = cursor + buffer;
+    // Gap after the last occupied block — same clean-hour rule.
+    const finalStart = roundUpToHour(cursor + buffer);
     if (dayEnd - finalStart >= slotDuration) {
       slots.push({ start: finalStart, end: finalStart + slotDuration });
     }
@@ -204,14 +210,14 @@ class AvailabilityEngine {
 
       // Customer confirmation
       await TwilioService.sendSMS(customer.phone,
-        `Your Waves Pest Control appointment is confirmed!\n\n📅 ${dateLabel}\n⏰ ${this.minToTime12(this.timeToMin(startTime))} – ${this.minToTime12(this.timeToMin(endTime))}\n📍 ${customer.address_line1}, ${customer.city}\n\nConfirmation: ${confCode}\n\nReply RESCHEDULE if you need to change. 🌊`,
+        `Your Waves Pest Control appointment is confirmed.\n\nDate: ${dateLabel}\nTime: ${this.minToTime12(this.timeToMin(startTime))} – ${this.minToTime12(this.timeToMin(endTime))}\nAddress: ${customer.address_line1}, ${customer.city}\n\nConfirmation: ${confCode}\n\nReply RESCHEDULE if you need to change.`,
         { customerId: customer.id, messageType: 'booking_confirmation' }
       );
 
       // Adam notification
       if (process.env.ADAM_PHONE) {
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `📱 New self-booked appointment:\n${customer.first_name} ${customer.last_name}\n${serviceType}\n${dateLabel} ${this.minToTime12(this.timeToMin(startTime))}\n${customer.city}\nCode: ${confCode}`,
+          `New self-booked appointment:\n${customer.first_name} ${customer.last_name}\n${serviceType}\n${dateLabel} ${this.minToTime12(this.timeToMin(startTime))}\n${customer.city}\nCode: ${confCode}`,
           { messageType: 'internal_alert' }
         );
       }
