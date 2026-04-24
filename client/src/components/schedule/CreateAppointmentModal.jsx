@@ -173,7 +173,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const amt = d.discount_type === 'percentage'
       ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
       : `$${Number(d.amount).toFixed(2)}`;
-    return `${d.icon ? d.icon + ' ' : ''}${d.name} — ${amt}`;
+    return `${d.name} — ${amt}`;
   }, [discountPresetId, discountPresets]);
 
   // Notes & Confirm state
@@ -728,7 +728,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                             className="waves-sq-row"
                             style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
                           >
-                            <span style={{ flex: 1, fontWeight: 500 }}>{d.icon ? `${d.icon} ` : ''}{d.name}</span>
+                            <span style={{ flex: 1, fontWeight: 500 }}>{d.name}</span>
                             <span style={{ fontSize: 12, color: D.muted, whiteSpace: 'nowrap' }}>
                               {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
                             </span>

@@ -1151,7 +1151,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                   <option value="">None</option>
                   {discountPresets.map(d => (
                     <option key={d.id} value={d.id}>
-                      {d.icon ? `${d.icon} ` : ''}{d.name} — {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
+                      {d.name} — {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
                     </option>
                   ))}
                   <option value="custom">Custom…</option>
