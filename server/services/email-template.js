@@ -106,7 +106,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
         </td></tr>
         <tr><td style="background:${SAND};padding:20px 32px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;">
-            Waves Pest Control, LLC · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · FL License #JF336375
+            Waves Pest Control, LLC · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · FL License #JB351547
           </div>
         </td></tr>
       </table>
