@@ -14,7 +14,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { CONSENT_TEXT, CONSENT_VERSION } = require('./payment-method-consent-text');
 
-const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'admin_tap_to_pay']);
+const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'admin_tap_to_pay', 'backfill']);
 
 async function recordConsent({
   customerId,

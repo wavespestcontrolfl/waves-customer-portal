@@ -4,6 +4,7 @@ import api from '../utils/api';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
+import SaveCardConsent from '../components/billing/SaveCardConsent';
 import BrandFooter from '../components/BrandFooter';
 import { etDateString } from '../lib/timezone';
 
@@ -3626,6 +3627,12 @@ function BillingTab({ customer }) {
                 {stripeError}
               </div>
             )}
+            {/* Save-card authorization — locked because saving is the
+                purpose of this modal. Shown so the consent record
+                reflects the copy the customer saw. */}
+            <div style={{ marginBottom: 12 }}>
+              <SaveCardConsent locked onChange={() => {}} />
+            </div>
             <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} style={{
               ...BUTTON_BASE, width: '100%', padding: 14, fontSize: 15,
               background: stripeReady ? B.wavesBlue : B.grayLight,

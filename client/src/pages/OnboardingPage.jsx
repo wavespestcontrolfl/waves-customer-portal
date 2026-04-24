@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
+import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { etDateString } from '../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -460,6 +461,13 @@ export default function OnboardingPage() {
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                   <span style={{ fontSize: 14, color: B.navy, fontWeight: 500 }}>Auto-pay monthly on the 1st</span>
                   <ToggleSwitch value={true} onChange={() => {}} />
+                </div>
+
+                {/* Save-card authorization — locked because finishing
+                    onboarding requires a card on file. Shown so the
+                    consent record reflects the copy the customer saw. */}
+                <div style={{ marginBottom: 16 }}>
+                  <SaveCardConsent locked onChange={() => {}} />
                 </div>
 
                 {q.depositAmount > 0 && (

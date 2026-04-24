@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import api from '../../utils/api';
 import { etDateString, addETDays } from '../../lib/timezone';
+import SaveCardConsent from './SaveCardConsent';
 
 function loadStripeJs(publishableKey) {
   return new Promise((resolve) => {
@@ -286,6 +287,10 @@ export default function AutopayCard() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div ref={mountRef} style={{ minHeight: 180 }} />
               {!stripeReady && <div style={{ fontSize: 13, color: B.grayMid }}>Loading payment form…</div>}
+              {/* Save-card authorization — locked because saving is the
+                  whole purpose of this modal. Shown so the consent row
+                  reflects the copy the customer saw. */}
+              <SaveCardConsent locked onChange={() => {}} />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button style={btn('secondary')} disabled={saving} onClick={resetAddCard}>Back</button>
                 <button style={btn('primary')} disabled={saving || !stripeReady} onClick={submitNewCard}>
