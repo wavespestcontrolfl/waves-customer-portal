@@ -212,12 +212,6 @@ export default function MobileCheckoutSheet({
             {mintError}
           </div>
         )}
-        <div className="text-center text-ink-secondary" style={{ fontSize: 13, marginTop: 14, lineHeight: 1.4 }}>
-          Finalize the price for each of your services and add
-          <br />
-          any additional products or discounts.
-        </div>
-
         {/* Service line items */}
         <div className="mt-6">
           {/* Base appointment service */}
@@ -306,7 +300,7 @@ export default function MobileCheckoutSheet({
           <button
             type="button"
             onClick={() => setShowServicePicker(true)}
-            className="w-full bg-zinc-100 text-zinc-900 font-medium rounded-xs u-focus-ring"
+            className="w-full bg-white text-zinc-900 font-medium rounded-xs u-focus-ring border border-hairline border-zinc-200"
             style={{ padding: '14px 20px', fontSize: 15 }}
           >
             Add Service
@@ -314,7 +308,7 @@ export default function MobileCheckoutSheet({
           <button
             type="button"
             onClick={() => setShowItemPicker(true)}
-            className="w-full bg-zinc-100 text-zinc-900 font-medium rounded-xs u-focus-ring"
+            className="w-full bg-white text-zinc-900 font-medium rounded-xs u-focus-ring border border-hairline border-zinc-200"
             style={{ padding: '14px 20px', fontSize: 15 }}
           >
             Add Item or Discount
