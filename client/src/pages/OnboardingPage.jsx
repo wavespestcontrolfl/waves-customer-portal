@@ -146,14 +146,22 @@ export default function OnboardingPage() {
       .then(d => {
         setData(d);
         if (d.preferences) setPrefs(prev => ({ ...prev, ...d.preferences }));
+        // Customers who opted to pay at the visit during inline accept
+        // never see the Stripe card capture screen. Treat them as if
+        // payment is already satisfied so the resume-state logic jumps
+        // straight to details.
+        const payAtVisit = d.scheduledService?.paymentMethodPreference === 'pay_at_visit';
         if (d.status.current === 'complete') setScreen(3);
         else if (d.status.detailsCollected) setScreen(3);
         else if (d.status.serviceConfirmed) setScreen(2);
         else if (d.status.paymentCollected) setScreen(2);
+        else if (payAtVisit) setScreen(0);  // welcome → skips to details (screen 2) via CTA below
         setLoading(false);
       })
       .catch(e => { setError(e.message); setLoading(false); });
   }, [token]);
+
+  const payAtVisit = data?.scheduledService?.paymentMethodPreference === 'pay_at_visit';
 
   const updatePref = useCallback((field, value) => {
     setPrefs(prev => ({ ...prev, [field]: value }));
@@ -181,9 +189,11 @@ export default function OnboardingPage() {
 
   useEffect(() => { if (screen === 2) autoSave(); }, [prefs, referralSource, referredBy]);
 
-  // Initialize Stripe when payment screen is shown
+  // Initialize Stripe when payment screen is shown.
+  // Skipped entirely for pay-at-visit customers — their flow never
+  // renders screen 1 so Stripe never needs to load.
   useEffect(() => {
-    if (screen !== 1 || stripeInitRef.current) return;
+    if (screen !== 1 || stripeInitRef.current || payAtVisit) return;
     stripeInitRef.current = true;
     (async () => {
       try {
@@ -408,18 +418,23 @@ export default function OnboardingPage() {
                   WaveGuard {q.tier} — {q.tier === 'Platinum' ? '20%' : q.tier === 'Gold' ? '15%' : q.tier === 'Silver' ? '10%' : '0%'} bundle savings
                 </div>
               )}
-              {q.depositAmount > 0 && (
+              {q.depositAmount > 0 && !payAtVisit && (
                 <div style={{ fontSize: 13, color: B.grayDark, marginTop: 6 }}>
                   50% deposit: ${q.depositAmount.toFixed(2)} due today
                 </div>
               )}
+              {payAtVisit && (
+                <div style={{ fontSize: 13, color: B.grayDark, marginTop: 6 }}>
+                  Payment at the visit — nothing due today.
+                </div>
+              )}
             </div>
 
-            <button onClick={() => setScreen(1)} style={{
+            <button onClick={() => setScreen(payAtVisit ? 2 : 1)} style={{
               ...BUTTON_BASE, width: '100%', padding: 16, marginTop: 20,
               background: B.yellow, color: B.blueDeeper, fontSize: 16,
               boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
-            }}>Let's Get You Set Up</button>
+            }}>{payAtVisit ? "Finish Setting Up" : "Let's Get You Set Up"}</button>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: 8 }}>Takes about 2 minutes</div>
           </div>
         )}

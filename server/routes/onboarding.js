@@ -113,6 +113,10 @@ router.get('/:token', loadSession, async (req, res, next) => {
         serviceType: scheduled.service_type,
         techName: scheduled.tech_name,
         confirmed: scheduled.customer_confirmed,
+        // Carries the deposit_now / pay_at_visit choice the customer made
+        // during inline accept so the onboarding UI can skip the Stripe
+        // screen when they opted to pay at the visit.
+        paymentMethodPreference: scheduled.payment_method_preference || null,
       } : null,
       preferences: prefs ? {
         preferredTime: prefs.preferred_time,

@@ -152,4 +152,29 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   }
 });
 
+// DELETE /:token/reserve/:scheduledServiceId — release a live hold
+// when the customer taps "Change my pick" or closes the tab. Narrow —
+// only deletes rows still in reservation state (no customer_id). Safe
+// to spam; always returns 200 so the client never has to special-case
+// "already released."
+router.delete('/:token/reserve/:scheduledServiceId', async (req, res) => {
+  const token = req.params.token;
+  const scheduledServiceId = req.params.scheduledServiceId;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const estimate = await db('estimates').where({ token }).first('id');
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const result = await slotReservation.releaseReservation({
+      scheduledServiceId,
+      estimateId: estimate.id,
+    });
+    return res.json({ ok: true, released: result.released });
+  } catch (err) {
+    logger.error(`[estimate-slots-public:release] ${err.message}`, { stack: err.stack });
+    return res.status(500).json({ error: 'unable to release reservation' });
+  }
+});
+
 module.exports = router;
