@@ -1285,8 +1285,8 @@ export default function DispatchPageV2() {
         <MobileCheckoutSheet
           service={checkoutService}
           onClose={() => setCheckoutService(null)}
-          onChargeSuccess={({ service: svc, invoiceId, amount }) => {
-            setPaymentData({ service: svc, invoiceId, amount });
+          onChargeSuccess={({ service: svc, invoiceId, invoiceToken, amount }) => {
+            setPaymentData({ service: svc, invoiceId, invoiceToken, amount });
           }}
           onEditServiceLine={(svc) => setEditingLineService(svc)}
         />
@@ -1312,6 +1312,7 @@ export default function DispatchPageV2() {
         <MobilePaymentSheet
           service={paymentData.service}
           invoiceId={paymentData.invoiceId}
+          invoiceToken={paymentData.invoiceToken}
           amount={paymentData.amount}
           onClose={() => setPaymentData(null)}
           onSelectCash={(svc) => {
@@ -1319,6 +1320,12 @@ export default function DispatchPageV2() {
             setCheckoutService(null);
             setDetailService(null);
             setPrepaidService(svc);
+          }}
+          onInvoiceSent={() => {
+            setPaymentData(null);
+            setCheckoutService(null);
+            setDetailService(null);
+            fetchSchedule(date);
           }}
         />
       )}
