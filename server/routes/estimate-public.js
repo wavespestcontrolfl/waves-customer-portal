@@ -1480,7 +1480,22 @@ router.put('/:token/preferences', async (req, res, next) => {
     const pestRecurring = detectPestRecurring(recurring);
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
     const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
-    const baseMonthly = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || estimate.monthly_total || 0);
+
+    // baseMonthly resolution, ordered so legacy rows self-heal:
+    //   1. explicit estData.baseMonthly / preDiscountMonthly
+    //   2. derive from engine result: annualBeforeDiscount / 12
+    //   3. sum of recurring.services[].mo (pre-discount per-service monthlies)
+    //   4. estimate.monthly_total (DISCOUNTED — last-resort; stale if tier has changed)
+    // The derived value is persisted back to estimate_data.baseMonthly below
+    // so subsequent toggles on this row don't need to re-derive.
+    const explicitBase = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || 0);
+    const engineDerivedBase = Number(estResult?.recurring?.annualBeforeDiscount || 0) / 12;
+    const summedBase = recurring.reduce((s, x) => s + Number(x.mo || x.monthly || 0), 0);
+    const baseMonthly = explicitBase > 0 ? explicitBase
+      : engineDerivedBase > 0 ? Math.round(engineDerivedBase * 100) / 100
+      : summedBase > 0 ? Math.round(summedBase * 100) / 100
+      : Number(estimate.monthly_total || 0);
+
     const currentTier = estimate.waveguard_tier || 'Bronze';
     const tierDiscount = TIER_DISCOUNTS[currentTier] || 0;
 
@@ -1494,8 +1509,9 @@ router.put('/:token/preferences', async (req, res, next) => {
       tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - TIER_DISCOUNTS[t]) - monthlyOff) * 100) / 100);
     });
 
-    // Persist — merge new prefs back onto the JSON blob, update totals.
+    // Persist — merge new prefs + self-healed baseMonthly back onto the blob.
     parsedData.preferences = nextPrefs;
+    if (baseMonthly > 0) parsedData.baseMonthly = baseMonthly;
     await db('estimates').where({ id: estimate.id }).update({
       estimate_data: JSON.stringify(parsedData),
       monthly_total: monthlyTotal,
@@ -1604,16 +1620,23 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
           const newAnnual = Number(legacyResult?.recurring?.annualAfterDiscount || newMonthly * 12);
           const newOneTime = Number(legacyResult?.oneTime?.total || estimate.onetime_total || 0);
           const newTier = String(legacyResult?.recurring?.tier || 'silver').replace(/^./, (c) => c.toUpperCase());
+          // Pre-discount monthly for the new bundle. Required so downstream
+          // pref toggles apply WaveGuard tier math against a fresh anchor
+          // instead of a stale (pre-bundle, single-service) baseMonthly.
+          const newBaseMonthly = Math.round((Number(legacyResult?.recurring?.annualBeforeDiscount || 0) / 12) * 100) / 100;
 
           const newEstimateData = {
             ...(estData || {}),
             inputs: updatedInputs,
             result: legacyResult,
+            baseMonthly: newBaseMonthly > 0 ? newBaseMonthly : (estData?.baseMonthly || 0),
+            onetimeTotalBase: newOneTime,
             bundleAutoApplied: {
               addedService: suggestedService,
               previousMonthly: Number(estimate.monthly_total || 0),
               previousTier: estimate.waveguard_tier || 'Bronze',
               newMonthly,
+              newBaseMonthly,
               newTier,
               appliedAt: new Date().toISOString(),
             },
