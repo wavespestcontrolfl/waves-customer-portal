@@ -415,7 +415,15 @@ router.get('/:id/followup', async (req, res, next) => {
     const seq = await db('invoice_followup_sequences').where({ invoice_id: req.params.id }).first();
     res.json({
       sequence: seq || null,
-      steps: followupConfig.steps.map(s => ({ id: s.id, label: s.label, daysAfterDue: s.daysAfterDue })),
+      // Config-field rename: steps now expose daysAfterSend (PR #106
+      // anchored the cadence to invoice.sent_at). daysAfterDue is kept
+      // as an alias so any pre-update client still renders a number.
+      steps: followupConfig.steps.map(s => ({
+        id: s.id,
+        label: s.label,
+        daysAfterSend: s.daysAfterSend,
+        daysAfterDue: s.daysAfterSend,
+      })),
       autopayFailureThreshold: followupConfig.autopayFailureThreshold,
     });
   } catch (err) { next(err); }
