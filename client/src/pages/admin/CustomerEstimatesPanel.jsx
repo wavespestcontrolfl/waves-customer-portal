@@ -108,12 +108,12 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
   return (
     <>
       <div
-        className="fixed inset-0 z-40 bg-black/30"
+        className="fixed inset-0 z-[105] bg-black/30"
         onClick={onClose}
         aria-hidden
       />
       <aside
-        className="fixed top-0 right-0 z-50 h-full w-full sm:max-w-[480px] bg-white border-l border-hairline border-zinc-200 shadow-2xl flex flex-col"
+        className="fixed top-0 right-0 z-[110] h-full w-full sm:max-w-[480px] bg-white border-l border-hairline border-zinc-200 shadow-2xl flex flex-col"
         role="dialog"
         aria-label="Customer + estimate history"
       >
