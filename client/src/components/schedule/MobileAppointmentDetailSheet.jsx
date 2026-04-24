@@ -16,6 +16,7 @@
 
 import { useEffect, useState } from 'react';
 import { TIMEZONE } from '../../lib/timezone';
+import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -114,6 +115,7 @@ export default function MobileAppointmentDetailSheet({
   const [savingNote, setSavingNote] = useState(false);
   const [noteSavedAt, setNoteSavedAt] = useState(null);
   const [actionBusy, setActionBusy] = useState('');
+  const [showCustomer, setShowCustomer] = useState(false);
 
   useEffect(() => {
     setNote(service?.notes || '');
@@ -243,9 +245,10 @@ export default function MobileAppointmentDetailSheet({
             <div className="font-medium text-zinc-900" style={{ fontSize: 20, marginBottom: 10 }}>
               Customer
             </div>
-            <a
-              href={`/admin/customers?customerId=${encodeURIComponent(service.customerId)}`}
-              className="flex items-start justify-between gap-3 py-3 border-b border-hairline border-zinc-200 no-underline hover:bg-zinc-50 -mx-1 px-1 rounded-sm"
+            <button
+              type="button"
+              onClick={() => setShowCustomer(true)}
+              className="w-full flex items-start justify-between gap-3 py-3 border-b border-hairline border-zinc-200 text-left bg-transparent hover:bg-zinc-50 -mx-1 px-1 rounded-sm"
             >
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-zinc-900 truncate" style={{ fontSize: 16 }}>
@@ -256,7 +259,7 @@ export default function MobileAppointmentDetailSheet({
                 </div>
               </div>
               <span aria-hidden className="text-ink-secondary" style={{ fontSize: 22, lineHeight: 1 }}>›</span>
-            </a>
+            </button>
           </section>
         )}
 
@@ -410,6 +413,16 @@ export default function MobileAppointmentDetailSheet({
           </button>
         </section>
       </div>
+
+      {/* Customer detail sheet — opens over this sheet when the operator
+          taps the Customer row, instead of navigating to /admin/customers
+          and losing the schedule context. */}
+      {showCustomer && service.customerId && (
+        <MobileCustomerDetailSheet
+          customerId={service.customerId}
+          onClose={() => setShowCustomer(false)}
+        />
+      )}
     </div>
   );
 }
