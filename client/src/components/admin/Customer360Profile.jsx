@@ -577,8 +577,8 @@ export default function Customer360Profile({ customerId, onClose }) {
                         {m.answeredBy && <span style={{ fontSize: 10, color: D.muted }}>· {m.answeredBy}</span>}
                       </div>
                       {summary && <div style={{ fontSize: 12, color: D.text }}>{summary}</div>}
-                      {rec?.url && (
-                        <audio controls src={rec.url} style={{ marginTop: 6, width: '100%', height: 32 }} />
+                      {rec?.url && rec?.sid && (
+                        <audio controls src={`${API_BASE}/admin/call-recordings/audio/${rec.sid}?token=${encodeURIComponent(localStorage.getItem('waves_admin_token') || '')}`} style={{ marginTop: 6, width: '100%', height: 32 }} />
                       )}
                       <div style={{ fontSize: 10, color: D.muted, marginTop: 4, textAlign: 'right' }}>{timeAgo(m.createdAt)}</div>
                     </div>
