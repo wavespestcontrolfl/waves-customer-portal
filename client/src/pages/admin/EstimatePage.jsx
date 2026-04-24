@@ -1877,9 +1877,14 @@ const PIPELINE_FILTERS = [
   { key: 'follow_up', label: 'Follow Up Now', color: C.amber },
   { key: 'won', label: 'Won', color: C.green },
   { key: 'lost', label: 'Lost', color: C.red },
+  { key: 'archived', label: 'Archived', color: C.muted || C.heading },
 ];
 
 function classifyEstimate(e) {
+  // Archived trumps status for filter bucketing. The list API returns only
+  // archived rows when ?archived=only is set, so this mostly affects the
+  // filter-count math in the pills.
+  if (e.archivedAt) return 'archived';
   if (e.status === 'accepted') return 'won';
   if (e.status === 'declined' || e.status === 'expired') return 'lost';
   if (e.status === 'draft' && (!e.monthlyTotal || e.monthlyTotal === 0)) return 'needs_estimate';

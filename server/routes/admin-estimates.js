@@ -195,7 +195,15 @@ router.sendEstimateNow = sendEstimateNow;
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {
   try {
-    const { status, search, source, page = 1, limit = 50 } = req.query;
+    const { status, search, source, page = 1, limit = 50, archived: archivedRaw } = req.query;
+    // archived=only → archived-only view. archived=all → include both.
+    // Default (unset / any other value) → hide archived.
+    const archived = archivedRaw === 'only' || archivedRaw === '1' || archivedRaw === 'true'
+      ? 'only'
+      : archivedRaw === 'all'
+      ? 'all'
+      : 'hide';
+
     let query = db('estimates')
       .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
       .select('estimates.*', 'technicians.name as created_by_name')
@@ -212,6 +220,8 @@ router.get('/', async (req, res, next) => {
         this.whereILike('customer_name', s).orWhereILike('customer_phone', s).orWhereILike('address', s);
       });
     }
+    if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
+    else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const estimates = await query.limit(parseInt(limit)).offset(offset);
@@ -238,8 +248,45 @@ router.get('/', async (req, res, next) => {
         lastFollowUpAt: e.last_follow_up_at,
         declineReason: e.decline_reason,
         token: e.token,
+        archivedAt: e.archived_at,
       })),
     });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/archive — tuck a closed estimate out of the default list.
+// Allowed states: declined / expired / accepted. Active states (draft / sent /
+// viewed) must be declined first — preserves the operator's intent that
+// archive is a final shelving action, not a workflow shortcut.
+router.post('/:id/archive', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!['declined', 'expired', 'accepted'].includes(estimate.status)) {
+      return res.status(400).json({
+        error: `Only closed estimates (declined / expired / accepted) can be archived. Current status: ${estimate.status}.`,
+      });
+    }
+    if (estimate.archived_at) return res.json(estimate);  // idempotent
+    const [updated] = await db('estimates')
+      .where({ id: req.params.id })
+      .update({ archived_at: db.fn.now(), updated_at: db.fn.now() })
+      .returning('*');
+    res.json(updated);
+  } catch (err) { next(err); }
+});
+
+// POST /:id/unarchive — pulls an archived estimate back into the default view.
+router.post('/:id/unarchive', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!estimate.archived_at) return res.json(estimate);  // idempotent
+    const [updated] = await db('estimates')
+      .where({ id: req.params.id })
+      .update({ archived_at: null, updated_at: db.fn.now() })
+      .returning('*');
+    res.json(updated);
   } catch (err) { next(err); }
 });
 
