@@ -58,6 +58,23 @@ function shellTopBar() {
   </header>`;
 }
 
+// Sticky "Questions?" bar pinned to the bottom of the customer estimate
+// page. Two equal-width buttons (Call / Text) using tel: + sms: schemes
+// so mobile users land in their dialer / messages app, and desktop users
+// see the same affordance via the platform handler.
+function shellQuestionsBar() {
+  return `<div class="q-bar" role="region" aria-label="Questions for Waves">
+    <a href="tel:+19412975749" class="q-btn q-call" aria-label="Call Waves at (941) 297-5749">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92Z"/></svg>
+      <span>Questions? Call Waves</span>
+    </a>
+    <a href="sms:+19412975749" class="q-btn q-text" aria-label="Text Waves at (941) 297-5749">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span>Questions? Text Waves!</span>
+    </a>
+  </div>`;
+}
+
 const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
 
 // ── Service-preference pricing modifiers ──────────────────────
@@ -326,6 +343,14 @@ function renderPage(token, estimate, estData) {
     return `<tr><td>${escapeHtml(s.name)}</td><td style="text-align:right">${fmtMoney(discounted)}/mo</td></tr>`;
   }).join('');
 
+  // Services for the hero eyebrow — falls back to one-time items for one-time-only
+  // estimates, then to the tier label so the eyebrow never renders empty.
+  const quotedServiceNames = recurring.map((s) => s.name).filter(Boolean);
+  const quotedOneTimeNames = oneTimeItems.map((it) => it.name).filter(Boolean);
+  const quotedServicesLabel = quotedServiceNames.length
+    ? quotedServiceNames.join(' · ')
+    : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' · ') : `WaveGuard ${tier}`);
+
   // WaveGuard Membership — $99 initial fee rolled into oneTimeTotal by the
   // pricing engine but not into oneTime.items[]. Surface it as its own
   // line so the customer sees what the fee is and the "waived with annual
@@ -565,8 +590,17 @@ function renderPage(token, estimate, estData) {
   .site-footer-contact a:hover{text-decoration:underline}
   .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
   .site-footer-legal{font-size:11px;color:#6B7280}
-  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
+  #toast{position:fixed;bottom:calc(80px + env(safe-area-inset-bottom,0));left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
   #toast.show{opacity:1}
+  .q-bar{position:fixed;left:0;right:0;bottom:0;z-index:90;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0));background:rgba(255,255,255,.96);backdrop-filter:saturate(140%) blur(8px);-webkit-backdrop-filter:saturate(140%) blur(8px);border-top:1px solid #E7E2D7;box-shadow:0 -2px 12px rgba(15,23,42,.06)}
+  .q-bar .q-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding:10px 14px;border-radius:10px;font-size:14px;font-weight:600;text-decoration:none;line-height:1.2;transition:background .15s,color .15s}
+  .q-bar .q-btn svg{flex-shrink:0}
+  .q-bar .q-call{background:#1B2C5B;color:#fff}
+  .q-bar .q-call:hover{background:#121E3D}
+  .q-bar .q-text{background:#F7F5EE;color:#1B2C5B;border:1px solid #E7E2D7}
+  .q-bar .q-text:hover{background:#EDE8D8}
+  @media(max-width:480px){.q-bar .q-btn{font-size:13px;padding:10px}}
+  body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0))}
 </style>
 </head><body>
 
@@ -577,7 +611,7 @@ ${shellTopBar()}
   ${locked ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
 
   <div class="hero">
-    <div class="eyebrow">Your estimate · WaveGuard ${escapeHtml(tier)}</div>
+    <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
     <h1>Hey ${firstName}, here\u2019s your custom plan.</h1>
     <div class="addr">${address}</div>
     ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
@@ -624,7 +658,7 @@ ${shellTopBar()}
     <div id="review-area" style="display:none">
       <div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn" onclick="confirmBooking()"><span class="pay-pref-title" id="confirm-book-title">Confirm and pay deposit</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to complete the deposit.</span></button>
+        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn" onclick="confirmBooking()"><span class="pay-pref-title" id="confirm-book-title">Confirm and pay deposit</span><span class="pay-pref-sub">You will be taken to a secure Stripe page to complete the deposit.</span></button>
         <button type="button" class="pay-pref-btn" onclick="cancelReservation()"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>
       </div>
     </div>
@@ -686,6 +720,8 @@ ${shellTopBar()}
 </div>
 
 <div id="toast"></div>
+
+${shellQuestionsBar()}
 
 <script>
   const TOKEN = ${JSON.stringify(token)};
