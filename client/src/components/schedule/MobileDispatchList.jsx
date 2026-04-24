@@ -102,7 +102,7 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
     ? '#A1A1AA'
     : serviceColor(service.serviceType).bg;
 
-  const firstName = customerMissing ? 'Unassigned' : name.split(' ')[0] || name;
+  const displayName = customerMissing ? 'Unassigned' : name;
   const techInitial = service.technicianName
     ? service.technicianName.trim().charAt(0).toUpperCase()
     : '';
@@ -127,7 +127,7 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
               className="font-medium text-zinc-900 truncate"
               style={{ fontSize: 15 }}
             >
-              {firstName}
+              {displayName}
             </span>
             {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
           </span>
@@ -146,22 +146,19 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
             {formatWindow(service)}
           </span>
         </span>
-        {techInitial && (
-          <span
-            className="flex items-center justify-center font-semibold text-zinc-900"
-            style={{
-              width: 28,
-              height: 28,
-              fontSize: 13,
-              flexShrink: 0,
-              alignSelf: 'center',
-            }}
-            title={service.technicianName}
-          >
-            {techInitial}
-          </span>
-        )}
       </button>
+      {techInitial && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onEdit?.(service); }}
+          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center font-medium"
+          style={{ fontSize: 13 }}
+          title={service.technicianName}
+          aria-label={`Technician: ${service.technicianName}`}
+        >
+          {techInitial}
+        </button>
+      )}
       {onEnRoute && (
         <button
           type="button"
