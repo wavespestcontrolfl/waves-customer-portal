@@ -8057,8 +8057,7 @@ function MyRequestsCard() {
 const TABS = [
   { id: 'dashboard', label: 'Home', icon: '🏠' },
   { id: 'plan', label: 'My Plan', icon: '🛡️' },
-  { id: 'services', label: 'History', icon: '📋' },
-  { id: 'schedule', label: 'Schedule', icon: '📅' },
+  { id: 'visits', label: 'Visits', icon: '📅' },
   { id: 'billing', label: 'Billing', icon: '💳' },
   { id: 'request', label: 'Request', icon: '🆘' },
   { id: 'refer', label: 'Refer & Earn', icon: '🎁' },
@@ -8066,6 +8065,42 @@ const TABS = [
   { id: 'property', label: 'My Property', icon: '🏡' },
   { id: 'learn', label: 'Learn', icon: '💡' },
 ];
+
+// Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
+// "Visits" surface — a visit is one object moving from upcoming → completed,
+// so customers shouldn't have to know which tab holds which state.
+function VisitsTab({ customer, subTab, onSubTabChange }) {
+  const active = subTab === 'completed' ? 'completed' : 'upcoming';
+  const pill = (id, label) => {
+    const isActive = active === id;
+    return (
+      <button
+        key={id}
+        onClick={() => onSubTabChange(id)}
+        style={{
+          flex: 1, padding: '10px 14px', borderRadius: 10, border: 'none',
+          cursor: 'pointer', fontSize: 13, fontWeight: isActive ? 700 : 600,
+          fontFamily: FONTS.heading,
+          background: isActive ? B.wavesBlue : 'transparent',
+          color: isActive ? B.white : B.grayMid,
+          transition: 'all 0.2s ease',
+        }}
+      >{label}</button>
+    );
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{
+        display: 'flex', gap: 4, background: B.white, borderRadius: 12,
+        padding: 4, boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+      }}>
+        {pill('upcoming', 'Upcoming')}
+        {pill('completed', 'Completed')}
+      </div>
+      {active === 'upcoming' ? <ScheduleTab customer={customer} /> : <ServicesTab />}
+    </div>
+  );
+}
 
 // =========================================================================
 // AI CHAT WIDGET
@@ -8214,14 +8249,28 @@ export default function PortalPage() {
   const { customer, logout } = useAuth();
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
-  const initialTab = (() => {
+  // Returns [tabId, visitsSubTab]. Legacy ?tab=schedule / ?tab=services
+  // land on the Visits tab with the matching sub-tab preselected so SMS
+  // deep-links keep working after the merge.
+  const [initialTab, initialVisitsSubTab] = (() => {
     try {
       const t = new URLSearchParams(window.location.search).get('tab');
-      const allowed = ['dashboard', 'plan', 'schedule', 'billing', 'services', 'request', 'refer', 'documents', 'property'];
-      return t && allowed.includes(t) ? t : 'dashboard';
-    } catch { return 'dashboard'; }
+      if (t === 'schedule') return ['visits', 'upcoming'];
+      if (t === 'services') return ['visits', 'completed'];
+      const allowed = ['dashboard', 'plan', 'visits', 'billing', 'request', 'refer', 'documents', 'property', 'learn'];
+      return [t && allowed.includes(t) ? t : 'dashboard', 'upcoming'];
+    } catch { return ['dashboard', 'upcoming']; }
   })();
   const [activeTab, setActiveTab] = useState(initialTab);
+  const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
+  // Translates legacy 'schedule' / 'services' targets into the merged Visits
+  // tab so existing call-sites (dashboard quick actions, CTAs, etc.) route
+  // to the correct sub-view without having to be rewritten.
+  const switchTab = (id) => {
+    if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); return; }
+    if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); return; }
+    setActiveTab(id);
+  };
   const [showMenu, setShowMenu] = useState(false);
   const [showReportIssue, setShowReportIssue] = useState(false);
   const [showChat, setShowChat] = useState(false);
@@ -8286,16 +8335,15 @@ export default function PortalPage() {
                 <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
               </div>
               {[
-                { icon: '🏠', label: 'Home', action: () => { setActiveTab('dashboard'); setShowMenu(false); } },
-                { icon: '🛡️', label: 'My Plan', action: () => { setActiveTab('plan'); setShowMenu(false); } },
-                { icon: '📅', label: 'Schedule', action: () => { setActiveTab('schedule'); setShowMenu(false); } },
-                { icon: '💳', label: 'Billing', action: () => { setActiveTab('billing'); setShowMenu(false); } },
-                { icon: '📋', label: 'Service History', action: () => { setActiveTab('services'); setShowMenu(false); } },
-                { icon: '🆘', label: 'Request Service', action: () => { setActiveTab('request'); setShowMenu(false); } },
-                { icon: '🎁', label: 'Refer & Earn', action: () => { setActiveTab('refer'); setShowMenu(false); } },
-                { icon: '📄', label: 'Documents', action: () => { setActiveTab('documents'); setShowMenu(false); } },
-                { icon: '🏡', label: 'My Property', action: () => { setActiveTab('property'); setShowMenu(false); } },
-                { icon: '💡', label: 'Learn', action: () => { setActiveTab('learn'); setShowMenu(false); } },
+                { icon: '🏠', label: 'Home', action: () => { switchTab('dashboard'); setShowMenu(false); } },
+                { icon: '🛡️', label: 'My Plan', action: () => { switchTab('plan'); setShowMenu(false); } },
+                { icon: '📅', label: 'Visits', action: () => { switchTab('schedule'); setShowMenu(false); } },
+                { icon: '💳', label: 'Billing', action: () => { switchTab('billing'); setShowMenu(false); } },
+                { icon: '🆘', label: 'Request Service', action: () => { switchTab('request'); setShowMenu(false); } },
+                { icon: '🎁', label: 'Refer & Earn', action: () => { switchTab('refer'); setShowMenu(false); } },
+                { icon: '📄', label: 'Documents', action: () => { switchTab('documents'); setShowMenu(false); } },
+                { icon: '🏡', label: 'My Property', action: () => { switchTab('property'); setShowMenu(false); } },
+                { icon: '💡', label: 'Learn', action: () => { switchTab('learn'); setShowMenu(false); } },
               ].map(item => (
                 <div key={item.label} onClick={item.action} style={{
                   padding: '11px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
@@ -8323,19 +8371,18 @@ export default function PortalPage() {
 
       {/* Tabs */}
       <div style={{ padding: '14px 16px 0' }}>
-        <TabBar tabs={TABS} active={activeTab} onSelect={setActiveTab} />
+        <TabBar tabs={TABS} active={activeTab} onSelect={switchTab} />
       </div>
 
       {/* Content */}
       <div style={{ padding: '16px 16px 100px', maxWidth: 700, margin: '0 auto' }}>
-        {activeTab === 'dashboard' && <DashboardTab customer={customer} onSwitchTab={setActiveTab} />}
+        {activeTab === 'dashboard' && <DashboardTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab customer={customer} />}
-        {activeTab === 'services' && <ServicesTab />}
-        {activeTab === 'schedule' && <ScheduleTab customer={customer} />}
+        {activeTab === 'visits' && <VisitsTab customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} />}
         {activeTab === 'billing' && <BillingTab customer={customer} />}
-        {activeTab === 'request' && <RequestTab customer={customer} onSwitchTab={setActiveTab} />}
-        {activeTab === 'refer' && <ReferTab customer={customer} onSwitchTab={setActiveTab} />}
-        {activeTab === 'documents' && <DocumentsTab customer={customer} onSwitchTab={setActiveTab} />}
+        {activeTab === 'request' && <RequestTab customer={customer} onSwitchTab={switchTab} />}
+        {activeTab === 'refer' && <ReferTab customer={customer} onSwitchTab={switchTab} />}
+        {activeTab === 'documents' && <DocumentsTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab customer={customer} />}
         {activeTab === 'learn' && <LearnTab customer={customer} />}
       </div>
