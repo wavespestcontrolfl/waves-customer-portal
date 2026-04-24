@@ -1767,7 +1767,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10,
       }}>
         {[
-          { icon: '🔧', label: 'Request Service', action: () => onSwitchTab?.('services') },
+          { icon: '🔧', label: 'Request Service', action: () => onSwitchTab?.('request') },
           { icon: '💬', label: 'Message Us', action: () => onSwitchTab?.('messages') },
           { icon: '💳', label: 'Pay Now', action: () => onSwitchTab?.('billing') },
           { icon: '🎁', label: 'Refer a Friend', action: () => onSwitchTab?.('refer') },
@@ -2605,12 +2605,6 @@ function ScheduleTab({ customer }) {
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
   const [prefsLocked, setPrefsLocked] = useState({});
-  const [showRequestForm, setShowRequestForm] = useState(false);
-  const [requestType, setRequestType] = useState('');
-  const [requestUrgency, setRequestUrgency] = useState('');
-  const [requestDesc, setRequestDesc] = useState('');
-  const [requestSubmitting, setRequestSubmitting] = useState(false);
-  const [requestSubmitted, setRequestSubmitted] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -2657,31 +2651,6 @@ function ScheduleTab({ customer }) {
     } finally {
       setConfirmingIds(prev => ({ ...prev, [id]: false }));
     }
-  };
-
-  const handleRequestSubmit = async () => {
-    if (!requestType || !requestUrgency) return;
-    setRequestSubmitting(true);
-    try {
-      await api.createRequest({
-        type: requestType,
-        urgency: requestUrgency,
-        description: requestDesc,
-        source: 'schedule_tab',
-      });
-      setRequestSubmitted(true);
-      setTimeout(() => {
-        setShowRequestForm(false);
-        setRequestSubmitted(false);
-        setRequestType('');
-        setRequestUrgency('');
-        setRequestDesc('');
-      }, 3000);
-    } catch (err) {
-      console.error(err);
-      alert('Could not submit your request. Please try again or call us.');
-    }
-    setRequestSubmitting(false);
   };
 
   const formatTime = (t) => {
@@ -2919,105 +2888,11 @@ function ScheduleTab({ customer }) {
     </div>
   );
 
-  // Request form pill configs
-  const serviceTypePills = [
-    { value: 'pest_callback', label: 'Pest Callback' },
-    { value: 'lawn_concern', label: 'Lawn Concern' },
-    { value: 'new_service', label: 'New Service' },
-    { value: 'emergency', label: 'Emergency' },
-  ];
-  const urgencyPills = [
-    { value: 'routine', label: 'Routine' },
-    { value: 'this_week', label: 'This Week' },
-    { value: 'urgent', label: 'Urgent' },
-  ];
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <style>{pulsingDotCss}</style>
 
-      {/* Header with Request a Visit button */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-        <SectionHeading>Upcoming Services</SectionHeading>
-        <button onClick={() => setShowRequestForm(!showRequestForm)} style={{
-          ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
-          background: showRequestForm ? B.grayLight : B.wavesBlue,
-          color: showRequestForm ? B.grayDark : '#fff',
-        }}>
-          {showRequestForm ? '✕ Close' : '+ Request a Visit'}
-        </button>
-      </div>
-
-      {/* Inline Request a Visit form */}
-      {showRequestForm && (
-        <div style={{
-          background: B.white, borderRadius: 14, padding: 20,
-          border: `2px solid ${B.wavesBlue}22`, boxShadow: '0 4px 20px rgba(0,0,0,0.06)',
-        }}>
-          {requestSubmitted ? (
-            <div style={{ textAlign: 'center', padding: 20 }}>
-              <div style={{ fontSize: 36, marginBottom: 8 }}>{'✅'}</div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: B.green, fontFamily: FONTS.heading }}>Request Submitted</div>
-              <div style={{ fontSize: 13, color: B.grayMid, marginTop: 4 }}>We'll get back to you shortly</div>
-            </div>
-          ) : (
-            <>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Request a Visit</div>
-
-              <div style={{ fontSize: 11, fontWeight: 600, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Service Type</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
-                {serviceTypePills.map(p => (
-                  <button key={p.value} onClick={() => setRequestType(p.value)} style={{
-                    ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 50,
-                    background: requestType === p.value ? B.wavesBlue : B.offWhite,
-                    color: requestType === p.value ? '#fff' : B.grayDark,
-                    border: requestType === p.value ? 'none' : `1px solid ${B.grayLight}`,
-                  }}>{p.label}</button>
-                ))}
-              </div>
-
-              <div style={{ fontSize: 11, fontWeight: 600, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Urgency</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
-                {urgencyPills.map(p => {
-                  const uColor = p.value === 'urgent' ? B.red : p.value === 'this_week' ? B.orange : B.wavesBlue;
-                  return (
-                    <button key={p.value} onClick={() => setRequestUrgency(p.value)} style={{
-                      ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 50,
-                      background: requestUrgency === p.value ? uColor : B.offWhite,
-                      color: requestUrgency === p.value ? '#fff' : B.grayDark,
-                      border: requestUrgency === p.value ? 'none' : `1px solid ${B.grayLight}`,
-                    }}>{p.label}</button>
-                  );
-                })}
-              </div>
-
-              <div style={{ fontSize: 11, fontWeight: 600, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Description (optional)</div>
-              <textarea
-                value={requestDesc}
-                onChange={e => setRequestDesc(e.target.value)}
-                placeholder="Tell us what's going on..."
-                rows={3}
-                style={{
-                  width: '100%', padding: 12, borderRadius: 10, border: `1px solid ${B.grayLight}`,
-                  fontFamily: FONTS.body, fontSize: 13, resize: 'vertical', boxSizing: 'border-box',
-                  outline: 'none', color: B.navy,
-                }}
-              />
-
-              <button
-                onClick={handleRequestSubmit}
-                disabled={!requestType || !requestUrgency || requestSubmitting}
-                style={{
-                  ...BUTTON_BASE, padding: '10px 24px', fontSize: 13, marginTop: 12, width: '100%',
-                  background: (!requestType || !requestUrgency) ? B.grayLight : B.wavesBlue,
-                  color: (!requestType || !requestUrgency) ? B.grayMid : '#fff',
-                  cursor: (!requestType || !requestUrgency) ? 'not-allowed' : 'pointer',
-                }}
-              >{requestSubmitting ? 'Submitting...' : 'Submit Request'}</button>
-            </>
-          )}
-        </div>
-      )}
+      <SectionHeading>Upcoming Services</SectionHeading>
 
       {/* Empty state */}
       {upcomingOnly.length === 0 && (
@@ -3789,463 +3664,6 @@ function BillingTab({ customer }) {
           {billingPrefsSaving ? 'Saving...' : 'Save Billing Preferences'}
         </button>
       </div>
-    </div>
-  );
-}
-
-// =========================================================================
-// SERVICE REQUEST TAB
-// =========================================================================
-function RequestTab({ customer, onSwitchTab }) {
-  const [category, setCategory] = useState('');
-  const [subject, setSubject] = useState('');
-  const [description, setDescription] = useState('');
-  const [urgency, setUrgency] = useState('routine');
-  const [photos, setPhotos] = useState([]); // array of base64 preview strings
-  const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [requests, setRequests] = useState([]);
-  const fileInputRef = useRef(null);
-
-  useEffect(() => {
-    api.getRequests?.().then(d => setRequests(d?.requests || [])).catch(() => {});
-  }, [submitted]);
-
-  // Check if customer's last pest service was within 30 days (callback eligibility)
-  const lastPestService = customer.lastServiceDate ? parseDate(customer.lastServiceDate) : null;
-  const daysSinceLastService = lastPestService ? Math.floor((Date.now() - lastPestService) / (1000 * 60 * 60 * 24)) : null;
-  const isCallbackEligible = daysSinceLastService !== null && daysSinceLastService <= 30;
-
-  // "Something's wrong" categories
-  const wrongCategories = [
-    {
-      value: 'pest_issue', label: '🐜 Pest Issue', desc: 'Seeing bugs, rodents, or wildlife',
-      color: B.red, quickTaps: [
-        'Ants in the kitchen',
-        'Roaches in the bathroom',
-        'Spiders on the lanai',
-        'Wasps near the garage',
-        'Rodent activity in attic',
-      ],
-    },
-    {
-      value: 'lawn_concern', label: '🌱 Lawn Concern', desc: 'Brown patches, weeds, fungus, bare spots',
-      color: B.green, quickTaps: [
-        'Brown patches near oak tree',
-        'Dollar weed spreading',
-        'Fungus spots appearing',
-        'Bare spots not filling in',
-        'Chinch bug damage',
-      ],
-    },
-    {
-      value: 'irrigation', label: '💧 Irrigation Issue', desc: 'Sprinkler problems, dry spots, overwatering',
-      color: B.teal, quickTaps: [
-        'Sprinkler head broken',
-        'Dry spots in lawn',
-        'Zone not running',
-        'Need irrigation adjustment',
-      ],
-    },
-    {
-      value: 'schedule', label: '📅 Schedule', desc: 'Reschedule, skip, or change service day',
-      color: B.wavesBlue, quickTaps: [
-        'Reschedule my next visit',
-        'Skip this month',
-        'Change my service day',
-      ],
-    },
-  ];
-
-  // "I need something" categories
-  const needCategories = [
-    {
-      value: 'billing', label: '💳 Billing Question', desc: 'Payments, charges, plan changes',
-      color: B.orange, quickTaps: [
-        'Question about my bill',
-        'Update payment method',
-        'Change my plan',
-      ],
-    },
-    {
-      value: 'add_service', label: '➕ Add a Service', desc: 'Upgrade your plan or add-ons',
-      color: B.wavesBlue, redirect: true,
-    },
-    {
-      value: 'other', label: '💬 Other', desc: 'General questions or feedback',
-      color: B.grayDark, quickTaps: [],
-    },
-  ];
-
-  const allCategories = [...wrongCategories, ...needCategories];
-  const selectedCat = allCategories.find(c => c.value === category);
-
-  const handleQuickTap = (text) => {
-    setSubject(text);
-  };
-
-  const handlePhotoSelect = (e) => {
-    const file = e.target.files?.[0];
-    if (!file || photos.length >= 5) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => setPhotos(prev => [...prev, ev.target.result]);
-    reader.readAsDataURL(file);
-    e.target.value = '';
-  };
-
-  const removePhoto = (idx) => {
-    setPhotos(prev => prev.filter((_, i) => i !== idx));
-  };
-
-  const handleCategorySelect = (cat) => {
-    if (cat.value === 'add_service' && cat.redirect) {
-      // Redirect to Plan tab add-ons section
-      onSwitchTab?.('plan');
-      return;
-    }
-    setCategory(cat.value);
-    setSubject('');
-  };
-
-  const handleSubmit = async () => {
-    if (!category || !subject.trim()) return;
-    setSubmitting(true);
-    try {
-      await api.createRequest?.({
-        category,
-        subject: subject.trim(),
-        description: description.trim(),
-        urgency,
-        photos: photos.length > 0 ? photos : undefined,
-      });
-      setSubmitted(true);
-      setCategory(''); setSubject(''); setDescription('');
-      setUrgency('routine'); setPhotos([]);
-      setTimeout(() => setSubmitted(false), 4000);
-    } catch (err) {
-      console.error(err);
-      const msg = err?.response?.data?.error || err?.message || 'Could not submit your request. Please try again or call our office at (941) 297-5749.';
-      alert(msg);
-    }
-    setSubmitting(false);
-  };
-
-  // Request status pipeline config
-  const PIPELINE_STEPS = [
-    { key: 'submitted', label: 'Submitted' },
-    { key: 'seen', label: 'Seen' },
-    { key: 'scheduled', label: 'Scheduled' },
-    { key: 'completed', label: 'Completed' },
-  ];
-
-  const getPipelineIndex = (status) => {
-    const map = { submitted: 0, new: 0, seen: 1, in_progress: 1, scheduled: 2, resolved: 3, completed: 3 };
-    return map[status] ?? 0;
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <SectionHeading>Service Request</SectionHeading>
-      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65 }}>
-        See something? Snap a photo and tell us. We'll get back to you within a few hours — usually much faster.
-      </div>
-
-      {submitted && (
-        <div style={{
-          padding: 18, borderRadius: 14, background: `${B.green}20`,
-          border: `1.5px solid ${B.green}33`,
-        }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: B.green }}>Request submitted!</div>
-          <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4 }}>
-            We've notified your service team. You'll get a text when we've reviewed it.
-          </div>
-        </div>
-      )}
-
-      {/* Category Selection — split into two groups */}
-      <div style={{ background: B.white, borderRadius: 16, padding: 20, border: `1px solid ${B.grayLight}` }}>
-        {/* Something's wrong */}
-        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginBottom: 10 }}>Something's wrong</div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          {wrongCategories.map(c => (
-            <div key={c.value} onClick={() => handleCategorySelect(c)} style={{
-              padding: '14px 14px', borderRadius: 12, cursor: 'pointer',
-              border: category === c.value ? `2px solid ${c.color}` : `1px solid ${B.grayLight}`,
-              background: category === c.value ? `${c.color}08` : B.white,
-              transition: 'all 0.2s',
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{c.label}</div>
-              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{c.desc}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* I need something */}
-        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, marginTop: 18, marginBottom: 10 }}>I need something</div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          {needCategories.map(c => (
-            <div key={c.value} onClick={() => handleCategorySelect(c)} style={{
-              padding: '14px 14px', borderRadius: 12, cursor: 'pointer',
-              border: category === c.value ? `2px solid ${c.color}` : `1px solid ${B.grayLight}`,
-              background: category === c.value ? `${c.color}08` : B.white,
-              transition: 'all 0.2s',
-              gridColumn: c.value === 'other' ? 'span 2' : undefined,
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{c.label}</div>
-              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 2 }}>{c.desc}</div>
-              {c.redirect && <div style={{ fontSize: 10, color: B.wavesBlue, marginTop: 3, fontWeight: 600 }}>View add-ons in Plan tab →</div>}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Callback recognition — pest issue within 30 days */}
-      {category === 'pest_issue' && isCallbackEligible && (
-        <div style={{
-          padding: 14, borderRadius: 12,
-          background: `${B.green}08`, border: `1.5px solid ${B.green}33`,
-        }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: B.green }}>This may be a callback</div>
-          <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
-            Your last pest service was {daysSinceLastService} day{daysSinceLastService !== 1 ? 's' : ''} ago.
-            Callbacks are <strong>free</strong> with your {customer.tier || 'WaveGuard'} plan — we'll get you taken care of.
-          </div>
-        </div>
-      )}
-
-      {/* Detail Form — shows after category selection */}
-      {category && category !== 'add_service' && (
-        <div style={{ background: B.white, borderRadius: 16, padding: 20, border: `1px solid ${B.grayLight}` }}>
-
-          {/* Photo Upload — front and center, before text */}
-          <div style={{ marginBottom: 16 }}>
-            <input
-              ref={fileInputRef}
-              type="file" accept="image/*" capture="environment"
-              onChange={handlePhotoSelect}
-              style={{ display: 'none' }}
-            />
-            {photos.length === 0 ? (
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                style={{
-                  padding: '18px 16px', borderRadius: 12, cursor: 'pointer',
-                  border: `2px dashed ${B.wavesBlue}55`, textAlign: 'center',
-                  background: `${B.wavesBlue}06`, transition: 'border-color 0.2s',
-                }}
-              >
-                <div style={{ fontSize: 32 }}>📸</div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginTop: 4 }}>Snap a Photo</div>
-                <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-                  A photo helps us diagnose faster — up to 5 photos
-                </div>
-              </div>
-            ) : (
-              <div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  {photos.map((p, idx) => (
-                    <div key={idx} style={{ position: 'relative', width: 80, height: 80 }}>
-                      <img src={p} alt={`Photo ${idx + 1}`} style={{
-                        width: 80, height: 80, objectFit: 'cover', borderRadius: 10,
-                        border: `1px solid ${B.grayLight}`,
-                      }} />
-                      <button onClick={() => removePhoto(idx)} style={{
-                        position: 'absolute', top: -6, right: -6,
-                        width: 22, height: 22, borderRadius: '50%',
-                        background: B.red, color: '#fff',
-                        border: 'none', cursor: 'pointer', fontSize: 12,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        lineHeight: 1,
-                      }}>x</button>
-                    </div>
-                  ))}
-                  {photos.length < 5 && (
-                    <div onClick={() => fileInputRef.current?.click()} style={{
-                      width: 80, height: 80, borderRadius: 10, cursor: 'pointer',
-                      border: `2px dashed ${B.grayLight}`, background: B.offWhite,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: 24, color: B.grayMid,
-                    }}>+</div>
-                  )}
-                </div>
-                <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
-                  {photos.length}/5 photos attached
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Quick-tap suggestions */}
-          {selectedCat?.quickTaps?.length > 0 && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, marginBottom: 8 }}>Common issues — tap to select:</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {selectedCat.quickTaps.map(qt => (
-                  <button key={qt} onClick={() => handleQuickTap(qt)} style={{
-                    ...BUTTON_BASE, padding: '7px 12px', fontSize: 12, borderRadius: 20,
-                    background: subject === qt ? selectedCat.color : B.offWhite,
-                    color: subject === qt ? '#fff' : B.grayDark,
-                    border: subject === qt ? 'none' : `1px solid ${B.grayLight}`,
-                  }}>{qt}</button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Subject */}
-          <input
-            type="text" value={subject} onChange={e => setSubject(e.target.value)}
-            placeholder={
-              category === 'pest_issue' ? "What are you seeing? (e.g., 'Ants in the kitchen')" :
-              category === 'lawn_concern' ? "Describe the issue (e.g., 'Brown patches near oak tree')" :
-              "Brief summary"
-            }
-            style={{
-              width: '100%', padding: '12px 14px', borderRadius: 12,
-              border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-              color: B.navy, outline: 'none', boxSizing: 'border-box',
-            }}
-            onFocus={e => e.target.style.borderColor = B.wavesBlue}
-            onBlur={e => e.target.style.borderColor = B.grayLight}
-          />
-
-          {/* Description */}
-          <textarea
-            value={description} onChange={e => setDescription(e.target.value)}
-            placeholder={
-              category === 'pest_issue' ? "Where exactly? How long have you noticed it? Any patterns (time of day, after rain, etc.)?" :
-              category === 'lawn_concern' ? "Where on the property? How big is the affected area? When did you first notice?" :
-              "Any additional details that would help us (optional)"
-            }
-            rows={3}
-            style={{
-              width: '100%', padding: '12px 14px', borderRadius: 12, marginTop: 10,
-              border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-              color: B.navy, outline: 'none', boxSizing: 'border-box', resize: 'vertical',
-            }}
-            onFocus={e => e.target.style.borderColor = B.wavesBlue}
-            onBlur={e => e.target.style.borderColor = B.grayLight}
-          />
-
-          {/* Urgency selector with expectations */}
-          <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, marginBottom: 8 }}>How urgent is this?</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {[
-                { value: 'routine', label: 'Routine', desc: '1 business day', color: B.grayMid },
-                { value: 'next_24', label: 'Next 24 Hours', desc: 'Today if possible', color: B.orange },
-                { value: 'urgent', label: 'Urgent', desc: 'Within 2 hours', color: B.red },
-              ].map(u => (
-                <button key={u.value} onClick={() => setUrgency(u.value)} style={{
-                  flex: 1, padding: '10px 8px', borderRadius: 10, cursor: 'pointer',
-                  border: urgency === u.value ? `2px solid ${u.color}` : `1px solid ${B.grayLight}`,
-                  background: urgency === u.value ? `${u.color}10` : B.white,
-                  textAlign: 'center', transition: 'all 0.2s',
-                }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: urgency === u.value ? u.color : B.grayDark }}>{u.label}</div>
-                  <div style={{ fontSize: 10, color: B.grayMid, marginTop: 2 }}>{u.desc}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Emergency call bypass for Urgent */}
-          {urgency === 'urgent' && (
-            <div style={{
-              marginTop: 12, padding: 14, borderRadius: 12,
-              background: `${B.red}08`, border: `1.5px solid ${B.red}33`,
-              textAlign: 'center',
-            }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: B.red }}>Need help right now?</div>
-              <a href="tel:+19412975749" style={{
-                ...BUTTON_BASE, display: 'inline-block', padding: '10px 22px', fontSize: 14, marginTop: 8,
-                borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
-              }}>Call (941) 297-5749 directly</a>
-              <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
-                For urgent issues, calling gets the fastest response.
-              </div>
-            </div>
-          )}
-
-          {/* Submit */}
-          <button onClick={handleSubmit} disabled={!subject.trim() || submitting} style={{
-            ...BUTTON_BASE, width: '100%', padding: 14, marginTop: 16, fontSize: 15,
-            background: subject.trim() ? B.red : B.grayLight,
-            color: subject.trim() ? '#fff' : B.grayMid,
-            opacity: submitting ? 0.7 : 1,
-          }}>
-            {submitting ? 'Sending...' : 'Submit Request'}
-          </button>
-
-          <div style={{ fontSize: 11, color: B.grayMid, textAlign: 'center', marginTop: 8 }}>
-            We'll text you at {formatPhoneDisplay(customer.phone)} when we've reviewed your request
-          </div>
-        </div>
-      )}
-
-      {/* Add a Service — upsell when not in add_service category */}
-      {category !== 'add_service' && !category && (
-        <div style={{
-          background: `linear-gradient(135deg, ${B.wavesBlue}08, ${B.bluePale})`,
-          borderRadius: 14, padding: 18, border: `1px solid ${B.wavesBlue}22`,
-        }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Looking to add a service?</div>
-          <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
-            Expand your coverage with add-on services — tree & shrub care, mosquito barrier, fire ant control, and more.
-          </div>
-          <button onClick={() => onSwitchTab?.('plan')} style={{
-            ...BUTTON_BASE, padding: '9px 16px', fontSize: 12, marginTop: 10,
-            background: B.wavesBlue, color: '#fff',
-          }}>View Add-Ons in My Plan →</button>
-        </div>
-      )}
-
-      {/* Past requests with status pipeline */}
-      {requests.length > 0 && (
-        <>
-          <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>Your Requests</div>
-          {requests.map(r => {
-            const pipeIdx = getPipelineIndex(r.status);
-            return (
-              <div key={r.id} style={{
-                background: B.white, borderRadius: 12, padding: '14px 18px',
-                border: `1px solid ${r.status === 'resolved' || r.status === 'completed' ? B.green + '33' : B.grayLight}`,
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: B.navy }}>{r.subject}</div>
-                  <span style={{
-                    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '3px 8px', borderRadius: 20,
-                    background: pipeIdx >= 3 ? `${B.green}20` : pipeIdx >= 2 ? `${B.bluePale}20` : pipeIdx >= 1 ? `${B.orange}20` : B.bluePale,
-                    color: pipeIdx >= 3 ? B.green : pipeIdx >= 2 ? B.teal : pipeIdx >= 1 ? B.orange : B.wavesBlue,
-                  }}>{PIPELINE_STEPS[pipeIdx]?.label}</span>
-                </div>
-                {/* Pipeline progress */}
-                <div style={{ display: 'flex', gap: 4, marginTop: 10 }}>
-                  {PIPELINE_STEPS.map((step, i) => (
-                    <div key={step.key} style={{ flex: 1, textAlign: 'center' }}>
-                      <div style={{
-                        height: 3, borderRadius: 2, marginBottom: 4,
-                        background: i <= pipeIdx ? (pipeIdx >= 3 ? B.green : B.wavesBlue) : B.grayLight,
-                        transition: 'background 0.3s',
-                      }} />
-                      <div style={{
-                        fontSize: 9, fontWeight: i <= pipeIdx ? 700 : 500,
-                        color: i <= pipeIdx ? B.navy : B.grayMid,
-                      }}>{step.label}</div>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ fontSize: 11, color: B.grayMid, marginTop: 6 }}>
-                  {r.category?.replace('_', ' ')} · {new Date(r.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                  {r.seenAt && ` · Seen ${new Date(r.seenAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`}
-                  {r.scheduledAt && ` · Scheduled ${new Date(r.scheduledAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
-                  {r.completedAt && ` · Done ${new Date(r.completedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
-                </div>
-              </div>
-            );
-          })}
-        </>
-      )}
     </div>
   );
 }
@@ -7756,7 +7174,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         borderBottom: `1px solid ${B.grayLight}`,
         padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
       }}>
-        <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Report an Issue</div>
+        <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>New Request</div>
         <button onClick={onClose} style={{
           background: B.offWhite, border: 'none', cursor: 'pointer', fontSize: 18,
           color: B.grayMid, width: 32, height: 32, borderRadius: '50%',
@@ -8059,7 +7477,6 @@ const TABS = [
   { id: 'plan', label: 'My Plan', icon: '🛡️' },
   { id: 'visits', label: 'Visits', icon: '📅' },
   { id: 'billing', label: 'Billing', icon: '💳' },
-  { id: 'request', label: 'Request', icon: '🆘' },
   { id: 'refer', label: 'Refer & Earn', icon: '🎁' },
   { id: 'documents', label: 'Documents', icon: '📄' },
   { id: 'property', label: 'My Property', icon: '🏡' },
@@ -8249,30 +7666,35 @@ export default function PortalPage() {
   const { customer, logout } = useAuth();
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
-  // Returns [tabId, visitsSubTab]. Legacy ?tab=schedule / ?tab=services
-  // land on the Visits tab with the matching sub-tab preselected so SMS
-  // deep-links keep working after the merge.
-  const [initialTab, initialVisitsSubTab] = (() => {
+  // Returns [tabId, visitsSubTab, openRequest]. Legacy ?tab=schedule /
+  // ?tab=services land on Visits with the matching sub-tab preselected;
+  // ?tab=request opens the request overlay instead of routing to a tab.
+  const [initialTab, initialVisitsSubTab, initialOpenRequest] = (() => {
     try {
       const t = new URLSearchParams(window.location.search).get('tab');
-      if (t === 'schedule') return ['visits', 'upcoming'];
-      if (t === 'services') return ['visits', 'completed'];
-      const allowed = ['dashboard', 'plan', 'visits', 'billing', 'request', 'refer', 'documents', 'property', 'learn'];
-      return [t && allowed.includes(t) ? t : 'dashboard', 'upcoming'];
-    } catch { return ['dashboard', 'upcoming']; }
+      if (t === 'schedule') return ['visits', 'upcoming', false];
+      if (t === 'services') return ['visits', 'completed', false];
+      if (t === 'request') return ['dashboard', 'upcoming', true];
+      const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+      return [t && allowed.includes(t) ? t : 'dashboard', 'upcoming', false];
+    } catch { return ['dashboard', 'upcoming', false]; }
   })();
   const [activeTab, setActiveTab] = useState(initialTab);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
-  // Translates legacy 'schedule' / 'services' targets into the merged Visits
-  // tab so existing call-sites (dashboard quick actions, CTAs, etc.) route
-  // to the correct sub-view without having to be rewritten.
+  const [showMenu, setShowMenu] = useState(false);
+  // "Request" is no longer a tab — it's the same bottom-sheet overlay used
+  // for the FAB. Kept the old state name (showReportIssue) since a lot of
+  // UI hangs off it; only the surfaced copy changed to "New Request".
+  const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest);
+  // Translates legacy 'schedule' / 'services' / 'request' targets into
+  // their consolidated surfaces (Visits sub-tabs, request overlay) so
+  // existing call-sites route correctly without rewriting each one.
   const switchTab = (id) => {
     if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); return; }
     if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); return; }
+    if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
   };
-  const [showMenu, setShowMenu] = useState(false);
-  const [showReportIssue, setShowReportIssue] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const menuRef = useRef(null);
@@ -8380,7 +7802,6 @@ export default function PortalPage() {
         {activeTab === 'plan' && <MyPlanTab customer={customer} />}
         {activeTab === 'visits' && <VisitsTab customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} />}
         {activeTab === 'billing' && <BillingTab customer={customer} />}
-        {activeTab === 'request' && <RequestTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'refer' && <ReferTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab customer={customer} />}
@@ -8441,7 +7862,7 @@ export default function PortalPage() {
           fontSize: 12, fontWeight: 700, fontFamily: FONTS.heading,
           boxShadow: '0 4px 15px rgba(0,0,0,0.2)',
           whiteSpace: 'nowrap',
-        }}>Report an Issue</div>
+        }}>New Request</div>
         <button onClick={() => setShowReportIssue(true)} style={{
           width: 56, height: 56, borderRadius: '50%',
           background: B.red, color: '#fff', border: 'none', cursor: 'pointer',
