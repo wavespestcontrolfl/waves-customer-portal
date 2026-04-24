@@ -226,7 +226,7 @@ export default function LoginPage() {
               style={{
                 ...BUTTON_BASE, width: '100%', padding: 12,
                 background: 'transparent', color: B.wavesBlue,
-                fontSize: 13, fontWeight: 600, marginTop: 8,
+                fontSize: 14, fontWeight: 600, marginTop: 8,
               }}
             >
               ← Use a different number
@@ -237,7 +237,7 @@ export default function LoginPage() {
         {error && (
           <div style={{
             marginTop: 14, padding: '12px 14px', borderRadius: 10,
-            background: '#FFEBEE', color: B.red, fontSize: 13, fontWeight: 500, lineHeight: 1.5,
+            background: '#FFEBEE', color: B.red, fontSize: 14, fontWeight: 500, lineHeight: 1.5,
           }}>
             {error === 'No account found for this phone number'
               ? "Hmm, we don't have that number on file. Give us a call at (941) 297-5749 and we'll get you set up."

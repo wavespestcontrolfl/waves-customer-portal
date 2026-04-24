@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import BrandFooter from "../components/BrandFooter";
 import { Button } from "../components/Button";
+import Icon from "../components/Icon";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -307,7 +308,7 @@ export default function BookingPage() {
                 borderRadius: 14, padding: "32px 20px",
                 textAlign: "center",
               }}>
-                <div style={{ fontSize: 28, marginBottom: 12 }}>📭</div>
+                <div style={{ marginBottom: 12, color: COLORS.slate400 }}><Icon name="mail" size={28} strokeWidth={1.5} /></div>
                 <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.blueDeeper, marginBottom: 6 }}>
                   No availability this period
                 </div>

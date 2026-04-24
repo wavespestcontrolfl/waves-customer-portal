@@ -167,7 +167,7 @@ export default function AutopayCard() {
   };
 
   const btn = (kind = 'primary') => ({
-    padding: '10px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600,
+    padding: '10px 14px', borderRadius: 8, fontSize: 14, fontWeight: 600,
     cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1,
     fontFamily: FONTS.heading,
     border: kind === 'primary' ? 'none' : `1px solid ${B.grayLight}`,
@@ -194,14 +194,14 @@ export default function AutopayCard() {
                 : 'Auto-pay is off — charges will not run automatically'}
           </div>
           {activeCard && state !== 'disabled' && (
-            <div style={{ fontSize: 13, color: B.grayMid, marginTop: 4 }}>
+            <div style={{ fontSize: 14, color: B.grayMid, marginTop: 4 }}>
               Charging {activeCard.brand || 'card'} ending in {activeCard.last4}
             </div>
           )}
         </div>
       </div>
 
-      {err && <div style={{ color: B.red, fontSize: 13 }}>{err}</div>}
+      {err && <div style={{ color: B.red, fontSize: 14 }}>{err}</div>}
 
       {/* Actions row */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -232,11 +232,11 @@ export default function AutopayCard() {
         } onClose={() => { setModal(null); setErr(''); }}>
           {modal === 'pause' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <label style={{ fontSize: 13, color: B.grayDark, fontWeight: 600 }}>Pause until</label>
+              <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Pause until</label>
               <input type="date" value={pauseUntil} onChange={(e) => setPauseUntil(e.target.value)}
                 min={etDateString(addETDays(new Date(), 1))}
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${B.grayLight}`, borderRadius: 8 }} />
-              <label style={{ fontSize: 13, color: B.grayDark, fontWeight: 600 }}>Reason (optional)</label>
+              <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Reason (optional)</label>
               <textarea value={pauseReason} onChange={(e) => setPauseReason(e.target.value)} rows={2}
                 placeholder="e.g. Out of town for the month"
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${B.grayLight}`, borderRadius: 8, fontFamily: FONTS.body }} />
@@ -252,7 +252,7 @@ export default function AutopayCard() {
           {modal === 'card' && !addingCard && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {payment_methods.length === 0 ? (
-                <div style={{ fontSize: 13, color: B.grayMid }}>No cards on file yet — add one below.</div>
+                <div style={{ fontSize: 14, color: B.grayMid }}>No cards on file yet — add one below.</div>
               ) : (
                 payment_methods.map((pm) => (
                   <label key={pm.id} style={{
@@ -286,7 +286,7 @@ export default function AutopayCard() {
           {modal === 'card' && addingCard && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div ref={mountRef} style={{ minHeight: 180 }} />
-              {!stripeReady && <div style={{ fontSize: 13, color: B.grayMid }}>Loading payment form…</div>}
+              {!stripeReady && <div style={{ fontSize: 14, color: B.grayMid }}>Loading payment form…</div>}
               {/* Save-card authorization — locked because saving is the
                   whole purpose of this modal. Shown so the consent row
                   reflects the copy the customer saw. */}
@@ -302,7 +302,7 @@ export default function AutopayCard() {
 
           {modal === 'day' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <label style={{ fontSize: 13, color: B.grayDark, fontWeight: 600 }}>Charge day of month (1–28)</label>
+              <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Charge day of month (1–28)</label>
               <input type="number" min={1} max={28} value={selectedDay}
                 onChange={(e) => setSelectedDay(parseInt(e.target.value) || 1)}
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${B.grayLight}`, borderRadius: 8 }} />

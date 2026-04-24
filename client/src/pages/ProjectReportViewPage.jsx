@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
+import Icon from '../components/Icon';
 
 /**
  * Public project-report viewer (WDO, termite, pest, rodent, bed bug).
@@ -73,7 +74,7 @@ export default function ProjectReportViewPage() {
   if (!data || data.error) return (
     <div style={{ minHeight: '100vh', background: B.blueDark, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
-        <div style={{ fontSize: 32 }}>📄</div>
+        <div style={{ color: B.grayMid }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>Report not found</div>
         <a href="tel:+19412975749" style={{
           ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999,
@@ -112,7 +113,7 @@ export default function ProjectReportViewPage() {
               fontSize: 20, color: '#fff',
               letterSpacing: '0.02em', lineHeight: 1, margin: 0,
             }}>{typeLabel}</h1>
-            <div style={{ fontSize: 11, color: B.blueLight, marginTop: 4 }}>{data.customerName}</div>
+            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4 }}>{data.customerName}</div>
           </div>
         </div>
       </div>
@@ -123,7 +124,7 @@ export default function ProjectReportViewPage() {
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
             {data.title || typeLabel}
           </div>
-          <div style={{ fontSize: 13, color: B.grayDark, marginTop: 4 }}>
+          <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4 }}>
             {data.sentAt && new Date(data.sentAt).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
             {data.technicianName ? ` · ${data.technicianName}` : ''}
           </div>
@@ -140,8 +141,8 @@ export default function ProjectReportViewPage() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {findingsEntries.map(([key, value]) => (
                   <div key={key} style={{ padding: '10px 12px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
-                    <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
+                    <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
                   </div>
                 ))}
               </div>
@@ -174,8 +175,8 @@ export default function ProjectReportViewPage() {
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {Object.entries(data.followupFindings).filter(([, v]) => v).map(([key, value]) => (
                   <div key={key} style={{ padding: '8px 10px', borderRadius: 8, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: B.navy }}>{humanizeKey(key)}</div>
-                    <div style={{ fontSize: 13, color: B.grayDark, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: B.navy }}>{humanizeKey(key)}</div>
+                    <div style={{ fontSize: 14, color: B.grayDark, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
                   </div>
                 ))}
               </div>
@@ -190,13 +191,13 @@ export default function ProjectReportViewPage() {
 
         {/* CTA */}
         <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
-          <div style={{ fontSize: 13, color: B.grayDark }}>Questions about this report?</div>
+          <div style={{ fontSize: 14, color: B.grayDark }}>Questions about this report?</div>
           <a href="sms:+19412975749" style={{
             ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14, marginTop: 8,
             borderRadius: 999, background: B.yellow, color: B.blueDeeper,
             textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
             fontWeight: 800,
-          }}>💬 Text Us — (941) 297-5749</a>
+          }}><Icon name="message" size={16} strokeWidth={2} style={{ marginRight: 6 }} /> Text Us — (941) 297-5749</a>
         </div>
 
         <BrandFooter />
@@ -290,7 +291,7 @@ function RecommendationsBlock({ text }) {
             <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               {titleCase(s.heading)}
             </div>
-            <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
+            <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
           </div>
         ))}
       </div>
@@ -299,7 +300,7 @@ function RecommendationsBlock({ text }) {
   return (
     <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Recommendations</div>
-      <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
+      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
     </div>
   );
 }
