@@ -439,6 +439,17 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               title="Open Waves Tech app to tap customer's card/phone"
                             >Charge in person</button>
                           )}
+                          {inv.status !== 'void' && inv.token && (
+                            <a
+                              href={inv.status === 'paid' ? `${API_BASE}/receipt/${inv.token}/pdf` : `${API_BASE}/pay/${inv.token}/invoice.pdf`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ ...sBtn(D.card, D.text, isMobile), textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+                              title={inv.status === 'paid' ? 'Download the receipt PDF' : 'Download the invoice PDF'}
+                            >
+                              Download PDF
+                            </a>
+                          )}
                           {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
                           {sendReceiptEnabled && inv.status === 'paid' && (
                             <button
