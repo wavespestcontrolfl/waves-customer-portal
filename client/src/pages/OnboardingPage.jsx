@@ -422,7 +422,7 @@ export default function OnboardingPage() {
               )}
               {q.depositAmount > 0 && !payAtVisit && (
                 <div style={{ fontSize: 14, color: B.grayDark, marginTop: 6 }}>
-                  50% deposit: ${q.depositAmount.toFixed(2)} due today
+                  We'll charge ${q.depositAmount.toFixed(2)} on the visit day. Add a card on file to lock your slot.
                 </div>
               )}
               {payAtVisit && (
@@ -473,7 +473,7 @@ export default function OnboardingPage() {
 
                 {q.depositAmount > 0 && (
                   <div style={{ fontSize: 14, color: B.grayDark, fontWeight: 600, marginBottom: 12 }}>
-                    Deposit of ${q.depositAmount.toFixed(2)} will be charged now
+                    We'll charge ${q.depositAmount.toFixed(2)} on your visit day — nothing now.
                   </div>
                 )}
 

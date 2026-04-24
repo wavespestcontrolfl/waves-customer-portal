@@ -651,14 +651,14 @@ ${shellTopBar()}
       <h3 style="margin:20px 0 4px">How would you like to pay?</h3>
       <p class="card-sub" style="margin:0">Both options reserve your slot. You will not be charged until you confirm on the next screen.</p>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" data-pay-pref="deposit_now"><span class="pay-pref-title">Deposit now with card</span><span class="pay-pref-sub">Secure your slot with a small card-on-file deposit. Pay the rest at the visit.</span></button>
+        <button type="button" class="pay-pref-btn primary" data-pay-pref="deposit_now"><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
         <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit"><span class="pay-pref-title">Pay at the visit</span><span class="pay-pref-sub">We will collect payment with the tech on-site. No card needed now.</span></button>
       </div>
     </div>
     <div id="review-area" style="display:none">
       <div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn" onclick="confirmBooking()"><span class="pay-pref-title" id="confirm-book-title">Confirm and pay deposit</span><span class="pay-pref-sub">You will be taken to a secure Stripe page to complete the deposit.</span></button>
+        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn" onclick="confirmBooking()"><span class="pay-pref-title" id="confirm-book-title">Confirm and save card</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
         <button type="button" class="pay-pref-btn" onclick="cancelReservation()"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>
       </div>
     </div>
@@ -906,8 +906,8 @@ ${shellQuestionsBar()}
       const title = document.getElementById('confirm-book-title');
       const sub = document.getElementById('confirm-book-sub');
       if (pref === 'deposit_now') {
-        if (title) title.textContent = 'Confirm and enter payment';
-        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · next step collects your card securely via Stripe.';
+        if (title) title.textContent = 'Confirm and save card';
+        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · next step adds your card on file. We charge on the visit day, not now.';
       } else {
         if (title) title.textContent = 'Confirm and book';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · pay at the visit, no card needed now.';
