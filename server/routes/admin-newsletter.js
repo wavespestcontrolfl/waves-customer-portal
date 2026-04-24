@@ -123,11 +123,14 @@ router.delete('/subscribers/:id', async (req, res, next) => {
 // GET /api/admin/newsletter/sends
 router.get('/sends', async (req, res, next) => {
   try {
+    // Order by effective send date (sent_at for sent rows, otherwise created_at)
+    // so Beehiiv-imported historical posts slot into chronological order
+    // instead of bunching at "now" by import time.
     const rows = await db('newsletter_sends')
       .leftJoin('technicians', 'newsletter_sends.created_by', 'technicians.id')
       .select('newsletter_sends.*', 'technicians.name as created_by_name')
-      .orderBy('newsletter_sends.created_at', 'desc')
-      .limit(200);
+      .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')
+      .limit(500);
     res.json({ sends: rows });
   } catch (err) { next(err); }
 });
@@ -398,6 +401,96 @@ ${tone ? `Tone: ${tone}` : ''}`;
     res.json({ success: true, draft });
   } catch (err) {
     logger.error(`[newsletter] draft-ai failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/newsletter/import-beehiiv — pull every Beehiiv post,
+// upsert into newsletter_sends so the in-portal History shows the full
+// historical campaign archive (subjects, stats, content, web URL).
+//
+// Automation email bodies are NOT accessible via the Beehiiv API — only
+// the automation list (which we already have hard-coded in
+// email-automations.js). This endpoint only imports broadcast posts.
+router.post('/import-beehiiv', async (req, res) => {
+  try {
+    if (!process.env.BEEHIIV_API_KEY || !process.env.BEEHIIV_PUB_ID) {
+      return res.status(400).json({ error: 'Beehiiv not configured (BEEHIIV_API_KEY / BEEHIIV_PUB_ID missing)' });
+    }
+
+    const key = process.env.BEEHIIV_API_KEY;
+    const pub = process.env.BEEHIIV_PUB_ID.trim();
+
+    let page = 1;
+    let imported = 0;
+    let updated = 0;
+    let skipped = 0;
+    const maxPages = 20;  // safety stop
+
+    while (page <= maxPages) {
+      const url = `https://api.beehiiv.com/v2/publications/${pub}/posts?limit=50&page=${page}&expand[]=free_email_content&expand[]=stats`;
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+      if (!r.ok) {
+        const text = await r.text();
+        logger.error(`[newsletter/import-beehiiv] page ${page} failed: ${r.status} ${text}`);
+        return res.status(502).json({ error: `Beehiiv API ${r.status}: ${text.slice(0, 200)}` });
+      }
+      const body = await r.json();
+      const posts = body.data || [];
+      if (!posts.length) break;
+
+      for (const p of posts) {
+        const externalId = p.id;
+        const existing = await db('newsletter_sends').where({ external_post_id: externalId }).first();
+
+        // Beehiiv publish_date can be unix-seconds or ms — normalize.
+        let publishMs = null;
+        if (p.publish_date) {
+          publishMs = typeof p.publish_date === 'number'
+            ? (p.publish_date < 1e12 ? p.publish_date * 1000 : p.publish_date)
+            : new Date(p.publish_date).getTime();
+        }
+
+        const emailStats = p.stats?.email || {};
+        const status = p.status === 'confirmed' ? 'sent' : 'draft';
+
+        const row = {
+          subject: p.subject_line || p.title || '(no subject)',
+          html_body: p.content?.free?.email || null,
+          text_body: null,
+          preview_text: p.preview_text || null,
+          status,
+          recipient_count: emailStats.recipients || 0,
+          delivered_count: emailStats.delivered || 0,
+          bounced_count: emailStats.spam_reports || 0,
+          complained_count: emailStats.complaints || 0,
+          unsubscribed_count: emailStats.unsubscribes || 0,
+          opened_count: emailStats.unique_opens || emailStats.opens || 0,
+          clicked_count: emailStats.unique_clicks || emailStats.clicks || 0,
+          sent_at: publishMs && status === 'sent' ? new Date(publishMs) : null,
+          external_post_id: externalId,
+          external_source: 'beehiiv',
+          external_web_url: p.web_url || null,
+          updated_at: new Date(),
+        };
+
+        if (existing) {
+          await db('newsletter_sends').where({ id: existing.id }).update(row);
+          updated++;
+        } else {
+          await db('newsletter_sends').insert(row);
+          imported++;
+        }
+      }
+
+      if (posts.length < 50) break;  // last page
+      page++;
+    }
+
+    logger.info(`[newsletter/import-beehiiv] imported=${imported} updated=${updated} skipped=${skipped}`);
+    res.json({ success: true, imported, updated, skipped });
+  } catch (err) {
+    logger.error(`[newsletter/import-beehiiv] failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
