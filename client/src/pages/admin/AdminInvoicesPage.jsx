@@ -858,7 +858,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
 
           {/* Customer Search */}
           <div style={{ marginBottom: 16 }}>
-            <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Customer</label>
             {selectedCustomer ? (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: D.input, borderRadius: 8, padding: '10px 12px', border: `1px solid ${D.teal}`, flexWrap: 'wrap', gap: 8 }}>
                 <div>
@@ -910,7 +909,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
 
           {/* Line Items */}
           <div style={{ marginBottom: 16 }}>
-            <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 8 }}>Line Items</label>
             {lineItems.map((item, i) => (
               <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
                 <div style={{ position: 'relative', flex: isMobile ? '1 1 100%' : 3 }}>
@@ -964,7 +962,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           {/* Notes */}
           <div style={{ marginBottom: 16 }}>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Notes (optional)</label>
-            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="Internal or customer-facing notes" style={{ ...sInput(isMobile), resize: 'vertical' }} />
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="" style={{ ...sInput(isMobile), resize: 'vertical' }} />
           </div>
 
           {/* Send toggle */}
@@ -973,8 +971,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <label htmlFor="send-toggle" style={{ fontSize: 13, color: D.text }}>Send via SMS + email immediately after creating</label>
           </div>
 
-          <button onClick={handleCreate} disabled={saving} style={{ ...sBtn(D.green, D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1 }}>
-            {saving ? 'Creating...' : sendAfterCreate ? 'Create & Send Invoice' : 'Create Draft'}
+          <button onClick={handleCreate} disabled={saving} style={{ ...sBtn('#111', D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1 }}>
+            {saving ? 'Creating...' : sendAfterCreate ? 'Send Invoice' : 'Create Draft'}
           </button>
         </div>
       </div>
