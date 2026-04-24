@@ -148,13 +148,10 @@ export default function ProjectReportViewPage() {
             </div>
           )}
 
-          {/* Recommendations */}
-          {data.recommendations && (
-            <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Recommendations</div>
-              <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{data.recommendations}</div>
-            </div>
-          )}
+          {/* Recommendations — if the text is the three-section AI-drafted
+               format, render each section with its own heading. Otherwise
+               fall back to the single "Recommendations" block. */}
+          {data.recommendations && <RecommendationsBlock text={data.recommendations} />}
         </div>
 
         {/* Primary visit photos */}
@@ -252,6 +249,57 @@ function PhotoGrid({ title, photos, noCard }) {
   return (
     <div style={{ marginTop: 16, background: '#fff', borderRadius: 16, padding: 20, border: `1px solid ${B.bluePale}` }}>
       {content}
+    </div>
+  );
+}
+
+// Heuristic: if the text contains all three section markers, split it into
+// named sections and render each with its own heading. Otherwise render the
+// whole block under a single "Recommendations" heading like before.
+const SECTION_HEADINGS = ['WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE RECOMMEND'];
+
+function parseSections(text) {
+  const hasAll = SECTION_HEADINGS.every(h => text.includes(h));
+  if (!hasAll) return null;
+  const sections = [];
+  const headingPattern = new RegExp(`^(${SECTION_HEADINGS.join('|')})\\s*$`, 'gm');
+  const indices = [];
+  let m;
+  while ((m = headingPattern.exec(text)) !== null) {
+    indices.push({ heading: m[1], start: m.index, contentStart: m.index + m[0].length });
+  }
+  for (let i = 0; i < indices.length; i++) {
+    const end = i + 1 < indices.length ? indices[i + 1].start : text.length;
+    const body = text.slice(indices[i].contentStart, end).trim();
+    if (body) sections.push({ heading: indices[i].heading, body });
+  }
+  return sections.length === SECTION_HEADINGS.length ? sections : null;
+}
+
+function titleCase(s) {
+  return s.split(' ').map(w => w[0] + w.slice(1).toLowerCase()).join(' ');
+}
+
+function RecommendationsBlock({ text }) {
+  const sections = parseSections(text);
+  if (sections) {
+    return (
+      <div style={{ marginTop: 16, padding: '16px 18px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
+        {sections.map((s, i) => (
+          <div key={s.heading} style={{ marginTop: i === 0 ? 0 : 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              {titleCase(s.heading)}
+            </div>
+            <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Recommendations</div>
+      <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
     </div>
   );
 }
