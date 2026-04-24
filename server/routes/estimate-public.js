@@ -343,13 +343,45 @@ function renderPage(token, estimate, estData) {
     return `<tr><td>${escapeHtml(s.name)}</td><td style="text-align:right">${fmtMoney(discounted)}/mo</td></tr>`;
   }).join('');
 
-  // Services for the hero eyebrow — falls back to one-time items for one-time-only
-  // estimates, then to the tier label so the eyebrow never renders empty.
-  const quotedServiceNames = recurring.map((s) => s.name).filter(Boolean);
+  // Services for the hero eyebrow with frequency prefix — e.g.
+  // "Quarterly Pest Control + Monthly Lawn Care". Per-service frequency
+  // comes from the engine's R block (estResult.results); falls back to the
+  // bare name when we can't resolve a clean frequency label.
+  const R = estResult?.results || {};
+  const visitsToLabel = (v) => {
+    const n = Number(v);
+    if (n === 12) return 'Monthly';
+    if (n === 6) return 'Bi-monthly';
+    if (n === 4) return 'Quarterly';
+    if (n === 26) return 'Bi-weekly';
+    if (n === 8) return '8-visit';
+    if (n === 2) return 'Semi-annual';
+    if (n === 1) return 'Annual';
+    return null;
+  };
+  const visitsForService = (name) => {
+    const n = String(name || '').toLowerCase();
+    if (n.includes('pest')) return R.pest?.apps;
+    if (n.includes('lawn') && Array.isArray(R.lawn)) {
+      const sel = R.lawn.find((t) => t.recommended) || R.lawn[0];
+      return sel?.v;
+    }
+    if (n.includes('mosquito') && Array.isArray(R.mq)) {
+      const sel = R.mq.find((t) => t.recommended) || R.mq[0];
+      return sel?.v;
+    }
+    if (n.includes('tree') && Array.isArray(R.ts)) return R.ts[0]?.v;
+    return null;
+  };
+  const labelWithFreq = (name) => {
+    const freq = visitsToLabel(visitsForService(name));
+    return freq ? `${freq} ${name}` : name;
+  };
+  const quotedServiceNames = recurring.map((s) => labelWithFreq(s.name)).filter(Boolean);
   const quotedOneTimeNames = oneTimeItems.map((it) => it.name).filter(Boolean);
   const quotedServicesLabel = quotedServiceNames.length
-    ? quotedServiceNames.join(' · ')
-    : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' · ') : `WaveGuard ${tier}`);
+    ? quotedServiceNames.join(' + ')
+    : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' + ') : `WaveGuard ${tier}`);
 
   // WaveGuard Membership — $99 initial fee rolled into oneTimeTotal by the
   // pricing engine but not into oneTime.items[]. Surface it as its own
