@@ -1,17 +1,22 @@
 // client/src/pages/admin/EmailAutomationsPanelV2.jsx
-// Monochrome V2 of EmailAutomationsPanel. Strict 1:1 on endpoints + state:
-//   GET  /admin/email-automations/automations
-//   GET  /admin/email-automations/stats
-//   GET  /admin/email-automations/log?limit=50
-//   POST /admin/email-automations/trigger        { automationKey, customerId }
-//   PUT  /admin/email-automations/automations/:key  { enabled }
-//   GET  /admin/customers?search=...&limit=10
-// alert-fg reserved for: Failed automation status row + Beehiiv-not-configured banner.
+// Automations v2 — in-house SendGrid-backed automation sequences.
+// Replaces the Beehiiv-facing panel. Endpoints:
+//   GET    /admin/automations/templates
+//   GET    /admin/automations/templates/:key
+//   PUT    /admin/automations/templates/:key
+//   POST   /admin/automations/templates/:key/steps
+//   PUT    /admin/automations/steps/:id
+//   DELETE /admin/automations/steps/:id
+//   POST   /admin/automations/draft-ai
+//   POST   /admin/automations/templates/:key/test
+//   POST   /admin/automations/templates/:key/trigger
+//   GET    /admin/automations/enrollments
+//
+// Legacy /admin/email-automations/* kept working behind the scenes;
+// this UI is the v2 surface.
+
 import { useState, useEffect, useCallback } from 'react';
-import {
-  Badge, Button, Card, CardBody, Input, Switch,
-  Table, THead, TBody, TR, TH, TD, cn,
-} from '../../components/ui';
+import { Badge, Button, Card, Switch, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -22,394 +27,419 @@ function adminFetch(path, options = {}) {
       'Content-Type': 'application/json',
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+  }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+    return data;
   });
 }
 
-function timeAgo(d) {
-  if (!d) return '';
-  const mins = Math.floor((Date.now() - new Date(d)) / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
-
 export default function EmailAutomationsPanelV2() {
-  const [tab, setTab] = useState('send');
-  const [automations, setAutomations] = useState([]);
-  const [log, setLog] = useState([]);
-  const [stats, setStats] = useState(null);
+  const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [beehiivConfigured, setBeehiivConfigured] = useState(false);
+  const [selectedKey, setSelectedKey] = useState(null);
   const [toast, setToast] = useState('');
 
-  const loadData = useCallback(async () => {
-    const [autoData, statsData, logData] = await Promise.all([
-      adminFetch('/admin/email-automations/automations').catch(() => ({ automations: [] })),
-      adminFetch('/admin/email-automations/stats').catch(() => null),
-      adminFetch('/admin/email-automations/log?limit=50').catch(() => ({ log: [] })),
-    ]);
-    setAutomations(autoData.automations || []);
-    setBeehiivConfigured(autoData.beehiivConfigured);
-    setStats(statsData);
-    setLog(logData.log || []);
-    setLoading(false);
+  const load = useCallback(() => {
+    setLoading(true);
+    adminFetch('/admin/automations/templates')
+      .then((d) => setTemplates(d.templates || []))
+      .catch((e) => setToast('Load failed: ' + e.message))
+      .finally(() => setLoading(false));
   }, []);
+  useEffect(() => { load(); }, [load]);
 
-  useEffect(() => { loadData(); }, [loadData]);
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
-
-  if (loading) return <div className="p-10 text-center text-ink-tertiary text-13">Loading email automations…</div>;
-
-  const TABS = [
-    { key: 'send', label: 'Send to Customer' },
-    { key: 'automations', label: 'Automations' },
-    { key: 'log', label: 'Activity Log' },
-  ];
+  const toggleEnabled = async (tpl) => {
+    try {
+      await adminFetch(`/admin/automations/templates/${tpl.key}`, { method: 'PUT', body: JSON.stringify({ enabled: !tpl.enabled }) });
+      load();
+    } catch (e) { setToast('Toggle failed: ' + e.message); }
+  };
 
   return (
-    <div>
-      {/* Header */}
-      <div className="flex justify-between items-start mb-4 gap-3 flex-wrap">
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
         <div>
-          <div className="text-22 tracking-tight text-ink-primary">Email Automations</div>
-          <div className="text-13 text-ink-tertiary mt-1 flex items-center gap-2 flex-wrap">
-            <span>Beehiiv + SMS — manual triggers</span>
-            {beehiivConfigured
-              ? <Badge tone="strong">Beehiiv Connected</Badge>
-              : <Badge tone="alert">Beehiiv Not Configured</Badge>}
-          </div>
+          <h2 className="text-18 font-medium text-zinc-900">Automations</h2>
+          <p className="text-12 text-ink-secondary mt-0.5">
+            Transactional email sequences sent via SendGrid. Fill in step content per automation — once a template has a step with a body, the runtime switches that automation off Beehiiv and onto local send automatically.
+          </p>
         </div>
+        {toast && <span className="text-11 text-ink-secondary">{toast}</span>}
       </div>
 
-      {/* Stats */}
-      {stats && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-5">
-          {[
-            { label: 'Total Sent', value: stats.total },
-            { label: 'Last 24h', value: stats.last24h },
-            { label: 'Last 7d', value: stats.last7d },
-            { label: 'Success', value: stats.success },
-            { label: 'Customers Reached', value: stats.uniqueCustomers },
-          ].map((s) => (
-            <div key={s.label} className="bg-white border-hairline border-zinc-200 rounded-md p-3 text-center">
-              <div className="text-22 font-mono u-nums text-ink-primary">{s.value}</div>
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mt-0.5">{s.label}</div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Tab pills */}
-      <div className="flex gap-1 mb-5 bg-white border-hairline rounded-md p-1 w-fit">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            onClick={() => setTab(t.key)}
-            className={cn(
-              'min-h-[44px] md:min-h-0 md:h-8 px-4 py-2 md:py-0 inline-flex items-center rounded-sm text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label transition-colors',
-              tab === t.key
-                ? 'bg-zinc-900 text-white'
-                : 'text-ink-secondary hover:bg-zinc-50',
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'send' && <SendTabV2 automations={automations} showToast={showToast} onSent={loadData} />}
-      {tab === 'automations' && <AutomationsTabV2 automations={automations} showToast={showToast} onUpdate={loadData} />}
-      {tab === 'log' && <LogTabV2 log={log} onRefresh={loadData} />}
-
-      {/* Toast */}
-      <div
-        className={cn(
-          'fixed bottom-5 right-5 bg-white border-hairline border-zinc-900 rounded-md px-4 py-2',
-          'flex items-center gap-2 shadow-lg z-[300] text-12 transition-all pointer-events-none',
-          toast ? 'translate-y-0 opacity-100' : 'translate-y-20 opacity-0',
-        )}
-      >
-        <span className="text-ink-primary">✓</span>
-        <span className="text-ink-secondary">{toast}</span>
-      </div>
-    </div>
-  );
-}
-
-// ── Send Tab ────────────────────────────────────────────────────────
-
-function SendTabV2({ automations, showToast, onSent }) {
-  const [search, setSearch] = useState('');
-  const [customers, setCustomers] = useState([]);
-  const [selectedCustomer, setSelectedCustomer] = useState(null);
-  const [selectedAuto, setSelectedAuto] = useState('');
-  const [sending, setSending] = useState(false);
-  const [result, setResult] = useState(null);
-  const [searching, setSearching] = useState(false);
-
-  const doSearch = async (q) => {
-    setSearch(q);
-    if (q.length < 2) { setCustomers([]); return; }
-    setSearching(true);
-    try {
-      const d = await adminFetch(`/admin/customers?search=${encodeURIComponent(q)}&limit=10`);
-      setCustomers(d.customers || []);
-    } catch { setCustomers([]); }
-    setSearching(false);
-  };
-
-  const handleSend = async () => {
-    if (!selectedCustomer || !selectedAuto) { showToast('Select a customer and automation'); return; }
-    setSending(true);
-    setResult(null);
-    try {
-      const r = await adminFetch('/admin/email-automations/trigger', {
-        method: 'POST',
-        body: JSON.stringify({ automationKey: selectedAuto, customerId: selectedCustomer.id }),
-      });
-      setResult(r);
-      if (r.success) showToast(`Sent "${automations.find((a) => a.key === selectedAuto)?.name}" to ${selectedCustomer.firstName}`);
-      else showToast(r.error || 'Failed');
-      onSent();
-    } catch (e) {
-      showToast(`Failed: ${e.message}`);
-      setResult({ error: e.message });
-    }
-    setSending(false);
-  };
-
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-      {/* Left: customer search */}
-      <Card>
-        <CardBody>
-          <div className="text-13 font-medium text-ink-primary mb-3">1. Select Customer</div>
-          <Input
-            value={search}
-            onChange={(e) => doSearch(e.target.value)}
-            placeholder="Search by name, phone, or email…"
-            className="h-11 md:h-9 text-16 md:text-13 min-h-[44px] md:min-h-0"
-          />
-          {searching && <div className="text-12 text-ink-tertiary mt-2">Searching…</div>}
-
-          <div className="mt-2 max-h-[300px] overflow-y-auto">
-            {customers.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                onClick={() => { setSelectedCustomer(c); setCustomers([]); setSearch(`${c.firstName} ${c.lastName}`); }}
-                className={cn(
-                  'w-full text-left p-2.5 rounded-sm mb-1 border-hairline transition-colors',
-                  selectedCustomer?.id === c.id
-                    ? 'bg-zinc-50 border-zinc-900'
-                    : 'bg-white border-transparent hover:bg-zinc-50',
-                )}
-              >
-                <div className="text-13 font-medium text-ink-primary">{c.firstName} {c.lastName}</div>
-                <div className="text-11 text-ink-tertiary flex items-center gap-1.5 flex-wrap mt-0.5">
-                  {c.phone && <span>{c.phone}</span>}
-                  {c.email && <span>· {c.email}</span>}
-                  {c.pipelineStage && <Badge tone="neutral">{c.pipelineStage}</Badge>}
-                </div>
-              </button>
-            ))}
-          </div>
-
-          {selectedCustomer && (
-            <div className="mt-3 p-3 bg-zinc-50 rounded-md border-hairline border-zinc-900">
-              <div className="text-13 font-medium text-ink-primary">
-                Selected: {selectedCustomer.firstName} {selectedCustomer.lastName}
-              </div>
-              <div className="text-12 text-ink-tertiary mt-1">
-                {selectedCustomer.email || 'No email'} · {selectedCustomer.phone || 'No phone'}
-              </div>
-              {!selectedCustomer.email && (
-                <div className="text-12 text-alert-fg mt-1">No email — Beehiiv will be skipped</div>
-              )}
-            </div>
-          )}
-        </CardBody>
-      </Card>
-
-      {/* Right: pick automation */}
-      <Card>
-        <CardBody>
-          <div className="text-13 font-medium text-ink-primary mb-3">2. Pick Automation & Send</div>
-
-          <div className="grid gap-2 mb-4">
-            {automations.filter((a) => a.enabled).map((a) => (
-              <button
-                key={a.key}
-                type="button"
-                onClick={() => setSelectedAuto(a.key)}
-                className={cn(
-                  'text-left p-3 rounded-sm border-hairline transition-colors',
-                  selectedAuto === a.key
-                    ? 'bg-zinc-50 border-zinc-900'
-                    : 'bg-white border-zinc-300 hover:bg-zinc-50',
-                )}
-              >
-                <div className="flex justify-between items-start gap-2 flex-wrap">
-                  <div className="text-13 font-medium text-ink-primary">{a.name}</div>
-                  <div className="flex gap-1 flex-wrap">
-                    {a.smsTemplate && <Badge tone="strong">+ SMS</Badge>}
-                    {a.tags?.map((t) => <Badge key={t} tone="neutral">{t}</Badge>)}
-                  </div>
-                </div>
-                <div className="text-12 text-ink-tertiary mt-1">{a.description}</div>
-              </button>
-            ))}
-          </div>
-
-          <Button
-            variant="primary"
-            onClick={handleSend}
-            disabled={sending || !selectedCustomer || !selectedAuto}
-            className="w-full"
-          >
-            {sending ? 'Sending…' : `Send ${automations.find((a) => a.key === selectedAuto)?.name || 'Automation'}`}
-          </Button>
-
-          {result && (
-            <div
-              className={cn(
-                'mt-3 p-3 rounded-md border-hairline',
-                result.success ? 'bg-zinc-50 border-zinc-900' : 'bg-alert-bg border-alert-fg',
-              )}
-            >
-              <div className={cn('text-13 font-medium', result.success ? 'text-ink-primary' : 'text-alert-fg')}>
-                {result.success ? '✓ Sent successfully' : `✗ ${result.error || 'Failed'}`}
-              </div>
-              {result.beehiiv && !result.beehiiv.error && (
-                <div className="text-12 text-ink-tertiary mt-1">
-                  Beehiiv: subscribed + tagged [{result.beehiiv.tags?.join(', ')}]
-                </div>
-              )}
-              {result.beehiiv?.skipped && (
-                <div className="text-12 text-ink-tertiary mt-1">Beehiiv: {result.beehiiv.skipped}</div>
-              )}
-              {result.sms?.sent && (
-                <div className="text-12 text-ink-tertiary mt-1">SMS: sent to {result.sms.to}</div>
-              )}
-            </div>
-          )}
-        </CardBody>
-      </Card>
-    </div>
-  );
-}
-
-// ── Automations Tab ─────────────────────────────────────────────────
-
-function AutomationsTabV2({ automations, showToast, onUpdate }) {
-  const toggleAuto = async (key, enabled) => {
-    try {
-      await adminFetch(`/admin/email-automations/automations/${key}`, {
-        method: 'PUT',
-        body: JSON.stringify({ enabled }),
-      });
-      showToast(`${key} ${enabled ? 'enabled' : 'disabled'}`);
-      onUpdate();
-    } catch (e) { showToast(`Failed: ${e.message}`); }
-  };
-
-  return (
-    <div className="grid gap-2">
-      {automations.map((a) => (
-        <Card key={a.key}>
-          <CardBody>
-            <div className={cn('flex items-start gap-4', !a.enabled && 'opacity-50')}>
-              <div className="flex-1">
-                <div className="flex justify-between items-center mb-1 gap-3 flex-wrap">
-                  <div className="text-14 font-medium text-ink-primary">{a.name}</div>
-                  <Switch checked={a.enabled} onChange={(v) => toggleAuto(a.key, v)} />
-                </div>
-                <div className="text-13 text-ink-tertiary mb-2">{a.description}</div>
-                <div className="flex gap-1.5 flex-wrap mb-2">
-                  <Badge tone="neutral">Manual trigger</Badge>
-                  {a.tags?.map((t) => <Badge key={t} tone="neutral">tag: {t}</Badge>)}
-                  {a.smsTemplate && <Badge tone="strong">+ SMS</Badge>}
-                </div>
-                <div className="flex gap-4 text-12 text-ink-tertiary flex-wrap">
-                  <span>Total: <span className="font-mono u-nums text-ink-primary font-medium">{a.totalRuns}</span></span>
-                  <span>Success: <span className="font-mono u-nums text-ink-primary font-medium">{a.successCount}</span></span>
-                  <span>Last 7d: <span className="font-mono u-nums text-ink-primary font-medium">{a.last7Days}</span></span>
-                </div>
-              </div>
-            </div>
-          </CardBody>
-        </Card>
-      ))}
-    </div>
-  );
-}
-
-// ── Log Tab ─────────────────────────────────────────────────────────
-
-function LogTabV2({ log, onRefresh }) {
-  const statusTone = { success: 'strong', partial: 'neutral', failed: 'alert' };
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-3">
-        <div className="text-13 font-medium text-ink-primary">Recent Sends</div>
-        <Button variant="secondary" size="sm" onClick={onRefresh}>Refresh</Button>
-      </div>
-      {log.length === 0 ? (
-        <Card><CardBody><div className="p-10 text-center text-ink-tertiary text-13">No automations sent yet</div></CardBody></Card>
+      {loading ? (
+        <div className="text-13 text-ink-secondary p-6 text-center">Loading…</div>
       ) : (
-        <Card>
-          <CardBody className="p-0">
-            <div className="overflow-x-auto">
-              <Table>
-                <THead>
-                  <TR>
-                    <TH>Customer</TH>
-                    <TH>Automation</TH>
-                    <TH>Status</TH>
-                    <TH>Beehiiv</TH>
-                    <TH>SMS</TH>
-                    <TH>Time</TH>
-                  </TR>
-                </THead>
-                <TBody>
-                  {log.map((l) => {
-                    const bh = l.beehiiv_result
-                      ? (typeof l.beehiiv_result === 'string' ? JSON.parse(l.beehiiv_result) : l.beehiiv_result)
-                      : null;
-                    const sms = l.sms_result
-                      ? (typeof l.sms_result === 'string' ? JSON.parse(l.sms_result) : l.sms_result)
-                      : null;
-                    return (
-                      <TR key={l.id}>
-                        <TD>
-                          <div className="text-13 font-medium text-ink-primary">{l.first_name} {l.last_name}</div>
-                          <div className="text-11 text-ink-tertiary">{l.customer_email}</div>
-                        </TD>
-                        <TD>{l.automation_name || l.automation_key}</TD>
-                        <TD><Badge tone={statusTone[l.status] || 'neutral'}>{l.status}</Badge></TD>
-                        <TD className="text-11 text-ink-tertiary">
-                          {bh?.subscriberId ? '✓ Enrolled' : bh?.skipped ? 'Skipped' : bh?.error ? '✗ Error' : '—'}
-                        </TD>
-                        <TD className="text-11 text-ink-tertiary">
-                          {sms?.sent ? `✓ ${sms.to}` : sms?.error ? '✗ Error' : '—'}
-                        </TD>
-                        <TD className="text-11 text-ink-tertiary font-mono u-nums">{timeAgo(l.created_at)}</TD>
-                      </TR>
-                    );
-                  })}
-                </TBody>
-              </Table>
-            </div>
-          </CardBody>
+        <Card className="p-0 overflow-hidden">
+          <table className="w-full text-13">
+            <thead className="bg-zinc-50 border-b border-hairline border-zinc-200">
+              <tr>
+                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Name</th>
+                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Group</th>
+                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Steps</th>
+                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Runtime</th>
+                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Active</th>
+                <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Enabled</th>
+                <th className="px-4 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {templates.map((t) => {
+                const activeCount = t.enrollment_counts?.active || 0;
+                return (
+                  <tr key={t.key} className="border-b border-hairline border-zinc-100 last:border-b-0 hover:bg-zinc-50/50">
+                    <td className="px-4 py-3">
+                      <div className="text-14 font-medium text-zinc-900">{t.name}</div>
+                      <div className="text-11 text-ink-tertiary">{t.description}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge tone={t.asm_group === 'newsletter' ? 'muted' : 'neutral'}>{t.asm_group}</Badge>
+                    </td>
+                    <td className="px-4 py-3 u-nums text-zinc-900">{t.step_count}</td>
+                    <td className="px-4 py-3">
+                      {t.has_local_content ? (
+                        <Badge tone="strong">Local (SendGrid)</Badge>
+                      ) : (
+                        <Badge tone="muted">Beehiiv</Badge>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 u-nums text-ink-secondary">{activeCount}</td>
+                    <td className="px-4 py-3">
+                      <Switch checked={!!t.enabled} onChange={() => toggleEnabled(t)} />
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <Button variant="secondary" onClick={() => setSelectedKey(t.key)}>Edit steps</Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </Card>
       )}
+
+      {selectedKey && (
+        <TemplateEditorModal
+          templateKey={selectedKey}
+          onClose={() => setSelectedKey(null)}
+          onSaved={load}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Template editor modal ──────────────────────────────────────────────
+
+function TemplateEditorModal({ templateKey, onClose, onSaved }) {
+  const [template, setTemplate] = useState(null);
+  const [steps, setSteps] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState('');
+  const [testEmail, setTestEmail] = useState('contact@wavespestcontrol.com');
+  const [testing, setTesting] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    adminFetch(`/admin/automations/templates/${templateKey}`)
+      .then((d) => { setTemplate(d.template); setSteps(d.steps || []); })
+      .catch((e) => setToast('Load failed: ' + e.message))
+      .finally(() => setLoading(false));
+  }, [templateKey]);
+  useEffect(() => { load(); }, [load]);
+
+  const addStep = async () => {
+    try {
+      await adminFetch(`/admin/automations/templates/${templateKey}/steps`, {
+        method: 'POST',
+        body: JSON.stringify({ delayHours: steps.length === 0 ? 0 : 24 }),
+      });
+      load();
+      onSaved?.();
+    } catch (e) { setToast('Add failed: ' + e.message); }
+  };
+
+  const sendTest = async () => {
+    if (!testEmail) return;
+    setTesting(true); setToast('');
+    try {
+      const r = await adminFetch(`/admin/automations/templates/${templateKey}/test`, {
+        method: 'POST', body: JSON.stringify({ toEmail: testEmail }),
+      });
+      const ok = r.results?.filter((x) => x.sent).length || 0;
+      setToast(`Test sent — ${ok}/${r.results?.length || 0} step(s) delivered`);
+    } catch (e) { setToast('Test failed: ' + e.message); }
+    finally { setTesting(false); }
+  };
+
+  if (loading) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+        <div className="bg-white p-5 rounded-sm border-hairline border-zinc-300">Loading…</div>
+      </div>
+    );
+  }
+  if (!template) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-4" onClick={onClose}>
+      <div className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-4xl my-8" onClick={(e) => e.stopPropagation()}>
+        <div className="p-5 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
+          <div className="flex-1">
+            <h3 className="text-18 font-medium text-zinc-900">{template.name}</h3>
+            <p className="text-12 text-ink-secondary mt-0.5">{template.description}</p>
+            <div className="flex items-center gap-2 mt-2">
+              <Badge tone={template.asm_group === 'newsletter' ? 'muted' : 'neutral'}>{template.asm_group}</Badge>
+              <Badge tone={template.enabled ? 'strong' : 'muted'}>{template.enabled ? 'Enabled' : 'Disabled'}</Badge>
+              <span className="text-11 text-ink-tertiary">key: {template.key}</span>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="text-ink-tertiary hover:text-zinc-900 text-14">✕</button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {steps.length === 0 ? (
+            <div className="text-13 text-ink-secondary p-6 text-center border-hairline border-zinc-200 border-dashed rounded-sm">
+              No steps yet. Add the first step to define what the first email says. While this template has no steps, enrollments still run on Beehiiv.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {steps.map((s, i) => (
+                <StepEditor
+                  key={s.id}
+                  step={s}
+                  stepIndex={i}
+                  totalSteps={steps.length}
+                  templateKey={template.key}
+                  onSaved={load}
+                  onDeleted={load}
+                />
+              ))}
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 pt-2 border-t border-hairline border-zinc-200">
+            <Button onClick={addStep} variant="secondary">+ Add step</Button>
+            <div className="ml-auto flex items-center gap-2">
+              <input
+                type="email"
+                value={testEmail}
+                onChange={(e) => setTestEmail(e.target.value)}
+                className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 font-mono w-56"
+                placeholder="test@wavespestcontrol.com"
+              />
+              <Button onClick={sendTest} variant="secondary" disabled={testing || steps.length === 0}>
+                {testing ? 'Sending…' : 'Send test sequence'}
+              </Button>
+            </div>
+          </div>
+          {toast && <div className="text-12 text-ink-secondary">{toast}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Step editor ───────────────────────────────────────────────────────
+
+function StepEditor({ step, stepIndex, totalSteps, templateKey, onSaved, onDeleted }) {
+  const [delayHours, setDelayHours] = useState(step.delay_hours || 0);
+  const [subject, setSubject] = useState(step.subject || '');
+  const [previewText, setPreviewText] = useState(step.preview_text || '');
+  const [htmlBody, setHtmlBody] = useState(step.html_body || '');
+  const [textBody, setTextBody] = useState(step.text_body || '');
+  const [enabled, setEnabled] = useState(!!step.enabled);
+  const [saving, setSaving] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [status, setStatus] = useState('');
+
+  const save = async () => {
+    setSaving(true); setStatus('');
+    try {
+      await adminFetch(`/admin/automations/steps/${step.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ delayHours, subject, previewText, htmlBody, textBody, enabled }),
+      });
+      setStatus('Saved.');
+      onSaved?.();
+    } catch (e) { setStatus('Save failed: ' + e.message); }
+    finally { setSaving(false); }
+  };
+
+  const remove = async () => {
+    if (!confirm('Delete this step?')) return;
+    try {
+      await adminFetch(`/admin/automations/steps/${step.id}`, { method: 'DELETE' });
+      onDeleted?.();
+    } catch (e) { setStatus('Delete failed: ' + e.message); }
+  };
+
+  const applyAiDraft = async ({ prompt, tone, includeCTA }) => {
+    const r = await adminFetch('/admin/automations/draft-ai', {
+      method: 'POST',
+      body: JSON.stringify({ templateKey, stepGoal: prompt, stepIndex, totalSteps, tone, includeCTA }),
+    });
+    const d = r.draft || {};
+    if (d.subject) setSubject(d.subject);
+    if (d.previewText) setPreviewText(d.previewText);
+    if (d.htmlBody) setHtmlBody(d.htmlBody);
+    if (d.textBody) setTextBody(d.textBody);
+    setAiOpen(false);
+    setStatus('AI draft inserted. Review and Save.');
+  };
+
+  return (
+    <Card className="p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-14 font-medium text-zinc-900">Step {stepIndex + 1}</span>
+          <span className="text-11 text-ink-tertiary">
+            {stepIndex === 0 ? `Fires ${delayHours}h after enroll` : `Fires ${delayHours}h after step ${stepIndex}`}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setAiOpen(true)} variant="secondary">Draft with AI</Button>
+          <button type="button" onClick={remove} className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-alert-fg hover:border-alert-fg u-focus-ring">Delete</button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <div>
+          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Delay (hours)</label>
+          <input
+            type="number"
+            min="0"
+            value={delayHours}
+            onChange={(e) => setDelayHours(Number(e.target.value))}
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900 font-mono"
+          />
+        </div>
+        <div className="col-span-2 flex items-end gap-2">
+          <label className="inline-flex items-center gap-2 text-12 text-ink-secondary">
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            Step enabled
+          </label>
+          {!enabled && <Badge tone="muted">Disabled — skipped</Badge>}
+        </div>
+      </div>
+
+      <div className="mb-3">
+        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Subject</label>
+        <input
+          type="text"
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900"
+          placeholder="Hi {{first_name}}, here's what to expect…"
+        />
+      </div>
+
+      <div className="mb-3">
+        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Preview text</label>
+        <input
+          type="text"
+          value={previewText}
+          onChange={(e) => setPreviewText(e.target.value)}
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900"
+        />
+      </div>
+
+      <div className="mb-3">
+        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">HTML body</label>
+        <textarea
+          value={htmlBody}
+          onChange={(e) => setHtmlBody(e.target.value)}
+          rows={10}
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 font-mono"
+          placeholder="<p>Hi {{first_name}}, welcome to Waves…</p>"
+        />
+        <p className="text-11 text-ink-tertiary mt-1">
+          Use <code>{'{{first_name}}'}</code> / <code>{'{{last_name}}'}</code> / <code>{'{{email}}'}</code> for personalization. SendGrid appends the unsub footer automatically based on the automation's ASM group.
+        </p>
+      </div>
+
+      <div className="mb-3">
+        <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Plain-text fallback</label>
+        <textarea
+          value={textBody}
+          onChange={(e) => setTextBody(e.target.value)}
+          rows={3}
+          className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+        />
+      </div>
+
+      <div className="flex items-center gap-2 pt-2 border-t border-hairline border-zinc-200">
+        <Button onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save step'}</Button>
+        {status && <span className="text-12 text-ink-secondary">{status}</span>}
+      </div>
+
+      {aiOpen && <AiDraftModal onClose={() => setAiOpen(false)} onDraft={applyAiDraft} />}
+    </Card>
+  );
+}
+
+// ── AI draft modal (shared visual with newsletter modal) ───────────────
+
+function AiDraftModal({ onClose, onDraft }) {
+  const [prompt, setPrompt] = useState('');
+  const [tone, setTone] = useState('Neighborly, owner-operator');
+  const [includeCTA, setIncludeCTA] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  const run = async () => {
+    if (prompt.trim().length < 4) { setErr('Describe what this step should say (at least a few words)'); return; }
+    setLoading(true); setErr('');
+    try {
+      await onDraft({ prompt, tone, includeCTA });
+    } catch (e) {
+      setErr(e.message);
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-lg p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <h3 className="text-16 font-medium text-zinc-900">Draft step with AI</h3>
+          <button type="button" onClick={onClose} className="text-ink-tertiary hover:text-zinc-900 text-14">✕</button>
+        </div>
+
+        <div>
+          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">What should this email say?</label>
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={4}
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+            placeholder="e.g. Welcome the customer, explain what happens on their first visit, set expectations about timing + weather delays."
+          />
+        </div>
+
+        <div>
+          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Tone</label>
+          <input
+            type="text"
+            value={tone}
+            onChange={(e) => setTone(e.target.value)}
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+          />
+        </div>
+
+        <label className="inline-flex items-center gap-2 text-12 text-ink-secondary">
+          <input type="checkbox" checked={includeCTA} onChange={(e) => setIncludeCTA(e.target.checked)} />
+          Include a call to action at the end
+        </label>
+
+        {err && <div className="text-12 text-alert-fg">{err}</div>}
+
+        <div className="flex items-center justify-end gap-2 pt-2 border-t border-hairline border-zinc-200">
+          <Button onClick={onClose} variant="secondary" disabled={loading}>Cancel</Button>
+          <Button onClick={run} disabled={loading}>{loading ? 'Drafting…' : 'Draft it'}</Button>
+        </div>
+      </div>
     </div>
   );
 }
