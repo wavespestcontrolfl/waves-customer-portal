@@ -37,6 +37,20 @@ const CATEGORY_LABELS = {
 // Shared row + card styling so the three views look identical.
 const rowChrome = 'flex items-center gap-3 bg-white border-hairline border-zinc-200 rounded-sm px-3 no-underline';
 
+// Shared form primitives for the inline edit panels.
+function Field({ label, children }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-ink-tertiary uppercase tracking-label" style={{ fontSize: 11 }}>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+const inputChrome = 'block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-10 px-3 focus:outline-none focus:border-zinc-900';
+const selectChrome = inputChrome;
+const editPanelChrome = 'bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-3 flex flex-col gap-3';
+
 function SearchBar({ value, onChange, placeholder }) {
   return (
     <div className="relative mb-3">
@@ -148,6 +162,7 @@ function CategoriesView({ onBack }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
+  const [expandedKey, setExpandedKey] = useState(null);
 
   useEffect(() => {
     aFetch('/admin/services?is_active=true&limit=500')
@@ -156,7 +171,8 @@ function CategoriesView({ onBack }) {
   }, []);
 
   const groups = useMemo(() => {
-    // Group services by `category`. Count distinct subcategories within each.
+    // Group services by `category`. Count distinct subcategories within each
+    // and keep the underlying service rows for the expanded panel.
     const map = new Map();
     for (const s of services) {
       const key = s.category || 'other';
@@ -172,6 +188,8 @@ function CategoriesView({ onBack }) {
         label: CATEGORY_LABELS[g.key] || g.key,
         itemCount: g.services.length,
         subCount: g.subs.size,
+        services: g.services,
+        subs: Array.from(g.subs).sort(),
       }))
       .filter((g) => !q || g.label.toLowerCase().includes(q))
       .sort((a, b) => b.itemCount - a.itemCount);
@@ -188,23 +206,75 @@ function CategoriesView({ onBack }) {
         <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>No categories</div>
       ) : (
         <div className="flex flex-col gap-2">
-          {groups.map((g) => (
-            <div key={g.key} className={`${rowChrome} justify-between`} style={{ height: 64 }}>
-              <Thumb />
-              <div className="flex-1 min-w-0">
-                <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{g.label}</div>
-                <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
-                  {g.subCount} subcategor{g.subCount === 1 ? 'y' : 'ies'}
-                </div>
+          {groups.map((g) => {
+            const isOpen = expandedKey === g.key;
+            return (
+              <div key={g.key} className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => setExpandedKey(isOpen ? null : g.key)}
+                  aria-expanded={isOpen}
+                  className={`${rowChrome} justify-between text-left u-focus-ring`}
+                  style={{ height: 64 }}
+                >
+                  <Thumb />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{g.label}</div>
+                    <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
+                      {g.subCount} subcategor{g.subCount === 1 ? 'y' : 'ies'}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 text-ink-secondary" style={{ fontSize: 14 }}>
+                    <span className="u-nums">{g.itemCount} item{g.itemCount === 1 ? '' : 's'}</span>
+                    <span aria-hidden style={{ fontSize: 18, lineHeight: 1, transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>›</span>
+                  </div>
+                </button>
+                {isOpen && <CategoryDetail group={g} />}
               </div>
-              <div className="flex items-center gap-1 text-ink-secondary" style={{ fontSize: 14 }}>
-                <span className="u-nums">{g.itemCount} item{g.itemCount === 1 ? '' : 's'}</span>
-                <span aria-hidden style={{ fontSize: 18, lineHeight: 1 }}>›</span>
-              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CategoryDetail({ group }) {
+  // Group services by subcategory so the panel mirrors how Virginia thinks
+  // about the catalog. "—" header is used when subcategory is null.
+  const bySub = useMemo(() => {
+    const map = new Map();
+    for (const s of group.services) {
+      const k = s.subcategory || '';
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(s);
+    }
+    for (const arr of map.values()) {
+      arr.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [group]);
+
+  return (
+    <div className={editPanelChrome}>
+      <div className="text-ink-tertiary" style={{ fontSize: 12 }}>
+        Categories are set per service. Edit a service from <strong>All Services</strong> to move it.
+      </div>
+      {bySub.map(([sub, svcs]) => (
+        <div key={sub || '__none__'} className="flex flex-col gap-1">
+          <div className="text-ink-secondary uppercase tracking-label" style={{ fontSize: 11 }}>
+            {sub || 'Uncategorized'}
+          </div>
+          {svcs.map((s) => (
+            <div key={s.id} className="flex items-center justify-between bg-white border-hairline border-zinc-200 rounded-sm px-3" style={{ height: 40 }}>
+              <span className="text-ink-primary truncate" style={{ fontSize: 13 }}>{s.name}</span>
+              <span className="text-ink-tertiary u-nums" style={{ fontSize: 12 }}>
+                {s.pricing_type === 'fixed' && s.base_price ? `$${Number(s.base_price).toFixed(0)}` : '—'}
+              </span>
             </div>
           ))}
         </div>
-      )}
+      ))}
     </div>
   );
 }
@@ -214,9 +284,10 @@ function DiscountsView({ onBack }) {
   const [discounts, setDiscounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
+  const [expandedId, setExpandedId] = useState(null);
 
-  useEffect(() => {
-    aFetch('/admin/discounts')
+  const load = useCallback(() => {
+    return aFetch('/admin/discounts')
       .then((d) => {
         // Endpoint returns a raw array.
         setDiscounts(Array.isArray(d) ? d : (d.discounts || []));
@@ -224,6 +295,8 @@ function DiscountsView({ onBack }) {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const formatAmount = (d) => {
     const amt = Number(d.amount || 0);
@@ -256,21 +329,117 @@ function DiscountsView({ onBack }) {
         <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>No discounts</div>
       ) : (
         <div className="flex flex-col gap-2">
-          {list.map((d) => (
-            <div key={d.id} className={`${rowChrome} justify-between`} style={{ height: 64 }}>
-              <Thumb color="#F4F4F5" icon={<span style={{ fontSize: 18 }} aria-hidden>🏷</span>} />
-              <div className="flex-1 min-w-0">
-                <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{d.name}</div>
+          {list.map((d) => {
+            const isOpen = expandedId === d.id;
+            return (
+              <div key={d.id} className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => setExpandedId(isOpen ? null : d.id)}
+                  aria-expanded={isOpen}
+                  className={`${rowChrome} justify-between text-left u-focus-ring`}
+                  style={{ height: 64 }}
+                >
+                  <Thumb color="#F4F4F5" icon={<span style={{ fontSize: 18 }} aria-hidden>🏷</span>} />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{d.name}</div>
+                  </div>
+                  <div className="flex items-center gap-1 text-ink-primary" style={{ fontSize: 14 }}>
+                    <span className="u-nums font-medium">{formatAmount(d)}</span>
+                    <span aria-hidden className="text-ink-secondary" style={{ fontSize: 18, lineHeight: 1, transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>›</span>
+                  </div>
+                </button>
+                {isOpen && (
+                  <DiscountEditPanel
+                    discount={d}
+                    onCancel={() => setExpandedId(null)}
+                    onSaved={async () => { await load(); setExpandedId(null); }}
+                  />
+                )}
               </div>
-              <div className="flex items-center gap-1 text-ink-primary" style={{ fontSize: 14 }}>
-                <span className="u-nums font-medium">{formatAmount(d)}</span>
-                <span aria-hidden className="text-ink-secondary" style={{ fontSize: 18, lineHeight: 1 }}>›</span>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
+  );
+}
+
+const DISCOUNT_TYPES = [
+  { value: 'percentage', label: 'Percentage (%)' },
+  { value: 'fixed_amount', label: 'Fixed amount ($)' },
+  { value: 'variable_percentage', label: 'Variable percentage' },
+  { value: 'variable_amount', label: 'Variable amount' },
+  { value: 'free_service', label: 'Free service' },
+];
+
+function DiscountEditPanel({ discount, onCancel, onSaved }) {
+  const [name, setName] = useState(discount.name || '');
+  const [discountType, setDiscountType] = useState(discount.discount_type || 'percentage');
+  const [amount, setAmount] = useState(discount.amount != null ? String(discount.amount) : '');
+  const [isActive, setIsActive] = useState(discount.is_active !== false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      await aFetch(`/admin/discounts/${discount.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: name.trim(),
+          discount_type: discountType,
+          amount: amount === '' ? 0 : Number(amount),
+          is_active: isActive,
+        }),
+      });
+      await onSaved();
+    } catch (err) {
+      setError(err.message || 'Save failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className={editPanelChrome}>
+      <Field label="Name">
+        <input className={inputChrome} value={name} onChange={(e) => setName(e.target.value)} required />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Type">
+          <select className={selectChrome} value={discountType} onChange={(e) => setDiscountType(e.target.value)}>
+            {DISCOUNT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </select>
+        </Field>
+        <Field label="Amount">
+          <input
+            className={inputChrome}
+            type="number"
+            inputMode="decimal"
+            step="0.01"
+            min="0"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            disabled={discountType === 'free_service'}
+          />
+        </Field>
+      </div>
+      <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
+        <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
+        <span className="text-ink-primary">Active</span>
+      </label>
+      {error && <div className="text-alert-fg" style={{ fontSize: 12 }}>{error}</div>}
+      <div className="flex gap-2 justify-end pt-1">
+        <button type="button" onClick={onCancel} disabled={saving} className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13 }}>
+          Cancel
+        </button>
+        <button type="submit" disabled={saving} className="bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13, fontWeight: 500 }}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -279,12 +448,15 @@ function AllServicesView({ onBack }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
+  const [expandedId, setExpandedId] = useState(null);
 
-  useEffect(() => {
-    aFetch('/admin/services?is_active=true&limit=500')
+  const load = useCallback(() => {
+    return aFetch('/admin/services?is_active=true&limit=500')
       .then((d) => { setServices(d.services || []); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const formatDuration = (m) => {
     const n = Number(m || 0);
@@ -329,22 +501,131 @@ function AllServicesView({ onBack }) {
           {list.map((s) => {
             const duration = formatDuration(s.default_duration_minutes);
             const price = formatPrice(s);
+            const isOpen = expandedId === s.id;
             return (
-              <div key={s.id} className={`${rowChrome} justify-between`} style={{ height: 68 }}>
-                <Thumb color={s.color || '#E4E4E7'} />
-                <div className="flex-1 min-w-0">
-                  <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{s.name}</div>
-                  {duration && (
-                    <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>{duration}</div>
-                  )}
-                </div>
-                <div className="u-nums font-medium text-ink-primary" style={{ fontSize: 14 }}>{price}</div>
+              <div key={s.id} className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => setExpandedId(isOpen ? null : s.id)}
+                  aria-expanded={isOpen}
+                  className={`${rowChrome} justify-between text-left u-focus-ring`}
+                  style={{ height: 68 }}
+                >
+                  <Thumb color={s.color || '#E4E4E7'} />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{s.name}</div>
+                    {duration && (
+                      <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>{duration}</div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="u-nums font-medium text-ink-primary" style={{ fontSize: 14 }}>{price}</span>
+                    <span aria-hidden className="text-ink-secondary" style={{ fontSize: 18, lineHeight: 1, transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>›</span>
+                  </div>
+                </button>
+                {isOpen && (
+                  <ServiceEditPanel
+                    service={s}
+                    onCancel={() => setExpandedId(null)}
+                    onSaved={async () => { await load(); setExpandedId(null); }}
+                  />
+                )}
               </div>
             );
           })}
         </div>
       )}
     </div>
+  );
+}
+
+const PRICING_TYPES = [
+  { value: 'fixed', label: 'Fixed price' },
+  { value: 'variable', label: 'Variable' },
+  { value: 'quoted', label: 'Quoted' },
+];
+
+function ServiceEditPanel({ service, onCancel, onSaved }) {
+  const [name, setName] = useState(service.name || '');
+  const [duration, setDuration] = useState(service.default_duration_minutes != null ? String(service.default_duration_minutes) : '');
+  const [pricingType, setPricingType] = useState(service.pricing_type || 'fixed');
+  const [basePrice, setBasePrice] = useState(service.base_price != null ? String(service.base_price) : '');
+  const [isActive, setIsActive] = useState(service.is_active !== false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      await aFetch(`/admin/services/${service.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: name.trim(),
+          default_duration_minutes: duration === '' ? null : Number(duration),
+          pricing_type: pricingType,
+          base_price: pricingType === 'fixed' && basePrice !== '' ? Number(basePrice) : null,
+          is_active: isActive,
+        }),
+      });
+      await onSaved();
+    } catch (err) {
+      setError(err.message || 'Save failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className={editPanelChrome}>
+      <Field label="Name">
+        <input className={inputChrome} value={name} onChange={(e) => setName(e.target.value)} required />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Duration (min)">
+          <input
+            className={inputChrome}
+            type="number"
+            inputMode="numeric"
+            step="5"
+            min="0"
+            value={duration}
+            onChange={(e) => setDuration(e.target.value)}
+          />
+        </Field>
+        <Field label="Pricing">
+          <select className={selectChrome} value={pricingType} onChange={(e) => setPricingType(e.target.value)}>
+            {PRICING_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </select>
+        </Field>
+      </div>
+      {pricingType === 'fixed' && (
+        <Field label="Base price ($)">
+          <input
+            className={inputChrome}
+            type="number"
+            inputMode="decimal"
+            step="0.01"
+            min="0"
+            value={basePrice}
+            onChange={(e) => setBasePrice(e.target.value)}
+          />
+        </Field>
+      )}
+      <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
+        <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
+        <span className="text-ink-primary">Active</span>
+      </label>
+      {error && <div className="text-alert-fg" style={{ fontSize: 12 }}>{error}</div>}
+      <div className="flex gap-2 justify-end pt-1">
+        <button type="button" onClick={onCancel} disabled={saving} className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13 }}>
+          Cancel
+        </button>
+        <button type="submit" disabled={saving} className="bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13, fontWeight: 500 }}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </form>
   );
 }
 
