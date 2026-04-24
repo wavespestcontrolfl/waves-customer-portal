@@ -2,7 +2,12 @@
 builder = "nixpacks"
 
 [build.nixpacks]
-buildCmd = "npm install && npm run build"
+# Railway runs the install phase with NODE_ENV=production, which makes
+# `npm ci` skip devDependencies. vite (and the rest of the Vite toolchain)
+# live in client/package.json devDependencies, so without --include=dev
+# `vite build` fails with exit 127 / "vite: not found".
+installCmd = "npm ci --include=dev"
+buildCmd = "npm run build"
 
 [deploy]
 startCommand = "npm start"
