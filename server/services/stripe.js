@@ -432,6 +432,121 @@ const StripeService = {
   },
 
   // =========================================================================
+  // CHARGE AN INVOICE WITH A SPECIFIC SAVED CARD (admin-side)
+  // =========================================================================
+
+  /**
+   * Charge a specific payment_methods row against an open invoice.
+   * Used by the admin MobilePaymentSheet "Card on File" flow when the
+   * tech wants to collect from a card the customer already consented
+   * to save — distinct from the generic default-autopay-card path in
+   * charge() above.
+   *
+   * @param {string} invoiceId — invoices.id
+   * @param {string} paymentMethodId — payment_methods.id (our internal UUID)
+   * @returns {object} payments row
+   */
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+
+    const invoice = await db('invoices').where({ id: invoiceId }).first();
+    if (!invoice) throw new Error('Invoice not found');
+    if (invoice.status === 'paid') throw new Error('Invoice already paid');
+
+    const card = await db('payment_methods').where({ id: paymentMethodId }).first();
+    if (!card) throw new Error('Payment method not found');
+    if (card.customer_id !== invoice.customer_id) {
+      throw new Error('Payment method does not belong to invoice customer');
+    }
+    if (!card.stripe_payment_method_id) {
+      throw new Error('Payment method has no Stripe id');
+    }
+
+    const stripeCustomerId = await this.ensureStripeCustomer(invoice.customer_id);
+
+    const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), card.method_type);
+    const amountCents = Math.round(total * 100);
+
+    let paymentIntent;
+    try {
+      paymentIntent = await stripe.paymentIntents.create({
+        amount: amountCents,
+        currency: 'usd',
+        customer: stripeCustomerId,
+        payment_method: card.stripe_payment_method_id,
+        off_session: true,
+        confirm: true,
+        description: `Invoice ${invoice.invoice_number} — card on file`,
+        metadata: {
+          waves_invoice_id: invoiceId,
+          invoice_number: invoice.invoice_number,
+          waves_customer_id: invoice.customer_id,
+          base_amount: String(base),
+          card_surcharge: String(surcharge),
+          source: 'admin_card_on_file',
+        },
+      });
+    } catch (err) {
+      logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
+      // Record failure for audit
+      try {
+        await db('payments').insert({
+          customer_id: invoice.customer_id,
+          payment_method_id: card.id,
+          processor: 'stripe',
+          payment_date: etDateString(),
+          amount: total,
+          status: 'failed',
+          description: `Invoice ${invoice.invoice_number} — card on file (FAILED)`,
+          failure_reason: err.message,
+        });
+      } catch { /* non-fatal */ }
+      throw new Error(err.message || 'Card charge failed');
+    }
+
+    // Link the PI to the invoice so the webhook can mark it paid.
+    await db('invoices')
+      .where({ id: invoiceId })
+      .update({
+        processor: 'stripe',
+        stripe_payment_intent_id: paymentIntent.id,
+      });
+
+    const status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
+    const [paymentRecord] = await db('payments').insert({
+      customer_id: invoice.customer_id,
+      payment_method_id: card.id,
+      processor: 'stripe',
+      stripe_payment_intent_id: paymentIntent.id,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payment_date: etDateString(),
+      amount: total,
+      status,
+      description: surcharge > 0
+        ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} fee)`
+        : `Invoice ${invoice.invoice_number} — card on file`,
+      metadata: JSON.stringify({
+        base_amount: base,
+        card_surcharge: surcharge,
+        source: 'admin_card_on_file',
+      }),
+    }).returning('*');
+
+    logger.info(`[stripe] Card-on-file charge succeeded: $${total} for invoice ${invoice.invoice_number}, PI ${paymentIntent.id}`);
+    return {
+      paymentId: paymentRecord.id,
+      paymentIntentId: paymentIntent.id,
+      status,
+      amount: total,
+      base,
+      surcharge,
+      last4: card.last_four,
+      brand: card.card_brand,
+    };
+  },
+
+  // =========================================================================
   // PAYMENT HISTORY
   // =========================================================================
 

@@ -337,6 +337,24 @@ router.post('/:id/send', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:id/charge-card — charge a saved card on file against this invoice.
+// Body: { paymentMethodId } (our internal payment_methods.id).
+// The card must belong to the invoice customer. Succeeds by calling
+// Stripe off-session with confirm:true; webhook marks the invoice paid.
+router.post('/:id/charge-card', async (req, res, next) => {
+  try {
+    const { paymentMethodId } = req.body || {};
+    if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.chargeInvoiceWithSavedCard(req.params.id, paymentMethodId);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    logger.error(`[admin-invoices] charge-card failed: ${err.message}`);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // POST /:id/void — void invoice
 router.post('/:id/void', async (req, res, next) => {
   try {

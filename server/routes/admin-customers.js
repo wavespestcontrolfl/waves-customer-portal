@@ -230,6 +230,31 @@ router.get('/pipeline/view', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/cards — just the saved payment methods.
+// Lightweight endpoint so the MobilePaymentSheet's Card on File picker
+// doesn't have to load the full customer profile (tags, interactions,
+// services, etc.) every time the tech opens the payment sheet.
+router.get('/:id/cards', async (req, res, next) => {
+  try {
+    const cards = await db('payment_methods')
+      .where({ customer_id: req.params.id })
+      .orderBy('is_default', 'desc')
+      .orderBy('created_at', 'desc');
+    res.json({
+      cards: cards.map((c) => ({
+        id: c.id,
+        method_type: c.method_type,
+        brand: c.card_brand,
+        last_four: c.last_four,
+        exp_month: c.exp_month,
+        exp_year: c.exp_year,
+        bank_name: c.bank_name,
+        is_default: !!c.is_default,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id/timeline — unified customer timeline
 router.get('/:id/timeline', async (req, res, next) => {
   try {
