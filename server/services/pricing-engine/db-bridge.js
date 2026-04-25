@@ -58,8 +58,10 @@ async function syncConstantsFromDB(dbInstance) {
       if (f.pool_no_cage != null) adj.poolNoCage = r(f.pool_no_cage);
       if (f.shrubs_heavy != null) adj.shrubs_heavy = r(f.shrubs_heavy);
       if (f.shrubs_moderate != null) adj.shrubs_moderate = r(f.shrubs_moderate);
+      if (f.shrubs_light != null) adj.shrubs_light = f.shrubs_light >= 0 ? r(f.shrubs_light) : -r(Math.abs(f.shrubs_light));
       if (f.trees_heavy != null) adj.trees_heavy = r(f.trees_heavy);
       if (f.trees_moderate != null) adj.trees_moderate = r(f.trees_moderate);
+      if (f.trees_light != null) adj.trees_light = f.trees_light >= 0 ? r(f.trees_light) : -r(Math.abs(f.trees_light));
       if (f.landscape_complex != null) adj.complexity_complex = r(f.landscape_complex);
       if (f.near_water != null) adj.nearWater = f.near_water;
       if (f.large_driveway != null) adj.largeDriveway = f.large_driveway;

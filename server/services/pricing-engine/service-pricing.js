@@ -59,10 +59,12 @@ function pricePestControl(property, options = {}) {
   if (f.indoor) additionalAdj += PEST.additionalAdjustments.indoor;
   if (f.shrubs === 'heavy') additionalAdj += PEST.additionalAdjustments.shrubs_heavy;
   else if (f.shrubs === 'moderate') additionalAdj += PEST.additionalAdjustments.shrubs_moderate;
+  else if (f.shrubs === 'light') additionalAdj += (PEST.additionalAdjustments.shrubs_light || 0);
   if (f.poolCage) additionalAdj += PEST.additionalAdjustments.poolCage;
   else if (f.pool) additionalAdj += PEST.additionalAdjustments.poolNoCage;
   if (f.trees === 'heavy') additionalAdj += PEST.additionalAdjustments.trees_heavy;
   else if (f.trees === 'moderate') additionalAdj += PEST.additionalAdjustments.trees_moderate;
+  else if (f.trees === 'light') additionalAdj += (PEST.additionalAdjustments.trees_light || 0);
   if (f.complexity === 'complex') additionalAdj += PEST.additionalAdjustments.complexity_complex;
   if (f.nearWater) additionalAdj += PEST.additionalAdjustments.nearWater;
   if (f.largeDriveway) additionalAdj += PEST.additionalAdjustments.largeDriveway;
