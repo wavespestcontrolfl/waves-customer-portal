@@ -2105,7 +2105,15 @@ function EstimatePipelineView() {
                 <div style={{ textAlign: 'right', minWidth: 100, flexShrink: 0 }}>
                   <div style={{ fontSize: 11, color: C.gray }}>Created {fmtDate(e.createdAt)}</div>
                   {e.sentAt && <div style={{ fontSize: 10, color: C.teal }}>Sent {timeAgo(e.sentAt)}</div>}
-                  {e.viewedAt && <div style={{ fontSize: 10, color: C.amber }}>Viewed {timeAgo(e.viewedAt)}</div>}
+                  {e.viewedAt && (
+                    <div style={{ fontSize: 10, color: C.amber }}>
+                      Viewed {timeAgo(e.viewedAt)}
+                      {e.viewCount > 1 && ` · ${e.viewCount}×`}
+                    </div>
+                  )}
+                  {e.lastViewedAt && e.viewCount > 1 && (
+                    <div style={{ fontSize: 10, color: C.amber }}>Last viewed {timeAgo(e.lastViewedAt)}</div>
+                  )}
                   {e.acceptedAt && <div style={{ fontSize: 10, color: C.green }}>Accepted {timeAgo(e.acceptedAt)}</div>}
                   {e.declinedAt && <div style={{ fontSize: 10, color: C.red }}>Declined {timeAgo(e.declinedAt)}</div>}
                   {e.followUpCount > 0 && <div style={{ fontSize: 10, color: C.gray }}>Follow-ups: {e.followUpCount}</div>}

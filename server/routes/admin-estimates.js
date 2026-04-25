@@ -254,6 +254,8 @@ router.get('/', async (req, res, next) => {
         tier: e.waveguard_tier, createdBy: e.created_by_name,
         sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,
         declinedAt: e.declined_at,
+        viewCount: e.view_count || 0,
+        lastViewedAt: e.last_viewed_at,
         createdAt: e.created_at,
         source: e.source || 'manual',
         serviceInterest: e.service_interest,
