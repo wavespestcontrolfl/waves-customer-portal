@@ -130,12 +130,13 @@ const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
 
 // ── Service-preference pricing modifiers ──────────────────────
 // Customers can opt out of interior spraying or exterior (eave/cobweb)
-// sweeping. Each opt-out saves $10/visit on recurring pest control and
-// $50 on a one-time pest treatment. Applied only when the estimate
-// contains a recurring or one-time pest-control line.
+// sweeping on RECURRING pest only ($10/visit each). On one-time pest
+// both are bundled in — the one-time price already reflects "the works"
+// (full perimeter + granular + IGR + eave sweep + interior) and there's
+// no per-visit recurring savings to give back, so opt-out yields $0.
 const SERVICE_PREFS = {
-  interior_spray:  { perVisit: 10, oneTime: 50, label: 'Interior spraying',  offDesc: 'No interior treatment — tech sprays and inspects the perimeter only.' },
-  exterior_sweep:  { perVisit: 10, oneTime: 50, label: 'Exterior eave sweep', offDesc: 'No eave/cobweb sweep on the exterior. Tech still performs the perimeter treatment.' },
+  interior_spray:  { perVisit: 10, oneTime: 0, label: 'Interior spraying',  offDesc: 'No interior treatment — tech sprays and inspects the perimeter only.' },
+  exterior_sweep:  { perVisit: 10, oneTime: 0, label: 'Exterior eave sweep', offDesc: 'No eave/cobweb sweep on the exterior. Tech still performs the perimeter treatment.' },
 };
 const SERVICE_PREF_KEYS = Object.keys(SERVICE_PREFS);
 const DEFAULT_PREFS = SERVICE_PREF_KEYS.reduce((a, k) => (a[k] = true, a), {});
