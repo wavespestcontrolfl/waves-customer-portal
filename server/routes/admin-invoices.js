@@ -425,11 +425,13 @@ router.post('/:id/send-receipt', async (req, res, next) => {
       emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
     }
     if (via === 'sms' || via === 'both') {
-      // InvoiceService.sendReceipt is a fire-and-forget helper that logs its
-      // own failures; wrap in try/catch so one side failing doesn't block
-      // the other or the stamp below.
+      // Manual operator resend — pass force:true to override the auto-send
+      // idempotency guard (otherwise re-clicking SEND RECEIPT would no-op
+      // for invoices already auto-receipted by the Stripe webhook).
+      // recordActivity:false because this route writes its own activity_log
+      // row below with the memo and channel mix.
       try {
-        await InvoiceService.sendReceipt(id);
+        await InvoiceService.sendReceipt(id, { force: true, recordActivity: false });
         smsResult = { ok: true };
       } catch (err) {
         smsResult = { ok: false, error: err.message };
