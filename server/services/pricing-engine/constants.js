@@ -97,10 +97,12 @@ const PEST = {
   ],
   additionalAdjustments: {
     indoor: r(15),              // NEW. Interior treatment adds 10-15 min + $3-5 in product.
+    shrubs_light: -r(5),        // Light shrubs = sparser perimeter, less spray time. Already on the admin Pricing Logic panel; pricer was missing the branch (drift bug).
     shrubs_moderate: r(5),
     shrubs_heavy: r(12),        // Was r(10). Consistent with trees heavy.
     poolCage: r(10),            // Was r(5). Cage is a separate treatment zone, adds 5-8 min.
     poolNoCage: r(5),
+    trees_light: -r(5),         // Same drift fix as shrubs_light.
     trees_moderate: r(5),
     trees_heavy: r(12),         // Was r(10). Slight increase for canopy spray coverage.
     complexity_complex: r(8),   // Was r(5). Complex landscaping adds real navigation time.
