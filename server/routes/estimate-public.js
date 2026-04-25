@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const config = require('../config');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -22,23 +24,45 @@ const WAVES_OFFICE_PHONE = '+19413187612';
 // per-open estimate_views insert:
 //   1. UA allowlist: drop anything whose user-agent matches a known bot /
 //      preview / scanner / CLI client.
-//   2. Admin IP allowlist (WAVES_ADMIN_IPS, comma-separated): drop hits
-//      from office IPs so internal preview clicks don't inflate the count.
+//   2. Admin marker cookie: a long-lived signed JWT set by /api/admin/auth
+//      on every login + /me. Per-device, per-browser; survives network
+//      changes. Replaces the old WAVES_ADMIN_IPS env-var allowlist.
 // First-view side-effects (status flip, office SMS, admin notification)
 // have their own gating downstream and are unaffected.
 const BOT_UA_RE = /bot\b|crawler|spider|crawling|facebookexternalhit|slackbot|twitterbot|linkedinbot|whatsapp|telegram|discordbot|preview|prerender|headlesschrome|curl\/|wget\/|python-requests|axios\/|node-fetch|pingdom|uptimerobot|statuscake|monitoring|http-client/i;
-const VIEW_ADMIN_IPS = (process.env.WAVES_ADMIN_IPS || '')
-  .split(',').map((s) => s.trim()).filter(Boolean);
 
 function clientIp(req) {
   return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
     .toString().split(',')[0].trim().slice(0, 64);
 }
 
+// Tiny cookie-header parser — avoids pulling in cookie-parser for one read.
+function readCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  const target = name + '=';
+  for (const part of header.split(';')) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(target)) {
+      try { return decodeURIComponent(trimmed.slice(target.length)); } catch { return null; }
+    }
+  }
+  return null;
+}
+
+function hasAdminMarker(req) {
+  const token = readCookie(req, 'waves_admin');
+  if (!token) return false;
+  try {
+    const payload = jwt.verify(token, config.jwt.secret);
+    return payload && payload.kind === 'admin_marker';
+  } catch { return false; }
+}
+
 function shouldCountView(req) {
   const ua = req.get('user-agent') || '';
   if (BOT_UA_RE.test(ua)) return false;
-  if (VIEW_ADMIN_IPS.length && VIEW_ADMIN_IPS.includes(clientIp(req))) return false;
+  if (hasAdminMarker(req)) return false;
   return true;
 }
 
