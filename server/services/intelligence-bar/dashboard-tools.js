@@ -30,6 +30,27 @@ function excludeInternalEstimates(qb) {
     );
 }
 
+// Same exclusion but for queries against the `customers` table directly
+// (alias `c`). Use on customer-acquisition / churn / new-customer counts.
+function excludeInternalCustomers(qb) {
+  if (INTERNAL_TEST_CUSTOMERS.length === 0) return qb;
+  return qb.whereNotIn(
+    db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+    INTERNAL_TEST_CUSTOMERS,
+  );
+}
+
+// Same exclusion for `payments` queries — joins to customers as `c` and
+// drops payments tied to a known internal/test customer so revenue
+// totals reflect real cash from real prospects.
+function excludeInternalPayments(qb) {
+  if (INTERNAL_TEST_CUSTOMERS.length === 0) return qb;
+  return qb.whereNotIn(
+    db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+    INTERNAL_TEST_CUSTOMERS,
+  );
+}
+
 // ─── Date helpers ───────────────────────────────────────────────
 
 function dateRange(period) {
@@ -286,36 +307,74 @@ async function comparePeriods(input) {
   const a = resolvePeriod(period_a);
   const b = resolvePeriod(period_b);
 
+  // Each metric query mirrors the funnel-fix discipline applied in
+  // PR #247:
+  //   - Use the *event* timestamp, not created_at (sent_at, accepted_at,
+  //     payment_date, etc.). An estimate created Apr 5 and sent Apr 25
+  //     belongs to the Apr-25 window, not Apr-5.
+  //   - Filter out drafts / cancelled / void rows that aren't real
+  //     business events.
+  //   - Exclude INTERNAL_TEST_CUSTOMERS (Adam Martinez et al.) so test
+  //     activity can't skew period-over-period deltas.
   async function getMetrics(from, to) {
+    const fromTs = `${from}T00:00:00`;
+    const toTs = `${to}T23:59:59`;
     const m = {};
     if (wantAll || metrics.includes('revenue')) {
-      const rev = await db('payments').where({ status: 'paid' }).whereBetween('payment_date', [from, to]).sum('amount as total').first();
+      const rev = await excludeInternalPayments(
+        db({ p: 'payments' })
+          .leftJoin({ c: 'customers' }, 'p.customer_id', 'c.id')
+          .where('p.status', 'paid')
+          .whereBetween('p.payment_date', [from, to])
+      ).sum('p.amount as total').first();
       m.revenue = parseFloat(rev?.total || 0);
     }
     if (wantAll || metrics.includes('services')) {
-      const svc = await db('scheduled_services').whereBetween('scheduled_date', [from, to]).select(
-        db.raw("COUNT(*) as total"), db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
-      ).first();
+      const svc = await db('scheduled_services')
+        .whereBetween('scheduled_date', [from, to])
+        .whereNotIn('status', ['cancelled'])
+        .select(
+          db.raw("COUNT(*) as total"),
+          db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
+        ).first();
       m.services_total = parseInt(svc?.total || 0);
       m.services_completed = parseInt(svc?.completed || 0);
     }
     if (wantAll || metrics.includes('new_customers')) {
-      const nc = await db('customers').where({ active: true }).whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first();
-      m.new_customers = parseInt(nc?.c || 0);
+      const nc = await excludeInternalCustomers(
+        db({ c: 'customers' })
+          .where('c.active', true)
+          .whereNull('c.deleted_at')
+          .whereBetween('c.created_at', [fromTs, toTs])
+      ).count('* as count').first();
+      m.new_customers = parseInt(nc?.count || 0);
     }
     if (wantAll || metrics.includes('estimates_sent')) {
-      const es = await db('estimates').whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first();
-      m.estimates_sent = parseInt(es?.c || 0);
+      const es = await excludeInternalEstimates(
+        db({ e: 'estimates' })
+          .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
+          .whereNotNull('e.sent_at')
+          .whereBetween('e.sent_at', [fromTs, toTs])
+      ).count('* as count').first();
+      m.estimates_sent = parseInt(es?.count || 0);
     }
     if (wantAll || metrics.includes('estimates_accepted')) {
-      const ea = await db('estimates').where({ status: 'accepted' }).whereBetween('accepted_at', [from, to + 'T23:59:59']).count('* as c').first();
-      m.estimates_accepted = parseInt(ea?.c || 0);
+      const ea = await excludeInternalEstimates(
+        db({ e: 'estimates' })
+          .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
+          .where('e.status', 'accepted')
+          .whereBetween('e.accepted_at', [fromTs, toTs])
+      ).count('* as count').first();
+      m.estimates_accepted = parseInt(ea?.count || 0);
     }
     if (wantAll || metrics.includes('churn')) {
-      const ch = await db('customers').where({ active: false })
-        .whereRaw('COALESCE(churned_at, updated_at) BETWEEN ? AND ?', [from, to + 'T23:59:59'])
-        .count('* as c').first();
-      m.churned = parseInt(ch?.c || 0);
+      const ch = await excludeInternalCustomers(
+        db({ c: 'customers' })
+          .where('c.active', false)
+          .whereNull('c.deleted_at')
+          .whereRaw('COALESCE(c.churned_at, c.updated_at) BETWEEN ? AND ?', [fromTs, toTs])
+      ).count('* as count').first();
+      m.churned = parseInt(ch?.count || 0);
     }
     return m;
   }
