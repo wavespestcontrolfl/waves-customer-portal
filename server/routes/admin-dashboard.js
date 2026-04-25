@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const {
+  executeDashboardTool,
+} = require('../services/intelligence-bar/dashboard-tools');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -294,23 +298,36 @@ router.get('/core-kpis', async (req, res, next) => {
       ).first();
     const srTotal = parseInt(cbAgg?.total || 0);
     const callbacks = parseInt(cbAgg?.callbacks || 0);
+    // Callback rate as percent with one decimal
     const callbackRate = srTotal > 0 ? Math.round((callbacks / srTotal) * 1000) / 10 : null;
 
-    // CSAT — review_requests.rating (1-10 NPS) in window
-    const csatRow = await db('review_requests')
-      .where('created_at', '>=', start).whereNotNull('rating')
-      .select(
-        db.raw("AVG(rating) as avg_rating"),
-        db.raw("COUNT(*) as responses"),
-        db.raw("COUNT(*) FILTER (WHERE rating >= 9) as promoters"),
-        db.raw("COUNT(*) FILTER (WHERE rating <= 6) as detractors")
-      ).first().catch(() => null);
-    const csatAvg = csatRow?.avg_rating ? parseFloat(csatRow.avg_rating).toFixed(1) : null;
-    const nps = csatRow && parseInt(csatRow.responses) > 0
-      ? Math.round(((parseInt(csatRow.promoters) - parseInt(csatRow.detractors)) / parseInt(csatRow.responses)) * 100)
+    // CSAT / NPS — read from review_requests submitted via the customer Rate page.
+    // Rate page writes `score` (1–10) and pre-categorizes as promoter (8–10) /
+    // passive (4–7) / detractor (1–3) on submit. Only count submitted rows.
+    let csatRow = null;
+    try {
+      csatRow = await db('review_requests')
+        .where('submitted_at', '>=', start)
+        .where({ status: 'submitted' })
+        .whereNotNull('score')
+        .select(
+          db.raw("AVG(score) as avg_score"),
+          db.raw("COUNT(*) as responses"),
+          db.raw("COUNT(*) FILTER (WHERE score >= 8) as promoters"),
+          db.raw("COUNT(*) FILTER (WHERE score <= 3) as detractors")
+        ).first();
+    } catch (err) {
+      logger.error(`[admin-dashboard] CSAT query failed: ${err.message}`);
+    }
+    const csatAvg = csatRow?.avg_score ? parseFloat(csatRow.avg_score).toFixed(1) : null;
+    const csatResponses = parseInt(csatRow?.responses || 0);
+    const nps = csatResponses > 0
+      ? Math.round(((parseInt(csatRow.promoters) - parseInt(csatRow.detractors)) / csatResponses) * 100)
       : null;
 
     // Revenue/job, RPMH, job efficiency, gross margin
+    // Both per-job average AND revenue-weighted gross margin so a $50 callback
+    // at 100% can't visually offset a $5,000 job at 30%.
     const srFin = await db('service_records')
       .where('service_date', '>=', start).where('service_date', '<=', todayStr)
       .whereNotNull('revenue')
@@ -320,26 +337,37 @@ router.get('/core-kpis', async (req, res, next) => {
         db.raw("AVG(revenue) as avg_rev"),
         db.raw("AVG(revenue_per_man_hour) as avg_rpmh"),
         db.raw("AVG(gross_margin_pct) as avg_margin"),
+        db.raw("SUM(revenue * gross_margin_pct) / NULLIF(SUM(revenue), 0) as weighted_margin"),
         db.raw("COUNT(*) as jobs")
       ).first();
     const revPerJob = srFin?.avg_rev ? parseFloat(srFin.avg_rev) : null;
     const rpmh = srFin?.avg_rpmh ? parseFloat(srFin.avg_rpmh) : null;
-    const grossMargin = srFin?.avg_margin ? parseFloat(srFin.avg_margin) : null;
+    const grossMarginAvg = srFin?.avg_margin ? parseFloat(srFin.avg_margin) : null;
+    const grossMarginWeighted = srFin?.weighted_margin ? parseFloat(srFin.weighted_margin) : null;
     const jobsDone = parseInt(srFin?.jobs || 0);
     const laborHoursTotal = parseFloat(srFin?.hours_total || 0);
 
-    // Tech utilization — billable hours / available hours (8h/day × techs × days)
-    const techCount = await db('technicians').where({ active: true }).count('* as c').first().catch(() => ({ c: 3 }));
-    const numTechs = parseInt(techCount?.c || 3);
+    // Tech utilization — billable hours / available hours (8h/day × techs × days).
+    // Fail loud (null) instead of pretending we have 3 techs when the query
+    // breaks — silent fallbacks distort utilization for weeks before anyone
+    // notices.
+    let numTechs = null;
+    try {
+      const techCount = await db('technicians').where({ active: true }).count('* as c').first();
+      numTechs = parseInt(techCount?.c || 0) || null;
+    } catch (err) {
+      logger.error(`[admin-dashboard] active techs count failed: ${err.message}`);
+    }
     const daysInPeriod = Math.max(1, Math.ceil((now - new Date(start)) / 86400000) + 1);
-    const availableHours = numTechs * 8 * daysInPeriod;
+    const availableHours = numTechs ? numTechs * 8 * daysInPeriod : 0;
     const utilization = availableHours > 0 && laborHoursTotal > 0
       ? Math.round((laborHoursTotal / availableHours) * 100) : null;
 
     // Route efficiency — stops per hour (completed stops / labor hours)
     const stopsPerHour = laborHoursTotal > 0 ? Math.round((jobsDone / laborHoursTotal) * 10) / 10 : null;
 
-    // Lead response time + conv — leads table
+    // Lead response time + conv — leads table. Log failures so a renamed column
+    // doesn't silently turn the tile into "—" for weeks.
     let leadMetrics = { avgResponseMin: null, conversion: null, leads: 0, booked: 0 };
     try {
       const leadAgg = await db('leads')
@@ -357,7 +385,9 @@ router.get('/core-kpis', async (req, res, next) => {
         conversion: leads > 0 ? Math.round((booked / leads) * 1000) / 10 : null,
         avgResponseMin: leadAgg?.avg_resp ? Math.round(parseFloat(leadAgg.avg_resp)) : null,
       };
-    } catch {}
+    } catch (err) {
+      logger.error(`[admin-dashboard] lead metrics failed: ${err.message}`);
+    }
 
     // AR Days — avg days outstanding on unpaid invoices + DSO
     let arDays = null, arOpen = 0, arOverdue = 0;
@@ -373,7 +403,9 @@ router.get('/core-kpis', async (req, res, next) => {
       arDays = arAgg?.avg_days_open ? Math.round(parseFloat(arAgg.avg_days_open)) : null;
       arOpen = parseFloat(arAgg?.open_total || 0);
       arOverdue = parseInt(arAgg?.overdue_count || 0);
-    } catch {}
+    } catch (err) {
+      logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
+    }
 
     // Retention — customers who churned in window vs active at start
     let retentionPct = null, churned = 0;
@@ -384,7 +416,9 @@ router.get('/core-kpis', async (req, res, next) => {
       const activeStart = await db('customers').where({ active: true }).whereNull('deleted_at').count('* as c').first();
       const base = parseInt(activeStart?.c || 0) + churned;
       retentionPct = base > 0 ? Math.round(((base - churned) / base) * 1000) / 10 : null;
-    } catch {}
+    } catch (err) {
+      logger.error(`[admin-dashboard] retention failed: ${err.message}`);
+    }
 
     // Tech leaderboard — revenue + jobs + RPMH per tech in window
     let leaderboard = [];
@@ -415,7 +449,9 @@ router.get('/core-kpis', async (req, res, next) => {
           callbacks: parseInt(r.callbacks || 0),
           callbackRate: r.jobs > 0 ? Math.round((parseInt(r.callbacks || 0) / parseInt(r.jobs)) * 1000) / 10 : 0,
         }));
-    } catch {}
+    } catch (err) {
+      logger.error(`[admin-dashboard] leaderboard failed: ${err.message}`);
+    }
 
     res.json({
       period,
@@ -430,13 +466,19 @@ router.get('/core-kpis', async (req, res, next) => {
       },
       quality: {
         csatAvg,
-        csatResponses: parseInt(csatRow?.responses || 0),
+        csatResponses,
         nps,
       },
       financial: {
         revPerJob,
         rpmh,
-        grossMargin,
+        // grossMargin kept for V1 backwards compat = revenue-weighted (the
+        // accurate one). V2 reads grossMarginWeighted + grossMarginAvg
+        // explicitly so it can show both.
+        grossMargin: grossMarginWeighted ?? grossMarginAvg,
+        grossMarginWeighted,
+        grossMarginAvg,
+        activeTechs: numTechs,
         jobsDone,
         laborHours: Math.round(laborHoursTotal * 10) / 10,
         stopsPerHour,
@@ -448,6 +490,176 @@ router.get('/core-kpis', async (req, res, next) => {
       leaderboard,
     });
   } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Chart-driven panels for DashboardPageV2.
+//
+// These wrap the Intelligence Bar dashboard tools so chat answers and
+// dashboard tiles share one source of truth. If a tile and a chat answer
+// ever disagree, that's a bug in one place, not two.
+// ─────────────────────────────────────────────────────────────────────
+
+function ibError(toolName) {
+  return (err) => {
+    logger.error(`[admin-dashboard] IB tool ${toolName} failed: ${err.message}`);
+    throw err;
+  };
+}
+
+// GET /api/admin/dashboard/funnel — estimate funnel for the current month
+router.get('/funnel', async (req, res, next) => {
+  try {
+    const result = await executeDashboardTool('get_estimate_funnel', {}).catch(ibError('get_estimate_funnel'));
+    if (result?.error) return res.status(500).json({ error: result.error });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/aging — outstanding AR aging buckets
+router.get('/aging', async (req, res, next) => {
+  try {
+    const result = await executeDashboardTool('get_outstanding_balances', {}).catch(ibError('get_outstanding_balances'));
+    if (result?.error) return res.status(500).json({ error: result.error });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/mrr-trend?months=12
+router.get('/mrr-trend', async (req, res, next) => {
+  try {
+    const months = Math.max(1, Math.min(24, parseInt(req.query.months || 12, 10) || 12));
+    const result = await executeDashboardTool('get_mrr_trend', { months }).catch(ibError('get_mrr_trend'));
+    if (result?.error) return res.status(500).json({ error: result.error });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/lead-source — customer acquisition by source (YTD)
+router.get('/lead-source', async (req, res, next) => {
+  try {
+    const result = await executeDashboardTool('get_customer_acquisition', {}).catch(ibError('get_customer_acquisition'));
+    if (result?.error) return res.status(500).json({ error: result.error });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/service-mix — completed service mix by category (MTD)
+router.get('/service-mix', async (req, res, next) => {
+  try {
+    const result = await executeDashboardTool('get_service_mix', {}).catch(ibError('get_service_mix'));
+    if (result?.error) return res.status(500).json({ error: result.error });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/compare?period=this_month&against=last_month
+// Powers period-over-period overlay on the revenue area chart and the
+// hero-tile delta arrows. Returns daily series for both windows.
+router.get('/compare', async (req, res, next) => {
+  try {
+    const period = String(req.query.period || 'this_month').toLowerCase();
+    const against = String(req.query.against || 'last_month').toLowerCase();
+
+    function resolveWindow(p) {
+      const today = etDateString();
+      switch (p) {
+        case 'today':       return { from: today, to: today, label: 'Today' };
+        case 'this_week':   return { from: etWeekStart(), to: today, label: 'This week' };
+        case 'last_week': {
+          const monThis = etWeekStart();
+          const monLast = etDateString(addETDays(parseETDateTime(monThis + 'T12:00'), -7));
+          const sunLast = etDateString(addETDays(parseETDateTime(monThis + 'T12:00'), -1));
+          return { from: monLast, to: sunLast, label: 'Last week' };
+        }
+        case 'this_month':  return { from: etMonthStart(), to: today, label: 'This month' };
+        case 'last_month':  return { from: etMonthStart(new Date(), -1), to: etMonthEnd(new Date(), -1), label: 'Last month' };
+        case 'ytd':         return { from: etYearStart(), to: today, label: 'YTD' };
+        default:            return { from: etMonthStart(), to: today, label: 'This month' };
+      }
+    }
+
+    async function dailySeries(from, to) {
+      const rows = await db('payments')
+        .where({ status: 'paid' })
+        .where('payment_date', '>=', from).where('payment_date', '<=', to)
+        .select(db.raw("payment_date::date as date"), db.raw("SUM(amount) as total"))
+        .groupByRaw("payment_date::date").orderBy('date');
+      return rows.map(r => ({ date: r.date, total: parseFloat(r.total || 0) }));
+    }
+
+    async function totals(from, to) {
+      const [rev, services, customers] = await Promise.all([
+        db('payments').where({ status: 'paid' }).whereBetween('payment_date', [from, to]).sum('amount as total').first(),
+        db('scheduled_services').whereBetween('scheduled_date', [from, to])
+          .select(db.raw("COUNT(*) as total"), db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")).first(),
+        db('customers').where({ active: true }).whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first(),
+      ]);
+      return {
+        revenue: parseFloat(rev?.total || 0),
+        services: parseInt(services?.total || 0),
+        servicesCompleted: parseInt(services?.completed || 0),
+        newCustomers: parseInt(customers?.c || 0),
+      };
+    }
+
+    const a = resolveWindow(period);
+    const b = resolveWindow(against);
+
+    const [seriesA, seriesB, totalsA, totalsB] = await Promise.all([
+      dailySeries(a.from, a.to),
+      dailySeries(b.from, b.to),
+      totals(a.from, a.to),
+      totals(b.from, b.to),
+    ]);
+
+    function pctChange(curr, prev) {
+      if (!prev || prev === 0) return null;
+      return Math.round(((curr - prev) / prev) * 1000) / 10;
+    }
+
+    res.json({
+      period: { ...a, series: seriesA, totals: totalsA },
+      against: { ...b, series: seriesB, totals: totalsB },
+      deltas: {
+        revenue: pctChange(totalsA.revenue, totalsB.revenue),
+        services: pctChange(totalsA.services, totalsB.services),
+        servicesCompleted: pctChange(totalsA.servicesCompleted, totalsB.servicesCompleted),
+        newCustomers: pctChange(totalsA.newCustomers, totalsB.newCustomers),
+      },
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /compare failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// GET /api/admin/dashboard/today-completion — radial gauge: completed vs scheduled today
+router.get('/today-completion', async (req, res, next) => {
+  try {
+    const today = etDateString();
+    const row = await db('scheduled_services')
+      .where({ scheduled_date: today })
+      .select(
+        db.raw("COUNT(*) as total"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled"),
+        db.raw("COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled')) as remaining")
+      ).first();
+    const total = parseInt(row?.total || 0);
+    const completed = parseInt(row?.completed || 0);
+    res.json({
+      date: today,
+      total,
+      completed,
+      cancelled: parseInt(row?.cancelled || 0),
+      remaining: parseInt(row?.remaining || 0),
+      pct: total > 0 ? Math.round((completed / total) * 100) : null,
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /today-completion failed: ${err.message}`);
+    next(err);
+  }
 });
 
 module.exports = router;
