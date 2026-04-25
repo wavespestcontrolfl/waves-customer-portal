@@ -236,7 +236,15 @@ export default function DashboardPageV2() {
         </ChartCard>
         <ChartCard
           title="Estimate Funnel"
-          sub={funnel?.period ? `${funnel.period.from} → ${funnel.period.to}` : ''}
+          sub={
+            funnel?.period
+              ? `${funnel.period.from} → ${funnel.period.to}${
+                  funnel.excluded_internal_customers?.length
+                    ? ` · excludes ${funnel.excluded_internal_customers.join(', ')}`
+                    : ''
+                }`
+              : ''
+          }
         >
           <EstimateFunnel
             funnel={funnel?.funnel || {}}
