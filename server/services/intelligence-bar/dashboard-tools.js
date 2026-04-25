@@ -10,6 +10,26 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
+// Internal/test customers excluded from sales-funnel analytics. Names are
+// matched lowercase against both estimates.customer_name (denormalized
+// string) and the joined customers row, so a misspelled denormalization
+// can't sneak past. Add new names here as they come up.
+const INTERNAL_TEST_CUSTOMERS = ['adam martinez'];
+
+// Returns a Knex builder with the standard exclusion applied to a
+// query against the `estimates` table aliased as `e`. Use this on every
+// funnel-style query so internal test estimates never inflate sales
+// metrics. Caller is responsible for the leftJoin to customers as `c`.
+function excludeInternalEstimates(qb) {
+  if (INTERNAL_TEST_CUSTOMERS.length === 0) return qb;
+  return qb
+    .whereNotIn(db.raw("LOWER(COALESCE(e.customer_name, ''))"), INTERNAL_TEST_CUSTOMERS)
+    .whereNotIn(
+      db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+      INTERNAL_TEST_CUSTOMERS,
+    );
+}
+
 // ─── Date helpers ───────────────────────────────────────────────
 
 function dateRange(period) {
@@ -440,12 +460,32 @@ async function getEstimateFunnel(input) {
   const r = dateRange();
   const from = input.date_from || r.month_start;
   const to = input.date_to || r.today;
+  const fromTs = `${from}T00:00:00`;
+  const toTs = `${to}T23:59:59`;
+
+  // Each stage counts estimates whose stage *transition* timestamp
+  // (sent_at / viewed_at / accepted_at / declined_at) falls in the
+  // window — NOT created_at. The previous version counted draft rows
+  // (status defaults to 'draft' on insert), which inflated the "Sent"
+  // bucket with estimates the operator only started but never delivered.
+  //
+  // INTERNAL_TEST_CUSTOMERS are excluded at every stage via the
+  // excludeInternalEstimates helper so funnel/close-rate metrics
+  // reflect real prospect activity only.
+  function stageQuery(stageColumn, status) {
+    let qb = db({ e: 'estimates' })
+      .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
+      .whereNotNull(`e.${stageColumn}`)
+      .whereBetween(`e.${stageColumn}`, [fromTs, toTs]);
+    if (status) qb = qb.where('e.status', status);
+    return excludeInternalEstimates(qb);
+  }
 
   const [sent, viewed, accepted, declined] = await Promise.all([
-    db('estimates').whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first(),
-    db('estimates').whereIn('status', ['viewed', 'accepted', 'declined']).whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first(),
-    db('estimates').where({ status: 'accepted' }).whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first(),
-    db('estimates').where({ status: 'declined' }).whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first(),
+    stageQuery('sent_at').count('* as c').first(),
+    stageQuery('viewed_at').count('* as c').first(),
+    stageQuery('accepted_at', 'accepted').count('* as c').first(),
+    stageQuery('declined_at', 'declined').count('* as c').first(),
   ]);
 
   const totalSent = parseInt(sent?.c || 0);
@@ -453,12 +493,20 @@ async function getEstimateFunnel(input) {
   const totalAccepted = parseInt(accepted?.c || 0);
   const totalDeclined = parseInt(declined?.c || 0);
 
-  const avgResponse = await db('estimates').where({ status: 'accepted' }).whereBetween('accepted_at', [from, to + 'T23:59:59'])
-    .whereNotNull('sent_at')
-    .select(db.raw("AVG(EXTRACT(EPOCH FROM (accepted_at - sent_at)) / 3600) as avg_hrs")).first();
+  const avgResponse = await excludeInternalEstimates(
+    db({ e: 'estimates' })
+      .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
+      .where('e.status', 'accepted')
+      .whereBetween('e.accepted_at', [fromTs, toTs])
+      .whereNotNull('e.sent_at')
+  ).select(db.raw("AVG(EXTRACT(EPOCH FROM (e.accepted_at - e.sent_at)) / 3600) as avg_hrs")).first();
 
-  const totalValue = await db('estimates').where({ status: 'accepted' }).whereBetween('accepted_at', [from, to + 'T23:59:59'])
-    .select(db.raw('COALESCE(SUM(COALESCE(monthly_total,0) + COALESCE(onetime_total,0)), 0) as total')).first();
+  const totalValue = await excludeInternalEstimates(
+    db({ e: 'estimates' })
+      .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
+      .where('e.status', 'accepted')
+      .whereBetween('e.accepted_at', [fromTs, toTs])
+  ).select(db.raw('COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)), 0) as total')).first();
 
   return {
     period: { from, to },
@@ -476,6 +524,7 @@ async function getEstimateFunnel(input) {
     },
     avg_response_hours: parseFloat(avgResponse?.avg_hrs || 0).toFixed(1),
     total_accepted_value: parseFloat(totalValue?.total || 0),
+    excluded_internal_customers: INTERNAL_TEST_CUSTOMERS,
   };
 }
 
