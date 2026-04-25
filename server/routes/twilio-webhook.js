@@ -113,23 +113,6 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`Reschedule reply check failed: ${e.message}`); }
     }
 
-    // CONVERSATIONAL SMS SCHEDULER — handles multi-turn natural language scheduling
-    if (customer && numberConfig.type === 'location' && Body) {
-      try {
-        const SmsScheduler = require('../services/sms-scheduler');
-        const schedulerResult = await SmsScheduler.handleMessage(customer.id, Body, From, To);
-        if (schedulerResult?.handled) {
-          logger.info(`[sms-scheduler] Handled for ${customer.first_name}: ${Body.slice(0, 60)}`);
-          await db('sms_log').insert({
-            customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
-            message_body: Body, twilio_sid: MessageSid, status: 'received',
-            message_type: 'scheduling_conversation',
-          }).catch(() => {});
-          return res.type('text/xml').send('<Response></Response>');
-        }
-      } catch (e) { logger.error(`[sms-scheduler] Failed: ${e.message}`); }
-    }
-
     // LEAD INTAKE STATE MACHINE — catches replies to the "What are you
     // interested in — Pest Control, Lawn Care, or One-Time Service?"
     // auto-reply that lead-webhook.js sends after a form submission.
