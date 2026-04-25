@@ -6,9 +6,32 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { etDateString, etMonthStart, etMonthEnd, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const {
   executeDashboardTool,
+  INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Lead-table exclusion mirroring the customers/estimates/payments helpers
+// in dashboard-tools.js, but applied directly to `leads.first_name +
+// last_name` (the leads table denormalizes contact info rather than
+// always FK'ing to customers, so the customers-side helper isn't enough).
+// Caller passes a Knex builder querying `leads` (alias optional —
+// pass aliasPrefix to scope the column references).
+function excludeInternalLeads(qb, aliasPrefix = '') {
+  if (INTERNAL_TEST_CUSTOMERS.length === 0) return qb;
+  const fn = aliasPrefix ? `${aliasPrefix}.first_name` : 'first_name';
+  const ln = aliasPrefix ? `${aliasPrefix}.last_name` : 'last_name';
+  return qb.whereNotIn(
+    db.raw(`LOWER(COALESCE(${fn}, '') || ' ' || COALESCE(${ln}, ''))`),
+    INTERNAL_TEST_CUSTOMERS,
+  );
+}
+
+// Statuses that aren't real lead engagement opportunities — exclude from
+// any "conversion rate" denominator. `lost` and `abandoned` are KEPT in
+// the denominator on purpose: those represent real prospects we worked
+// and didn't close, and excluding them would inflate the rate.
+const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate'];
 
 // ET-calendar period helpers — these back every dashboard KPI window.
 function startOfMonth(d = new Date()) { return etMonthStart(d); }
@@ -368,11 +391,18 @@ router.get('/core-kpis', async (req, res, next) => {
 
     // Lead response time + conv — leads table. Log failures so a renamed column
     // doesn't silently turn the tile into "—" for weeks.
+    //
+    // Conversion denominator excludes non-engaged statuses (cancelled,
+    // spam, duplicate) — counting spam/dup leads in the denominator
+    // artificially deflates the rate. Internal/test customers (Adam
+    // Martinez et al.) are also excluded so test activity can't skew it.
     let leadMetrics = { avgResponseMin: null, conversion: null, leads: 0, booked: 0 };
     try {
-      const leadAgg = await db('leads')
-        .where('created_at', '>=', start)
-        .select(
+      const leadAgg = await excludeInternalLeads(
+        db('leads')
+          .where('created_at', '>=', start)
+          .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+      ).select(
           db.raw("COUNT(*) as total"),
           db.raw("COUNT(*) FILTER (WHERE status = 'won') as booked"),
           db.raw("AVG(response_time_minutes) FILTER (WHERE response_time_minutes IS NOT NULL) as avg_resp")
@@ -750,10 +780,12 @@ router.get('/calls-by-source', async (req, res, next) => {
 router.get('/leads-by-source', async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period);
-    const rows = await db('leads as l')
-      .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id')
-      .whereBetween('l.first_contact_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
-      .select(
+    const rows = await excludeInternalLeads(
+      db('leads as l')
+        .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id')
+        .whereBetween('l.first_contact_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`]),
+      'l',
+    ).select(
         db.raw("COALESCE(s.name, 'Unattributed') as name"),
         db.raw("s.source_type as source_type"),
         db.raw("s.channel as channel"),
@@ -787,6 +819,7 @@ router.get('/leads-by-source', async (req, res, next) => {
           conversionPct: leads > 0 ? Math.round((booked / leads) * 1000) / 10 : null,
         };
       }),
+      excluded_internal_customers: INTERNAL_TEST_CUSTOMERS,
     });
   } catch (err) {
     logger.error(`[admin-dashboard] /leads-by-source failed: ${err.message}`);
@@ -801,9 +834,10 @@ router.get('/leads-by-source', async (req, res, next) => {
 router.get('/channel-mix', async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period);
-    const rows = await db('leads')
-      .whereBetween('first_contact_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
-      .select(
+    const rows = await excludeInternalLeads(
+      db('leads')
+        .whereBetween('first_contact_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
+    ).select(
         db.raw("COALESCE(first_contact_channel, 'unknown') as channel"),
         db.raw('COUNT(*) as leads'),
         db.raw("COUNT(*) FILTER (WHERE status = 'won') as booked"),
@@ -821,6 +855,7 @@ router.get('/channel-mix', async (req, res, next) => {
         booked: parseInt(r.booked),
         pctOfTotal: total > 0 ? Math.round((parseInt(r.leads) / total) * 100) : 0,
       })),
+      excluded_internal_customers: INTERNAL_TEST_CUSTOMERS,
     });
   } catch (err) {
     logger.error(`[admin-dashboard] /channel-mix failed: ${err.message}`);

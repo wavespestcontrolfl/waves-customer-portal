@@ -850,4 +850,4 @@ async function getTodayBriefing() {
 }
 
 
-module.exports = { DASHBOARD_TOOLS, executeDashboardTool };
+module.exports = { DASHBOARD_TOOLS, executeDashboardTool, INTERNAL_TEST_CUSTOMERS };
