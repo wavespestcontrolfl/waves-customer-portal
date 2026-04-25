@@ -142,21 +142,31 @@ function pricePestControl(property, options = {}) {
 // PEST — INITIAL ROACH KNOCKDOWN (one-time)
 // ============================================================
 // Auto-added by estimate-engine when recurring pest is booked with a
-// non-none roach type. Covers the heavier visit-1 treatment cost (extra
-// product + 10–15 min of additional labor) regardless of whether the
-// customer keeps the recurring program — closes the adverse-selection
-// gap left by the old multiplicative roachModifier (which only paid back
-// after ~3 visits).
+// non-none roach type. Covers the heavier visit-1 treatment cost
+// regardless of whether the customer keeps the recurring program —
+// closes the adverse-selection gap left by the old multiplicative
+// roachModifier (which only paid back after ~3 visits).
+//
+// Sliding scale by footprint and species — German is materially harder
+// than palmetto (longer visit, more product, multi-visit follow-up).
+// The dedicated `priceGermanRoach` ($450+ multi-visit cleanout) is
+// still available for severe colonies; this is the auto-fire for the
+// everyday "I saw one or two" case.
 function pricePestInitialRoach(property, options = {}) {
   const { roachType = 'none' } = options;
   if (roachType === 'none') return null;
 
-  const price = PEST.pestInitialRoach;
+  const scale = PEST.pestInitialRoach?.[roachType];
+  if (!Array.isArray(scale) || scale.length === 0) return null;
+  const footprint = property?.footprint || 0;
+  const bracket = scale.find((b) => footprint < b.sqft) || scale[scale.length - 1];
+  const price = bracket.price;
+
   // Cost detail mirrors pricePestControl's costing block so the margin
   // panel can reason about the fee. Visit-1 burden estimate: heavier
-  // chemical rotation (~$20) + ~15 extra minutes of labor at GLOBAL.LABOR_RATE.
+  // chemical rotation + extra on-site labor at GLOBAL.LABOR_RATE.
   const extraMaterial = roachType === 'german' ? 25 : 20;
-  const extraOnSiteMin = roachType === 'german' ? 20 : 15;
+  const extraOnSiteMin = roachType === 'german' ? 25 : 15;
   const extraLabor = GLOBAL.LABOR_RATE * extraOnSiteMin / 60;
   const incrementalCost = extraMaterial + extraLabor;
   const margin = price > 0 ? (price - incrementalCost) / price : 0;
@@ -167,6 +177,7 @@ function pricePestInitialRoach(property, options = {}) {
     price,
     roachType,
     oneTime: true,
+    footprintBracket: bracket.sqft === Infinity ? '2500+' : `<${bracket.sqft}`,
     costs: {
       extraMaterial,
       extraLaborMin: extraOnSiteMin,

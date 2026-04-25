@@ -2099,6 +2099,31 @@ const V1_LABEL_TO_LADDER = {
   'Monthly':    { key: 'monthly',    label: 'Monthly' },
 };
 
+// Pull the auto-fired Initial Roach Knockdown line item (`service:
+// 'pest_initial_roach'`) out of the saved estimate data so the public
+// estimate view can surface it as a first-visit fee separate from the
+// general one-time bucket. Returns null if not present.
+function findInitialRoachItem(_pestTiers, estData) {
+  const result = estData?.result || {};
+  const buckets = [
+    result.oneTime?.items,
+    result.oneTime?.specItems,
+    result.results?.oneTime?.items,
+    result.results?.oneTime?.specItems,
+  ];
+  for (const list of buckets) {
+    if (!Array.isArray(list)) continue;
+    const hit = list.find((it) => it?.service === 'pest_initial_roach');
+    if (hit && hit.price) {
+      return {
+        price: Number(hit.price) || 0,
+        label: hit.label || 'Initial Roach Knockdown',
+      };
+    }
+  }
+  return null;
+}
+
 function readV1Shape(estData) {
   if (!estData || typeof estData !== 'object') return null;
   const result = estData.result;
@@ -2205,16 +2230,32 @@ async function buildPricingBundle(estimate) {
     const hasPest = v1.pestTiers.length > 0;
     const finalFreqs = hasPest ? frequencies : frequencies.slice(0, 1);
 
+    // First-visit fees stack — non-recurring charges shown to the customer
+    // alongside their monthly price. WaveGuard membership is waivable with
+    // annual prepay; the Initial Roach Knockdown (auto-fired when recurring
+    // pest carries a roach type) is NOT waivable — it covers the heavier
+    // visit-1 cost regardless of customer churn.
+    const firstVisitFees = [];
+    if (hasPest) {
+      firstVisitFees.push({ amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true });
+    }
+    const initialRoachItem = findInitialRoachItem(v1.pestTiers, estData);
+    if (initialRoachItem) {
+      firstVisitFees.push({
+        amount: initialRoachItem.price,
+        label: initialRoachItem.label || 'Initial Roach Knockdown',
+        waivedWithPrepay: false,
+      });
+    }
+
     const payload = {
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice: v1.oneTimeTotal || Number(estimate.onetime_total || 0) || null,
-      // WaveGuard $99 initial fee — recurring pest only. Spec says waived with
-      // annual prepay; we surface it as an informational line for now so the
-      // customer sees it on their estimate. A prepay toggle that actually
-      // applies the waiver is a separate follow-up (accept payload +
-      // estimate-converter + invoice line item changes).
-      setupFee: hasPest ? { amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true } : null,
+      // Back-compat: keep `setupFee` populated with the first waivable entry
+      // for any older client build still reading the singular field.
+      setupFee: firstVisitFees.find((f) => f.waivedWithPrepay) || null,
+      firstVisitFees,
       source: 'v1_engine_shape',
     };
     pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });

@@ -22,6 +22,9 @@ const ONE_TIME_SERVICES = new Set([
   // Session 11a Step 2b-3: auto-fire from recurring pest roachModifier='GERMAN'.
   // Mirrors v2-legacy-mapper treating oneTime.germanRoachInitial as a one-time item.
   'german_roach_initial',
+  // Auto-fired by estimate-engine when recurring pest carries roachType !== 'none'.
+  // Surfaces in the customer-facing estimate's first-visit-fees stack.
+  'pest_initial_roach',
 ]);
 
 const CAP = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -43,6 +46,7 @@ const SERVICE_LABEL = {
   flea: 'Flea Treatment',
   german_roach: 'German Roach',
   german_roach_initial: 'German Roach Initial (3-Visit)',
+  pest_initial_roach: 'Initial Roach Knockdown',
   stinging: 'Stinging Insect',
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',

@@ -115,11 +115,26 @@ const PEST = {
   // whether the customer churns after the first visit. Keys stay in place so
   // any caller passing roachType doesn't break.
   roachModifier: { german: 0, regular: 0, none: 0 },
-  // One-time "Initial Knockdown" treatment auto-added when recurring pest is
-  // booked with a non-none roach type. Covers ~30–40 min on visit 1 plus the
-  // heavier product rotation (Tekko Pro IGR + Demand CS + bait gel + perimeter
-  // granular). Anchored between Terminix's $99 and Orkin's $189 retail.
-  pestInitialRoach: r(139),
+  // One-time "Initial Knockdown" treatments auto-added when recurring pest is
+  // booked with a non-none roach type. Sliding scale by footprint matches
+  // industry-standard pricing patterns (Terminix / Orkin / Truly Nolen all
+  // tier their initial fees by home size). German is materially harder than
+  // palmetto — heavier product rotation, longer visit, requires follow-up
+  // visits to break the breeding cycle — so it carries a higher scale.
+  // Brackets are upper bounds: < first sqft → first price, < second sqft →
+  // second price, else third.
+  pestInitialRoach: {
+    regular: [
+      { sqft: 1500, price: r(119) },
+      { sqft: 2500, price: r(139) },
+      { sqft: Infinity, price: r(169) },
+    ],
+    german: [
+      { sqft: 1500, price: r(169) },
+      { sqft: 2500, price: r(199) },
+      { sqft: Infinity, price: r(249) },
+    ],
+  },
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
     // Session 11a byte-parity: v1 lowered from 0.92/0.85 to 0.85/0.70 to match
