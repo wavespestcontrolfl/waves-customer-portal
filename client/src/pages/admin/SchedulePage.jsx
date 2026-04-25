@@ -353,7 +353,7 @@ function ServiceCard({ service, zoneColors, onStatusChange, onComplete, onResche
             try {
               const r = await adminFetch('/admin/communications/call', {
                 method: 'POST',
-                body: JSON.stringify({ to: service.customerPhone }),
+                body: JSON.stringify({ to: service.customerPhone, fromNumber: '+19412975749' }),
               });
               if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
             } catch (e) { alert('Call failed: ' + e.message); }
