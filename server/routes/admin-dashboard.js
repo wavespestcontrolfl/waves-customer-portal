@@ -437,18 +437,23 @@ router.get('/core-kpis', async (req, res, next) => {
           db.raw("COUNT(*) FILTER (WHERE is_callback = true) as callbacks")
         )
         .orderByRaw('SUM(revenue) DESC NULLS LAST');
-      leaderboard = leaderboard
-        .filter(r => r.tech_name)
-        .map(r => ({
-          techId: r.tech_id,
-          name: r.tech_name,
-          jobs: parseInt(r.jobs),
-          revenue: parseFloat(r.revenue || 0),
-          rpmh: r.rpmh ? Math.round(parseFloat(r.rpmh)) : 0,
-          margin: r.margin ? Math.round(parseFloat(r.margin)) : 0,
-          callbacks: parseInt(r.callbacks || 0),
-          callbackRate: r.jobs > 0 ? Math.round((parseInt(r.callbacks || 0) / parseInt(r.jobs)) * 1000) / 10 : 0,
-        }));
+      // Keep service_records with no technician_id assigned in their own
+      // "Unassigned" bucket instead of dropping them. Silently filtering
+      // these out (the previous behavior) made it impossible to see how
+      // much work was being attributed to nobody — and inflated per-tech
+      // share-of-total since unassigned jobs disappeared from the
+      // denominator.
+      leaderboard = leaderboard.map(r => ({
+        techId: r.tech_id,
+        name: r.tech_name || 'Unassigned',
+        unassigned: !r.tech_name,
+        jobs: parseInt(r.jobs),
+        revenue: parseFloat(r.revenue || 0),
+        rpmh: r.rpmh ? Math.round(parseFloat(r.rpmh)) : 0,
+        margin: r.margin ? Math.round(parseFloat(r.margin)) : 0,
+        callbacks: parseInt(r.callbacks || 0),
+        callbackRate: r.jobs > 0 ? Math.round((parseInt(r.callbacks || 0) / parseInt(r.jobs)) * 1000) / 10 : 0,
+      }));
     } catch (err) {
       logger.error(`[admin-dashboard] leaderboard failed: ${err.message}`);
     }

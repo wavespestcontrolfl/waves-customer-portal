@@ -498,26 +498,39 @@ export function TechLeaderboardBars({ leaderboard = [] }) {
   const max = Math.max(...leaderboard.map(t => t.revenue || 0), 1);
   return (
     <ul className="space-y-3">
-      {leaderboard.map((t, i) => (
-        <li key={t.techId || i}>
-          <div className="flex items-baseline justify-between text-12 mb-1">
-            <span className="text-zinc-900">
-              <span className="text-ink-tertiary u-nums mr-2">{i + 1}.</span>
-              <span className="font-medium">{t.name}</span>
-              <span className="text-ink-tertiary ml-2 u-nums">· {t.jobs} jobs</span>
-            </span>
-            <span className="u-nums font-medium">{fmtMoney(t.revenue)}</span>
-          </div>
-          <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
-            <div className="h-full" style={{ width: `${(t.revenue / max) * 100}%`, background: CHART_INK }} />
-          </div>
-          <div className="flex justify-between mt-1 text-11 text-ink-secondary u-nums">
-            <span>RPMH {fmtMoney(t.rpmh)}</span>
-            <span className={cn(t.margin < 40 && 'text-alert-fg font-medium')}>{t.margin}% margin</span>
-            <span className={cn(t.callbackRate >= 6 && 'text-alert-fg font-medium')}>{t.callbackRate}% callbacks</span>
-          </div>
-        </li>
-      ))}
+      {leaderboard.map((t, i) => {
+        // Unassigned bucket = service_records without technician_id.
+        // Render in alert-fg if any unassigned jobs exist — that's
+        // a true alert (work nobody is being credited for, callback
+        // rates undercounted, leaderboard inflated).
+        const unassigned = !!t.unassigned;
+        return (
+          <li key={t.techId || `unassigned-${i}`}>
+            <div className="flex items-baseline justify-between text-12 mb-1">
+              <span className={cn('text-zinc-900', unassigned && 'text-alert-fg')}>
+                <span className="text-ink-tertiary u-nums mr-2">{i + 1}.</span>
+                <span className="font-medium">{t.name}</span>
+                <span className="text-ink-tertiary ml-2 u-nums">· {t.jobs} jobs</span>
+              </span>
+              <span className={cn('u-nums font-medium', unassigned && 'text-alert-fg')}>{fmtMoney(t.revenue)}</span>
+            </div>
+            <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
+              <div
+                className="h-full"
+                style={{
+                  width: `${(t.revenue / max) * 100}%`,
+                  background: unassigned ? CHART_ALERT : CHART_INK,
+                }}
+              />
+            </div>
+            <div className="flex justify-between mt-1 text-11 text-ink-secondary u-nums">
+              <span>RPMH {fmtMoney(t.rpmh)}</span>
+              <span className={cn(t.margin < 40 && 'text-alert-fg font-medium')}>{t.margin}% margin</span>
+              <span className={cn(t.callbackRate >= 6 && 'text-alert-fg font-medium')}>{t.callbackRate}% callbacks</span>
+            </div>
+          </li>
+        );
+      })}
     </ul>
   );
 }
