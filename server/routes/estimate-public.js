@@ -15,6 +15,33 @@ const addonDefaults = require('../config/addon-defaults-by-frequency');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
+// View-count hygiene. We surface view_count + last_viewed_at on the admin
+// estimates dashboard, so the count needs to mean "the customer opened it"
+// — not "iMessage unfurled the link" or "Virginia previewed it from the
+// office." Two filters, applied to BOTH the view_count increment and the
+// per-open estimate_views insert:
+//   1. UA allowlist: drop anything whose user-agent matches a known bot /
+//      preview / scanner / CLI client.
+//   2. Admin IP allowlist (WAVES_ADMIN_IPS, comma-separated): drop hits
+//      from office IPs so internal preview clicks don't inflate the count.
+// First-view side-effects (status flip, office SMS, admin notification)
+// have their own gating downstream and are unaffected.
+const BOT_UA_RE = /bot\b|crawler|spider|crawling|facebookexternalhit|slackbot|twitterbot|linkedinbot|whatsapp|telegram|discordbot|preview|prerender|headlesschrome|curl\/|wget\/|python-requests|axios\/|node-fetch|pingdom|uptimerobot|statuscake|monitoring|http-client/i;
+const VIEW_ADMIN_IPS = (process.env.WAVES_ADMIN_IPS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+function clientIp(req) {
+  return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
+    .toString().split(',')[0].trim().slice(0, 64);
+}
+
+function shouldCountView(req) {
+  const ua = req.get('user-agent') || '';
+  if (BOT_UA_RE.test(ua)) return false;
+  if (VIEW_ADMIN_IPS.length && VIEW_ADMIN_IPS.includes(clientIp(req))) return false;
+  return true;
+}
+
 // Map a one-time service name to the booking page's service id (matches PublicBookingPage SERVICES)
 function bookingServiceFor(name) {
   const n = String(name || '').toLowerCase();
@@ -1184,27 +1211,31 @@ async function handleEstimateView(req, res, next) {
       );
     }
 
-    // Track every view (count + last_viewed_at)
-    try {
-      await db('estimates').where({ id: estimate.id }).update({
-        view_count: db.raw('COALESCE(view_count, 0) + 1'),
-        last_viewed_at: db.fn.now(),
-      });
-    } catch (e) { logger.error(`[estimate-view] view tracking failed: ${e.message}`); }
+    // Track every real view (count + last_viewed_at). Bot UAs and admin
+    // IPs are filtered upstream by shouldCountView so the dashboard count
+    // reflects actual customer opens.
+    const countThisView = shouldCountView(req);
+    if (countThisView) {
+      try {
+        await db('estimates').where({ id: estimate.id }).update({
+          view_count: db.raw('COALESCE(view_count, 0) + 1'),
+          last_viewed_at: db.fn.now(),
+        });
+      } catch (e) { logger.error(`[estimate-view] view tracking failed: ${e.message}`); }
 
-    // Per-open log (Estimates v2 spec §4) — one row per open with ip + UA.
-    // Wrapped so a schema drift can't break the public estimate page.
-    try {
-      const ip = (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
-        .toString().split(',')[0].trim().slice(0, 64);
-      const ua = (req.get('user-agent') || '').slice(0, 1000);
-      await db('estimate_views').insert({
-        estimate_id: estimate.id,
-        viewed_at: db.fn.now(),
-        ip: ip || null,
-        user_agent: ua || null,
-      });
-    } catch (e) { logger.warn(`[estimate-view] estimate_views insert skipped: ${e.message}`); }
+      // Per-open log (Estimates v2 spec §4) — one row per open with ip + UA.
+      // Wrapped so a schema drift can't break the public estimate page.
+      try {
+        const ip = clientIp(req);
+        const ua = (req.get('user-agent') || '').slice(0, 1000);
+        await db('estimate_views').insert({
+          estimate_id: estimate.id,
+          viewed_at: db.fn.now(),
+          ip: ip || null,
+          user_agent: ua || null,
+        });
+      } catch (e) { logger.warn(`[estimate-view] estimate_views insert skipped: ${e.message}`); }
+    }
 
     // First-view actions: set viewed_at/status, notify admin + SMS office
     if (!estimate.viewed_at) {
@@ -2249,26 +2280,29 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
 
-    // Always-safe view signals — fire on every 200. Defensive try/catch
-    // because schema drift on estimate_views or a locked row shouldn't
-    // break the customer-facing endpoint.
-    try {
-      await db('estimates').where({ id: estimate.id }).update({
-        view_count: db.raw('COALESCE(view_count, 0) + 1'),
-        last_viewed_at: db.fn.now(),
-      });
-    } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
-
+    // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
+    // (filtered by shouldCountView). Defensive try/catch because schema
+    // drift on estimate_views or a locked row shouldn't break the
+    // customer-facing endpoint.
     const ip = extractRequestIp(req);
-    try {
-      const ua = (req.get('user-agent') || '').slice(0, 1000);
-      await db('estimate_views').insert({
-        estimate_id: estimate.id,
-        viewed_at: db.fn.now(),
-        ip: ip || null,
-        user_agent: ua || null,
-      });
-    } catch (e) { logger.warn(`[estimate-data] estimate_views insert skipped: ${e.message}`); }
+    if (shouldCountView(req)) {
+      try {
+        await db('estimates').where({ id: estimate.id }).update({
+          view_count: db.raw('COALESCE(view_count, 0) + 1'),
+          last_viewed_at: db.fn.now(),
+        });
+      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
+
+      try {
+        const ua = (req.get('user-agent') || '').slice(0, 1000);
+        await db('estimate_views').insert({
+          estimate_id: estimate.id,
+          viewed_at: db.fn.now(),
+          ip: ip || null,
+          user_agent: ua || null,
+        });
+      } catch (e) { logger.warn(`[estimate-data] estimate_views insert skipped: ${e.message}`); }
+    }
 
     // First-view transition — gate on viewed_at IS NULL AND !adminIP.
     // Admin allowlist keeps Virginia's preview clicks from firing the
