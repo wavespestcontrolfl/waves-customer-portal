@@ -331,17 +331,16 @@ router.post('/', async (req, res) => {
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
-    // Auto-reply to lead — always send (whether call connected or not).
-    // Pull from sms_templates (lead_auto_reply_biz / lead_auto_reply_after_hours)
-    // so Virginia can edit the copy in the admin UI without a deploy. The
-    // hardcoded strings below are the fallback if a template row is missing
-    // or disabled — keep them in sync with the seeded defaults.
+    // Auto-reply to lead — always send (whether call connected or not),
+    // 24/7. Same menu prompt regardless of hour: the state machine in
+    // server/services/lead-intake.js captures service interest + address
+    // overnight, so Virginia/Adam can send a finalized estimate first
+    // thing in the morning without any back-and-forth. Edit copy in the
+    // admin UI; keep the hardcoded fallback in sync with the seeded default.
     try {
       const smsTemplatesRouter = require('./admin-sms-templates');
-      const templateKey = isDuringHours ? 'lead_auto_reply_biz' : 'lead_auto_reply_after_hours';
-      const fallback = isDuringHours
-        ? `Hello ${firstName}! Thanks for reaching out to Waves! What are you interested in — Pest Control, Lawn Care, or a One-Time Service? Reply and we'll get you a quote right away.`
-        : `Hello ${firstName}! Thanks for reaching out to Waves! What are you interested in — Pest Control, Lawn Care, or a One-Time Service? We'll follow up first thing in the morning with a custom quote.`;
+      const templateKey = 'lead_auto_reply_biz';
+      const fallback = `Hello ${firstName}! Thanks for reaching out to Waves! What are you interested in — Pest Control, Lawn Care, or a One-Time Service? Reply and we'll get you a quote right away.`;
       let replyMsg = fallback;
       try {
         if (typeof smsTemplatesRouter.getTemplate === 'function') {
