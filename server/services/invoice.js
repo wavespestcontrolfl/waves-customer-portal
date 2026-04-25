@@ -324,13 +324,28 @@ const InvoiceService = {
 
   /**
    * Send payment confirmation SMS receipt.
+   *
+   * Idempotent: skips if invoices.receipt_sent_at is already set, unless
+   * `force: true` is passed (admin manual resend). On successful Twilio
+   * send the column is stamped and an activity_log row is inserted, so
+   * the invoice activity feed reflects the auto-receipt regardless of
+   * which payment path triggered it (Stripe webhook, /pay confirm, etc.).
+   *
+   * Throws on Twilio failure so callers can surface it. The Stripe
+   * webhook and pay-v2 confirm handlers wrap the call in their own
+   * .catch() with loud error logging.
    */
-  async sendReceipt(invoiceId) {
+  async sendReceipt(invoiceId, { force = false, recordActivity = true } = {}) {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
-    if (!invoice || invoice.status !== 'paid') return;
+    if (!invoice || invoice.status !== 'paid') return { sent: false, reason: 'not-paid' };
+
+    if (invoice.receipt_sent_at && !force) {
+      logger.info(`[invoice] Receipt already sent for ${invoice.invoice_number} — skipping`);
+      return { sent: false, reason: 'already-sent' };
+    }
 
     const customer = await db('customers').where({ id: invoice.customer_id }).first();
-    if (!customer?.phone) return;
+    if (!customer?.phone) return { sent: false, reason: 'no-phone' };
 
     const amount = Number(invoice.total).toFixed(2);
     const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
@@ -338,6 +353,13 @@ const InvoiceService = {
     const receiptUrl = longReceiptUrl
       ? await shortenOrPassthrough(longReceiptUrl, { kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id })
       : '';
+
+    // Template body has a {card_line} placeholder that renders as e.g.
+    // " (Visa •4242)" when card metadata is present, or empty otherwise.
+    const cardBrand = invoice.card_brand;
+    const cardLast4 = invoice.card_last_four;
+    const cardLine = cardBrand && cardLast4 ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} •${cardLast4})` : '';
+
     const fallback = `Hello ${customer.first_name}! Thank you for your payment — we truly appreciate your business. You can view your receipt here: ${receiptUrl}.\n\nIf you have any questions or need assistance, simply reply to this message. Thanks again for choosing Waves!`;
     let body = fallback;
     try {
@@ -346,6 +368,7 @@ const InvoiceService = {
         first_name: customer.first_name || '',
         invoice_number: invoice.invoice_number,
         amount,
+        card_line: cardLine,
         receipt_url: receiptUrl,
       });
       if (rendered && !rendered.includes('{first_name}')) body = rendered;
@@ -353,16 +376,28 @@ const InvoiceService = {
       logger.warn(`[invoice] Receipt template lookup failed: ${err.message}`);
     }
 
-    try {
-      const TwilioService = require('./twilio');
-      await TwilioService.sendSMS(customer.phone, body, {
-        customerId: customer.id,
-        messageType: 'receipt',
-      });
-      logger.info(`[invoice] Receipt SMS sent for ${invoice.invoice_number}`);
-    } catch (err) {
-      logger.error(`[invoice] Receipt SMS failed: ${err.message}`);
+    const TwilioService = require('./twilio');
+    await TwilioService.sendSMS(customer.phone, body, {
+      customerId: customer.id,
+      messageType: 'receipt',
+    });
+    logger.info(`[invoice] Receipt SMS sent for ${invoice.invoice_number}`);
+
+    if (!invoice.receipt_sent_at) {
+      await db('invoices').where({ id: invoiceId }).update({
+        receipt_sent_at: db.fn.now(),
+      }).catch((err) => logger.error(`[invoice] receipt_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`));
     }
+
+    if (recordActivity) {
+      await db('activity_log').insert({
+        customer_id: invoice.customer_id,
+        action: 'invoice_receipt_sent',
+        description: `Receipt sent for invoice ${invoice.invoice_number} (sms)`,
+      }).catch((err) => logger.warn(`[invoice] activity_log insert failed: ${err.message}`));
+    }
+
+    return { sent: true };
   },
 
   // ── Admin CRUD ──
