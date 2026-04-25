@@ -297,7 +297,7 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
             if (!service.customerPhone) return;
             if (!window.confirm(`Call ${service.customerName || 'customer'} at ${service.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
             try {
-              const r = await adminFetch('/admin/communications/call', { method: 'POST', body: JSON.stringify({ to: service.customerPhone }) });
+              const r = await adminFetch('/admin/communications/call', { method: 'POST', body: JSON.stringify({ to: service.customerPhone, fromNumber: '+19412975749' }) });
               if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
             } catch (e) { alert('Call failed: ' + e.message); }
           }}

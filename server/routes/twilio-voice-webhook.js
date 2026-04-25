@@ -284,7 +284,7 @@ router.post('/lead-alert-announce', async (req, res) => {
 router.post('/outbound-admin-prompt', async (req, res) => {
   try {
     const { callLogId, customerNumber, callerIdNumber, leadName: rawName = '' } = req.query;
-    const firstName = rawName.trim().split(/\s+/)[0] || 'a new customer';
+    const firstName = rawName.trim().split(/\s+/)[0] || 'a customer';
 
     const params = new URLSearchParams();
     if (callLogId) params.set('callLogId', callLogId);
@@ -301,7 +301,7 @@ router.post('/outbound-admin-prompt', async (req, res) => {
 
     gather.say(
       { voice: 'Polly.Joanna' },
-      `You have a quote request from ${firstName}. Press 1 to connect.`
+      `Calling ${firstName}. Press 1 to connect.`
     );
 
     twiml.say('No response received. Goodbye.');
@@ -322,6 +322,16 @@ router.post('/outbound-connect', async (req, res) => {
     const customerNumber = req.query.customerNumber || req.body.customerNumber;
     const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
     const rawCallLogId = req.query.callLogId || req.body.callLogId;
+    const digits = (req.body.Digits || '').trim();
+
+    // Only "1" connects. Any other digit (or a voicemail system mashing keys)
+    // hangs up cleanly so we don't bridge a customer to a voicemail tone.
+    if (digits !== '1') {
+      const reject = new VoiceResponse();
+      reject.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
+      reject.hangup();
+      return res.type('text/xml').send(reject.toString());
+    }
 
     // Guard against the literal string "undefined" slipping in from a caller
     // that forgot to pass callLogId — a NaN/undefined update would throw or
