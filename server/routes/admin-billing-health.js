@@ -128,9 +128,13 @@ router.get('/billing-health', async (req, res, next) => {
     const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     const sixtyDaysOut = new Date(); sixtyDaysOut.setDate(sixtyDaysOut.getDate() + 60);
 
-    // Active billable customers
+    // Active billable customers — `active=true` alone isn't enough,
+    // soft-deleted customers can have active=true left over from before
+    // the delete. whereNull('deleted_at') everywhere matches the rest
+    // of the dashboard.
     const billable = await db('customers')
       .where({ active: true })
+      .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
       .count('* as n').first();
     const totalBillable = parseInt(billable.n) || 0;
@@ -138,14 +142,17 @@ router.get('/billing-health', async (req, res, next) => {
     // Autopay enabled / paused / disabled
     const enabled = await db('customers')
       .where({ active: true, autopay_enabled: true })
+      .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
       .count('* as n').first();
     const disabled = await db('customers')
       .where({ active: true, autopay_enabled: false })
+      .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
       .count('* as n').first();
     const paused = await db('customers')
       .where({ active: true, autopay_enabled: true })
+      .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
       .whereNotNull('autopay_paused_until')
       .where('autopay_paused_until', '>=', etDateString(now))
@@ -154,6 +161,7 @@ router.get('/billing-health', async (req, res, next) => {
     // Customers with no autopay payment method
     const noMethod = await db('customers')
       .where({ active: true, autopay_enabled: true })
+      .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
       .whereNull('autopay_payment_method_id')
       .count('* as n').first();
@@ -189,6 +197,7 @@ router.get('/billing-health', async (req, res, next) => {
     const expiringCards = await db('payment_methods')
       .join('customers', 'customers.id', 'payment_methods.customer_id')
       .where('customers.active', true)
+      .whereNull('customers.deleted_at')
       .where('customers.autopay_enabled', true)
       .where('payment_methods.autopay_enabled', true)
       .whereRaw(
@@ -227,6 +236,7 @@ router.get('/billing-health/at-risk', async (req, res, next) => {
     // No payment method
     const noMethod = await db('customers')
       .where({ active: true, autopay_enabled: true })
+      .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
       .whereNull('autopay_payment_method_id')
       .select('id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier');

@@ -91,7 +91,12 @@ router.get('/', async (req, res, next) => {
               const parsed = JSON.parse(row.review_text);
               totalFromPlaces += parsed.totalReviews || 0;
               if (parsed.rating) { ratingSum += parsed.rating; ratingCount++; }
-            } catch {}
+            } catch (parseErr) {
+              // Bad JSON in a _stats row would have silently zeroed
+              // every Google Rating tile; log so a malformed sync can
+              // be diagnosed instead of just disappearing.
+              logger.warn(`[admin-dashboard] google_reviews _stats parse failed (id=${row.id}): ${parseErr.message}`);
+            }
           }
           if (totalFromPlaces > 0) {
             const unresponded = await db('google_reviews').where('reviewer_name', '!=', '_stats').whereNull('review_reply').whereNotNull('review_text').count('* as c').first();
@@ -103,7 +108,10 @@ router.get('/', async (req, res, next) => {
             db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
             db.raw("COUNT(*) FILTER (WHERE review_reply IS NULL AND review_text IS NOT NULL) as unresponded")
           ).first();
-        } catch { return { total: 0, avg_rating: '0', unresponded: 0 }; }
+        } catch (err) {
+          logger.error(`[admin-dashboard] google_reviews query failed: ${err.message}`);
+          return { total: 0, avg_rating: '0', unresponded: 0 };
+        }
       })(),
     ]);
 
@@ -396,7 +404,11 @@ router.get('/core-kpis', async (req, res, next) => {
     // spam, duplicate) — counting spam/dup leads in the denominator
     // artificially deflates the rate. Internal/test customers (Adam
     // Martinez et al.) are also excluded so test activity can't skew it.
-    let leadMetrics = { avgResponseMin: null, conversion: null, leads: 0, booked: 0 };
+    // Default shape includes `error: null`. If the query throws (renamed
+    // column, dropped table, anything), we set `error` to the message so
+    // the dashboard can render "metrics unavailable" instead of "—",
+    // which otherwise looks identical to a legitimate zero-leads window.
+    let leadMetrics = { avgResponseMin: null, conversion: null, leads: 0, booked: 0, error: null };
     try {
       const leadAgg = await excludeInternalLeads(
         db('leads')
@@ -414,9 +426,11 @@ router.get('/core-kpis', async (req, res, next) => {
         booked,
         conversion: leads > 0 ? Math.round((booked / leads) * 1000) / 10 : null,
         avgResponseMin: leadAgg?.avg_resp ? Math.round(parseFloat(leadAgg.avg_resp)) : null,
+        error: null,
       };
     } catch (err) {
       logger.error(`[admin-dashboard] lead metrics failed: ${err.message}`);
+      leadMetrics = { ...leadMetrics, error: err.message };
     }
 
     // AR Days — avg days outstanding on unpaid invoices + DSO
