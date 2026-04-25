@@ -662,4 +662,161 @@ router.get('/today-completion', async (req, res, next) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// Upstream-attribution panels.
+//
+// The pre-existing `/lead-source` endpoint groups customers.lead_source —
+// a coarse downstream string attached after a lead has converted. The
+// three endpoints below tap the upstream signal we actually capture:
+//
+//   /calls-by-source  — call_log JOIN lead_sources on the dialed number
+//   /leads-by-source  — leads GROUP BY lead_source_id
+//   /channel-mix      — leads GROUP BY first_contact_channel (form/call/sms…)
+//
+// Periods accepted: today | wtd | mtd | ytd. Defaults to mtd.
+// ─────────────────────────────────────────────────────────────────────
+
+function resolveAttributionWindow(period) {
+  const today = etDateString();
+  switch (String(period || 'mtd').toLowerCase()) {
+    case 'today': return { from: today,           to: today, label: 'Today' };
+    case 'wtd':   return { from: etWeekStart(),   to: today, label: 'Week to Date' };
+    case 'ytd':   return { from: etYearStart(),   to: today, label: 'Year to Date' };
+    case 'mtd':
+    default:      return { from: etMonthStart(),  to: today, label: 'Month to Date' };
+  }
+}
+
+// GET /api/admin/dashboard/calls-by-source?period=mtd
+//
+// Joins call_log (where direction='inbound') against lead_sources on the
+// dialed number. Calls landing on numbers we haven't catalogued show up
+// under "Unmapped" so a missing seed row is visible, not invisible.
+router.get('/calls-by-source', async (req, res, next) => {
+  try {
+    const win = resolveAttributionWindow(req.query.period);
+    const rows = await db('call_log as c')
+      .leftJoin('lead_sources as s', 'c.to_phone', 's.twilio_phone_number')
+      .where('c.direction', 'inbound')
+      .whereBetween('c.created_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
+      .select(
+        db.raw("COALESCE(s.name, 'Unmapped — ' || c.to_phone) as name"),
+        db.raw("s.source_type as source_type"),
+        db.raw("s.channel as channel"),
+        db.raw("s.is_active as is_active"),
+        db.raw("c.to_phone as to_phone"),
+        db.raw('COUNT(*) as calls'),
+        db.raw('COUNT(DISTINCT c.from_phone) as unique_callers'),
+        db.raw('COUNT(c.customer_id) as linked_to_customer'),
+      )
+      .groupBy('s.name', 's.source_type', 's.channel', 's.is_active', 'c.to_phone')
+      .orderByRaw('COUNT(*) DESC');
+
+    const total = rows.reduce((acc, r) => acc + parseInt(r.calls), 0);
+    res.json({
+      period: win,
+      total_inbound_calls: total,
+      sources: rows.map((r) => ({
+        name: r.name,
+        sourceType: r.source_type || 'unmapped',
+        channel: r.channel || null,
+        isActive: r.is_active === null ? null : !!r.is_active,
+        toPhone: r.to_phone,
+        calls: parseInt(r.calls),
+        uniqueCallers: parseInt(r.unique_callers),
+        linkedToCustomer: parseInt(r.linked_to_customer),
+        pctOfTotal: total > 0 ? Math.round((parseInt(r.calls) / total) * 100) : 0,
+      })),
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /calls-by-source failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// GET /api/admin/dashboard/leads-by-source?period=mtd
+//
+// Groups the `leads` table by lead_source_id (top-of-funnel attribution
+// before customer conversion). Joined to lead_sources for the human label.
+router.get('/leads-by-source', async (req, res, next) => {
+  try {
+    const win = resolveAttributionWindow(req.query.period);
+    const rows = await db('leads as l')
+      .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id')
+      .whereBetween('l.first_contact_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
+      .select(
+        db.raw("COALESCE(s.name, 'Unattributed') as name"),
+        db.raw("s.source_type as source_type"),
+        db.raw("s.channel as channel"),
+        db.raw('COUNT(*) as leads'),
+        db.raw("COUNT(*) FILTER (WHERE l.status = 'won') as booked"),
+        db.raw('COUNT(l.customer_id) as converted_to_customer'),
+        db.raw('SUM(COALESCE(l.monthly_value, 0)) as monthly_value'),
+      )
+      .groupBy('s.name', 's.source_type', 's.channel')
+      .orderByRaw('COUNT(*) DESC');
+
+    const totalLeads = rows.reduce((acc, r) => acc + parseInt(r.leads), 0);
+    const totalBooked = rows.reduce((acc, r) => acc + parseInt(r.booked), 0);
+
+    res.json({
+      period: win,
+      total_leads: totalLeads,
+      total_booked: totalBooked,
+      overall_conversion_pct: totalLeads > 0 ? Math.round((totalBooked / totalLeads) * 1000) / 10 : null,
+      sources: rows.map((r) => {
+        const leads = parseInt(r.leads);
+        const booked = parseInt(r.booked);
+        return {
+          name: r.name,
+          sourceType: r.source_type || 'unattributed',
+          channel: r.channel || null,
+          leads,
+          booked,
+          convertedToCustomer: parseInt(r.converted_to_customer),
+          monthlyValue: parseFloat(r.monthly_value || 0),
+          conversionPct: leads > 0 ? Math.round((booked / leads) * 1000) / 10 : null,
+        };
+      }),
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /leads-by-source failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// GET /api/admin/dashboard/channel-mix?period=mtd
+//
+// Phone vs form vs SMS vs other — answers "are we still mostly a phone
+// shop or has the web caught up?". Reads leads.first_contact_channel.
+router.get('/channel-mix', async (req, res, next) => {
+  try {
+    const win = resolveAttributionWindow(req.query.period);
+    const rows = await db('leads')
+      .whereBetween('first_contact_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
+      .select(
+        db.raw("COALESCE(first_contact_channel, 'unknown') as channel"),
+        db.raw('COUNT(*) as leads'),
+        db.raw("COUNT(*) FILTER (WHERE status = 'won') as booked"),
+      )
+      .groupBy('first_contact_channel')
+      .orderByRaw('COUNT(*) DESC');
+
+    const total = rows.reduce((acc, r) => acc + parseInt(r.leads), 0);
+    res.json({
+      period: win,
+      total_leads: total,
+      channels: rows.map((r) => ({
+        channel: r.channel,
+        leads: parseInt(r.leads),
+        booked: parseInt(r.booked),
+        pctOfTotal: total > 0 ? Math.round((parseInt(r.leads) / total) * 100) : 0,
+      })),
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /channel-mix failed: ${err.message}`);
+    next(err);
+  }
+});
+
 module.exports = router;

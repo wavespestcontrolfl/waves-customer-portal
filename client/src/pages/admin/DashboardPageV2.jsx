@@ -9,12 +9,14 @@ import {
 } from '../../components/ui';
 import {
   AgingBar,
+  CallsBySourceList,
+  ChannelMixDonut,
   ChartCard,
   CompletionGauge,
   EmptyState,
   EstimateFunnel,
   KpiSparklineTile,
-  LeadSourceBars,
+  LeadsBySourceList,
   MrrTrendChart,
   RevenueTrendArea,
   ServiceMixDonut,
@@ -71,7 +73,11 @@ export default function DashboardPageV2() {
   const [funnel, setFunnel] = useState(null);
   const [aging, setAging] = useState(null);
   const [mrrTrend, setMrrTrend] = useState(null);
-  const [leadSrc, setLeadSrc] = useState(null);
+  // /lead-source (downstream string aggregation) is intentionally dropped
+  // in favor of the upstream attribution endpoints below.
+  const [callsBySource, setCallsBySource] = useState(null);
+  const [leadsBySource, setLeadsBySource] = useState(null);
+  const [channelMix, setChannelMix] = useState(null);
   const [mix, setMix] = useState(null);
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
@@ -87,18 +93,22 @@ export default function DashboardPageV2() {
       adminFetch('/admin/dashboard/funnel').catch((e) => { console.error('[dashboard-v2] /funnel', e); return null; }),
       adminFetch('/admin/dashboard/aging').catch((e) => { console.error('[dashboard-v2] /aging', e); return null; }),
       adminFetch('/admin/dashboard/mrr-trend?months=12').catch((e) => { console.error('[dashboard-v2] /mrr-trend', e); return null; }),
-      adminFetch('/admin/dashboard/lead-source').catch((e) => { console.error('[dashboard-v2] /lead-source', e); return null; }),
+      adminFetch('/admin/dashboard/calls-by-source?period=mtd').catch((e) => { console.error('[dashboard-v2] /calls-by-source', e); return null; }),
+      adminFetch('/admin/dashboard/leads-by-source?period=mtd').catch((e) => { console.error('[dashboard-v2] /leads-by-source', e); return null; }),
+      adminFetch('/admin/dashboard/channel-mix?period=mtd').catch((e) => { console.error('[dashboard-v2] /channel-mix', e); return null; }),
       adminFetch('/admin/dashboard/service-mix').catch((e) => { console.error('[dashboard-v2] /service-mix', e); return null; }),
       adminFetch('/admin/dashboard/today-completion').catch((e) => { console.error('[dashboard-v2] /today-completion', e); return null; }),
       adminFetch('/admin/billing-health').catch((e) => { console.error('[dashboard-v2] /billing-health', e); return null; }),
-    ]).then(([d, cmp, fnl, ag, mrr, lead, mx, td, bh]) => {
+    ]).then(([d, cmp, fnl, ag, mrr, calls, leads, channels, mx, td, bh]) => {
       if (cancelled) return;
       setData(d);
       setCompare(cmp);
       setFunnel(fnl);
       setAging(ag);
       setMrrTrend(mrr);
-      setLeadSrc(lead);
+      setCallsBySource(calls);
+      setLeadsBySource(leads);
+      setChannelMix(channels);
       setMix(mx);
       setToday(td);
       setBilling(bh?.summary || null);
@@ -377,19 +387,54 @@ export default function DashboardPageV2() {
         </CardBody>
       </Card>
 
-      {/* Row: MRR trend + Lead source attribution */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
+      {/* MRR trend — full width above the attribution row */}
+      <div className="mb-5">
         <ChartCard
           title="MRR Trend"
           sub={mrrTrend?.avg_growth_pct != null ? `${mrrTrend.avg_growth_pct >= 0 ? '↑' : '↓'} ${Math.abs(mrrTrend.avg_growth_pct)}% avg monthly growth` : 'last 12 months'}
         >
           <MrrTrendChart trend={mrrTrend?.trend || []} />
         </ChartCard>
+      </div>
+
+      {/* Upstream lead-attribution row.
+          Replaces the prior single Lead Source panel (which aggregated the
+          downstream customers.lead_source string) with three upstream views
+          we actually capture:
+            - Calls by Source: call_log JOIN lead_sources by dialed number
+            - Leads by Source: leads GROUP BY lead_source_id
+            - Channel Mix:     leads.first_contact_channel breakdown
+          All MTD; can grow a period selector later. */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
         <ChartCard
-          title="Lead Source Attribution"
-          sub={leadSrc?.total_acquired != null ? `${leadSrc.total_acquired} new customers YTD` : ''}
+          title="Calls by Source"
+          sub={
+            callsBySource?.total_inbound_calls != null
+              ? `${callsBySource.total_inbound_calls} inbound calls · ${callsBySource.period?.label || 'MTD'}`
+              : ''
+          }
         >
-          <LeadSourceBars bySource={leadSrc?.by_source || []} />
+          <CallsBySourceList sources={callsBySource?.sources || []} />
+        </ChartCard>
+        <ChartCard
+          title="Leads by Source"
+          sub={
+            leadsBySource?.total_leads != null
+              ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || 'MTD'}`
+              : ''
+          }
+        >
+          <LeadsBySourceList sources={leadsBySource?.sources || []} />
+        </ChartCard>
+        <ChartCard
+          title="Channel Mix"
+          sub={
+            channelMix?.total_leads != null
+              ? `${channelMix.total_leads} leads by first-contact channel`
+              : ''
+          }
+        >
+          <ChannelMixDonut channels={channelMix?.channels || []} />
         </ChartCard>
       </div>
 
