@@ -18,7 +18,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["priority", "file", "title", "description"],
+        "required": ["priority", "file", "line", "title", "description"],
         "properties": {
           "priority": {
             "type": "string",
