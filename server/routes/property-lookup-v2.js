@@ -17,7 +17,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { lookupStoriesFromAI } = require('../services/property-lookup/ai-stories-lookup');
+const { lookupStoriesFromAI, lookupPropertyFromAI } = require('../services/property-lookup/ai-property-lookup');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -61,6 +61,22 @@ async function performPropertyLookup(address) {
   else result.errors.push({ source: 'rentcast', message: rcResult.reason?.message || String(rcResult.reason) });
   if (avmResult.status === 'fulfilled') result.avm = avmResult.value;
   else result.errors.push({ source: 'rentcast-avm', message: avmResult.reason?.message || String(avmResult.reason) });
+
+  // ── STEP 1.5: AI property fallback when RentCast had nothing ──
+  // Brand-new builds and rural addresses are common gaps in RentCast. When
+  // we get back null, kick a single Claude+web_search call to pull every
+  // pricing-relevant fact (sqft, lot, year built, beds, baths, stories,
+  // construction). The shaped result drops into result.rentcast as if it
+  // came from RentCast, with `_source: 'ai'` for provenance — downstream
+  // code (buildEnrichedProfile, buildFieldVerifyFlags) reads from the same
+  // shape and surfaces a different verify message based on _source.
+  if (!result.rentcast) {
+    const aiProperty = await lookupPropertyFromAI(address).catch((err) => {
+      result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
+      return null;
+    });
+    if (aiProperty) result.rentcast = aiProperty;
+  }
 
   // ── STEP 2: Geocode + Satellite Images ──
   let lat, lng;
@@ -211,7 +227,9 @@ async function performPropertyLookup(address) {
   // signature change.
   if (result.rentcast) {
     if (result.rentcast.stories) {
-      result.rentcast._storiesSource = 'rentcast';
+      // Attribute to 'ai' when STEP 1.5's full-property fallback supplied the
+      // rc object; otherwise it came from RentCast.
+      result.rentcast._storiesSource = result.rentcast._source === 'ai' ? 'ai' : 'rentcast';
     } else {
       const hints = {
         subdivision: result.rentcast._raw?.subdivision || null,
@@ -1058,12 +1076,21 @@ function buildFieldVerifyFlags(rc, ai) {
     });
   }
 
-  // No RentCast data at all
+  // No RentCast data at all. Distinguish the AI-fallback case (we DID get
+  // facts, just from web search instead of RentCast) so the operator gets a
+  // lower-priority "verify on site" nudge rather than a "we know nothing"
+  // alarm. Genuine "nothing at all" — no rc object — still HIGH.
   if (!rc) {
     flags.push({
       field: 'all',
       reason: 'No RentCast data — all property dimensions are estimated',
       priority: 'HIGH'
+    });
+  } else if (rc._source === 'ai') {
+    flags.push({
+      field: 'all',
+      reason: `Property data sourced from AI web search (RentCast had no record)${rc._aiSourceUrl ? ` — primary source: ${rc._aiSourceUrl}` : ''} — verify key dimensions on site`,
+      priority: 'MEDIUM',
     });
   }
 
