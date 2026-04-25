@@ -529,3 +529,162 @@ export function EmptyState({ children }) {
     <div className="py-10 text-center text-13 text-ink-secondary">{children}</div>
   );
 }
+
+// ─── Calls / Leads / Channel attribution panels ───────────────────
+//
+// All three live below the existing MRR trend and replace the prior
+// downstream-string Lead Source Attribution panel with the upstream
+// signal we actually capture (call_log + leads + lead_sources).
+
+// Channel chip — small zinc pill that renders the attribution channel
+// (organic / paid / direct / offline / unmapped). `paid` is rendered
+// slightly more prominent so paid spend is easy to spot.
+function ChannelChip({ channel }) {
+  if (!channel) return null;
+  const isPaid = channel === 'paid';
+  return (
+    <span
+      className={cn(
+        'inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-label rounded-xs border-hairline',
+        isPaid
+          ? 'bg-zinc-900 text-white border-zinc-900'
+          : 'bg-surface-sunken text-ink-secondary border-zinc-200'
+      )}
+    >
+      {channel}
+    </span>
+  );
+}
+
+// CallsBySourceList — call_log JOIN lead_sources by dialed number.
+// `sources` is the array returned by /admin/dashboard/calls-by-source.
+export function CallsBySourceList({ sources = [], maxRows = 10 }) {
+  if (!sources.length) return <EmptyState>No inbound calls in this window</EmptyState>;
+  const rows = sources.slice(0, maxRows);
+  const max = Math.max(...rows.map((r) => r.calls), 1);
+  return (
+    <ul className="space-y-2">
+      {rows.map((r, i) => {
+        const unmapped = r.sourceType === 'unmapped';
+        const dormant = r.isActive === false;
+        return (
+          <li key={`${r.name}-${i}`}>
+            <div className="flex items-baseline justify-between text-12 mb-1 gap-2">
+              <span className={cn('truncate min-w-0 flex items-center gap-2', dormant && 'text-ink-tertiary')}>
+                <span className="truncate">{r.name}</span>
+                <ChannelChip channel={r.channel} />
+                {unmapped && (
+                  <span className="text-[10px] uppercase tracking-label text-alert-fg">unmapped</span>
+                )}
+              </span>
+              <span className="u-nums whitespace-nowrap">
+                <span className="font-medium">{r.calls}</span>
+                <span className="text-ink-tertiary ml-2">{r.uniqueCallers} unique</span>
+              </span>
+            </div>
+            <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
+              <div
+                className="h-full"
+                style={{
+                  width: `${(r.calls / max) * 100}%`,
+                  background: unmapped ? CHART_ALERT : (dormant ? CHART_PRIOR : CHART_INK),
+                }}
+              />
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+// LeadsBySourceList — `leads` GROUP BY lead_source_id.
+// Shows count + booked + conversion %. Conversion below 20% renders in alert-fg.
+export function LeadsBySourceList({ sources = [], maxRows = 10 }) {
+  if (!sources.length) return <EmptyState>No leads in this window</EmptyState>;
+  const rows = sources.slice(0, maxRows);
+  const max = Math.max(...rows.map((r) => r.leads), 1);
+  return (
+    <ul className="space-y-2">
+      {rows.map((r, i) => {
+        const conv = r.conversionPct;
+        const lowConv = conv != null && conv < 20 && r.leads >= 5;
+        return (
+          <li key={`${r.name}-${i}`}>
+            <div className="flex items-baseline justify-between text-12 mb-1 gap-2">
+              <span className="truncate min-w-0 flex items-center gap-2">
+                <span className="truncate">{r.name}</span>
+                <ChannelChip channel={r.channel} />
+              </span>
+              <span className="u-nums whitespace-nowrap">
+                <span className="font-medium">{r.leads}</span>
+                <span className="text-ink-tertiary ml-2">{r.booked} won</span>
+                {conv != null && (
+                  <span className={cn('ml-2', lowConv ? 'text-alert-fg font-medium' : 'text-ink-tertiary')}>
+                    {conv}%
+                  </span>
+                )}
+              </span>
+            </div>
+            <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
+              <div
+                className="h-full"
+                style={{ width: `${(r.leads / max) * 100}%`, background: CHART_INK }}
+              />
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+// ChannelMixDonut — leads.first_contact_channel breakdown.
+// Phone vs form vs sms vs other — answers "is the web catching the phone yet?".
+// Reuses the same monochrome ramp as ServiceMixDonut so the dashboard reads
+// as a single visual system.
+export function ChannelMixDonut({ channels = [], height = 200 }) {
+  if (!channels.length) return <EmptyState>No leads in this window</EmptyState>;
+  const data = channels.map((c, i) => ({
+    name: c.channel,
+    value: c.leads,
+    pct: c.pctOfTotal,
+    booked: c.booked,
+    fill: CHART_SERIES[i % CHART_SERIES.length],
+  }));
+  return (
+    <div className="grid grid-cols-2 gap-4 items-center" style={{ minHeight: height }}>
+      <div style={{ height }}>
+        <ResponsiveContainer>
+          <PieChart>
+            <Pie
+              data={data}
+              dataKey="value"
+              nameKey="name"
+              innerRadius="58%"
+              outerRadius="92%"
+              stroke="#FFFFFF"
+              strokeWidth={1}
+              isAnimationActive={false}
+            >
+              {data.map((d, i) => (<Cell key={i} fill={d.fill} />))}
+            </Pie>
+            <Tooltip
+              contentStyle={TOOLTIP_STYLE}
+              formatter={(v, name, p) => [`${v} (${p?.payload?.pct}%) · ${p?.payload?.booked} won`, name]}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+      <ul className="text-12 space-y-2">
+        {data.map((d) => (
+          <li key={d.name} className="flex items-center gap-2 min-w-0">
+            <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: d.fill }} />
+            <span className="truncate capitalize">{d.name}</span>
+            <span className="ml-auto u-nums text-ink-secondary">{d.pct}%</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
