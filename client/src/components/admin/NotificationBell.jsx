@@ -37,13 +37,19 @@ export default function NotificationBell() {
   const [enabling, setEnabling] = useState(false);
   const panelRef = useRef(null);
 
+  // Bell read endpoints live at /admin/notifications (admin-notifications.js),
+  // NOT /admin/push (which only handles push subscriptions + VAPID + prefs).
+  // The previous URLs returned 404 → the bell silently rendered "all caught
+  // up" forever. Response shape: { count } for unread, { notifications, page, limit }
+  // for the list. Live dashboard alerts (id prefixed `live:`) are merged
+  // server-side so they appear here alongside persisted notifications.
   const loadCount = async () => {
-    try { const r = await adminFetch('/admin/push/notifications/unread'); setUnread(r.unread || 0); }
+    try { const r = await adminFetch('/admin/notifications/unread-count'); setUnread(r.count || 0); }
     catch { /* silent */ }
   };
 
   const loadList = async () => {
-    try { const r = await adminFetch('/admin/push/notifications?limit=25'); setItems(r.notifications || []); }
+    try { const r = await adminFetch('/admin/notifications?limit=25'); setItems(r.notifications || []); }
     catch { setItems([]); }
   };
 
@@ -70,13 +76,19 @@ export default function NotificationBell() {
   };
 
   const handleClickItem = async (n) => {
-    try { await adminFetch(`/admin/push/notifications/${n.id}/read`, { method: 'POST' }); } catch {}
+    // Live alerts (id prefix `live:`) aren't persisted — skip the
+    // mark-read API call. They auto-clear when their condition clears
+    // (e.g. invoice gets paid → ar_overdue_60 vanishes on next poll).
+    const isLive = String(n.id).startsWith('live:');
+    if (!isLive) {
+      try { await adminFetch(`/admin/notifications/${n.id}/read`, { method: 'PUT' }); } catch {}
+    }
     if (n.link) window.location.href = n.link;
     else { setOpen(false); loadList(); loadCount(); }
   };
 
   const markAll = async () => {
-    try { await adminFetch('/admin/push/notifications/read-all', { method: 'POST' }); }
+    try { await adminFetch('/admin/notifications/read-all', { method: 'PUT' }); }
     finally { loadList(); loadCount(); }
   };
 
