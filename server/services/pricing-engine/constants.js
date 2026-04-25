@@ -333,12 +333,15 @@ const RODENT = {
 // ONE-TIME SERVICES
 // ============================================================
 const ONE_TIME = {
-  // TODO(v4.4): document one-time pricing policy — the 1.30x multiplier on
-  // recurring rates and floor values. These are the minimum prices customers
-  // see for standalone service without a WaveGuard bundle.
+  // One-time pest = recurring quarterly × 1.75 (industry "initial service" norm
+  // is 2–3×; we sit at the low end). Floor $199 reflects the real cost of a
+  // one-time visit: 75–90 min on site (full perimeter + granular + IGR + eave
+  // sweep + interior) at $35/hr loaded labor + initial-dose product + drive +
+  // CAC for a customer who may never bill again. Sweeping and interior spray
+  // are bundled into this price (no opt-out discount on the one-time path).
   pest: {
-    multiplier: 1.30,
-    floor: r(150),
+    multiplier: 1.75,
+    floor: r(199),
   },
   lawn: {
     treatmentMultipliers: {
