@@ -1,7 +1,6 @@
 /**
  * Contract-test registry — auto-discovers every tool across:
  *   - Intelligence Bar  (server/services/intelligence-bar/*-tools.js)
- *   - Voice Agent       (server/services/voice-agent/tools.js)
  *   - Managed Agents    (server/services/{bi,lead-response,retention}-agent-config.js)
  *   - Lead Response exec (server/services/lead-response-tools.js)
  *   - Manual overrides  (server/contract-tests/overrides/manual-contracts.js)
@@ -61,22 +60,6 @@ function collectIntelligenceBar() {
     }
   }
   return out;
-}
-
-function collectVoiceAgent() {
-  const file = path.join(ROOT, 'voice-agent', 'tools.js');
-  if (!fs.existsSync(file)) return [];
-  const mod = safeRequire(file);
-  if (mod.__error) { console.warn(`[registry] voice-agent/tools.js failed: ${mod.__error.message}`); return []; }
-  const toolsArr = mod.TOOLS || mod.VOICE_TOOLS;
-  const execFn = mod.executeTool || mod.executeVoiceTool;
-  if (!Array.isArray(toolsArr)) return [];
-  return toolsArr.filter(t => t?.name).map(t => buildRecord(t, {
-    surface: 'voice-agent',
-    module: 'voice-agent/tools.js',
-    sourcePath: file,
-    execute: execFn ? (input) => execFn(t.name, input) : null,
-  }));
 }
 
 function collectManagedAgents() {
@@ -143,7 +126,6 @@ function buildRecord(tool, ctx) {
 
 async function discover() {
   const ib = collectIntelligenceBar();
-  const voice = collectVoiceAgent();
   const agents = collectManagedAgents();
   const lead = collectLeadResponseTools();
 
@@ -154,7 +136,7 @@ async function discover() {
     if (r.execute) byKey.set(key, r);
     else if (!byKey.has(key)) byKey.set(key, r);
   };
-  [...ib, ...voice, ...agents, ...lead].forEach(upsert);
+  [...ib, ...agents, ...lead].forEach(upsert);
 
   // Apply pure-manual overrides (tools registered only in overrides)
   for (const [name, contract] of Object.entries(OVERRIDES)) {

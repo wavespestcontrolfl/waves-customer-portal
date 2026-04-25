@@ -34,7 +34,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
-  Flag, Globe, Mic, Users, Bot, Phone, MessageSquare, Send, FilePlus2, SlidersHorizontal,
+  Flag, Globe, Users, Bot, Phone, MessageSquare, Send, FilePlus2, SlidersHorizontal,
   Check, X, ArrowLeft, Plus, Trash2,
 } from 'lucide-react';
 
@@ -349,7 +349,6 @@ function timeAgo(d) {
 
 const SOURCE_ICON = {
   lead_webhook: { Icon: Globe, title: 'Website lead' },
-  voice_agent: { Icon: Mic, title: 'Voice agent lead' },
   referral: { Icon: Users, title: 'Referral' },
   ai_agent: { Icon: Bot, title: 'AI agent draft — review before sending' },
 };

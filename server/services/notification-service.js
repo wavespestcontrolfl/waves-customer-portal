@@ -86,7 +86,7 @@ function getCategoryIcon(category) {
   const icons = {
     inbound_sms: '\u{1F4AC}', approval: '\u2705', new_lead: '\u{1F514}', estimate: '\u{1F4CB}',
     payment: '\u{1F4B0}', review: '\u2B50', schedule: '\u{1F4C5}', churn_risk: '\u26A0\uFE0F',
-    token_alert: '\u{1F511}', voice_agent: '\u{1F4DE}', system: '\u{1F527}',
+    token_alert: '\u{1F511}', system: '\u{1F527}',
     service: '\u{1F3E0}', appointment: '\u{1F4C5}', billing: '\u{1F4B3}', document: '\u{1F4C4}',
     lawn_health: '\u{1F331}', referral: '\u{1F381}', account: '\u{1F464}',
   };

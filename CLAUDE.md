@@ -23,7 +23,7 @@ Three interfaces:
 - **Backend:** Express + Node.js, Knex.js
 - **Database:** PostgreSQL on Railway
 - **Payments:** Stripe (Payment Element — card/Apple Pay/Google Pay/ACH)
-- **SMS/Voice:** Twilio (Programmable Messaging, ConversationRelay, Lookup)
+- **SMS/Voice:** Twilio (Programmable Messaging, Voice with recording + transcription, Lookup)
 - **AI:** Anthropic Claude API. **Never hardcode model IDs** — import `FLAGSHIP` / `WORKHORSE` / `FAST` from `server/config/models.js`. All three currently resolve to `claude-opus-4-7`; tiers can be swapped via `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` env vars with no code change.
 - **Deployment:** Railway (portal server + client + PostgreSQL). Spoke fleet (15 sites) = Astro on Cloudflare Pages/Workers.
 
@@ -161,7 +161,7 @@ See `server/services/intelligence-bar/README.md` for the full template + 6-line 
 
 **Stripe** — Payment Element (card/Apple Pay/Google Pay/ACH). All customer/billing data in PostgreSQL; Stripe is processor only, not a system of record.
 
-**Twilio** — SMS (appointment reminders with Lookup landline detection, post-service automation, review requests 90–180min delay, manual messaging). Voice via ConversationRelay + Claude + ElevenLabs/Deepgram. Multiple numbers across 4 GBP locations + tracking numbers.
+**Twilio** — SMS (appointment reminders with Lookup landline detection, post-service automation, review requests 90–180min delay, manual messaging). Voice forwarding with call recording + transcription (no AI voice agent). Multiple numbers across 4 GBP locations + tracking numbers.
 
 ## Environment Variables (Railway)
 

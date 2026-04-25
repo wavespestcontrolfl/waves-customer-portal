@@ -1,6 +1,6 @@
 import { Link, useNavigate } from 'react-router-dom';
 import {
-  FileText, Clock, BookOpen, Star, Gift, Mic2, Mail,
+  FileText, Clock, BookOpen, Star, Gift, Mail,
   Megaphone, Search as SearchIcon, Share2,
   Wrench, Truck, Package, ClipboardCheck, Leaf,
   Library, Brain,
@@ -19,7 +19,6 @@ const SECTIONS = [
   { section: 'Communications', items: [
     { path: '/admin/reviews', icon: Star, label: 'Reviews' },
     { path: '/admin/referrals', icon: Gift, label: 'Referrals' },
-    { path: '/admin/voice-agent', icon: Mic2, label: 'Voice Agent' },
     { path: '/admin/email', icon: Mail, label: 'Email' },
   ]},
   { section: 'Marketing', items: [

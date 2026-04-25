@@ -83,7 +83,6 @@ const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
 const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
-const AdminVoiceAgentPage = lazyWithRetry(() => import('./pages/admin/VoiceAgentPage'));
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePage'));
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
@@ -195,7 +194,6 @@ export default function App() {
             <Route path="ads" element={<Navigate to="/admin/ppc" replace />} />
             <Route path="ppc" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading PPC...</div>}><AdminAdsPage /></Suspense>} />
             <Route path="seo" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading SEO...</div>}><AdminSEOPage /></Suspense>} />
-            <Route path="voice-agent" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading voice agent...</div>}><AdminVoiceAgentPage /></Suspense>} />
             <Route path="blog" element={<Navigate to="/admin/seo" replace />} />
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
             <Route path="referrals" element={<AdminReferralsPage />} />
