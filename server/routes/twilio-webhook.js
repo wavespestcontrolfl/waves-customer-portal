@@ -96,25 +96,6 @@ router.post('/sms', async (req, res) => {
       );
     }
 
-    // #5: Check for post-call survey reply (1-5 rating)
-    if (Body && /^[1-5]$/.test((Body || '').trim())) {
-      try {
-        const { handleSurveyReply } = require('../services/voice-agent/agent');
-        const surveyResult = await handleSurveyReply(From, Body);
-        if (surveyResult?.handled) {
-          logger.info(`[PostCallSurvey] Rating ${surveyResult.rating}/5 from ${From} for call ${surveyResult.callSid}`);
-          // Log the inbound message
-          await db('sms_log').insert({
-            customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
-            message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'survey_reply',
-          }).catch(() => {});
-          return res.type('text/xml').send(
-            `<Response><Message>Thanks for your feedback! We appreciate you choosing Waves Pest Control.</Message></Response>`
-          );
-        }
-      } catch (e) { logger.error(`Survey reply check failed: ${e.message}`); }
-    }
-
     // Check for pending reschedule reply FIRST
     if (customer && numberConfig.type === 'location') {
       try {

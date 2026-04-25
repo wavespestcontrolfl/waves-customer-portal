@@ -24,7 +24,6 @@ import {
   MessageSquare,
   Star,
   Gift,
-  Mic,
   Mail,
   Megaphone,
   Search,
@@ -83,7 +82,6 @@ const NAV_SECTIONS = [
     { path: '/admin/communications', icon: MessageSquare, label: 'Communications' },
     { path: '/admin/reviews', icon: Star, label: 'Reviews' },
     { path: '/admin/referrals', icon: Gift, label: 'Referrals' },
-    { path: '/admin/voice-agent', icon: Mic, label: 'Voice Agent' },
     { path: '/admin/email', icon: Mail, label: 'Email' },
   ]},
   { section: 'Marketing', items: [

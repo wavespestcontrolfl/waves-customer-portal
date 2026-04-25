@@ -163,11 +163,9 @@ export default function CallLogTabV2() {
     Number(c.duration_seconds) > 5
     || !!c.recording_url
     || !!c.transcription
-    || !!c.voice_agent_outcome
   );
   const isReallyMissed = (c) => (!c.answered_by || c.answered_by === 'missed') && !hadConversation(c);
   const answered = calls.filter((c) => c.answered_by === 'human').length;
-  const aiHandled = calls.filter((c) => c.answered_by === 'voice_agent').length;
   const voicemail = calls.filter((c) => c.answered_by === 'voicemail').length;
   const missed = calls.filter(isReallyMissed).length;
 
@@ -187,7 +185,6 @@ export default function CallLogTabV2() {
   const filteredCalls = calls.filter((c) => {
     if (callFilter === 'all') return true;
     if (callFilter === 'answered') return c.answered_by === 'human';
-    if (callFilter === 'ai_agent') return c.answered_by === 'voice_agent';
     if (callFilter === 'voicemail') return c.answered_by === 'voicemail';
     if (callFilter === 'missed') return isReallyMissed(c);
     return true;
@@ -199,7 +196,6 @@ export default function CallLogTabV2() {
       <div className="hidden md:flex gap-2 flex-wrap">
         <StatButton label="Total" value={calls.length} filter="all" active={callFilter === 'all'} onClick={() => setCallFilter('all')} />
         <StatButton label="Answered" value={answered} filter="answered" active={callFilter === 'answered'} onClick={() => setCallFilter((p) => p === 'answered' ? 'all' : 'answered')} />
-        <StatButton label="AI Agent" value={aiHandled} filter="ai_agent" active={callFilter === 'ai_agent'} onClick={() => setCallFilter((p) => p === 'ai_agent' ? 'all' : 'ai_agent')} />
         <StatButton label="Voicemail" value={voicemail} filter="voicemail" active={callFilter === 'voicemail'} onClick={() => setCallFilter((p) => p === 'voicemail' ? 'all' : 'voicemail')} />
         <StatButton label="Missed" value={missed} filter="missed" active={callFilter === 'missed'} alert onClick={() => setCallFilter((p) => p === 'missed' ? 'all' : 'missed')} />
       </div>
@@ -333,7 +329,6 @@ export default function CallLogTabV2() {
                 const conversed = hadConversation(c);
                 const isMissed = (!c.answered_by || c.answered_by === 'missed') && !conversed;
                 const answeredLabel = c.answered_by === 'human' ? 'Answered'
-                  : c.answered_by === 'voice_agent' ? 'AI Agent'
                   : c.answered_by === 'voicemail' ? 'Voicemail'
                   : conversed ? 'Discussion'
                   : 'Missed';
@@ -367,9 +362,6 @@ export default function CallLogTabV2() {
                           {c.from_phone}{c.to_phone ? ` → ${c.to_phone}` : ''} · {dur}
                           {c.caller_city ? ` · ${c.caller_city}, ${c.caller_state}` : ''}
                         </div>
-                        {c.voice_agent_outcome && (
-                          <div className="text-13 md:text-11 text-ink-secondary mt-0.5">Outcome: {c.voice_agent_outcome?.replace(/_/g, ' ')}</div>
-                        )}
                       </div>
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
                         <Badge tone={badgeTone}>{answeredLabel}</Badge>

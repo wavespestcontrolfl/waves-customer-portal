@@ -16,7 +16,6 @@ router.use(adminAuthenticate);
 
 const AGENT_SOURCES = [
   { source: 'intelligence-bar', label: 'Admin Intelligence Bar', critical: true },
-  { source: 'voice-agent', label: 'Voice Agent', critical: true },
   { source: 'lead-response-agent', label: 'Lead Response Agent', critical: true },
   { source: 'tech-intelligence-bar', label: 'Tech Intelligence Bar', critical: false },
 ];

@@ -430,7 +430,6 @@ function CallLogTab() {
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading calls...</div>;
 
   const answered = calls.filter(c => c.answered_by === 'human').length;
-  const aiHandled = calls.filter(c => c.answered_by === 'voice_agent').length;
   const voicemail = calls.filter(c => c.answered_by === 'voicemail').length;
   const missed = calls.filter(c => !c.answered_by || c.answered_by === 'missed').length;
 
@@ -455,7 +454,6 @@ function CallLogTab() {
         {[
           { label: 'Total', value: calls.length, color: D.heading, filter: 'all' },
           { label: 'Answered', value: answered, color: D.green, filter: 'answered' },
-          { label: 'AI Agent', value: aiHandled, color: D.teal, filter: 'ai_agent' },
           { label: 'Voicemail', value: voicemail, color: D.amber, filter: 'voicemail' },
           { label: 'Missed', value: missed, color: D.red, filter: 'missed' },
         ].map((s, i) => (
@@ -602,14 +600,13 @@ function CallLogTab() {
             {calls.filter(c => {
               if (callFilter === 'all') return true;
               if (callFilter === 'answered') return c.answered_by === 'human';
-              if (callFilter === 'ai_agent') return c.answered_by === 'voice_agent';
               if (callFilter === 'voicemail') return c.answered_by === 'voicemail';
               if (callFilter === 'missed') return !c.answered_by || c.answered_by === 'missed';
               return true;
             }).map(c => {
               const isMissed = !c.answered_by || c.answered_by === 'missed';
-              const answeredColor = c.answered_by === 'human' ? D.green : c.answered_by === 'voice_agent' ? D.teal : c.answered_by === 'voicemail' ? D.amber : D.red;
-              const answeredLabel = c.answered_by === 'human' ? 'Answered' : c.answered_by === 'voice_agent' ? 'AI Agent' : c.answered_by === 'voicemail' ? 'Voicemail' : 'Missed';
+              const answeredColor = c.answered_by === 'human' ? D.green : c.answered_by === 'voicemail' ? D.amber : D.red;
+              const answeredLabel = c.answered_by === 'human' ? 'Answered' : c.answered_by === 'voicemail' ? 'Voicemail' : 'Missed';
               const dur = c.duration_seconds ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, '0')}` : '--';
               const isUnknown = !c.first_name && !c.customer_id;
               const currentDisp = dispositions[c.id] || c.disposition || '';
@@ -631,7 +628,6 @@ function CallLogTab() {
                       <div style={{ fontSize: 11, color: D.muted }}>
                         {c.from_phone} {c.to_phone ? ` > ${c.to_phone}` : ''} · {dur} · {c.caller_city ? `${c.caller_city}, ${c.caller_state}` : ''}
                       </div>
-                      {c.voice_agent_outcome && <div style={{ fontSize: 11, color: D.teal, marginTop: 2 }}>Outcome: {c.voice_agent_outcome?.replace(/_/g, ' ')}</div>}
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
                       <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: answeredColor + '22', color: answeredColor }}>{answeredLabel}</span>

@@ -607,7 +607,7 @@ Even if it looks ugly or disorganized, leave it alone unless the spec tells you 
 - **State management** — Zustand stores, React contexts, custom hooks, useReducer, query caches, React Query keys.
 - **Routing** — paths, guards, middleware, redirects, params, loaders.
 - **Keyboard shortcuts and command palette.** Preserve exactly. If new styling hides an affordance, restore the affordance — never remove the shortcut.
-- **Integrations** — Stripe Elements, Twilio flows, Voice Agent ConversationRelay, WordPress REST, DataForSEO, GSC, Arborjet, FAWN, SMS cron.
+- **Integrations** — Stripe Elements, Twilio flows, WordPress REST, DataForSEO, GSC, Arborjet, FAWN, SMS cron.
 - **Managed Agents and Intelligence Bar** — prompts, tool configs, 104 tools across 13 contexts. Do not restyle piecemeal.
 - **Tests.** If a test breaks, investigate — don't update assertions to pass.
 - **Analytics and a11y attributes** — `data-testid`, `data-analytics`, `aria-*`. Preserve verbatim.

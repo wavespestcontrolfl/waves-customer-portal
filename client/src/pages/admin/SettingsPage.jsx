@@ -259,11 +259,9 @@ const INTEGRATION_GROUPS = [
     ],
   },
   {
-    title: 'AI & Voice',
+    title: 'AI',
     items: [
-      { name: 'Anthropic (Claude)', platform: 'anthropic', keys: ['ANTHROPIC_API_KEY'], desc: 'Intelligence Bar, agents, triage, voice' },
-      { name: 'ElevenLabs', platform: 'elevenlabs', keys: ['ELEVENLABS_API_KEY'], desc: 'Voice TTS for ConversationRelay' },
-      { name: 'Deepgram', platform: 'deepgram', keys: ['DEEPGRAM_API_KEY'], desc: 'Voice STT for ConversationRelay' },
+      { name: 'Anthropic (Claude)', platform: 'anthropic', keys: ['ANTHROPIC_API_KEY'], desc: 'Intelligence Bar, agents, triage' },
     ],
   },
   {

@@ -62,7 +62,6 @@ Routes are pulled from `client/src/App.jsx:177–217`. Pure redirects (`<Navigat
 | `/admin/referrals` | `ReferralsPageV2` | **(b)** | 0 | List + cards. Acceptable on mobile but no thumb-target sizing. |
 | `/admin/ppc` | `AdsPage` | **(b)** | 0 | Charts + tables. Tables overflow. |
 | `/admin/seo` | `SEOPage` | **(b)** | 1 | Multi-tab dashboard with embedded `SEOIntelligenceBar`. Tab pills wrap; tables overflow. |
-| `/admin/voice-agent` | `VoiceAgentPage` | **(b)** | 0 | Form + log table. Cramped but usable. |
 | `/admin/knowledge` | `KnowledgePage` | **(b)** | 0 | Document list. Basic. |
 | `/admin/social-media` | `SocialMediaPage` | **(b)** | 9 | Post composer + schedule grid. Some `@media` work, mostly cramped. |
 | `/admin/tax` | `TaxPage` | **(b)** | 8 | Tax dashboard + expense table. Has `@media` work — most usable of the finance pages. |

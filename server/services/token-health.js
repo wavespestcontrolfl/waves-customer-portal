@@ -467,71 +467,6 @@ async function checkSendGrid() {
   }
 }
 
-async function checkElevenLabs() {
-  const platform = 'elevenlabs';
-  const envVarName = 'ELEVENLABS_API_KEY';
-  const key = process.env.ELEVENLABS_API_KEY;
-
-  if (!key) {
-    const result = { platform, status: 'not_configured', lastError: 'ELEVENLABS_API_KEY not set', expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  }
-
-  try {
-    const res = await fetch('https://api.elevenlabs.io/v1/user', {
-      headers: { 'xi-api-key': key },
-    });
-
-    if (res.ok) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
-      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-      return result;
-    }
-
-    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
-    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  } catch (err) {
-    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  }
-}
-
-async function checkDeepgram() {
-  const platform = 'deepgram';
-  const envVarName = 'DEEPGRAM_API_KEY';
-  const key = process.env.DEEPGRAM_API_KEY;
-
-  if (!key) {
-    const result = { platform, status: 'not_configured', lastError: 'DEEPGRAM_API_KEY not set', expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  }
-
-  try {
-    const res = await fetch('https://api.deepgram.com/v1/projects', {
-      headers: { Authorization: `Token ${key}` },
-    });
-
-    if (res.ok) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
-      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-      return result;
-    }
-
-    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
-    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  } catch (err) {
-    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  }
-}
 
 async function checkGitHub() {
   const platform = 'github';
@@ -625,8 +560,6 @@ const TokenHealthService = {
       case 'anthropic': return checkAnthropic();
       case 'google': return checkGoogle();
       case 'sendgrid': return checkSendGrid();
-      case 'elevenlabs': return checkElevenLabs();
-      case 'deepgram': return checkDeepgram();
       case 'rentcast': return checkRentCast();
       case 'github': return checkGitHub();
       default:
@@ -658,8 +591,6 @@ const TokenHealthService = {
     results.push(await checkAnthropic());
     results.push(await checkGoogle());
     results.push(await checkSendGrid());
-    results.push(await checkElevenLabs());
-    results.push(await checkDeepgram());
     results.push(await checkRentCast());
     results.push(await checkGitHub());
 
@@ -692,7 +623,7 @@ const TokenHealthService = {
         'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
         'bouncie', 'beehiiv', 'dataforseo',
         'stripe', 'twilio', 'anthropic', 'google',
-        'sendgrid', 'elevenlabs', 'deepgram', 'rentcast',
+        'sendgrid', 'rentcast',
         'github',
       ]);
 

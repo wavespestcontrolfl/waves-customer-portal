@@ -43,9 +43,6 @@ const gates = {
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
 
-  // Voice Agent — AI phone agent for missed/after-hours calls
-  voiceAgent: isProd ? process.env.GATE_VOICE_AGENT === 'true' : true,
-
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 

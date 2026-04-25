@@ -372,19 +372,6 @@ if (config.nodeEnv === 'production') {
 }
 
 // =========================================================================
-// VOICE AGENT — register Express routes BEFORE error handlers
-// (WebSocket setup happens after app.listen below)
-// =========================================================================
-const voiceAgentModule = (() => {
-  try { return require('./routes/voice-agent'); } catch { return null; }
-})();
-if (voiceAgentModule) {
-  // Register just the Express routes (TwiML + admin API) now
-  // The WebSocket server is attached after app.listen()
-  voiceAgentModule.registerExpressRoutes?.(app) || voiceAgentModule(app, null);
-}
-
-// =========================================================================
 // ERROR HANDLING
 // =========================================================================
 
@@ -406,20 +393,7 @@ app.use(errorHandler);
 const PORT = config.port;
 
 // Start listening FIRST (so Railway health check passes), then run migrations
-const server = app.listen(PORT, () => {
-  // Attach WebSocket server for voice agent (needs HTTP server)
-  if (voiceAgentModule) {
-    try {
-      const { WebSocketServer } = require('ws');
-      const { handleVoiceWebSocket, initVoiceAgent } = require('./services/voice-agent/agent');
-      const wss = new WebSocketServer({ server, path: '/ws/voice-agent' });
-      wss.on('connection', (ws, req) => { console.log('[VoiceAgent] WebSocket connected'); handleVoiceWebSocket(ws, req); });
-      initVoiceAgent();
-      logger.info('Voice Agent WebSocket registered');
-    } catch (err) {
-      logger.warn(`Voice Agent WebSocket setup skipped: ${err.message}`);
-    }
-  }
+app.listen(PORT, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);

@@ -2065,7 +2065,6 @@ function EstimatePipelineView() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 14, fontWeight: 600, color: C.heading }}>{e.customerName || 'Unknown'}</span>
                     {e.source === 'lead_webhook' && <span title="Website lead" style={{ fontSize: 14 }}>{'🌐'}</span>}
-                    {e.source === 'voice_agent' && <span title="Voice agent lead" style={{ fontSize: 14 }}>{'🎙️'}</span>}
                     {e.source === 'referral' && <span title="Referral" style={{ fontSize: 14 }}>{'🤝'}</span>}
                     {e.source === 'ai_agent' && <span title="AI agent draft — review before sending" style={{ fontSize: 14 }}>{'🤖'}</span>}
                     {/* Urgency indicator */}
@@ -2194,13 +2193,13 @@ function WebsiteQuotesView() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    adminFetch('/admin/estimates?source=website,voice_agent,lead_webhook,referral')
+    adminFetch('/admin/estimates?source=website,lead_webhook,referral')
       .then(d => { setLeads(d.estimates || []); setLoading(false); })
       .catch(() => {
         // Fallback — get all estimates and filter client-side
         adminFetch('/admin/estimates').then(d => {
           const webLeads = (d.estimates || []).filter(e =>
-            ['new', 'draft'].includes(e.status) || e.source === 'voice_agent' || e.source === 'lead_webhook'
+            ['new', 'draft'].includes(e.status) || e.source === 'lead_webhook'
           );
           setLeads(webLeads.length > 0 ? webLeads : d.estimates || []);
           setLoading(false);
@@ -2217,7 +2216,7 @@ function WebsiteQuotesView() {
   const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
 
   const sourceIcon = (src) => {
-    const icons = { voice_agent: '🎙️', lead_webhook: '🌐', website: '🌐', referral: '🤝', manual: '✏️', ai_agent: '🤖' };
+    const icons = { lead_webhook: '🌐', website: '🌐', referral: '🤝', manual: '✏️', ai_agent: '🤖' };
     return icons[src] || '📋';
   };
 
