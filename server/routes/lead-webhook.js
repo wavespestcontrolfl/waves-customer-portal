@@ -109,7 +109,35 @@ router.post('/', async (req, res) => {
     // Check for existing customer
     const existing = await db('customers').where({ phone: phoneFormatted }).first();
 
+    // Dedup: if this customer already submitted a form within the last 5 minutes,
+    // skip the heavy notification work below. Protects against accidental
+    // double-clicks and form retries; legitimate re-submissions hours/days
+    // later still flow through normally. New customers can't be duplicates by
+    // definition (no prior interactions), so the check only applies to existing.
+    let isDuplicateSubmission = false;
     if (existing) {
+      try {
+        const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
+        const recent = await db('customer_interactions')
+          .where('customer_id', existing.id)
+          .where('interaction_type', 'note')
+          .where(function () {
+            this.whereILike('subject', 'form submission%').orWhereILike('subject', 'new lead from%');
+          })
+          .where('created_at', '>=', fiveMinAgo)
+          .first();
+        if (recent) isDuplicateSubmission = true;
+      } catch (e) {
+        logger.warn(`[lead-webhook] dedup lookup failed (continuing): ${e.message}`);
+      }
+    }
+
+    let customer;
+    let isNewCustomer = false;
+    const location = resolveLocation(leadSource.area || '');
+
+    if (existing) {
+      customer = existing;
       // Update attribution if missing
       const updates = { last_contact_date: new Date(), last_contact_type: 'form_submission' };
       if (!existing.lead_source) updates.lead_source = leadSource.source;
@@ -126,47 +154,54 @@ router.post('/', async (req, res) => {
         metadata: JSON.stringify({ formId, formName, utmSource, utmMedium, utmCampaign }),
       });
 
-      logger.info(`Lead webhook: existing customer ${existing.first_name} ${existing.last_name} submitted form`);
-      return res.json({ success: true, existing: true, customerId: existing.id });
+      logger.info(`Lead webhook: existing customer ${existing.first_name} ${existing.last_name} submitted form${isDuplicateSubmission ? ' (duplicate within 5min — skipping notifications)' : ''}`);
+    } else {
+      isNewCustomer = true;
+      // Create new customer
+      const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+
+      const [newCust] = await db('customers').insert({
+        first_name: firstName, last_name: lastName,
+        phone: phoneFormatted, email: email || null,
+        address_line1: address || '', city: leadSource.area || '', state: 'FL', zip: '',
+        referral_code: code,
+        lead_source: leadSource.source,
+        lead_source_detail: leadSource.detail,
+        lead_source_channel: leadSource.channel,
+        lead_source_area: leadSource.area,
+        utm_data: JSON.stringify({ source: utmSource, medium: utmMedium, campaign: utmCampaign, term: utmTerm, content: utmContent, pageUrl, landingUrl, formId, formName }),
+        landing_page_url: landingUrl || pageUrl,
+        form_id: formId,
+        nearest_location_id: location.id,
+        pipeline_stage: 'new_lead',
+        pipeline_stage_changed_at: new Date(),
+        last_contact_date: new Date(),
+        last_contact_type: 'form_submission',
+        member_since: etDateString(),
+        waveguard_tier: null,
+      }).returning('*');
+      customer = newCust;
+
+      await db('property_preferences').insert({ customer_id: customer.id });
+      await db('notification_prefs').insert({ customer_id: customer.id });
+
+      await db('customer_interactions').insert({
+        customer_id: customer.id, interaction_type: 'note',
+        subject: `New lead from ${leadSource.detail || leadSource.source}`,
+        body: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${address || 'not provided'}.`,
+        metadata: JSON.stringify({ leadSource, formId }),
+      });
+
+      await PipelineManager.onEvent(customer.id, 'lead_created');
+      await LeadScorer.calculateScore(customer.id);
     }
 
-    // Create new customer
-    const location = resolveLocation(leadSource.area || '');
-    const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
-
-    const [customer] = await db('customers').insert({
-      first_name: firstName, last_name: lastName,
-      phone: phoneFormatted, email: email || null,
-      address_line1: address || '', city: leadSource.area || '', state: 'FL', zip: '',
-      referral_code: code,
-      lead_source: leadSource.source,
-      lead_source_detail: leadSource.detail,
-      lead_source_channel: leadSource.channel,
-      lead_source_area: leadSource.area,
-      utm_data: JSON.stringify({ source: utmSource, medium: utmMedium, campaign: utmCampaign, term: utmTerm, content: utmContent, pageUrl, landingUrl, formId, formName }),
-      landing_page_url: landingUrl || pageUrl,
-      form_id: formId,
-      nearest_location_id: location.id,
-      pipeline_stage: 'new_lead',
-      pipeline_stage_changed_at: new Date(),
-      last_contact_date: new Date(),
-      last_contact_type: 'form_submission',
-      member_since: etDateString(),
-      waveguard_tier: null,
-    }).returning('*');
-
-    await db('property_preferences').insert({ customer_id: customer.id });
-    await db('notification_prefs').insert({ customer_id: customer.id });
-
-    await db('customer_interactions').insert({
-      customer_id: customer.id, interaction_type: 'note',
-      subject: `New lead from ${leadSource.detail || leadSource.source}`,
-      body: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${address || 'not provided'}.`,
-      metadata: JSON.stringify({ leadSource, formId }),
-    });
-
-    await PipelineManager.onEvent(customer.id, 'lead_created');
-    await LeadScorer.calculateScore(customer.id);
+    if (isDuplicateSubmission) {
+      // Customer record + interaction note are written above so we still have an
+      // audit trail. Skip everything below (call, SMS, estimate, triage, agent)
+      // because we already fired all of that on the first submission.
+      return res.json({ success: true, customerId: customer.id, deduped: true });
+    }
 
     // Push + bell notification for admins
     try {
