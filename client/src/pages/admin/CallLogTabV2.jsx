@@ -3,7 +3,7 @@
 //   GET  /ai/admin/calls[?search=...][?days=365&limit=200]
 //   POST /admin/communications/call
 // alert-fg reserved for Missed stat / missed-call row accent only.
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Badge, Button, Card, CardBody, Input, Select, cn } from '../../components/ui';
 import {
   ALL_NUMBERS,
@@ -67,8 +67,13 @@ export default function CallLogTabV2() {
   const [callLogSearch, setCallLogSearch] = useState('');
   const [processingCallSid, setProcessingCallSid] = useState(null);
   const [processResult, setProcessResult] = useState(null);
-  // Transcript expand/collapse per call id. Collapsed by default because
-  // transcripts are noisy; tap the row to expand.
+  // Auto-processed sids — once we kick off a transcription run for a call
+  // we don't retry it during this session, even if it errors. Avoids hammering
+  // Gemini in a loop on a permanently-broken row.
+  const autoAttemptedRef = useRef(new Set());
+  const [autoProcessingSid, setAutoProcessingSid] = useState(null);
+  // Transcript expand/collapse per call id. Default to expanded so the
+  // operator sees the preview the moment it lands.
   const [expandedTranscripts, setExpandedTranscripts] = useState(() => new Set());
   const toggleTranscript = (id) => setExpandedTranscripts((prev) => {
     const next = new Set(prev);
@@ -90,6 +95,44 @@ export default function CallLogTabV2() {
     const t = setTimeout(() => { loadCalls(callLogSearch.trim()); }, 300);
     return () => clearTimeout(t);
   }, [callLogSearch]);
+
+  // Calls that need backend Gemini processing — has a recording but the
+  // processor never finished extracting (no terminal status) and nothing
+  // was transcribed. Voicemail/spam/processed rows are intentionally skipped.
+  const needsAutoProcess = (c) => {
+    if (!c?.twilio_call_sid || !c.recording_url) return false;
+    if (c.transcription && c.transcription.length > 0) return false;
+    const status = c.processing_status;
+    if (status === 'processed' || status === 'voicemail' || status === 'spam') return false;
+    if (autoAttemptedRef.current.has(c.twilio_call_sid)) return false;
+    return true;
+  };
+
+  // Serial auto-processor: pick the next unprocessed call and run it through
+  // the Gemini pipeline (transcribe + extract → customer/lead/estimate).
+  // One at a time so we don't fan out a bunch of slow Gemini requests.
+  useEffect(() => {
+    if (autoProcessingSid || processingCallSid) return;
+    const next = calls.find(needsAutoProcess);
+    if (!next) return;
+
+    const sid = next.twilio_call_sid;
+    autoAttemptedRef.current.add(sid);
+    setAutoProcessingSid(sid);
+
+    (async () => {
+      try {
+        await adminFetch(`/admin/call-recordings/process/${sid}`, { method: 'POST' });
+      } catch {
+        // Non-blocking — leave the row as-is; admin can manually reprocess.
+      } finally {
+        setAutoProcessingSid(null);
+        // Refresh so the new transcription / extraction shows up, which
+        // also re-runs this effect for the next pending call.
+        loadCalls(callLogSearch.trim());
+      }
+    })();
+  }, [calls, autoProcessingSid, processingCallSid]);
 
   const handleCall = async () => {
     if (!callTo.trim()) return;
@@ -369,11 +412,12 @@ export default function CallLogTabV2() {
                       </div>
                     </div>
 
-                    {/* Action row — Create Lead for unknown inbound callers,
-                        plus Process/Reprocess for any call with a Twilio SID
-                        so the operator can re-run Gemini extraction at any
-                        time (fills first_name / last_name / email / address
-                        into the matched customer record). */}
+                    {/* Action row — Create Lead for unknown inbound callers.
+                        Transcription + Gemini extraction (name / email /
+                        address → customers + estimates) runs automatically
+                        in the background; a discreet Reprocess link is kept
+                        so admins can re-run extraction on already-processed
+                        rows. */}
                     {((isUnknown && c.from_phone) || c.twilio_call_sid) && (
                       <div className="mt-2 ml-8 flex gap-2 flex-wrap items-center">
                         {isUnknown && c.from_phone && (
@@ -382,20 +426,29 @@ export default function CallLogTabV2() {
                           </Button>
                         )}
                         {c.twilio_call_sid && (() => {
-                          const isBusy = processingCallSid === c.twilio_call_sid;
+                          const isAuto = autoProcessingSid === c.twilio_call_sid;
+                          const isManual = processingCallSid === c.twilio_call_sid;
                           const isProcessed = c.processing_status === 'processed';
-                          return (
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              disabled={!!processingCallSid}
-                              onClick={() => handleProcessCall(c.twilio_call_sid, isProcessed)}
-                            >
-                              {isBusy
-                                ? (isProcessed ? 'Reprocessing…' : 'Processing…')
-                                : (isProcessed ? 'Reprocess' : 'Process')}
-                            </Button>
-                          );
+                          if (isAuto || isManual) {
+                            return (
+                              <span className="text-12 text-ink-tertiary italic">
+                                {isProcessed ? 'Reprocessing…' : 'Auto-transcribing…'}
+                              </span>
+                            );
+                          }
+                          if (isProcessed) {
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => handleProcessCall(c.twilio_call_sid, true)}
+                                disabled={!!processingCallSid || !!autoProcessingSid}
+                                className="text-11 uppercase tracking-label text-ink-tertiary hover:text-ink-primary u-focus-ring"
+                              >
+                                Reprocess
+                              </button>
+                            );
+                          }
+                          return null;
                         })()}
                         {processResult && processResult.callSid === c.twilio_call_sid && (
                           <span className={cn('text-12', processResult.ok ? 'text-ink-secondary' : 'text-alert-fg')}>
