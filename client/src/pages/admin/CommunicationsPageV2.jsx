@@ -25,6 +25,7 @@ import {
 import CallLogTabV2 from './CallLogTabV2';
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from './CommunicationsTabsV2';
 import PushSettingsV2 from '../../components/admin/PushSettingsV2';
+import CallBridgeLink from '../../components/admin/CallBridgeLink';
 import { Badge, Button, Card, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -218,7 +219,11 @@ function ConversationViewV2({ thread, messages, onReply, onBack }) {
         <Button size="sm" variant="secondary" onClick={onBack}>Back</Button>
         <div className="flex-1 min-w-0">
           <div className="text-14 font-medium text-zinc-900 truncate">{contactName}</div>
-          <div className="font-mono text-12 text-ink-secondary">{contactPhone}</div>
+          <CallBridgeLink
+            phone={contactPhone}
+            customerName={thread.customerName || ''}
+            className="font-mono text-12 text-ink-secondary underline"
+          />
         </div>
         <Button
           size="sm"
