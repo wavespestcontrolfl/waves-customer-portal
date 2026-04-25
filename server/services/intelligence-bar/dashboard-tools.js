@@ -803,18 +803,20 @@ async function getTodayBriefing() {
     // Pending estimates
     db('estimates').whereIn('status', ['sent', 'viewed']).count('* as c').first(),
 
-    // Overdue customers (no service in 90+ days for active pest customers)
-    db('customers').where({ active: true })
+    // Overdue customers (no service in 90+ days for active pest customers).
+    // Uses ET-anchored "today" so the 90-day boundary doesn't drift at
+    // midnight UTC.
+    db('customers').where({ active: true }).whereNull('deleted_at')
       .whereExists(function () {
         this.select('*').from('service_records').whereRaw('service_records.customer_id = customers.id').whereILike('service_type', '%pest%');
       })
-      .whereRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) < CURRENT_DATE - INTERVAL '90 days'")
+      .whereRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) < ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '90 days')")
       .count('* as c').first(),
 
-    // At-risk customers
+    // At-risk customers — same ET anchoring on the 7-day threshold.
     db('customer_health_scores')
       .whereIn('churn_risk', ['at_risk', 'critical'])
-      .whereRaw('created_at >= CURRENT_DATE - INTERVAL \'7 days\'')
+      .whereRaw("created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '7 days')")
       .count('* as c').first(),
 
     // Last 5 activity items
