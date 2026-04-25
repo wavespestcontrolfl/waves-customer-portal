@@ -238,11 +238,21 @@ async function getKpiSnapshot() {
       db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
     ).first(),
     db('customers').where({ active: true }).where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
-    db('invoices').whereIn('status', ['sent', 'viewed', 'overdue']).select(
-      db.raw('SUM(total) as total_owed'),
-      db.raw("SUM(CASE WHEN status = 'overdue' THEN total ELSE 0 END) as overdue"),
-      db.raw('COUNT(*) as count'),
-    ).first(),
+    // Source-of-truth filter for "outstanding" — paid_at IS NULL and not
+    // a draft/void. Mirrors the cleaner pattern used by /core-kpis AR
+    // Days; the prior status whitelist would silently drop any new
+    // status (e.g. 'in_collections') that gets added later.
+    // `overdue` is computed from due_date < today (ET) instead of
+    // trusting the `status='overdue'` string, which only flips when a
+    // cron flips it.
+    db('invoices')
+      .whereNull('paid_at')
+      .whereNotIn('status', ['draft', 'void'])
+      .select(
+        db.raw('SUM(total) as total_owed'),
+        db.raw("SUM(CASE WHEN due_date < (NOW() AT TIME ZONE 'America/New_York')::date THEN total ELSE 0 END) as overdue"),
+        db.raw('COUNT(*) as count'),
+      ).first(),
     db('customer_health_scores as h')
       .join(db.raw("(SELECT customer_id, MAX(created_at) as max_created FROM customer_health_scores GROUP BY customer_id) latest ON h.customer_id = latest.customer_id AND h.created_at = latest.max_created"))
       .select('h.churn_risk', db.raw('COUNT(*) as count')).groupBy('h.churn_risk'),
@@ -693,27 +703,54 @@ async function getCustomerAcquisition(input) {
 async function getOutstandingBalances(input) {
   const minAmount = input.min_amount || 0;
 
-  const invoices = await db('invoices')
-    .whereIn('status', ['sent', 'viewed', 'overdue'])
-    .where('total', '>', minAmount)
-    .leftJoin('customers', 'invoices.customer_id', 'customers.id')
+  // Source-of-truth filter: an invoice is unpaid if `paid_at IS NULL` and
+  // it isn't a draft or void. The previous status whitelist
+  // (['sent','viewed','overdue']) was fragile — if a partial-payment or
+  // 'in_collections' state ever gets added, those invoices would silently
+  // disappear from AR. matches the cleaner pattern already used by the
+  // /admin/dashboard/core-kpis AR Days query.
+  const invoices = await excludeInternalCustomers(
+    db({ i: 'invoices' })
+      .leftJoin({ c: 'customers' }, 'i.customer_id', 'c.id')
+      .whereNull('i.paid_at')
+      .whereNotIn('i.status', ['draft', 'void'])
+      .where('i.total', '>', minAmount)
+  )
     .select(
-      'invoices.id', 'invoices.total', 'invoices.status', 'invoices.created_at', 'invoices.due_date',
-      'customers.id as customer_id', 'customers.first_name', 'customers.last_name',
-      'customers.waveguard_tier', 'customers.phone',
+      'i.id', 'i.total', 'i.status', 'i.created_at', 'i.due_date',
+      'c.id as customer_id', 'c.first_name', 'c.last_name',
+      'c.waveguard_tier', 'c.phone',
     )
-    .orderBy('invoices.total', 'desc');
+    .orderBy('i.total', 'desc');
 
-  const now = new Date();
+  // ET-anchored "today" so the days-past-due math doesn't drift at the
+  // UTC midnight boundary. due_date is a date-only column — parse it as
+  // ET noon to keep the day count stable regardless of the server's TZ.
+  const todayET = parseETDateTime(`${etDateString()}T12:00`);
   let total = 0, overdue = 0;
   const aging = { current: 0, days_30: 0, days_60: 0, days_90_plus: 0 };
 
-  invoices.forEach(i => {
-    const amt = parseFloat(i.total || 0);
+  invoices.forEach((row) => {
+    const amt = parseFloat(row.total || 0);
     total += amt;
-    if (i.status === 'overdue') overdue += amt;
 
-    const age = i.due_date ? Math.floor((now - new Date(i.due_date)) / 86400000) : 0;
+    let age = 0;
+    if (row.due_date) {
+      // due_date may arrive as 'YYYY-MM-DD' (string) or a Date object
+      // depending on the driver. Normalize via ET noon either way.
+      const dueStr = typeof row.due_date === 'string'
+        ? row.due_date.slice(0, 10)
+        : etDateString(new Date(row.due_date));
+      const dueET = parseETDateTime(`${dueStr}T12:00`);
+      age = Math.floor((todayET - dueET) / 86400000);
+    }
+
+    // Overdue is derived from days-past-due, NOT the `status='overdue'`
+    // string — that string only flips when a cron flips it, so freshly
+    // past-due invoices still in 'sent' or 'viewed' wouldn't otherwise
+    // count.
+    if (age > 0) overdue += amt;
+
     if (age <= 0) aging.current += amt;
     else if (age <= 30) aging.days_30 += amt;
     else if (age <= 60) aging.days_60 += amt;
@@ -725,17 +762,18 @@ async function getOutstandingBalances(input) {
     total_overdue: overdue,
     invoice_count: invoices.length,
     aging,
-    top_balances: invoices.slice(0, 15).map(i => ({
-      invoice_id: i.id,
-      customer_id: i.customer_id,
-      customer: `${i.first_name} ${i.last_name}`,
-      tier: i.waveguard_tier,
-      phone: i.phone,
-      amount: parseFloat(i.total || 0),
-      status: i.status,
-      created: i.created_at,
-      due_date: i.due_date,
+    top_balances: invoices.slice(0, 15).map((row) => ({
+      invoice_id: row.id,
+      customer_id: row.customer_id,
+      customer: `${row.first_name} ${row.last_name}`,
+      tier: row.waveguard_tier,
+      phone: row.phone,
+      amount: parseFloat(row.total || 0),
+      status: row.status,
+      created: row.created_at,
+      due_date: row.due_date,
     })),
+    excluded_internal_customers: INTERNAL_TEST_CUSTOMERS,
   };
 }
 
