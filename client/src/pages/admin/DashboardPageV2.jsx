@@ -428,7 +428,11 @@ export default function DashboardPageV2() {
           title="Leads by Source"
           sub={
             leadsBySource?.total_leads != null
-              ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || 'MTD'}`
+              ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || 'MTD'}${
+                  leadsBySource.excluded_internal_customers?.length
+                    ? ` · excludes ${leadsBySource.excluded_internal_customers.join(', ')}`
+                    : ''
+                }`
               : ''
           }
         >
@@ -438,7 +442,11 @@ export default function DashboardPageV2() {
           title="Channel Mix"
           sub={
             channelMix?.total_leads != null
-              ? `${channelMix.total_leads} leads by first-contact channel`
+              ? `${channelMix.total_leads} leads by first-contact channel${
+                  channelMix.excluded_internal_customers?.length
+                    ? ` · excludes ${channelMix.excluded_internal_customers.join(', ')}`
+                    : ''
+                }`
               : ''
           }
         >
