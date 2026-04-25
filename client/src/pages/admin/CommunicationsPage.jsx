@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 
 import CallRecordingsPanel from './CallRecordingsPanel';
 import PushSettings from '../../components/admin/PushSettings';
+import CallBridgeLink from '../../components/admin/CallBridgeLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0', teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#FFFFFF', heading: '#0F172A', inputBorder: '#CBD5E1' };
@@ -307,7 +308,11 @@ function ConversationView({ thread, messages, onReply, onBack }) {
         }}>Back</button>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{contactName}</div>
-          <div style={{ fontSize: 12, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>{contactPhone}</div>
+          <CallBridgeLink
+            phone={contactPhone}
+            customerName={thread.customerName || ''}
+            style={{ fontSize: 12, color: D.muted, fontFamily: "'JetBrains Mono', monospace", textDecoration: 'underline' }}
+          />
         </div>
         <button onClick={() => onReply(contactPhone, thread.ourNumber)} style={{
           padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff',
@@ -353,7 +358,7 @@ function CallLogTab() {
   const [callTo, setCallTo] = useState('');
   const [callToSearch, setCallToSearch] = useState('');
   const [callToResults, setCallToResults] = useState([]);
-  const [callFrom, setCallFrom] = useState('+19413187612');
+  const [callFrom, setCallFrom] = useState('+19412975749');
   const [calling, setCalling] = useState(false);
   const [callResult, setCallResult] = useState(null);
   const [dispositions, setDispositions] = useState({}); // { callId: value }
