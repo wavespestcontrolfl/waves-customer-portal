@@ -109,11 +109,17 @@ const PEST = {
     nearWater: r(5),            // Was 2.5.
     largeDriveway: r(5),        // Was 2.5.
   },
-  // Session 11a Step 2b-3 byte-parity: v1 flattened from 0.25/0.10 to 0.15/0.15
-  // to match v2's currently-live rate (pricing-engine-v2.js:742-744). Customer-
-  // impact scan showed zero live estimates priced with roach modifier when this
-  // landed, so no existing customer pricing shifted.
-  roachModifier: { german: 0.15, regular: 0.15, none: 0 },
+  // Multiplicative roach modifier zeroed out (was 0.15 across the board) —
+  // we now charge a one-time `pestInitialRoach` line item on visit 1 instead,
+  // so we recover the heavier-knockdown product + labor cost regardless of
+  // whether the customer churns after the first visit. Keys stay in place so
+  // any caller passing roachType doesn't break.
+  roachModifier: { german: 0, regular: 0, none: 0 },
+  // One-time "Initial Knockdown" treatment auto-added when recurring pest is
+  // booked with a non-none roach type. Covers ~30–40 min on visit 1 plus the
+  // heavier product rotation (Tekko Pro IGR + Demand CS + bait gel + perimeter
+  // granular). Anchored between Terminix's $99 and Orkin's $189 retail.
+  pestInitialRoach: r(139),
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
     // Session 11a byte-parity: v1 lowered from 0.92/0.85 to 0.85/0.70 to match

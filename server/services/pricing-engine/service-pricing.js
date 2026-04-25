@@ -139,6 +139,44 @@ function pricePestControl(property, options = {}) {
 }
 
 // ============================================================
+// PEST — INITIAL ROACH KNOCKDOWN (one-time)
+// ============================================================
+// Auto-added by estimate-engine when recurring pest is booked with a
+// non-none roach type. Covers the heavier visit-1 treatment cost (extra
+// product + 10–15 min of additional labor) regardless of whether the
+// customer keeps the recurring program — closes the adverse-selection
+// gap left by the old multiplicative roachModifier (which only paid back
+// after ~3 visits).
+function pricePestInitialRoach(property, options = {}) {
+  const { roachType = 'none' } = options;
+  if (roachType === 'none') return null;
+
+  const price = PEST.pestInitialRoach;
+  // Cost detail mirrors pricePestControl's costing block so the margin
+  // panel can reason about the fee. Visit-1 burden estimate: heavier
+  // chemical rotation (~$20) + ~15 extra minutes of labor at GLOBAL.LABOR_RATE.
+  const extraMaterial = roachType === 'german' ? 25 : 20;
+  const extraOnSiteMin = roachType === 'german' ? 20 : 15;
+  const extraLabor = GLOBAL.LABOR_RATE * extraOnSiteMin / 60;
+  const incrementalCost = extraMaterial + extraLabor;
+  const margin = price > 0 ? (price - incrementalCost) / price : 0;
+
+  return {
+    service: 'pest_initial_roach',
+    label: roachType === 'german' ? 'Initial German Roach Knockdown' : 'Initial Palmetto Knockdown',
+    price,
+    roachType,
+    oneTime: true,
+    costs: {
+      extraMaterial,
+      extraLaborMin: extraOnSiteMin,
+      incrementalCost: Math.round(incrementalCost * 100) / 100,
+    },
+    margin: Math.round(margin * 1000) / 1000,
+  };
+}
+
+// ============================================================
 // LAWN CARE
 // ============================================================
 function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
@@ -1156,7 +1194,7 @@ function calculateRodentGuaranteeCombo(config = {}) {
 }
 
 module.exports = {
-  pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,

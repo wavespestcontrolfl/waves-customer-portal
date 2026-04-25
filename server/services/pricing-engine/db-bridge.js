@@ -50,6 +50,7 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.pest_base) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);
       if (config.pest_base.floor) constants.PEST.floor = r(config.pest_base.floor);
+      if (config.pest_base.initial_roach) constants.PEST.pestInitialRoach = r(config.pest_base.initial_roach);
     }
     if (config.pest_features) {
       const f = config.pest_features;
