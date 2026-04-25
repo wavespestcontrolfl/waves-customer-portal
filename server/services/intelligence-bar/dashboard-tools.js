@@ -230,8 +230,11 @@ async function getKpiSnapshot() {
   const [revMTD, revLastMonth, activeCount, newCount, pendingEst, servicesWeek, mrr, balances, healthDist] = await Promise.all([
     db('payments').where({ status: 'paid' }).whereBetween('payment_date', [r.month_start, r.month_end]).sum('amount as total').first(),
     db('payments').where({ status: 'paid' }).whereBetween('payment_date', [r.last_month_start, r.last_month_end]).sum('amount as total').first(),
-    db('customers').where({ active: true }).count('* as c').first(),
-    db('customers').where({ active: true }).where('created_at', '>=', r.month_start).count('* as c').first(),
+    // active=true alone isn't enough — soft-deleted customers can have
+    // active=true left over from before the delete. Match the rest of
+    // the dashboard by excluding deleted_at IS NOT NULL rows.
+    db('customers').where({ active: true }).whereNull('deleted_at').count('* as c').first(),
+    db('customers').where({ active: true }).whereNull('deleted_at').where('created_at', '>=', r.month_start).count('* as c').first(),
     db('estimates').whereIn('status', ['sent', 'viewed']).count('* as c').first(),
     db('scheduled_services').whereBetween('scheduled_date', [r.week_start, r.week_end]).select(
       db.raw("COUNT(*) as total"),

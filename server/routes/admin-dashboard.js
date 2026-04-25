@@ -36,7 +36,7 @@ router.get('/', async (req, res, next) => {
       db('payments').where({ status: 'paid' }).where('payment_date', '>=', solm).where('payment_date', '<=', eolm).sum('amount as total').first(),
       db('customers').where({ active: true }).whereNull('deleted_at').count('* as count').first(),
       db('customers').where({ active: true }).whereNull('deleted_at').where('created_at', '>=', som).count('* as count').first(),
-      db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', new Date().toISOString()).count('* as count').first(),
+      db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")
@@ -198,7 +198,7 @@ router.get('/forecast', async (req, res, next) => {
     async function getPipelineRevenue() {
       const estimates = await db('estimates')
         .whereIn('status', ['sent', 'viewed'])
-        .where('expires_at', '>', new Date().toISOString())
+        .where('expires_at', '>', db.raw('NOW()'))
         .select('monthly_total', 'annual_total', 'onetime_total');
 
       let totalMonthly = 0;
@@ -392,13 +392,17 @@ router.get('/core-kpis', async (req, res, next) => {
     // AR Days — avg days outstanding on unpaid invoices + DSO
     let arDays = null, arOpen = 0, arOverdue = 0;
     try {
+      // Both day-count math and the overdue boundary are ET-anchored so
+      // numbers don't drift at the UTC midnight boundary. Postgres `NOW()`
+      // and `CURRENT_DATE` use the server's TZ (UTC on Railway), which
+      // would put a 9 PM ET invoice into "tomorrow's" overdue bucket.
       const arAgg = await db('invoices')
         .whereNull('paid_at').whereNotIn('status', ['void', 'cancelled', 'draft'])
         .select(
           db.raw("COUNT(*) as open_count"),
           db.raw("SUM(total) as open_total"),
-          db.raw("AVG(EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) as avg_days_open"),
-          db.raw("COUNT(*) FILTER (WHERE due_date < CURRENT_DATE) as overdue_count")
+          db.raw("AVG(EXTRACT(EPOCH FROM ((NOW() AT TIME ZONE 'America/New_York') - (created_at AT TIME ZONE 'America/New_York'))) / 86400) as avg_days_open"),
+          db.raw("COUNT(*) FILTER (WHERE due_date < (NOW() AT TIME ZONE 'America/New_York')::date) as overdue_count")
         ).first();
       arDays = arAgg?.avg_days_open ? Math.round(parseFloat(arAgg.avg_days_open)) : null;
       arOpen = parseFloat(arAgg?.open_total || 0);
