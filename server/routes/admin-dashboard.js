@@ -877,4 +877,153 @@ router.get('/channel-mix', async (req, res, next) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// Operational alerts banner.
+//
+// Aggregates the alarms already in the data — overdue AR, failed
+// charges, calls hitting unmapped numbers, billing-health red flags,
+// at-risk customers — into a single thin banner above the hero KPIs.
+// Each alert is suppressed (omitted from the response) when its count
+// is zero, so the banner shows nothing on a clean day.
+//
+// Each alert returns: id, label, severity ('critical'|'warn'), href
+// (admin route the chip links to), and optional amount/count metadata
+// for the renderer.
+// ─────────────────────────────────────────────────────────────────────
+router.get('/alerts', async (req, res, next) => {
+  try {
+    const today = etDateString();
+    const alerts = [];
+
+    // 1. Invoices 60+ days overdue. paid_at IS NULL is the source of truth
+    //    (matches /core-kpis AR Days + getOutstandingBalances). Excludes
+    //    drafts and voids. Date math anchored to ET so the boundary doesn't
+    //    drift at midnight UTC.
+    try {
+      const overdue60 = await db('invoices')
+        .whereNull('paid_at')
+        .whereNotIn('status', ['draft', 'void'])
+        .whereRaw("due_date < ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '60 days')")
+        .select(
+          db.raw('COUNT(*) as count'),
+          db.raw('SUM(total) as amount'),
+        ).first();
+      const count = parseInt(overdue60?.count || 0);
+      if (count > 0) {
+        alerts.push({
+          id: 'ar_overdue_60',
+          severity: 'critical',
+          count,
+          amount: parseFloat(overdue60.amount || 0),
+          label: `${count} invoice${count === 1 ? '' : 's'} 60+ days overdue`,
+          href: '/admin/invoices',
+        });
+      }
+    } catch (err) { logger.error(`[alerts] ar_overdue_60: ${err.message}`); }
+
+    // 2. Failed payments today. Operator should see these every login.
+    try {
+      const failed = await db('payments')
+        .where({ status: 'failed' })
+        .where('payment_date', today)
+        .count('* as count').first();
+      const count = parseInt(failed?.count || 0);
+      if (count > 0) {
+        alerts.push({
+          id: 'payments_failed_today',
+          severity: 'critical',
+          count,
+          label: `${count} failed payment${count === 1 ? '' : 's'} today`,
+          href: '/admin/invoices',
+        });
+      }
+    } catch (err) { logger.error(`[alerts] payments_failed_today: ${err.message}`); }
+
+    // 3. Inbound calls today on numbers we haven't catalogued in
+    //    lead_sources. A non-zero count means real customers are dialing
+    //    a Twilio number that won't show up attributed in any panel —
+    //    fix by adding a row to lead_sources.
+    try {
+      const unmapped = await db('call_log as c')
+        .leftJoin('lead_sources as s', 'c.to_phone', 's.twilio_phone_number')
+        .where('c.direction', 'inbound')
+        .whereRaw("c.created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date)")
+        .whereNull('s.id')
+        .countDistinct('c.to_phone as count').first();
+      const count = parseInt(unmapped?.count || 0);
+      if (count > 0) {
+        alerts.push({
+          id: 'calls_unmapped_today',
+          severity: 'critical',
+          count,
+          label: `${count} unmapped phone number${count === 1 ? '' : 's'} rang today`,
+          href: '/admin/communications',
+        });
+      }
+    } catch (err) { logger.error(`[alerts] calls_unmapped_today: ${err.message}`); }
+
+    // 4. Cards expiring in next 7 days. Tighter than billing-health's
+    //    60-day window — this is "act this week or autopay breaks."
+    try {
+      const expiring = await db('payment_methods')
+        .join('customers', 'customers.id', 'payment_methods.customer_id')
+        .where('customers.active', true)
+        .whereNull('customers.deleted_at')
+        .where('customers.autopay_enabled', true)
+        .where('payment_methods.autopay_enabled', true)
+        .whereRaw(
+          "make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) <= ((NOW() AT TIME ZONE 'America/New_York')::date + INTERVAL '7 days')",
+        )
+        .count('* as count').first()
+        .catch(() => ({ count: 0 }));
+      const count = parseInt(expiring?.count || 0);
+      if (count > 0) {
+        alerts.push({
+          id: 'cards_expiring_7d',
+          severity: 'warn',
+          count,
+          label: `${count} card${count === 1 ? '' : 's'} expiring in 7 days`,
+          href: '/admin/customers',
+        });
+      }
+    } catch (err) { logger.error(`[alerts] cards_expiring_7d: ${err.message}`); }
+
+    // 5. Customers at churn risk per the latest health-score snapshot.
+    //    Pulls only the most-recent score per customer so a stale
+    //    'critical' score from months ago doesn't keep firing forever.
+    try {
+      const atRisk = await db.raw(
+        `SELECT COUNT(*) AS c
+         FROM (
+           SELECT DISTINCT ON (customer_id) customer_id, churn_risk
+           FROM customer_health_scores
+           ORDER BY customer_id, created_at DESC
+         ) latest
+         WHERE latest.churn_risk IN ('at_risk', 'critical')`,
+      );
+      const count = parseInt(atRisk?.rows?.[0]?.c || 0);
+      if (count > 0) {
+        alerts.push({
+          id: 'churn_at_risk',
+          severity: 'warn',
+          count,
+          label: `${count} customer${count === 1 ? '' : 's'} at churn risk`,
+          href: '/admin/customers?view=health',
+        });
+      }
+    } catch (err) { logger.error(`[alerts] churn_at_risk: ${err.message}`); }
+
+    res.json({
+      asOf: today,
+      alerts,
+      // Convenience for the renderer — true if any critical alert is
+      // present so the banner can use a louder treatment.
+      hasCritical: alerts.some((a) => a.severity === 'critical'),
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /alerts failed: ${err.message}`);
+    next(err);
+  }
+});
+
 module.exports = router;
