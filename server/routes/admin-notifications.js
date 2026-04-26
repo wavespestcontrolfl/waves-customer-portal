@@ -21,6 +21,12 @@ const DISMISS_WINDOW_HOURS = 24;
 //   - the alert's count grows past dismissed_at_count (escalation), or
 //   - DISMISS_WINDOW_HOURS elapse since dismissal (auto-expire).
 //
+// Returns { live, liveKeys } so callers can also dedupe persisted
+// dashboard_alert rows that mirror the live overlay (cron writes a
+// persisted bell row each time a new/escalated alert fires; the live
+// overlay is the source of truth for the current count, so the matching
+// persisted row at the same count is redundant).
+//
 // Logs and falls back to empty on any failure — flaky alert query must
 // never break the bell.
 async function liveAlertNotifications(adminUserId) {
@@ -30,11 +36,17 @@ async function liveAlertNotifications(adminUserId) {
     alerts = result.alerts || [];
   } catch (err) {
     logger.error(`[admin-notifications] computeDashboardAlerts failed: ${err.message}`);
-    return [];
+    return { live: [], liveKeys: new Set() };
   }
 
+  // liveKeys covers all currently-active alerts at their current count,
+  // including dismissed ones — the cron's persisted row at the same
+  // (alertId, count) is the same notification, regardless of whether the
+  // overlay is currently visible to this admin.
+  const liveKeys = new Set(alerts.map((a) => `${a.id}:${a.count}`));
+
   if (!adminUserId || alerts.length === 0) {
-    return toNotifications(alerts);
+    return { live: toNotifications(alerts), liveKeys };
   }
 
   // Pull the most-recent dismissal per alert for this admin within the
@@ -65,31 +77,65 @@ async function liveAlertNotifications(adminUserId) {
     return a.count > dismissedAtCount; // escalation re-shows
   });
 
-  return toNotifications(visible);
+  return { live: toNotifications(visible), liveKeys };
+}
+
+// True if a persisted notification was written by the dashboard-alerts
+// cron for the same (alertId, count) currently surfaced by the live
+// overlay. Older counts (escalation history) return false and stay
+// visible in the bell.
+function isLiveDuplicate(persisted, liveKeys) {
+  if (liveKeys.size === 0) return false;
+  let meta = persisted.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return false; }
+  }
+  if (!meta || meta.triggerKey !== 'dashboard_alert') return false;
+  const payload = meta.payload || {};
+  if (!payload.alertId || payload.alertCount == null) return false;
+  return liveKeys.has(`${payload.alertId}:${payload.alertCount}`);
 }
 
 // GET /api/admin/notifications — list with pagination.
 // Live dashboard alerts are merged in front of the persisted feed on
 // page 1 only; subsequent pages serve persisted notifications without
-// the live overlay so paging math stays simple.
+// the live overlay so paging math stays simple. Persisted rows that
+// duplicate the current live overlay (same alertId + count) are dropped
+// — escalation history (older counts) stays.
 router.get('/', async (req, res, next) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
     const offset = (page - 1) * limit;
     const persisted = await NotificationService.getAdminNotifications(limit, offset);
-    const live = page === 1 ? await liveAlertNotifications(req.technicianId) : [];
-    res.json({ notifications: [...live, ...persisted], page, limit });
+    const liveCtx = page === 1
+      ? await liveAlertNotifications(req.technicianId)
+      : { live: [], liveKeys: new Set() };
+    const dedupedPersisted = persisted.filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
+    res.json({ notifications: [...liveCtx.live, ...dedupedPersisted], page, limit });
   } catch (err) { next(err); }
 });
 
 // GET /api/admin/notifications/unread-count — bell badge polling.
-// Sums persisted unread + live alert count (after per-admin dismissals).
+// Sums persisted unread + live alert count (after per-admin dismissals),
+// minus persisted unread rows that duplicate the live overlay so the
+// badge doesn't double-count.
 router.get('/unread-count', async (req, res, next) => {
   try {
-    const persistedCount = await NotificationService.getAdminUnreadCount();
-    const live = await liveAlertNotifications(req.technicianId);
-    res.json({ count: persistedCount + live.length });
+    const liveCtx = await liveAlertNotifications(req.technicianId);
+    let persistedCount = await NotificationService.getAdminUnreadCount();
+    if (liveCtx.liveKeys.size > 0) {
+      try {
+        const unreadDashboardAlerts = await db('notifications')
+          .where({ recipient_type: 'admin', category: 'alert' })
+          .whereNull('read_at');
+        const dupes = unreadDashboardAlerts.filter((n) => isLiveDuplicate(n, liveCtx.liveKeys)).length;
+        persistedCount = Math.max(0, persistedCount - dupes);
+      } catch (err) {
+        logger.warn(`[admin-notifications] unread dedup query failed: ${err.message}`);
+      }
+    }
+    res.json({ count: persistedCount + liveCtx.live.length });
   } catch (err) { next(err); }
 });
 
