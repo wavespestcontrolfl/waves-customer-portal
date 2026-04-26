@@ -213,6 +213,7 @@ app.use('/api/admin/estimator', propertyLookupV2Routes);
 app.use('/api/admin/referrals', adminReferralRoutes);
 app.use('/api/reviews', reviewsPublicRoutes);
 app.use('/api/admin/dispatch', adminDispatchRoutes);
+app.use('/api/admin/dev', require('./routes/admin-dev-tech-status'));
 app.use('/api/stripe/terminal', require('./routes/stripe-terminal'));
 app.use('/api/admin/communications', adminCommsRoutes);
 app.use('/api/admin/communications', adminCommsAttachRoutes);

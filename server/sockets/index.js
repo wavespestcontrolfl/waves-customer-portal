@@ -1,10 +1,21 @@
 /**
  * Socket.io server bootstrap.
  *
- * Foundation only — auth middleware + connection logger. No event
- * handlers, no room joins, no broadcast helpers. Those land in
- * scoped follow-up PRs (one per channel: dispatch:tech_status,
- * customer:job_update, dispatch:job_update, dispatch:alert).
+ * Auth middleware + connection-time room joins + connection logger.
+ * Event handlers / broadcast helpers live in service modules
+ * (server/services/*.js) that import { getIo } from this file.
+ *
+ * Rooms are joined in the `connection` event handler, NOT in middleware.
+ * Middleware runs before the socket fully connects — calling
+ * socket.join() there can race against the connection completing and
+ * the client may miss broadcasts emitted during that window. Doing it
+ * inside `connection` guarantees the socket is registered with the
+ * adapter before any room write.
+ *
+ * Current rooms (one per event channel):
+ *   dispatch:admins  — staff (admin + technician). Receives
+ *                      dispatch:tech_status broadcasts on every
+ *                      tech_status row upsert. Customers do not join.
  *
  * CORS origins read from server/config/cors-origins.js — same source
  * the Express CORS middleware uses. Don't redefine the list here.
@@ -22,8 +33,16 @@ const { allowedOrigins } = require('../config/cors-origins');
 const { socketAuth } = require('./auth');
 const logger = require('../services/logger');
 
+// Module-level singleton so service modules (server/services/*.js)
+// can call getIo().to(room).emit(...) without us threading the io
+// instance through every function signature. Set once in
+// attachSockets(); read via getIo(). Returns null if attachSockets
+// hasn't run yet — service modules that emit must guard the null
+// case so a test harness without sockets doesn't crash.
+let _io = null;
+
 function attachSockets(httpServer) {
-  const io = new Server(httpServer, {
+  _io = new Server(httpServer, {
     cors: {
       origin: allowedOrigins,
       credentials: true,
@@ -34,12 +53,19 @@ function attachSockets(httpServer) {
     // clients on flaky LTE.
   });
 
-  io.use(socketAuth);
+  _io.use(socketAuth);
 
-  io.on('connection', (socket) => {
+  _io.on('connection', (socket) => {
+    // Room join lives here, not in the auth middleware. See header
+    // comment for why.
+    if (socket.userType === 'admin' || socket.userType === 'technician') {
+      socket.join('dispatch:admins');
+    }
+
     logger.info(
-      `[socket] connect id=${socket.id} userType=${socket.userType} userId=${socket.userId}`
+      `[socket] connect id=${socket.id} userType=${socket.userType} userId=${socket.userId} rooms=${[...socket.rooms].filter((r) => r !== socket.id).join(',') || '(none)'}`
     );
+
     socket.on('disconnect', (reason) => {
       logger.info(
         `[socket] disconnect id=${socket.id} userType=${socket.userType} userId=${socket.userId} reason=${reason}`
@@ -47,7 +73,11 @@ function attachSockets(httpServer) {
     });
   });
 
-  return io;
+  return _io;
 }
 
-module.exports = { attachSockets };
+function getIo() {
+  return _io;
+}
+
+module.exports = { attachSockets, getIo };
