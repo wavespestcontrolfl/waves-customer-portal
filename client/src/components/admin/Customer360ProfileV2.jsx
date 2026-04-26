@@ -24,7 +24,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { ChevronLeft, MoreHorizontal, Trash2 } from 'lucide-react';
 import { CustomerActionBar } from './StickyActionBar';
-import { Card, CardBody, Badge, Button, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
+import { Card, CardBody, Badge, Button, Switch, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
 import CallBridgeLink from './CallBridgeLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -674,6 +674,31 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
 
           {/* OVERVIEW */}
           {activeTab === 'overview' && (
+            <div>
+              <div className="flex items-center justify-between mb-4 pb-3 border-b border-hairline border-zinc-200">
+                <div>
+                  <div className="text-13 font-medium text-zinc-900">Already left a Google review</div>
+                  <div className="text-11 text-ink-secondary">When on, this customer is excluded from review-request and 48h followup SMS.</div>
+                  {c.reviewMarkedAt && c.hasLeftGoogleReview && (
+                    <div className="text-10 text-ink-tertiary mt-0.5 u-nums">Marked {fmtDate(c.reviewMarkedAt)}</div>
+                  )}
+                </div>
+                <Switch
+                  id="has-left-review-v2"
+                  checked={!!c.hasLeftGoogleReview}
+                  onChange={async (val) => {
+                    setData(prev => prev ? ({ ...prev, customer: { ...prev.customer, hasLeftGoogleReview: val, reviewMarkedAt: val ? new Date().toISOString() : null } }) : prev);
+                    try {
+                      await adminFetch(`/admin/customers/${customerId}`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ hasLeftGoogleReview: val }),
+                      });
+                    } catch {
+                      setData(prev => prev ? ({ ...prev, customer: { ...prev.customer, hasLeftGoogleReview: !val, reviewMarkedAt: !val ? new Date().toISOString() : null } }) : prev);
+                    }
+                  }}
+                />
+              </div>
             <div className="c360-overview-grid grid grid-cols-3 gap-5">
               {/* Col 1: Services */}
               <div>
@@ -753,6 +778,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                   </div>
                 )}
               </div>
+            </div>
             </div>
           )}
 

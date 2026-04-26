@@ -562,6 +562,8 @@ router.get('/:id', async (req, res, next) => {
         totalServices: c.total_services,
         referralCode: c.referral_code, crmNotes: c.crm_notes,
         satelliteUrl: c.satellite_url,
+        hasLeftGoogleReview: !!c.has_left_google_review,
+        reviewMarkedAt: c.review_marked_at,
       },
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, estimates, payments, scheduled, smsLog,
@@ -636,15 +638,20 @@ router.post('/', async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', hasLeftGoogleReview: 'has_left_google_review' };
     const updates = {};
     for (const [k, v] of Object.entries(fields)) {
       if (req.body[k] !== undefined) {
         // Handle empty strings for numeric/date fields
         if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
+        else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else { updates[v] = req.body[k]; }
       }
+    }
+    // Stamp when the review flag flips so admins can see who/when later.
+    if (updates.has_left_google_review !== undefined) {
+      updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
     }
     if (Object.keys(updates).length) await db('customers').where({ id: req.params.id }).update(updates);
 

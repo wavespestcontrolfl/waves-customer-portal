@@ -349,7 +349,37 @@ export default function Customer360Profile({ customerId, onClose }) {
 
           {/* ---- OVERVIEW TAB ---- */}
           {activeTab === 'overview' && (
-            <div className="c360-overview-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 20 }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', marginBottom: 14, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>Already left a Google review</div>
+                  <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>When on, this customer is excluded from review-request and 48h followup SMS.</div>
+                  {c.reviewMarkedAt && c.hasLeftGoogleReview && (
+                    <div style={{ fontSize: 10, color: D.muted, fontFamily: MONO, marginTop: 2 }}>Marked {fmtDate(c.reviewMarkedAt)}</div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={!!c.hasLeftGoogleReview}
+                  onClick={async () => {
+                    const next = !c.hasLeftGoogleReview;
+                    setData(prev => prev ? ({ ...prev, customer: { ...prev.customer, hasLeftGoogleReview: next, reviewMarkedAt: next ? new Date().toISOString() : null } }) : prev);
+                    try {
+                      await adminFetch(`/admin/customers/${customerId}`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ hasLeftGoogleReview: next }),
+                      });
+                    } catch {
+                      setData(prev => prev ? ({ ...prev, customer: { ...prev.customer, hasLeftGoogleReview: !next, reviewMarkedAt: !next ? new Date().toISOString() : null } }) : prev);
+                    }
+                  }}
+                  style={{ position: 'relative', width: 36, height: 20, borderRadius: 999, border: 'none', cursor: 'pointer', background: c.hasLeftGoogleReview ? D.green : D.border, transition: 'background 0.15s', flexShrink: 0 }}
+                >
+                  <span style={{ position: 'absolute', top: 2, left: c.hasLeftGoogleReview ? 18 : 2, width: 16, height: 16, borderRadius: '50%', background: D.white, transition: 'left 0.15s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }} />
+                </button>
+              </div>
+              <div className="c360-overview-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 20 }}>
               {/* Col 1: Services */}
               <div>
                 <SectionTitle>Upcoming Service</SectionTitle>
@@ -428,6 +458,7 @@ export default function Customer360Profile({ customerId, onClose }) {
                   </div>
                 )}
               </div>
+            </div>
             </div>
           )}
 

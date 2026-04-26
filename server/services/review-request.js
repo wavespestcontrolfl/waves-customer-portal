@@ -192,6 +192,15 @@ const ReviewService = {
     if (!request || request.sms_sent_at) return;
 
     const customer = await db('customers').where({ id: request.customer_id }).first();
+    // Skip customers a CSR has flagged as already-reviewed (Customer 360 toggle).
+    if (customer && customer.has_left_google_review) {
+      await db('review_requests').where({ id: requestId }).update({
+        status: 'suppressed',
+        updated_at: new Date(),
+      });
+      logger.info(`[review] Suppressed request for ${customer.first_name} ${customer.last_name} (already-reviewed flag)`);
+      return;
+    }
     // Route to the service beneficiary (see services/customer-contact.js) —
     // falls back to the billing phone when no service contact is configured.
     const { getServiceContact } = require('./customer-contact');
@@ -522,6 +531,16 @@ const ReviewService = {
       }
 
       const customer = await db('customers').where({ id: request.customer_id }).first();
+      // Dedup #3: CSR flagged the customer as already-reviewed (Customer 360 toggle).
+      if (customer && customer.has_left_google_review) {
+        await db('review_requests').where({ id: request.id }).update({
+          followup_sent: true,
+          followup_sent_at: new Date(),
+          updated_at: new Date(),
+        });
+        suppressed++;
+        continue;
+      }
       const contact = getServiceContact(customer);
       if (!contact.phone) continue;
 
