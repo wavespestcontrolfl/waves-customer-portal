@@ -51,13 +51,13 @@ router.post('/job-status', async (req, res) => {
   }
 
   try {
-    const payload = await transitionJobStatus({
+    const { customerPayload, adminPayload } = await transitionJobStatus({
       jobId,
       fromStatus,
       toStatus,
       transitionedBy: req.technicianId,
     });
-    return res.json({ ok: true, payload });
+    return res.json({ ok: true, customerPayload, adminPayload });
   } catch (err) {
     logger.error(`[admin-dev-job-status] transition failed: ${err.message}`);
     return res.status(500).json({ error: err.message });
