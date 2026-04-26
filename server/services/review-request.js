@@ -261,6 +261,9 @@ const ReviewService = {
   async createInline({ customerId, serviceRecordId }) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return null;
+    // CSR flagged this customer as already-reviewed — caller treats null
+    // as "skip the review suffix" so the completion SMS goes out clean.
+    if (customer.has_left_google_review) return null;
 
     // Reuse an existing request for this service so we don't stack tokens.
     if (serviceRecordId) {
