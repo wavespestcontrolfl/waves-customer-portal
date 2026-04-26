@@ -473,38 +473,74 @@ const ReviewService = {
   /**
    * Cron: send 48-hour follow-up to non-responders.
    * Only sends ONE follow-up, only to people who haven't opened OR opened but didn't rate.
+   *
+   * Per-customer dedup: a customer with multiple recent review_requests (e.g.
+   * back-to-back services) only gets a single follow-up SMS. Sibling rows are
+   * marked followup_sent so they stop appearing in eligibility windows on
+   * subsequent cron runs.
    */
   async processFollowups() {
     const cutoff = new Date(Date.now() - 48 * 3600000); // 48 hours ago
+    const recentFollowupCutoff = new Date(Date.now() - 14 * 24 * 3600000); // 14 days
     const eligible = await db('review_requests')
       .whereIn('status', ['sent', 'opened'])
       .where('sms_sent_at', '<=', cutoff)
       .where({ followup_sent: false })
       .whereNull('rated_at')
+      .orderBy('sms_sent_at', 'asc')
       .limit(20);
 
     let sent = 0;
+    let suppressed = 0;
+    const sentThisRun = new Set();
     const { getServiceContact } = require('./customer-contact');
     for (const request of eligible) {
+      // Dedup #1: another row in this same batch already triggered a followup
+      if (sentThisRun.has(request.customer_id)) {
+        await db('review_requests').where({ id: request.id }).update({
+          followup_sent: true,
+          followup_sent_at: new Date(),
+          updated_at: new Date(),
+        });
+        suppressed++;
+        continue;
+      }
+
+      // Dedup #2: a sibling row already sent a followup to this customer recently
+      const recentFollowup = await db('review_requests')
+        .where({ customer_id: request.customer_id, followup_sent: true })
+        .where('followup_sent_at', '>=', recentFollowupCutoff)
+        .first();
+      if (recentFollowup) {
+        await db('review_requests').where({ id: request.id }).update({
+          followup_sent: true,
+          followup_sent_at: new Date(),
+          updated_at: new Date(),
+        });
+        suppressed++;
+        continue;
+      }
+
       const customer = await db('customers').where({ id: request.customer_id }).first();
       const contact = getServiceContact(customer);
       if (!contact.phone) continue;
 
-      const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-      const longReviewUrl = `${domain}/rate/${request.token}`;
-      const reviewUrl = await shortenOrPassthrough(longReviewUrl, {
-        kind: 'review', entityType: 'review_requests', entityId: request.id, customerId: customer.id,
-      });
+      // Followup points straight at the GBP review form — they ignored the
+      // tokenized rate page once, so reduce friction the second time.
+      const location = resolveLocation(customer || {});
+      const googleReviewUrl = REVIEW_LINKS[location] || REVIEW_LINKS['lakewood-ranch'];
 
-      const fallback = `No pressure at all, ${contact.name || customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${reviewUrl} 🌊`;
+      const fallback = `No pressure at all, ${contact.name || customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${googleReviewUrl} 🌊`;
       let body = fallback;
       try {
         const templates = require('../routes/admin-sms-templates');
         const rendered = await templates.getTemplate('review_request_followup', {
           first_name: contact.name || customer.first_name || '',
-          review_url: reviewUrl,
+          google_review_url: googleReviewUrl,
         });
-        if (rendered && !rendered.includes('{first_name}')) body = rendered;
+        if (rendered && !rendered.includes('{first_name}') && !rendered.includes('{google_review_url}')) {
+          body = rendered;
+        }
       } catch { /* use fallback */ }
 
       try {
@@ -519,13 +555,16 @@ const ReviewService = {
           followup_sent_at: new Date(),
           updated_at: new Date(),
         });
+        sentThisRun.add(request.customer_id);
         sent++;
       } catch (err) {
         logger.error(`[review] Follow-up SMS failed: ${err.message}`);
       }
     }
-    if (sent > 0) logger.info(`[review] Sent ${sent} follow-up reminders`);
-    return { sent };
+    if (sent > 0 || suppressed > 0) {
+      logger.info(`[review] Follow-ups: ${sent} sent, ${suppressed} suppressed (dedup)`);
+    }
+    return { sent, suppressed };
   },
 
   // ── Stats ──
