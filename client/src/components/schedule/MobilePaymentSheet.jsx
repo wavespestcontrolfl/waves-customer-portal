@@ -10,6 +10,21 @@
 //   Invoice              → send SMS + email pay link (no sheet)
 //
 // Cash App Pay was removed per operator request.
+//
+// Audit focus:
+// - Tap to Pay: launches a deep link into the WavesPay iOS app. What
+//   happens on Android / desktop / when the deep link doesn't resolve?
+//   Confirm there's a fallback path so the operator isn't stuck.
+// - Sheet stacking: this sheet opens four child tender sheets. Confirm
+//   only one is open at a time, and that closing a tender sheet returns
+//   to this sheet (not to the underlying checkout sheet).
+// - Invoice + token handoff: invoiceId and invoiceToken are passed in
+//   from MobileCheckoutSheet. Each tender sheet uses these for the
+//   relevant POST. Verify nothing here re-creates an invoice (would
+//   duplicate the bill).
+// - Manual / Cash / Check tender record-payment endpoints: confirm each
+//   is idempotent on the (invoiceId, amount, method, externalRef) tuple
+//   so a network retry doesn't double-record.
 
 import { X, ChevronRight } from 'lucide-react';
 import { useState } from 'react';

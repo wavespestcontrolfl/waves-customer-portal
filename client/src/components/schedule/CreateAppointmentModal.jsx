@@ -1,3 +1,32 @@
+// client/src/components/schedule/CreateAppointmentModal.jsx
+//
+// Modal opened from the SchedulePage / DispatchPageV2 "+ New" CTA.
+// Walks the operator through customer lookup, service selection,
+// date/time slot, optional recurring cadence, and tech assignment.
+// Submits to POST /admin/services to create a scheduled_service row.
+//
+// Endpoints:
+//   GET  /admin/customers?search=         (autocomplete existing customer)
+//   GET  /admin/services                  (service-library lookup)
+//   GET  /admin/techs/availability        (slot availability for a date)
+//   POST /admin/services                  (create the appointment)
+//   POST /admin/customers                 (when creating a new customer
+//                                          inline before booking)
+//
+// Audit focus:
+// - Existing-customer-vs-new branching: confirm the new-customer
+//   inline-create path doesn't double-submit when the operator picks
+//   a search result mid-typing.
+// - Address autocomplete (Google Places) — verify graceful degradation
+//   when the script fails to load.
+// - Recurring-appointment generation: when a cadence (quarterly /
+//   bimonthly / monthly) is set, the server fans out future stops.
+//   Worth checking that the modal's UI promise (preview of N visits)
+//   matches what the server actually creates, especially around DST
+//   boundaries and timezone (use etDateString — never new Date(string)).
+// - Tech assignment dropdown: confirm "any available tech" vs an
+//   explicit assignment doesn't get silently swapped if the
+//   availability API responds slowly.
 import { useState, useEffect, useMemo, useRef } from 'react';
 import AddressAutocomplete from '../AddressAutocomplete';
 import { etDateString } from '../../lib/timezone';
