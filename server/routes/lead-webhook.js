@@ -564,13 +564,28 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   if (utmSource === 'facebook' || utmSource === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: utmMedium === 'cpc' ? 'paid' : 'organic' };
   if (utmSource === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
 
-  // Domain-based attribution
+  // Domain-based attribution. Must mirror the spoke fleet in
+  // wavespestcontrol-astro-/src/data/domains.json — each spoke domain that
+  // serves form-capture pages needs a row here so determineLeadSource() can
+  // attribute its inbound leads. Missing domains fall through to generic
+  // 'website' source (the bug PR #264 originally tried to fix on the
+  // exterminator/pestcontrol fleet — same fix needs the lawn + brand spokes).
   const domains = {
+    // Pest spokes (city)
     'bradentonflexterminator.com': { area: 'Bradenton' }, 'bradentonflpestcontrol.com': { area: 'Bradenton' },
     'palmettoexterminator.com': { area: 'Palmetto' }, 'palmettoflpestcontrol.com': { area: 'Palmetto' },
     'parrishexterminator.com': { area: 'Parrish' }, 'parrishpestcontrol.com': { area: 'Parrish' },
     'sarasotaflexterminator.com': { area: 'Sarasota' }, 'sarasotaflpestcontrol.com': { area: 'Sarasota' },
     'veniceexterminator.com': { area: 'Venice' }, 'veniceflpestcontrol.com': { area: 'Venice' },
+    // Pest spokes (newer)
+    'northportflpestcontrol.com': { area: 'North Port' },
+    // Lawn spokes (city)
+    'bradentonfllawncare.com': { area: 'Bradenton' },
+    'parrishfllawncare.com': { area: 'Parrish' },
+    'sarasotafllawncare.com': { area: 'Sarasota' },
+    'venicelawncare.com': { area: 'Venice' },
+    // Lawn brand-wide (no single city)
+    'waveslawncare.com': { area: 'SW Florida' },
   };
 
   for (const [domain, info] of Object.entries(domains)) {
