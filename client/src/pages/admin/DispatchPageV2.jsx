@@ -1,3 +1,37 @@
+// client/src/pages/admin/DispatchPageV2.jsx
+//
+// Mobile-first orchestrator for /admin/dispatch under the dispatch-v2
+// feature flag. Renders the day/week board, sidebars (TechMatchPanelV2 /
+// CSRPanelV2 / RevenuePanelV2 / InsightsPanelV2), and on mobile manages
+// the action-sheet stack (MobileAppointmentDetailSheet,
+// MobileCheckoutSheet, MobilePaymentSheet, MobileServicePickerSheet, and
+// the four payment tender sheets). Reuses CompletionPanel /
+// RescheduleModal / EditServiceModal / ProtocolPanel from SchedulePage so
+// the V1 modal logic is shared rather than re-implemented.
+//
+// Endpoints:
+//   GET  /admin/dispatch/services?date=…
+//   PATCH /admin/services/:id              (status, notes, tech assignment)
+//   POST /admin/services/:id/complete      (final products + observations)
+//   POST /admin/services/:id/reschedule
+//   POST /admin/services/:id/payment       (cash/check/card/manual-card)
+//   POST /admin/services/:id/refund
+//   GET  /admin/techs/availability
+//
+// Mobile-shell-v2 rule (CLAUDE.md): under 768px the page renders inside
+// MobileAdminShell with a bottom tab bar and StickyActionBar.
+//
+// Audit focus:
+// - Action-sheet stack management — opening one sheet from inside another
+//   (e.g. checkout → payment → cash tender) needs careful focus / scroll
+//   restoration so the user doesn't lose context on dismiss.
+// - Day-grid drag-drop (TimeGridDay / TimeGridDays) — race conditions
+//   between optimistic local move and the PATCH /admin/services/:id call.
+// - Sidebar lazy loading — Suspense boundaries around TechMatchPanelV2 etc.
+//   should fail gracefully when the API for a panel times out.
+// - Mobile vs desktop divergence — confirm the same appointment renders
+//   the same details / action set on both, no orphaned mobile-only state
+//   that desktop users can't reach.
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { Plus } from 'lucide-react';
 import {
