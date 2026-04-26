@@ -107,6 +107,14 @@ async function computeDashboardAlerts() {
 
   // 4. Cards expiring in next 7 days. Tighter than billing-health's
   //    60-day window — this is "act this week or autopay breaks."
+  //
+  //    Cards expire at the END of the printed month (e.g. exp 04/2026
+  //    is valid through 2026-04-30). The previous query compared
+  //    make_date(year, month, 1) which is the START of the month, so a
+  //    card expiring May 31 was incorrectly flagged on April 24 as
+  //    "expiring in 7 days." Now we compute the last-day-of-expiry-month
+  //    and bound it to a forward window so already-expired cards
+  //    (which belong in a different alert) don't pile in either.
   try {
     const expiring = await db('payment_methods')
       .join('customers', 'customers.id', 'payment_methods.customer_id')
@@ -115,7 +123,9 @@ async function computeDashboardAlerts() {
       .where('customers.autopay_enabled', true)
       .where('payment_methods.autopay_enabled', true)
       .whereRaw(
-        "make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) <= ((NOW() AT TIME ZONE 'America/New_York')::date + INTERVAL '7 days')",
+        "(make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) + INTERVAL '1 month - 1 day')::date "
+          + "BETWEEN (NOW() AT TIME ZONE 'America/New_York')::date "
+          + "AND ((NOW() AT TIME ZONE 'America/New_York')::date + INTERVAL '7 days')",
       )
       .count('* as count').first()
       .catch(() => ({ count: 0 }));
