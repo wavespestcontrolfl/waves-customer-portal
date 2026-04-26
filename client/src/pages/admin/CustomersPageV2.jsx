@@ -8,6 +8,32 @@
 // Scope: Directory view + header chrome + QuickAddModal redesigned.
 // Pipeline / Map / Health / AI Advisor render V1 panels via named exports
 // from CustomersPage.jsx (PR #4b/#4c/#4d will reskin those in later passes).
+//
+// Daily driver: Virginia (CSR) + the owner. ~700 active customers + ~70
+// new leads, paginated 100 per page. Search + stage + tier + city
+// filters compose into the query string. Mobile uses a stage-picker UX
+// instead of the desktop Kanban.
+//
+// Audit focus:
+// - Search debounce + abort: on a fast typer, do we cancel inflight
+//   /admin/customers requests so results don't render out of order?
+// - Filter composability: search + stage + tier + city all hit the
+//   same endpoint. Confirm changing one filter clears stale rows
+//   instead of mixing old + new pages.
+// - Pagination at scale: limit=100 with ~700 customers = 7 pages.
+//   Verify the page state resets when filters change (otherwise
+//   a filter that returns 50 results but page=4 will show empty).
+// - Customer360 panel open/close: clicking a row opens the V2
+//   Customer360ProfileV2 sheet. State management for which customer
+//   is selected — does navigating away (back button) close it?
+// - Inline edit (PUT /admin/customers/:id): optimistic UI vs API
+//   confirmation. If the PUT fails, do we roll back the row?
+// - Quick-add (POST /admin/customers) — phone duplicate check returns
+//   409. Confirm the modal surfaces the conflict cleanly with a
+//   "merge with existing?" path or a clear error.
+// - V1/V2 panel reuse: CustomerHealthSection (V1 export) renders
+//   inside V2. Watch for V1 styling leaking through — should be
+//   reskinned eventually but for now stylistic drift is the risk.
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Filter, Phone, MessageSquare, Plus } from 'lucide-react';
