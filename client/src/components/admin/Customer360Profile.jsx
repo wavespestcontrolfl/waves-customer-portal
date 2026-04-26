@@ -1,3 +1,30 @@
+// client/src/components/admin/Customer360Profile.jsx
+//
+// V1 Customer detail / profile slide-out panel. Rendered inside
+// CustomersPage when the operator clicks a row. Six tabs:
+// overview / services / billing / comms / property / compliance.
+//
+// Endpoints (same as V2 — strict parity):
+//   GET  /admin/customers/:id
+//   GET  /admin/customers/:id/timeline
+//   GET  /admin/customers/:id/autopay-state
+//   GET  /admin/customers/:id/cards
+//   GET  /admin/customers/:id/comms
+//   GET  /admin/customers/:id/estimates-summary
+//   POST /admin/communications/send-sms
+//   POST /admin/customers/:id/refund
+//   POST /admin/customers/:id/charge-now
+//
+// Audit focus:
+// - V1-only styling (D palette, inline styles) is intentionally
+//   preserved for flag-off users — don't flag this as drift.
+// - Same lifecycle / single-flight / confirmation concerns as V2:
+//   ESC-handler detach, double-submit on SMS, refund/charge-now
+//   confirmation gates, error surfacing on Stripe declines.
+// - V1 health/radar uses colored palette (teal/green/amber/red).
+//   That's intentional in V1 — V2 collapses to zinc.
+// - Both V1 and V2 share CustomerActionBar from StickyActionBar.jsx.
+//   Any change there hits both surfaces.
 import { useState, useEffect, useRef } from 'react';
 import { CustomerActionBar } from './StickyActionBar';
 import CallBridgeLink from './CallBridgeLink';
