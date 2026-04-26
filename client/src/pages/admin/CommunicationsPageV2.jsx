@@ -15,6 +15,40 @@
 // CSRCoachTabV2, EmailAutomationsPanelV2, and PushSettingsV2 each render
 // behind the comms-v2 flag. V1 CommunicationsPage still uses the V1 inline
 // tabs and V1 separate panels.
+//
+// Daily driver: Virginia (CSR) — 8 hrs/day. SMS thread view + outbound
+// composer + AI-draft suggestion is the primary workflow. Unread tracking
+// drives the inbox badge.
+//
+// Audit focus:
+// - Threading logic: messages keyed by (customer phone, business
+//   number) tuple. Confirm a customer texting from a new number doesn't
+//   silently merge into a different customer's thread, and that a
+//   customer with multiple historical numbers shows all threads.
+// - Unread tracking: stats endpoint returns counts; client maintains
+//   local optimistic decrement on view. Race with inbound webhook
+//   (new SMS arrives while operator is reading) — does the badge get
+//   stuck or double-count?
+// - AI-draft (POST /ai-draft): how is the operator-edit-then-send flow
+//   handled? If the operator edits the draft, do we still send the
+//   edited version (not the AI's original)? Single-flight on send?
+// - SMS send (POST /sms): single-flight against double-click. Empty /
+//   whitespace-only body must not submit. mediaUrls path needs the
+//   attach endpoint to complete first (multipart upload race).
+// - AI auto-reply toggle: server-side state; if a customer replies
+//   while toggling, who handles it? Confirm the toggle flips
+//   atomically and the UI reflects the actual server state on
+//   refresh.
+// - Search bar query against /log?search=: debounce + abort to avoid
+//   stale results on a fast typer.
+// - Unicode / SMS segment counting: a long SMS or one with emojis
+//   crosses a 160-char (GSM-7) or 70-char (UCS-2) boundary and gets
+//   split + billed per segment. Worth checking the composer warns.
+// - Twilio inbound webhook (server-side via twilio-webhook.js): spam
+//   block + STOP/UNSUBSCRIBE handling + dual-write to legacy + unified
+//   messages. This is the untrusted-input boundary — flag any
+//   missing signature verification or path that creates customers
+//   from arbitrary inbound numbers without rate-limiting.
 import React, {
   useState, useEffect, useCallback, useMemo, useRef,
 } from 'react';
