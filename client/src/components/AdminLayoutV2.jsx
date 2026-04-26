@@ -39,7 +39,6 @@ import {
   Landmark,
   Receipt,
   Calculator,
-  Award,
   Activity,
   Settings,
   LogOut,
@@ -107,7 +106,6 @@ const NAV_SECTIONS = [
     { path: '/admin/pricing-logic', icon: Calculator, label: 'Pricing Logic' },
   ]},
   { section: 'System', items: [
-    { path: '/admin/badges', icon: Award, label: 'Badges' },
     { path: '/admin/tool-health', icon: Activity, label: 'Tool Health' },
     { path: '/admin/settings', icon: Settings, label: 'Settings' },
   ]},

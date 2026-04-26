@@ -51,7 +51,6 @@ const NAV_SECTIONS = [
     { path: '/admin/pricing-logic', icon: '📐', label: 'Pricing Logic' },
   ]},
   { section: 'System', items: [
-    { path: '/admin/badges', icon: '🏅', label: 'Badges' },
     { path: '/admin/tool-health', icon: '🩺', label: 'Tool Health' },
     { path: '/admin/settings', icon: '⚙️', label: 'Settings' },
   ]},
