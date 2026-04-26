@@ -244,6 +244,24 @@ router.get('/', async (req, res, next) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const estimates = await query.limit(parseInt(limit)).offset(offset);
 
+    // Aggregate shortlink click telemetry per estimate. One estimate can
+    // accumulate multiple short_codes rows when /send is hit again (re-send
+    // / follow-up flows), so SUM the click counts and MAX the last-clicked
+    // timestamp. Bot UAs are filtered upstream in public-shortlinks so the
+    // numbers reflect real customer taps.
+    const ids = estimates.map((e) => e.id);
+    let clickStats = new Map();
+    if (ids.length) {
+      const rows = await db('short_codes')
+        .where({ entity_type: 'estimates' })
+        .whereIn('entity_id', ids)
+        .groupBy('entity_id')
+        .select('entity_id')
+        .sum({ click_count: 'click_count' })
+        .max({ last_clicked_at: 'last_clicked_at' });
+      clickStats = new Map(rows.map((r) => [r.entity_id, r]));
+    }
+
     res.json({
       estimates: estimates.map(e => ({
         id: e.id, status: e.status, customerName: e.customer_name,
@@ -256,6 +274,8 @@ router.get('/', async (req, res, next) => {
         declinedAt: e.declined_at,
         viewCount: e.view_count || 0,
         lastViewedAt: e.last_viewed_at,
+        clickCount: parseInt(clickStats.get(e.id)?.click_count || 0, 10),
+        lastClickedAt: clickStats.get(e.id)?.last_clicked_at || null,
         createdAt: e.created_at,
         source: e.source || 'manual',
         serviceInterest: e.service_interest,

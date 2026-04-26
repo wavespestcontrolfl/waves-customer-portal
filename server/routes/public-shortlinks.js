@@ -16,6 +16,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { resolveShortCode } = require('../services/short-url');
+const { isBotUserAgent } = require('../utils/bot-ua');
 
 // Accept lowercase alphanum only, 3-16 chars. Keeps the route from matching
 // unexpected paths (/l/favicon.ico etc) and short-circuits obvious bots.
@@ -35,11 +36,17 @@ router.get('/:code', async (req, res) => {
     }
 
     // Fire telemetry through the shared helper. It no-ops on row miss, which
-    // can't happen here but matches the contract.
-    resolveShortCode(code, {
-      ip: req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip,
-      userAgent: req.headers['user-agent'],
-    }).catch(() => { /* already logged inside */ });
+    // can't happen here but matches the contract. Skip the click-count
+    // bump for known bot/preview/scanner UAs so iMessage/Slack/WhatsApp
+    // unfurlers don't inflate the dashboard click counts — but still issue
+    // the 302 so the link itself works for everyone.
+    const ua = req.headers['user-agent'];
+    if (!isBotUserAgent(ua)) {
+      resolveShortCode(code, {
+        ip: req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip,
+        userAgent: ua,
+      }).catch(() => { /* already logged inside */ });
+    }
 
     return res.redirect(302, row.target_url);
   } catch (err) {
