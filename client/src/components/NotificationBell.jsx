@@ -65,7 +65,14 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setPushEnabling(true);
     setPushError(null);
     try {
-      await ensurePushSubscription({ token: localStorage.getItem(tokenKey) });
+      // Pass apiBase so push enrollment hits the same backend the rest
+      // of the bell talks to. Without this, ensurePushSubscription
+      // defaults to '/api' and breaks in any deployment where the
+      // frontend is configured to talk to a different API origin.
+      await ensurePushSubscription({
+        apiBase: API_BASE,
+        token: localStorage.getItem(tokenKey),
+      });
       setPushOn(true);
     } catch (err) {
       setPushError(err.message || 'Push setup failed');

@@ -44,8 +44,31 @@ async function smsOwner(message) {
   }
 }
 
+// In-process mutex to prevent overlapping ticks. node-cron will fire
+// every 5 minutes regardless of whether the previous run finished, so
+// a slow tick (DB latency, Twilio retry) could otherwise overlap the
+// next one and cause both runs to reclassify the same alert as "new"
+// before either one upserts state — duplicate push + duplicate owner
+// SMS. The flag is process-local; if Railway ever scales this service
+// beyond one replica, swap to a Postgres advisory lock — keeping it
+// simple here matches the actual deployment.
+let isRunning = false;
+
 // Single tick: read current alerts + state, fan out notifications, update state.
 async function runDashboardAlertsCheck() {
+  if (isRunning) {
+    logger.info('[dashboard-alerts-cron] previous tick still running, skipping this fire');
+    return { fired: 0, cleared: 0, skipped: true };
+  }
+  isRunning = true;
+  try {
+    return await runDashboardAlertsCheckInner();
+  } finally {
+    isRunning = false;
+  }
+}
+
+async function runDashboardAlertsCheckInner() {
   let current;
   try {
     const result = await computeDashboardAlerts();
