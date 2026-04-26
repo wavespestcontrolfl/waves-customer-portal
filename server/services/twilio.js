@@ -5,6 +5,58 @@ const logger = require('./logger');
 
 const WAVES_LOGO_URL = 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png';
 
+// Owner-SMS kill switch.
+//
+// 25+ places in the codebase send SMS to the operator's personal phone
+// — new-lead alerts, billing crons, BI briefings, SEO digests, missed
+// appointments, etc. — and most of them have hardcoded phone fallbacks
+// like '+19413187612' / '+19415993489' so simply unsetting env vars
+// doesn't silence them. When OWNER_SMS_DISABLED='true', sendSMS()
+// suppresses any send whose recipient matches a known owner phone.
+// Push notifications + bell entries continue normally.
+//
+// Toggleable via env var so the kill switch is reversible without a
+// deploy: set OWNER_SMS_DISABLED=true on Railway → silence; unset
+// or set to anything else → restore.
+const HARDCODED_OWNER_FALLBACKS = ['+19413187612', '+19415993489'];
+
+function normalizePhone(p) {
+  if (!p || typeof p !== 'string') return '';
+  // Canonicalize to bare digits. SMS recipient strings arrive in mixed
+  // formats — env-var literals (`+19413187612`), user input
+  // (`(941) 318-7612` / `941-318-7612`), JS string concat
+  // (`19413187612`) — so reduce both sides of every comparison to a
+  // single form. US numbers also vary on whether the country-code `1`
+  // is included; strip a leading `1` from 11-digit numbers so the
+  // 10-digit and 11-digit forms collide.
+  let d = p.replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  return d;
+}
+
+// Mask a phone for logging: keep only the last 4 digits.
+function maskPhone(p) {
+  const d = normalizePhone(p);
+  return d.length >= 4 ? `***${d.slice(-4)}` : '***';
+}
+
+function getOwnerPhoneSet() {
+  const candidates = [
+    process.env.OWNER_PHONE,
+    process.env.ADAM_PHONE,
+    process.env.ADAM_CELL,
+    process.env.WAVES_OFFICE_PHONE,
+    process.env.WAVES_ADMIN_PHONE,
+    ...HARDCODED_OWNER_FALLBACKS,
+  ];
+  return new Set(candidates.map(normalizePhone).filter(Boolean));
+}
+
+function isOwnerSmsSilenced(to) {
+  if (process.env.OWNER_SMS_DISABLED !== 'true') return false;
+  return getOwnerPhoneSet().has(normalizePhone(to));
+}
+
 // Lazy-initialize Twilio client — don't crash if creds are missing
 let _client;
 function getClient() {
@@ -72,6 +124,19 @@ const TwilioService = {
    */
   async sendSMS(to, body, options = {}) {
     try {
+      // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
+      // every send addressed to one of the operator's known phones.
+      // Push and bell still fire normally — only Twilio is silenced.
+      // See HARDCODED_OWNER_FALLBACKS / getOwnerPhoneSet above.
+      //
+      // Logged with metadata only — no body preview, no full recipient.
+      // Internal alerts contain customer PII (names, addresses) and the
+      // AGENTS.md PII-in-logs rule applies even on the suppression path.
+      if (isOwnerSmsSilenced(to)) {
+        logger.info(`[OWNER_SMS_DISABLED] suppressed SMS to ${maskPhone(to)} (messageType=${options.messageType || 'n/a'}, bodyLen=${body?.length || 0})`);
+        return { success: true, sid: 'owner-sms-disabled', suppressed: true };
+      }
+
       const { isEnabled } = require('../config/feature-gates');
       if (!isEnabled('twilioSms')) {
         logger.info(`[GATE BLOCKED] SMS to ${to}: "${body.substring(0, 60)}..." (gate: twilioSms)`);
@@ -86,12 +151,15 @@ const TwilioService = {
         const guard = validateOutbound(body, { messageType: options.messageType });
         if (!guard.ok) {
           logger.warn(`[SMS-GUARD BLOCKED] to=${to} reason=${guard.reason} body="${body.substring(0, 120)}"`);
-          // Best-effort alert to Virginia so a blocked send gets human eyes.
+          // Best-effort alert to the operator so a blocked send gets human eyes.
           // Non-blocking — if the alert path breaks we still refuse the send.
+          // Honors OWNER_SMS_DISABLED (the kill switch above only applied to
+          // the primary `to` argument; this branch directly calls
+          // c.messages.create against ownerPhone, so it needs its own guard).
           (async () => {
             try {
               const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
-              if (to !== ownerPhone) {
+              if (to !== ownerPhone && !isOwnerSmsSilenced(ownerPhone)) {
                 const c = getClient();
                 if (c) {
                   await c.messages.create({
