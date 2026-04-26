@@ -37,16 +37,30 @@ router.post('/', async (req, res) => {
     const rawPhone = body.phone || body['Got A Number We Can Call Or Text'] || findField(body, /number|phone|call|text/i) || '';
     const address = body.address || body['And Whats Your Address'] || findField(body, /address/i) || '';
 
-    const pageUrl = body.page_url || body['Page Url'] || body.referrer || '';
-    const landingUrl = body.landing_url || body['Landing Url'] || '';
-    const utmSource = body.utm_source || body['Utm Source'] || '';
-    const utmMedium = body.utm_medium || body['Utm Medium'] || '';
-    const utmCampaign = body.utm_campaign || body['Utm Campaign'] || '';
-    const utmContent = body.utm_content || body['Utm Content'] || '';
-    const utmTerm = body.utm_term || body['Utm Term'] || '';
+    // Attribution can arrive in two shapes:
+    //   1. Flat top-level fields (legacy callers, GHL forms, etc.):
+    //        body.utm_source, body.gclid, body.landing_url, body.referrer
+    //   2. Nested under body.attribution (wavespestcontrol-astro- spoke forms,
+    //      shipped 2026-04-25 in wavespestcontrol-astro- PR #23):
+    //        body.attribution.utm.source, body.attribution.gclid,
+    //        body.attribution.landing_url, body.attribution.referrer,
+    //        body.attribution.domain
+    // Read flat first (preserves legacy behavior), fall back to nested. Without
+    // this fallback, every form submission from the spoke fleet collapses into
+    // lead_source='website' / detail='' because determineLeadSource() can't see
+    // the URL or UTM data.
+    const attr = (body.attribution && typeof body.attribution === 'object') ? body.attribution : {};
+    const attrUtm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
+    const pageUrl = body.page_url || body['Page Url'] || body.referrer || attr.referrer || '';
+    const landingUrl = body.landing_url || body['Landing Url'] || attr.landing_url || '';
+    const utmSource = body.utm_source || body['Utm Source'] || attrUtm.source || '';
+    const utmMedium = body.utm_medium || body['Utm Medium'] || attrUtm.medium || '';
+    const utmCampaign = body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '';
+    const utmContent = body.utm_content || body['Utm Content'] || attrUtm.content || '';
+    const utmTerm = body.utm_term || body['Utm Term'] || attrUtm.term || '';
     const formId = body.form_id || body['Form Id'] || '';
-    const formName = body.form_name || body['Form Name'] || '';
-    const gclid = body.gclid || body['Gclid'] || body.GCLID || '';
+    const formName = body.form_name || body['Form Name'] || body.source || '';
+    const gclid = body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '';
 
     // Parse name
     const nameParts = rawName.trim().split(/\s+/);
