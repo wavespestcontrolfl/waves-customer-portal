@@ -450,8 +450,9 @@ const { attachSockets } = require('./sockets');
 const io = attachSockets(httpServer);
 
 // Migrations are NOT run from this process. They run as Railway's
-// release command (railway.toml: releaseCommand = "npm run db:migrate")
-// — once per deploy, fail-fast: if migrate:latest exits non-zero,
+// pre-deploy command (railway.toml:
+//   preDeployCommand = ["npm run db:migrate"]
+// ) — once per deploy, fail-fast: if migrate:latest exits non-zero,
 // Railway rejects the deploy and the previous version stays live.
 // Per-boot in-process migration was the old pattern (issue #286);
 // it ran every container start, raced concurrent boots, and the
