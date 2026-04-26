@@ -22,11 +22,22 @@ const HARDCODED_OWNER_FALLBACKS = ['+19413187612', '+19415993489'];
 
 function normalizePhone(p) {
   if (!p || typeof p !== 'string') return '';
-  // Strip everything except digits and a leading +. SMS recipient
-  // strings in this codebase arrive in mixed formats — env-var literals,
-  // user input, JS string concat — so canonicalize before set lookup.
-  const s = p.trim();
-  return s.startsWith('+') ? '+' + s.slice(1).replace(/\D/g, '') : s.replace(/\D/g, '');
+  // Canonicalize to bare digits. SMS recipient strings arrive in mixed
+  // formats — env-var literals (`+19413187612`), user input
+  // (`(941) 318-7612` / `941-318-7612`), JS string concat
+  // (`19413187612`) — so reduce both sides of every comparison to a
+  // single form. US numbers also vary on whether the country-code `1`
+  // is included; strip a leading `1` from 11-digit numbers so the
+  // 10-digit and 11-digit forms collide.
+  let d = p.replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  return d;
+}
+
+// Mask a phone for logging: keep only the last 4 digits.
+function maskPhone(p) {
+  const d = normalizePhone(p);
+  return d.length >= 4 ? `***${d.slice(-4)}` : '***';
 }
 
 function getOwnerPhoneSet() {
@@ -117,8 +128,12 @@ const TwilioService = {
       // every send addressed to one of the operator's known phones.
       // Push and bell still fire normally — only Twilio is silenced.
       // See HARDCODED_OWNER_FALLBACKS / getOwnerPhoneSet above.
+      //
+      // Logged with metadata only — no body preview, no full recipient.
+      // Internal alerts contain customer PII (names, addresses) and the
+      // AGENTS.md PII-in-logs rule applies even on the suppression path.
       if (isOwnerSmsSilenced(to)) {
-        logger.info(`[OWNER_SMS_DISABLED] suppressed SMS to ${to}: "${body.substring(0, 60)}..." (messageType=${options.messageType || 'n/a'})`);
+        logger.info(`[OWNER_SMS_DISABLED] suppressed SMS to ${maskPhone(to)} (messageType=${options.messageType || 'n/a'}, bodyLen=${body?.length || 0})`);
         return { success: true, sid: 'owner-sms-disabled', suppressed: true };
       }
 
@@ -136,12 +151,15 @@ const TwilioService = {
         const guard = validateOutbound(body, { messageType: options.messageType });
         if (!guard.ok) {
           logger.warn(`[SMS-GUARD BLOCKED] to=${to} reason=${guard.reason} body="${body.substring(0, 120)}"`);
-          // Best-effort alert to Virginia so a blocked send gets human eyes.
+          // Best-effort alert to the operator so a blocked send gets human eyes.
           // Non-blocking — if the alert path breaks we still refuse the send.
+          // Honors OWNER_SMS_DISABLED (the kill switch above only applied to
+          // the primary `to` argument; this branch directly calls
+          // c.messages.create against ownerPhone, so it needs its own guard).
           (async () => {
             try {
               const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
-              if (to !== ownerPhone) {
+              if (to !== ownerPhone && !isOwnerSmsSilenced(ownerPhone)) {
                 const c = getClient();
                 if (c) {
                   await c.messages.create({
