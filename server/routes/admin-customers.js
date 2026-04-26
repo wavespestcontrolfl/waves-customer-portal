@@ -46,6 +46,42 @@ router.post('/fix-tiers', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/customers/backfill-review-status — flip has_left_google_review = true
+// for any customer who already has a matched (non-_stats) row in google_reviews.
+// One-shot helper for the ~170 historical reviewers; safe to re-run (idempotent —
+// preserves the original review_marked_at on rows that are already true).
+router.post('/backfill-review-status', async (req, res, next) => {
+  try {
+    const dryRun = req.body?.dryRun === true;
+    const matchedIds = await db('google_reviews')
+      .whereNotNull('customer_id')
+      .where('reviewer_name', '!=', '_stats')
+      .distinct('customer_id')
+      .pluck('customer_id');
+
+    if (matchedIds.length === 0) {
+      return res.json({ success: true, matched: 0, updated: 0, alreadyFlagged: 0, dryRun });
+    }
+
+    const candidates = await db('customers')
+      .whereIn('id', matchedIds)
+      .whereNull('deleted_at')
+      .select('id', 'has_left_google_review');
+
+    const toFlip = candidates.filter(c => !c.has_left_google_review).map(c => c.id);
+    const alreadyFlagged = candidates.length - toFlip.length;
+
+    if (!dryRun && toFlip.length > 0) {
+      await db('customers')
+        .whereIn('id', toFlip)
+        .update({ has_left_google_review: true, review_marked_at: new Date() });
+    }
+
+    logger.info(`[customers] Review-status backfill: ${toFlip.length} flipped, ${alreadyFlagged} already flagged${dryRun ? ' (dry run)' : ''}`);
+    res.json({ success: true, matched: candidates.length, updated: dryRun ? 0 : toFlip.length, alreadyFlagged, dryRun });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
 router.post('/quick-add', async (req, res, next) => {
   try {
