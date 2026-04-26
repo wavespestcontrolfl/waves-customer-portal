@@ -69,17 +69,21 @@ finding and warns on P1. Reviewers must return JSON matching
   `stripe-terminal.js`. Bumping it past ~5 minutes without explicit
   justification widens the leaked-token window for screenshot/sniff
   attacks. P0 unless the PR description argues for it.
-- **Scheduled-service status changes go through `work-order-status.transition`.**
-  Direct `db('scheduled_services').update({ status: ... })` outside
-  `server/services/work-order-status.js` skips the
-  `ALLOWED_TRANSITIONS` check (lines 21–31) and skips the
-  `service_status_log` audit insert. The canonical lifecycle is
-  `scheduled → en_route → on_site → in_progress → completed → invoiced → paid`,
-  with `cancelled`/`rescheduled` branches that can only return to
-  `scheduled`. A diff that direct-updates status — or that adds a new
-  status string without extending `VALID_STATUSES` and the transitions
-  map — is a P0 (silent illegal transitions corrupt dispatch + revenue
-  reporting).
+- **`scheduled_services.status` is gated by a CHECK constraint, not a
+  service helper.** Migration `20260426000004` rewrote the original
+  5-value enum to:
+  `pending | confirmed | rescheduled | en_route | on_site | completed | cancelled | skipped`.
+  Direct `db('scheduled_services').update({ status: ... })` is the
+  current pattern (admin-schedule.js, admin-dispatch.js) — there is
+  no single helper today; an earlier sketch (`work-order-status.js`)
+  was orphaned and removed (see #281). A diff that introduces a new
+  status string without extending the CHECK via migration is P0
+  (the write will throw at runtime; CI won't catch it). The audit
+  trail lives in two tables: legacy `service_status_log` (status +
+  lat/lng, no from→to) and the newer `job_status_history` from #280
+  (full from→to with CHECK mirroring `scheduled_services.status`).
+  New dispatcher / tech-mobile code should append to
+  `job_status_history`; legacy callers stay on `service_status_log`.
 - **`/api/admin/*` route files must apply admin auth at the router level.**
   Every existing admin route file starts with
   `router.use(adminAuthenticate, requireTechOrAdmin)` (or `requireAdmin`)
@@ -202,9 +206,16 @@ finding and warns on P1. Reviewers must return JSON matching
   the `jti` row in `terminal_handoff_tokens` and verifies the JWT
   claims against the DB row.
 - **Scheduled-service state machine.**
-  `server/services/work-order-status.js` defines `VALID_STATUSES` and
-  `ALLOWED_TRANSITIONS`. All status changes route through
-  `transition()`, which writes to `service_status_log`.
+  Lifecycle gate is the `scheduled_services_status_check` CHECK
+  constraint (migration `20260426000004`):
+  `pending | confirmed | rescheduled | en_route | on_site | completed | cancelled | skipped`.
+  Writers today are admin-schedule.js + admin-dispatch.js routes
+  (direct `update({ status })`); no single helper. Audit log:
+  legacy `service_status_log` and newer `job_status_history` (added
+  in #280). The customer-visible state machine for the live tracker
+  is a separate ENUM (`track_state`) on the same row, owned by
+  `server/services/track-transitions.js` — that helper *is* canonical
+  for tracker state and the en-route SMS fire.
 - **Auth.** `server/middleware/admin-auth.js` exports `adminAuthenticate`
   + `requireAdmin` / `requireTechOrAdmin`. Every `admin-*.js` route file
   applies them at `router.use(...)` on line 1 of the router. JWT secret
