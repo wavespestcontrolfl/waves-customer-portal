@@ -41,7 +41,7 @@ router.get('/', async (req, res, next) => {
         .where('created_at', '>=', since)
         .select('source')
         .count('* as total')
-        .sum(db.raw('CASE WHEN NOT success THEN 1 ELSE 0 END as failed'))
+        .select(db.raw('SUM(CASE WHEN NOT success THEN 1 ELSE 0 END)::int as failed'))
         .avg('duration_ms as avg_duration_ms')
         .max('created_at as last_call_at')
         .groupBy('source'),
@@ -51,7 +51,7 @@ router.get('/', async (req, res, next) => {
         .whereNotNull('context')
         .select('context')
         .count('* as total')
-        .sum(db.raw('CASE WHEN NOT success THEN 1 ELSE 0 END as failed'))
+        .select(db.raw('SUM(CASE WHEN NOT success THEN 1 ELSE 0 END)::int as failed'))
         .countDistinct('tool_name as tools_used')
         .groupBy('context'),
 
@@ -59,7 +59,7 @@ router.get('/', async (req, res, next) => {
         .where('created_at', '>=', since)
         .select('context', 'tool_name', 'source')
         .count('* as total')
-        .sum(db.raw('CASE WHEN NOT success THEN 1 ELSE 0 END as failed'))
+        .select(db.raw('SUM(CASE WHEN NOT success THEN 1 ELSE 0 END)::int as failed'))
         .avg('duration_ms as avg_duration_ms')
         .groupBy('context', 'tool_name', 'source'),
 
