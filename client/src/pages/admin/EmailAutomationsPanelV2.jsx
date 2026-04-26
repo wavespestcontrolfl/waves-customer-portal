@@ -11,7 +11,24 @@
 //   POST   /admin/automations/templates/:key/test
 //   POST   /admin/automations/templates/:key/trigger
 //   GET    /admin/automations/enrollments
-
+//
+// Audit focus:
+// - draft-ai: Claude-backed step-content generator. Single-flight on
+//   the operator's "draft" button; cost-cap guard (don't loop).
+// - test vs trigger: /test sends to the operator's own email only;
+//   /trigger fires the real sequence at customers. Confirm the UI
+//   wiring can NEVER swap the two — a "test" button that secretly
+//   hits /trigger is a fan-out incident.
+// - DELETE step: must require explicit confirmation; deleting a
+//   step in an active sequence is destructive and customers in flight
+//   will skip it silently.
+// - Enrollments view: GET /enrollments may surface PII (customer
+//   email + sequence state). Confirm there's no public exposure
+//   path and that the operator-only auth middleware fires.
+// - SendGrid template variables: substitution happens server-side
+//   from a JSON payload. Watch for any unescaped HTML rendering on
+//   the preview side that could XSS the operator from a malformed
+//   template body.
 import { useState, useEffect, useCallback } from 'react';
 import { Badge, Button, Card, Switch, cn } from '../../components/ui';
 

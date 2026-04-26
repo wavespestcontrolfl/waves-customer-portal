@@ -4,6 +4,27 @@
 //   PUT  /admin/push/preferences   { preferences }
 // Plus device push enable/disable + test via shared helpers in lib/push-subscribe.
 // alert-fg reserved for priority=urgent dot, push-error banner, and Disable button.
+//
+// Audit focus:
+// - ensurePushSubscription: requests browser permission + registers
+//   service worker + subscribes to VAPID push. Confirm graceful UX
+//   when the user denies permission (no infinite loading, no error
+//   eaten silently).
+// - PUT preferences: optimistic UI on Switch toggles. If the PUT
+//   fails (network drop / auth expired), the toggle should revert
+//   to the server state — don't leave the user thinking quiet hours
+//   are on when they aren't.
+// - sendTestPush: useful for validation; rate-limit to prevent
+//   abuse. A test push that fails to deliver should surface an
+//   actionable error (browser denied / endpoint expired / VAPID
+//   misconfig).
+// - Per-admin scope: preferences are per-admin user, not global.
+//   Confirm the GET/PUT both filter by the authenticated admin and
+//   that one admin can't accidentally read or overwrite another's
+//   preferences.
+// - disablePush: must clean up the subscription server-side too,
+//   not just locally. Otherwise we keep firing pushes to an
+//   endpoint the browser has revoked.
 import { useState, useEffect } from 'react';
 import { Badge, Button, Card, CardBody, Switch, cn } from '../../components/ui';
 import {

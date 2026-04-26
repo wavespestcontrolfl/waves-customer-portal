@@ -11,6 +11,29 @@
 //   GET  /admin/csr/weekly-recommendation
 //   GET  /admin/csr/leaderboard
 //   GET  /admin/csr/lead-quality?days=30
+//
+// Dual exports: SmsTemplatesTabV2 (Templates tab) +
+// CSRCoachTabV2 (CSR Coach tab). Both consumed by CommunicationsPageV2.
+//
+// Audit focus:
+// - SmsTemplates PUT: editing a template that's referenced by an
+//   active automation sequence — confirm the change applies to
+//   future sends only (no retroactive rewrite of already-sent SMS
+//   bodies in the log).
+// - is_active toggle: turning off a template that an automation
+//   relies on — does the automation gracefully skip, or does it
+//   error? Either is OK; silent skip without operator notice is not.
+// - Follow-up tasks PUT: marking a task complete is the operator's
+//   primary action. Confirm optimistic UI rolls back on PUT failure
+//   instead of leaving a lie in the queue.
+// - CSR leaderboard PII: surfaces individual CSR call/SMS counts.
+//   Should be operator-only (Waves + management); confirm no
+//   tech-portal leak.
+// - Weekly recommendation: AI-generated coaching summary. Cache it
+//   so refresh doesn't re-run Claude; confirm there's a cache key
+//   tied to the week boundary (not just a per-render call).
+// - Lead-quality breakdown: at scale, /lead-quality?days=30 may
+//   return many records. Confirm reasonable bounded response size.
 import { useState, useEffect } from 'react';
 import {
   Badge, Button, Card, CardBody, Switch, Textarea,
