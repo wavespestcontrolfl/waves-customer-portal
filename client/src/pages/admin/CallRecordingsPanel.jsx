@@ -1,3 +1,44 @@
+// client/src/pages/admin/CallRecordingsPanel.jsx
+//
+// Call recordings + transcription panel. Lists Twilio recordings by
+// callSid, surfaces classification (spam / voicemail / new lead),
+// renders the AI synopsis, plays audio via the JWT-on-querystring
+// proxy, and lets the operator manually trigger Gemini transcription
+// for any call missing one.
+//
+// Endpoints:
+//   GET  /api/admin/call-recordings/audio/:id?token=…  (JWT in URL!)
+//   GET  /api/admin/call-recordings/stats
+//   GET  /api/admin/call-recordings/recordings
+//   POST /api/admin/call-recordings/process/:callSid    (Gemini txn)
+//   POST /api/admin/call-recordings/process-all
+//   POST /api/admin/call-recordings/synopsis/:callSid
+//   PUT  /api/admin/call-recordings/calls/:id/disposition
+// Twilio side (server-only, untrusted POSTs):
+//   POST /api/webhooks/twilio/call-complete
+//   POST /api/webhooks/twilio/recording-status
+//   POST /api/webhooks/twilio/transcription
+//
+// Audit focus:
+// - JWT in URL query string for /audio/:id is unusual. Browser will
+//   embed it in DOM (audio src=…). Confirm: short token TTL, no
+//   server-side logging that captures the full URL, no leakage in
+//   referer headers when audio plays cross-origin (S3 / Twilio).
+// - process-all: bulk Gemini transcription. Confirm rate-limit /
+//   confirmation gate so an accidental click doesn't run hundreds
+//   of paid Gemini calls.
+// - Manual disposition PUT: operator-edited classification. Audit
+//   that previous classification is preserved in history (don't
+//   silently overwrite ML's prior label without trail).
+// - Spam / voicemail / new-lead classification: confirm the panel
+//   doesn't surface PII from a spam call (recordings flagged spam
+//   should be muted/hidden by default).
+// - Synopsis regeneration: POST /synopsis/:callSid re-runs Claude.
+//   Single-flight + cost guard.
+// - Twilio webhooks (server-side): all three call-lifecycle webhooks
+//   need signature verification. Untrusted POSTs that update
+//   classification or write recordings to disk are an attack
+//   surface — flag any path missing the signature check.
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
