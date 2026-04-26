@@ -72,7 +72,7 @@ async function sendBranchReply(customer, interest) {
   const firstName = customer.first_name || 'there';
   const fallback = interest === 'one_time'
     ? `Got it, ${firstName} — one-time service it is. Send me the service address and a quick note on what needs attention, and I'll put a quote together.`
-    : `Great, ${firstName} — putting together a ${SERVICE_LABEL[interest].toLowerCase()} quote now. Just need to confirm the service address — can you text it over?`;
+    : `Great, ${firstName} — putting together a ${SERVICE_LABEL[interest].toLowerCase()} quote now.`;
   const body = await renderTemplate(templateKey, { first_name: firstName }, fallback);
   try {
     await TwilioService.sendSMS(customer.phone, body, {
