@@ -29,6 +29,7 @@
 //   from a JSON payload. Watch for any unescaped HTML rendering on
 //   the preview side that could XSS the operator from a malformed
 //   template body.
+import { useState, useEffect, useCallback } from 'react';
 import { Badge, Button, Card, Switch, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
