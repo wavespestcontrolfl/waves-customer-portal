@@ -1,3 +1,45 @@
+// client/src/pages/admin/RevenuePage.jsx
+//
+// Admin Revenue dashboard — period-based overview (month / quarter /
+// YTD), margin %, RPMH (revenue per man-hour), MRR / churn, and a
+// service-line revenue breakout chart. Operator's "show me the money"
+// view; Waves checks this daily.
+//
+// Endpoints:
+//   GET /admin/revenue/overview?period=month|quarter|ytd
+//                                            (service revenue, costs,
+//                                             MRR, churn, breakouts)
+//   GET /admin/revenue/forecast              (projection)
+//
+// Server-side: server/routes/admin-revenue.js orchestrates the period
+// math (etMonthStart, etYearStart, getPeriodDates) and pulls from:
+//   - service_records (completed visits, billed amounts)
+//   - invoices (collected / outstanding)
+//   - customers.monthly_rate WHERE active=true (MRR baseline)
+//   - server/services/revenue-forecast.js (projection model)
+//
+// Audit focus:
+// - Period boundaries: ET timezone math is the single biggest
+//   correctness hazard. Confirm month/quarter/YTD start are computed
+//   in America/New_York, not UTC. A May 1 12:01am ET visit shouldn't
+//   roll into April's number.
+// - Service-line classification: bucketing line items into pest /
+//   lawn / mosquito / tree-shrub / termite / specialty depends on a
+//   string match. Watch for unclassified rows silently falling out of
+//   every bucket (so chart total doesn't equal the headline total).
+// - MRR formula: SUM(customers.monthly_rate WHERE active=true).
+//   Confirm "active" matches the operator's mental model (paying
+//   customers, not just signed leads). One-time customers excluded.
+// - Margin % numerator: revenue minus what cost columns? Verify the
+//   server adds product cost + loaded labor + admin overhead and not
+//   just one. A margin number that drifts from reality is the most
+//   damaging dashboard bug — it drives pricing decisions.
+// - Recharts ResponsiveContainer empty-data behavior: empty period
+//   should render a clean "no revenue this period" state, not a
+//   distorted chart with axis ticks at 0/0/0/0.
+// - Forecast accuracy: GET /forecast — verify the model warns when
+//   data window is too short (< 3 months) instead of confidently
+//   projecting nonsense.
 import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
