@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { etParts, parseETDateTime, addETDays } = require('../utils/datetime-et');
+const { etParts, parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 const { shortenOrPassthrough } = require('./short-url');
 
 // GBP review links per location
@@ -192,6 +192,15 @@ const ReviewService = {
     if (!request || request.sms_sent_at) return;
 
     const customer = await db('customers').where({ id: request.customer_id }).first();
+    // Skip customers a CSR has flagged as already-reviewed (Customer 360 toggle).
+    if (customer && customer.has_left_google_review) {
+      await db('review_requests').where({ id: requestId }).update({
+        status: 'suppressed',
+        updated_at: new Date(),
+      });
+      logger.info(`[review] Suppressed request for ${customer.first_name} ${customer.last_name} (already-reviewed flag)`);
+      return;
+    }
     // Route to the service beneficiary (see services/customer-contact.js) —
     // falls back to the billing phone when no service contact is configured.
     const { getServiceContact } = require('./customer-contact');
@@ -252,6 +261,9 @@ const ReviewService = {
   async createInline({ customerId, serviceRecordId }) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return null;
+    // CSR flagged this customer as already-reviewed — caller treats null
+    // as "skip the review suffix" so the completion SMS goes out clean.
+    if (customer.has_left_google_review) return null;
 
     // Reuse an existing request for this service so we don't stack tokens.
     if (serviceRecordId) {
@@ -471,40 +483,94 @@ const ReviewService = {
   },
 
   /**
-   * Cron: send 48-hour follow-up to non-responders.
-   * Only sends ONE follow-up, only to people who haven't opened OR opened but didn't rate.
+   * Cron: send the single follow-up reminder, on Day 3 after the initial
+   * review request. Only sends ONE follow-up, only to people who haven't
+   * opened OR opened but didn't rate.
+   *
+   * Eligibility window: review SMS was sent on or before 2 ET-calendar-days
+   * ago. Combined with the 10:00 AM ET cron schedule, this lands the followup
+   * on the 3rd ET day after the original (e.g. Mon 8 AM or Mon 8 PM initial
+   * → Wed 10 AM followup, regardless of original time of day).
+   *
+   * Per-customer dedup: a customer with multiple recent review_requests (e.g.
+   * back-to-back services) only gets a single follow-up SMS. Sibling rows are
+   * marked followup_sent so they stop appearing in eligibility windows on
+   * subsequent cron runs.
    */
   async processFollowups() {
-    const cutoff = new Date(Date.now() - 48 * 3600000); // 48 hours ago
+    // ET midnight at the start of "yesterday in ET" — anything sent before
+    // this fell on (today - 2 ET days) or earlier in the ET calendar.
+    const cutoff = parseETDateTime(`${etDateString(addETDays(new Date(), -1))}T00:00`);
+    const recentFollowupCutoff = new Date(Date.now() - 14 * 24 * 3600000); // 14 days
     const eligible = await db('review_requests')
       .whereIn('status', ['sent', 'opened'])
-      .where('sms_sent_at', '<=', cutoff)
+      .where('sms_sent_at', '<', cutoff)
       .where({ followup_sent: false })
       .whereNull('rated_at')
+      .orderBy('sms_sent_at', 'asc')
       .limit(20);
 
     let sent = 0;
+    let suppressed = 0;
+    const sentThisRun = new Set();
     const { getServiceContact } = require('./customer-contact');
     for (const request of eligible) {
+      // Dedup #1: another row in this same batch already triggered a followup
+      if (sentThisRun.has(request.customer_id)) {
+        await db('review_requests').where({ id: request.id }).update({
+          followup_sent: true,
+          followup_sent_at: new Date(),
+          updated_at: new Date(),
+        });
+        suppressed++;
+        continue;
+      }
+
+      // Dedup #2: a sibling row already sent a followup to this customer recently
+      const recentFollowup = await db('review_requests')
+        .where({ customer_id: request.customer_id, followup_sent: true })
+        .where('followup_sent_at', '>=', recentFollowupCutoff)
+        .first();
+      if (recentFollowup) {
+        await db('review_requests').where({ id: request.id }).update({
+          followup_sent: true,
+          followup_sent_at: new Date(),
+          updated_at: new Date(),
+        });
+        suppressed++;
+        continue;
+      }
+
       const customer = await db('customers').where({ id: request.customer_id }).first();
+      // Dedup #3: CSR flagged the customer as already-reviewed (Customer 360 toggle).
+      if (customer && customer.has_left_google_review) {
+        await db('review_requests').where({ id: request.id }).update({
+          followup_sent: true,
+          followup_sent_at: new Date(),
+          updated_at: new Date(),
+        });
+        suppressed++;
+        continue;
+      }
       const contact = getServiceContact(customer);
       if (!contact.phone) continue;
 
-      const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-      const longReviewUrl = `${domain}/rate/${request.token}`;
-      const reviewUrl = await shortenOrPassthrough(longReviewUrl, {
-        kind: 'review', entityType: 'review_requests', entityId: request.id, customerId: customer.id,
-      });
+      // Followup points straight at the GBP review form — they ignored the
+      // tokenized rate page once, so reduce friction the second time.
+      const location = resolveLocation(customer || {});
+      const googleReviewUrl = REVIEW_LINKS[location] || REVIEW_LINKS['lakewood-ranch'];
 
-      const fallback = `No pressure at all, ${contact.name || customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${reviewUrl} 🌊`;
+      const fallback = `No pressure at all, ${contact.name || customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${googleReviewUrl} 🌊`;
       let body = fallback;
       try {
         const templates = require('../routes/admin-sms-templates');
         const rendered = await templates.getTemplate('review_request_followup', {
           first_name: contact.name || customer.first_name || '',
-          review_url: reviewUrl,
+          google_review_url: googleReviewUrl,
         });
-        if (rendered && !rendered.includes('{first_name}')) body = rendered;
+        if (rendered && !rendered.includes('{first_name}') && !rendered.includes('{google_review_url}')) {
+          body = rendered;
+        }
       } catch { /* use fallback */ }
 
       try {
@@ -519,13 +585,16 @@ const ReviewService = {
           followup_sent_at: new Date(),
           updated_at: new Date(),
         });
+        sentThisRun.add(request.customer_id);
         sent++;
       } catch (err) {
         logger.error(`[review] Follow-up SMS failed: ${err.message}`);
       }
     }
-    if (sent > 0) logger.info(`[review] Sent ${sent} follow-up reminders`);
-    return { sent };
+    if (sent > 0 || suppressed > 0) {
+      logger.info(`[review] Follow-ups: ${sent} sent, ${suppressed} suppressed (dedup)`);
+    }
+    return { sent, suppressed };
   },
 
   // ── Stats ──
