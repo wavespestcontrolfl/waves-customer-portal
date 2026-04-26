@@ -1,3 +1,64 @@
+// client/src/pages/admin/AdminInvoicesPage.jsx
+//
+// Admin Invoices page — list, search, create, edit, void, refund.
+// Stats bar (draft / sent / viewed / paid / overdue), tap-to-pay launch
+// for in-person collection, manual payment recording, follow-up
+// sequence kickoff. Mobile + desktop.
+//
+// Endpoints:
+//   GET   /admin/invoices?search=&status=&customerId=&from=&to=
+//   GET   /admin/invoices/stats
+//   POST  /admin/invoices/create
+//   GET   /admin/invoices/:id
+//   PUT   /admin/invoices/:id           (refund / void / mark paid)
+//   POST  /admin/invoices/:id/send      (SMS + email pay link)
+//   POST  /admin/invoices/:id/refund    (manual refund)
+//   GET   /admin/customers/search       (autocomplete in create modal)
+//   GET   /admin/service-records        (line-item picker)
+//   POST  /api/stripe/terminal/start-payment-link  (Tap to Pay launch)
+//
+// Server orchestrators Codex should follow:
+//   server/services/invoice.js              (create, list, update,
+//                                             void, refund — pulls
+//                                             discount-engine + tax-calc)
+//   server/services/invoice-followups.js    (Day 3/5/7 SMS sequence,
+//                                             stopOnPayment guard)
+//   server/services/invoice-email.js        (template + send)
+//   server/services/pdf/invoice-pdf.js      (PDF generation)
+//   server/routes/admin-payments-reconcile.js  (Tap to Pay reconcile)
+//   server/routes/admin-billing-health.js   (charge-now + manual refund)
+//   server/services/discount-engine.js      (WaveGuard tier %)
+//   server/services/tax-calculator.js       (per-county sales tax)
+//
+// Audit focus:
+// - Refund amount math: invoice.js → refund() pulls from
+//   DiscountEngine. Confirm a refund REVERSES the 3% credit-card
+//   surcharge if the original payment was card (otherwise we eat the
+//   surcharge). Verify it does NOT re-apply tax on a refund.
+// - Void vs refund: void = unpaid invoice cancellation (no money
+//   movement). Refund = paid invoice money-back. The UI wiring must
+//   never swap them — voiding a paid invoice loses revenue silently;
+//   refunding an unpaid one is a Stripe error.
+// - Tap to Pay launch: deep-links into the WavesPay iOS app via
+//   /api/stripe/terminal/start-payment-link. Confirm fallback when the
+//   deep link doesn't resolve (Android, desktop, app not installed).
+// - Send pay link single-flight: POST /:id/send fires SMS + email.
+//   Double-click must not double-send (= duplicate SMS to customer
+//   = TCPA risk + irritation).
+// - Stats race: /stats counts and /list rows must agree at a moment
+//   in time. If a paid status change happens between the two
+//   requests, the stats bar can lie. Cache /stats with a short TTL
+//   or compute client-side from /list.
+// - Status filter composability: search + status + customerId +
+//   date-range all hit the same endpoint. Pagination must reset on
+//   filter change.
+// - Follow-up sequence stopOnPayment: when an invoice gets marked
+//   paid, the Day 3/5/7 SMS schedule must cancel. Verify the cron
+//   checks payment status at FIRE time, not just at enqueue time —
+//   a customer who pays manually shouldn't get a "you owe us" SMS
+//   the next morning.
+// - alert-fg discipline: spec reserves red for overdue / failed /
+//   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
