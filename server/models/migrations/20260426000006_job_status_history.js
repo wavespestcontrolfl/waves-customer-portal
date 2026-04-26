@@ -25,6 +25,17 @@
  * tables can't drift. from_status is nullable — first transition on
  * a freshly-created scheduled_services row has no prior state.
  *
+ * The 8-value set, inline so future readers don't need to chase the
+ * pointer to migration 20260426000004:
+ *   pending | confirmed | rescheduled | en_route | on_site
+ *   completed | cancelled | skipped
+ * Note: this is NOT the original initial_schema.js enum (which had
+ * only 5 values: pending|confirmed|rescheduled|cancelled|completed).
+ * Migration 20260426000004 (already on main as part of PR #278,
+ * commit 5d41b6f) drops that CHECK and recreates with the 8-value
+ * set above. job_status_history runs after ...004, so the mirror
+ * matches the live constraint, not the historical one.
+ *
  * Known mismatch: server/services/work-order-status.js defines an
  * aspirational lifecycle (scheduled, in_progress, invoiced, paid)
  * that does NOT match this CHECK or scheduled_services_status_check.
