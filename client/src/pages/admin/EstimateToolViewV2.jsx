@@ -13,6 +13,21 @@
 //   GET  /admin/customers?search=   (lookup + send-form lookup)
 //   GET  /admin/discounts           (manual-discount presets)
 //
+// Recent integration notes (post #254):
+// - Pricing breakdown (~lines 770-799) duplicates server bracket logic
+//   for the "Pricing Modifiers" panel. After PR #232 it now reads light
+//   shrubs/trees as -$5 to match the server. Be careful: any new server
+//   bracket value needs to be mirrored here or the panel drifts.
+// - Stories field (~line 1062) shows an alert-fg "verify stories" hint
+//   when enrichedProfile.storiesSource === 'default' (PR #228/#251).
+// - The form initializes with stories=1 default; AI lookup paths
+//   (rentcast / ai-property fallback) populate via setForm in doLookup
+//   (~line 543+). Stale state across rapid re-lookups is the most
+//   likely class of bug remaining.
+// - Cockroach modifier dropdown drives the engine's auto-fired
+//   pest_initial_roach line item via the saved estimate's
+//   services.pest.roachType — no UI change needed in this file.
+//
 // Monochrome rules applied:
 // - All panels = Card
 // - All primary buttons = Button variant="primary" (zinc-900)
