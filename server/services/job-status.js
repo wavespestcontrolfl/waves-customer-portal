@@ -1,8 +1,15 @@
 /**
  * Sole writer for scheduled_services.status transitions going forward.
  * Wraps the status update + audit log insert in a single Knex
- * transaction and emits customer:job_update to the customer:<id>
- * room *after* the transaction commits — never before, never inside.
+ * transaction and emits TWO Socket.io events *after* commit:
+ *
+ *   - customer:job_update    → customer:<customer_id> room (one customer)
+ *   - dispatch:job_update    → dispatch:admins        room (all staff)
+ *
+ * Both fire from the same trx commit. Either both fire (commit) or
+ * neither fires (rollback) — see "Post-commit emit" below. They go
+ * to different rooms with different payloads (see PII BOUNDARY and
+ * ADMIN PAYLOAD SCOPE blocks).
  *
  * Atomicity contract:
  *   The scheduled_services.status update AND the job_status_history
@@ -11,29 +18,32 @@
  *   "transitioned to on_site" but the source-of-truth column still
  *   says "en_route" (or vice versa). Per-table separate transactions
  *   are not equivalent. The atomic guard below uses the shared trx
- *   for both writes. If either fails, both roll back and the emit
- *   never fires.
+ *   for both writes. If either fails, both roll back and the emits
+ *   never fire.
  *
  * Post-commit emit:
  *   Same pattern as services/tech-status.js#upsertTechStatus. If
  *   the caller passes their own `trx`, this function uses it for the
- *   writes and chains the emit on `trx.executionPromise` so the
- *   broadcast fires after the caller's commit, and is suppressed if
+ *   writes and chains both emits on `trx.executionPromise` so the
+ *   broadcasts fire after the caller's commit, and are suppressed if
  *   the caller rolls back. If no trx is passed, this function creates
  *   one, commits it, and emits inline. Either way, the trx scope
- *   wraps both writes and the emit happens after commit.
+ *   wraps both writes and the emits happen after commit.
+ *
+ *   Both emits chain on the same promise — they fire in sequence
+ *   after commit. There's no scenario where one fires and the other
+ *   doesn't (short of the io instance disappearing between calls,
+ *   which would be a runtime crash, not a leak).
  *
  * Atomic guard:
  *   The status update is gated on the row currently holding
  *   `fromStatus` — if a racing transition already advanced past it,
- *   the UPDATE affects 0 rows and the function throws. This is the
- *   same shape as track-transitions.markEnRoute. fromStatus may be
- *   null only if the caller is operating on a row whose status has
- *   never been set (legacy default), but in practice every job has a
- *   status.
+ *   the UPDATE affects 0 rows and the function throws. Same shape as
+ *   track-transitions.markEnRoute. fromStatus is required (Codex P1
+ *   on #290) — null was a footgun that bypassed the guard.
  *
  * ============================================================
- * PII BOUNDARY — READ THIS BEFORE MODIFYING THE PAYLOAD
+ * PII BOUNDARY — READ THIS BEFORE MODIFYING THE CUSTOMER PAYLOAD
  * ============================================================
  *   The `customer:job_update` payload is sent to a customer's own
  *   room, where it is consumed by the customer's portal / live
@@ -56,83 +66,148 @@
  *
  *   Customer-facing payload — additions to this object require
  *   security review. Internal/admin data flows via dispatch:job_update
- *   only (separate PR — admin counterpart, broadcast to dispatch:admins).
+ *   only — that event broadcasts to staff (dispatch:admins room),
+ *   not to customers, so admin-only fields belong on the admin
+ *   payload below.
+ * ============================================================
+ *
+ * ============================================================
+ * ADMIN PAYLOAD SCOPE — what dispatch:job_update can carry
+ * ============================================================
+ *   The `dispatch:job_update` payload is sent only to dispatch:admins
+ *   (staff: admin + technician), so it MAY include data that the
+ *   customer payload above redacts:
+ *
+ *     - tech full name
+ *     - customer first name (display in roster) — full
+ *       customer record stays in the admin detail-view fetch,
+ *       not on this real-time event
+ *     - service_type (what's being done)
+ *     - scheduled_date / window_start / window_end (timing)
+ *     - notes (gate codes, dog warnings — coordinator context)
+ *     - internal_notes (dispatcher-to-tech context)
+ *     - from_status (so the board can animate the transition)
+ *     - transitioned_by (audit attribution on-screen)
+ *
+ *   It does NOT carry, even on the admin path:
+ *     - pricing / profit / cost (admin-only detail-view fetch)
+ *     - product names / EPA reg numbers / dilution / lot numbers
+ *       (compliance audit, not real-time roster context)
+ *     - other customers' rows (one event = one job)
+ *     - any field added to scheduled_services after this PR without
+ *       a maintainer reviewing whether it belongs on a real-time
+ *       event vs. an on-click fetch
+ *
+ *   Rule of thumb: this payload is what the dispatch board's
+ *   left-pane roster and Gantt timeline need to RE-RENDER without
+ *   an extra fetch. Anything richer (full chemical history, profit
+ *   margin, customer's saved payment methods) is detail-view work
+ *   and should be fetched on click, not pushed.
  * ============================================================
  */
 const db = require('../models/db');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
 
-const EVENT = 'customer:job_update';
+const CUSTOMER_EVENT = 'customer:job_update';
+const ADMIN_EVENT = 'dispatch:job_update';
+const ADMIN_ROOM = 'dispatch:admins';
 
 function customerRoom(customerId) {
   return `customer:${customerId}`;
 }
 
 /**
- * Build the customer-facing payload from a freshly-committed row.
- * Reads via the trx so we see post-update values without an extra
- * round-trip after commit. Field set is the strict allowlist —
- * see PII BOUNDARY in this file's header.
+ * Build BOTH the customer-facing and admin-facing payloads from a
+ * freshly-committed row. Reads via the trx so we see post-update
+ * values without an extra round-trip after commit. Single LEFT JOIN
+ * pulls every column either payload needs in one query.
  *
- * @returns {Promise<{customerId: string, payload: object}>}
+ * @returns {Promise<{
+ *   customerId: string,
+ *   customerPayload: object,
+ *   adminPayload: object,
+ * }>}
  */
-async function buildCustomerPayload(trx, jobId, toStatus) {
+async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
   const row = await trx('scheduled_services as s')
     .leftJoin('technicians as t', 's.technician_id', 't.id')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.id', jobId)
     .first(
       's.id as job_id',
       's.customer_id',
       's.technician_id as tech_id',
+      's.service_type',
+      's.scheduled_date',
+      's.window_start',
+      's.window_end',
+      's.notes',
+      's.internal_notes',
       's.updated_at',
-      't.name as tech_full_name'
+      't.name as tech_full_name',
+      'c.first_name as cust_first_name'
     );
   if (!row) throw new Error(`transitionJobStatus: job ${jobId} not found`);
 
-  // Tech first name only — never last name. technicians.name is full
-  // name; split on the first space. If the row has no tech assigned
-  // yet (technician_id null), tech_first_name is null too.
   const techFirstName = row.tech_full_name
     ? row.tech_full_name.split(' ')[0]
     : null;
 
+  const customerPayload = {
+    // ── PII BOUNDARY: see file header. Strict allowlist. ─────────────
+    job_id: row.job_id,
+    status: toStatus,
+    eta: null, // ETA derivation lands in a future PR; field included
+               // now for forward compat with the customer tracker UI.
+               // When wired, source from BouncieService.calculateETA
+               // for status='en_route'; null for other statuses.
+    tech_id: row.tech_id,
+    tech_first_name: techFirstName,
+    updated_at: row.updated_at,
+  };
+
+  const adminPayload = {
+    // ── ADMIN PAYLOAD SCOPE: see file header. Broader than customer
+    //    but still excludes pricing / products / EPA / etc. ──────────
+    job_id: row.job_id,
+    customer_id: row.customer_id,
+    cust_first_name: row.cust_first_name, // customer-first-name only;
+                                          // last name stays in detail
+                                          // fetch (less PII surface
+                                          // even on admin channel)
+    status: toStatus,
+    from_status: fromStatus,
+    tech_id: row.tech_id,
+    tech_full_name: row.tech_full_name,   // admin sees full name
+    service_type: row.service_type,
+    scheduled_date: row.scheduled_date,
+    window_start: row.window_start,
+    window_end: row.window_end,
+    notes: row.notes,
+    internal_notes: row.internal_notes,
+    transitioned_by: transitionedBy,
+    updated_at: row.updated_at,
+  };
+
   return {
     customerId: row.customer_id,
-    payload: {
-      job_id: row.job_id,
-      status: toStatus,
-      eta: null, // ETA derivation lands in a future PR; field included
-                 // now for forward compat with the customer tracker UI.
-                 // When wired, source from BouncieService.calculateETA
-                 // for status='en_route'; null for other statuses.
-      tech_id: row.tech_id,
-      tech_first_name: techFirstName,
-      updated_at: row.updated_at,
-    },
+    customerPayload,
+    adminPayload,
   };
 }
 
 /**
  * Transition a scheduled_services row from fromStatus to toStatus.
  * Writes the status column and appends to job_status_history in the
- * same transaction; emits customer:job_update after commit.
+ * same transaction; emits customer:job_update AND dispatch:job_update
+ * after commit (both fire, or neither fires).
  *
  * @param {object} args
  * @param {string} args.jobId           required, scheduled_services.id
  * @param {string} args.fromStatus      required for the atomic guard.
  *                                       Must match the row's current
- *                                       status; if a racing transition
- *                                       already advanced past it the
- *                                       UPDATE affects 0 rows and this
- *                                       function throws. Null is NOT
- *                                       accepted — scheduled_services.status
- *                                       is NOT NULL DEFAULT 'pending', so
- *                                       no live row legitimately has
- *                                       null as a prior state. Allowing
- *                                       null would skip the guard and
- *                                       let racing writers clobber each
- *                                       other (Codex P1 on #290).
+ *                                       status; null/undefined rejected.
  * @param {string} args.toStatus        required, must be in the
  *                                       scheduled_services_status_check
  *                                       value set
@@ -140,11 +215,12 @@ async function buildCustomerPayload(trx, jobId, toStatus) {
  *                                       admin/tech who triggered it
  * @param {object} [args.trx]           optional Knex transaction; if
  *                                       passed, both writes use it and
- *                                       the emit chains on commit. If
+ *                                       BOTH emits chain on commit. If
  *                                       not passed, this function owns
  *                                       the trx end-to-end.
- * @returns {Promise<object>} the customer-facing payload that was
- *                             (or will be, on commit) broadcast
+ * @returns {Promise<{customerPayload: object, adminPayload: object}>}
+ *           the two payloads broadcast (or, with an outer trx, the
+ *           payloads that will broadcast on commit)
  */
 async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, trx }) {
   if (!jobId || !toStatus || fromStatus == null) {
@@ -177,28 +253,39 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       transitioned_by: transitionedBy || null,
     });
 
-    return buildCustomerPayload(t, jobId, toStatus);
+    return buildPayloads(t, jobId, fromStatus, toStatus, transitionedBy);
+  }
+
+  function emitBoth(customerId, customerPayload, adminPayload) {
+    // Customer event first, then admin event. Order doesn't matter
+    // semantically (different rooms, different payloads, different
+    // consumers) but keeping a deterministic sequence makes log
+    // ordering easier to follow.
+    emitToCustomer(customerId, customerPayload);
+    emitToAdmins(adminPayload);
   }
 
   if (trx) {
-    // Caller-owned trx. Do the writes; defer the emit until the
+    // Caller-owned trx. Do the writes; defer both emits until the
     // caller's outer transaction resolves. trx.executionPromise is
     // the promise returned by db.transaction(fn) — resolves on
     // commit, rejects on rollback.
-    const { customerId, payload } = await doWrites(trx);
+    const { customerId, customerPayload, adminPayload } = await doWrites(trx);
     if (trx.executionPromise) {
-      trx.executionPromise.then(() => emitToCustomer(customerId, payload)).catch(() => {
-        // Rollback path. Caller will see the rejection on their
-        // db.transaction() promise; we just suppress the emit.
-      });
+      trx.executionPromise
+        .then(() => emitBoth(customerId, customerPayload, adminPayload))
+        .catch(() => {
+          // Rollback path. Caller will see the rejection on their
+          // db.transaction() promise; we just suppress both emits.
+        });
     } else {
       // Defensive: some Knex test harnesses may pass a bare object as
       // trx. Fall back to inline emit (caller is responsible for
       // commit ordering in that case).
       logger.warn('[job-status] trx.executionPromise missing — emitting inline (test harness?)');
-      emitToCustomer(customerId, payload);
+      emitBoth(customerId, customerPayload, adminPayload);
     }
-    return payload;
+    return { customerPayload, adminPayload };
   }
 
   // No outer trx — own the lifecycle end-to-end.
@@ -207,24 +294,35 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     captured = await doWrites(innerTrx);
   });
   // trx committed by here.
-  emitToCustomer(captured.customerId, captured.payload);
-  return captured.payload;
+  emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
+  return {
+    customerPayload: captured.customerPayload,
+    adminPayload: captured.adminPayload,
+  };
 }
 
 function emitToCustomer(customerId, payload) {
   const io = getIo();
   if (!io) {
-    // attachSockets() didn't run — typically only happens in unit
-    // tests that import this module without booting the full server.
-    // Don't throw; the DB write already succeeded.
-    logger.warn('[job-status] io not initialized; skipping broadcast');
+    logger.warn('[job-status] io not initialized; skipping customer broadcast');
     return;
   }
-  io.to(customerRoom(customerId)).emit(EVENT, payload);
+  io.to(customerRoom(customerId)).emit(CUSTOMER_EVENT, payload);
+}
+
+function emitToAdmins(payload) {
+  const io = getIo();
+  if (!io) {
+    logger.warn('[job-status] io not initialized; skipping admin broadcast');
+    return;
+  }
+  io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
 }
 
 module.exports = {
   transitionJobStatus,
-  EVENT,
+  CUSTOMER_EVENT,
+  ADMIN_EVENT,
+  ADMIN_ROOM,
   customerRoom,
 };
