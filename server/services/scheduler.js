@@ -903,6 +903,20 @@ function initScheduledJobs() {
   }
 
   // =========================================================================
+  // STRIPE BANKING — Sync payouts twice daily at 8 AM and 8 PM ET
+  // Webhooks handle real-time updates; this is the safety-net catch-up.
+  // =========================================================================
+  cron.schedule('0 8,20 * * *', async () => {
+    try {
+      const StripeBanking = require('./stripe-banking');
+      const result = await StripeBanking.syncPayouts(50);
+      logger.info(`[stripe-banking] Scheduled sync: ${result.synced} payouts`);
+    } catch (err) {
+      logger.error(`[stripe-banking] Scheduled sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // STRIPE BILLING — Monthly autopay + payment retries
   // =========================================================================
   cron.schedule('0 8 1 * *', async () => {

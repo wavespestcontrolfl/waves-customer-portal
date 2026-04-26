@@ -532,18 +532,9 @@ httpServer.listen(PORT, () => {
       logger.warn(`[pricing-engine] Initial DB sync skipped: ${err.message}`);
     }
 
-    // Sync Stripe payouts every 15 minutes
-    setInterval(async () => {
-      try {
-        const StripeBanking = require('./services/stripe-banking');
-        const result = await StripeBanking.syncPayouts(20);
-        if (result.synced > 0) {
-          logger.info(`[stripe-banking] Synced ${result.synced} new payouts`);
-        }
-      } catch (err) {
-        logger.error(`[stripe-banking] Sync failed: ${err.message}`);
-      }
-    }, 15 * 60 * 1000);
+    // Stripe payout sync runs twice daily at 8 AM and 8 PM ET
+    // (see scheduler.js — cron `0 8,20 * * *`). Real-time updates still
+    // arrive via the payout.* webhook in stripe-webhook.js.
 
     // Process unprocessed call recordings every 10 minutes (safety net)
     setInterval(async () => {
