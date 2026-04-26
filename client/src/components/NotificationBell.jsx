@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { ensurePushSubscription, isPushEnabled } from '../lib/push-subscribe.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -12,6 +13,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState('account'); // 'account' | 'whats_new'
+  // Web Push enable state — only relevant for admin bell. The strip
+  // shows when the current device hasn't subscribed to push yet, and
+  // hides itself once the user grants permission.
+  const [pushOn, setPushOn] = useState(false);
+  const [pushEnabling, setPushEnabling] = useState(false);
+  const [pushError, setPushError] = useState(null);
   const panelRef = useRef(null);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
 
@@ -44,6 +51,35 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     if (open) document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
+
+  // Probe Web Push state when the panel opens (admin only). Re-runs on
+  // each open so a user who enabled push elsewhere doesn't see a stale
+  // "Enable push" strip. Customer bell skips this — only admins get
+  // operational push.
+  useEffect(() => {
+    if (!open || type !== 'admin') return;
+    isPushEnabled().then(setPushOn).catch(() => setPushOn(false));
+  }, [open, type]);
+
+  const handleEnablePush = async () => {
+    setPushEnabling(true);
+    setPushError(null);
+    try {
+      // Pass apiBase so push enrollment hits the same backend the rest
+      // of the bell talks to. Without this, ensurePushSubscription
+      // defaults to '/api' and breaks in any deployment where the
+      // frontend is configured to talk to a different API origin.
+      await ensurePushSubscription({
+        apiBase: API_BASE,
+        token: localStorage.getItem(tokenKey),
+      });
+      setPushOn(true);
+    } catch (err) {
+      setPushError(err.message || 'Push setup failed');
+    } finally {
+      setPushEnabling(false);
+    }
+  };
 
   // Load notifications when opened
   const loadNotifications = async () => {
@@ -187,6 +223,17 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               </div>
             </div>
 
+            {/* Enable Push strip — admin only, shown when not yet
+                subscribed on this device. iOS reminder is folded into
+                the error message that ensurePushSubscription throws. */}
+            {type === 'admin' && !pushOn && (
+              <PushEnableStrip
+                enabling={pushEnabling}
+                error={pushError}
+                onClick={handleEnablePush}
+              />
+            )}
+
             {/* Notification list */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: '#71717A', fontSize: 14 }}>Loading…</div>}
@@ -272,6 +319,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               </div>
             </div>
 
+            {/* Enable Push strip — admin only, shown when not yet
+                subscribed on this device. */}
+            {type === 'admin' && !pushOn && (
+              <PushEnableStrip
+                enabling={pushEnabling}
+                error={pushError}
+                onClick={handleEnablePush}
+              />
+            )}
+
             {/* Notification List */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: colors.muted }}>Loading...</div>}
@@ -335,6 +392,51 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             </div>
           </div>
         )
+      )}
+    </div>
+  );
+}
+
+// Inline strip rendered in both mobile + desktop bell views when the
+// admin hasn't yet subscribed this device to Web Push. iOS PWA
+// requirement is surfaced via the error-message path inside
+// ensurePushSubscription, not pre-emptively here, so Android/desktop
+// users don't see an irrelevant warning.
+function PushEnableStrip({ enabling, error, onClick }) {
+  return (
+    <div style={{
+      padding: '12px 16px',
+      background: '#F4F4F5',
+      borderBottom: '1px solid #E4E4E7',
+      fontSize: 13,
+      color: '#18181B',
+    }}>
+      <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ fontWeight: 600 }}>Get push notifications on this device</span>
+      </div>
+      <div style={{ marginBottom: 8, color: '#52525B', fontSize: 12 }}>
+        Banner alerts for failed payments, overdue invoices, unmapped calls, and more.
+      </div>
+      <button
+        onClick={onClick}
+        disabled={enabling}
+        style={{
+          padding: '8px 14px',
+          background: '#18181B',
+          color: '#FFFFFF',
+          border: 'none',
+          borderRadius: 6,
+          fontSize: 13,
+          fontWeight: 500,
+          cursor: enabling ? 'wait' : 'pointer',
+        }}
+      >
+        {enabling ? 'Enabling…' : 'Enable push'}
+      </button>
+      {error && (
+        <div style={{ marginTop: 8, color: '#C8312F', fontSize: 12, lineHeight: 1.4 }}>
+          {error}
+        </div>
       )}
     </div>
   );
