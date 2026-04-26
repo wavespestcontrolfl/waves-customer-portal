@@ -1,3 +1,83 @@
+// client/src/pages/PayPageV2.jsx
+//
+// Customer-facing pay page (V2). Renders the Stripe Payment Element,
+// 3% credit-card surcharge preview, save-card consent, and on success
+// redirects to /receipt/:token. The single most security-and-money-
+// critical page in the customer-facing portal.
+//
+// Endpoints:
+//   GET  /api/billing/v2/invoice/:token        (invoice details by
+//                                               public token, no auth)
+//   POST /api/billing/v2/intent                (create PaymentIntent,
+//                                               server computes amount)
+//   POST /api/billing/v2/card                  (save method post-pay)
+//   GET  /api/billing/v2/cards                 (list saved methods)
+//
+// Server orchestrators Codex follows via the endpoints above:
+//   server/services/stripe.js                  (computeChargeAmount,
+//                                               ensureStripeCustomer,
+//                                               PI create/confirm)
+//   server/routes/billing-v2.js                (PI route handler)
+//   server/routes/stripe-webhook.js            (signature verify,
+//                                               idempotency table,
+//                                               event dispatch)
+//   server/services/billing-cron.js            (monthly billing,
+//                                               retry ladder Day 1/3/5)
+//   server/services/payment-router.js          (processor abstraction)
+//
+// Customer-facing styling (CLAUDE.md): warm tone, Luckiest Guy /
+// Baloo 2, gold pill, mascot. Do NOT apply admin monochrome rules.
+//
+// Audit focus — CLIENT:
+// - Stripe SDK loaded once, cached in module scope. Confirm subsequent
+//   page mounts don't re-load the script (would re-prompt user agents
+//   and slow first-paint).
+// - 3% surcharge preview client-side vs authoritative server-side
+//   computeChargeAmount. The two MUST agree on every payment method
+//   (card / apple_pay / google_pay = 3%; ACH = 0%). Drift = customer
+//   sees one number and gets charged another.
+// - Confirm button single-flight: Stripe Payment Intent confirm is
+//   slow (~2-5s). Double-click must not double-confirm. Standard
+//   pattern is disable-on-submit + idempotency key.
+// - Save-card consent: SaveCardConsent checkbox state must persist
+//   to the payment method row only when true. A consent miss here
+//   creates a future autopay charge the customer never agreed to.
+// - Token validation: GET /api/billing/v2/invoice/:token has no auth
+//   (it's a public link). Server must validate the token format
+//   (cryptographic, not sequential) and rate-limit guesses.
+// - Receipt redirect: on success, redirect to /receipt/:token. Confirm
+//   the redirect happens AFTER the webhook confirms payment (or that
+//   the receipt page handles "still confirming" gracefully) — a
+//   premature redirect on a 3DS-required payment shows "paid" before
+//   the auth completes.
+//
+// Audit focus — SERVER (Codex follows imports):
+// - stripe-webhook.js signature verification: stripe.webhooks
+//   .constructEvent must run BEFORE any DB writes. A handler that
+//   processes the body before verifying is the standard
+//   Stripe-webhook-replay-attack vulnerability.
+// - Idempotency table (stripe_webhook_events): event.id must be
+//   recorded BEFORE processing. If the table write happens after,
+//   a Stripe retry races and we double-credit the invoice.
+// - computeChargeAmount: 3% surcharge logic for card / apple_pay /
+//   google_pay; 0% for ACH. Any other method (Cash App, Klarna)
+//   needs an explicit branch — silently defaulting to 0% loses
+//   money on every transaction.
+// - ensureStripeCustomer: customer-stripe linking. Confirm we don't
+//   accidentally create a NEW Stripe Customer for an existing
+//   customer (= duplicated card on file, broken autopay).
+// - billing-cron.js monthly-billing guards: autopay disabled /
+//   paused / wrong billing day must each skip the charge. Retry
+//   ladder Day 1/3/5 must STOP on first success (no double-charge
+//   if first retry succeeds but logs a transient error).
+// - service_paused_at flag: a paused-service customer must not be
+//   billed. Verify the cron checks this at fire time, not just at
+//   enqueue time.
+// - Refund webhook (charge.refunded): must update invoice status +
+//   reverse the surcharge in our books to keep the revenue dashboard
+//   accurate.
+// - Dispute webhook (dispute.created): must flag the customer for
+//   the operator to review before any further charges fire.
 import { COLORS, FONTS } from '../theme-brand';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
