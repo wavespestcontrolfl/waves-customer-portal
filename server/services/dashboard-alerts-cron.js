@@ -94,7 +94,13 @@ async function runDashboardAlertsCheckInner() {
       // Fire push (and SMS for critical) BEFORE updating state, so a
       // failing push doesn't get marked as "last_pushed_at = now."
       try {
+        // alertId + alertCount land in the persisted row's metadata so
+        // the bell endpoint can dedupe this row against the live overlay
+        // (same alert at same count). Earlier counts stay as escalation
+        // history.
         await triggerNotification('dashboard_alert', {
+          alertId: alert.id,
+          alertCount: alert.count,
           title: alert.label + (alert.amount ? ` ($${Math.round(alert.amount).toLocaleString()})` : ''),
           body: alert.severity === 'critical' ? 'Critical — needs attention now.' : 'Worth a look soon.',
           link: alert.href,
