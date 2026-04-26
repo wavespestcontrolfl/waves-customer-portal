@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { etParts, parseETDateTime, addETDays } = require('../utils/datetime-et');
+const { etParts, parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 const { shortenOrPassthrough } = require('./short-url');
 
 // GBP review links per location
@@ -480,8 +480,14 @@ const ReviewService = {
   },
 
   /**
-   * Cron: send 48-hour follow-up to non-responders.
-   * Only sends ONE follow-up, only to people who haven't opened OR opened but didn't rate.
+   * Cron: send the single follow-up reminder, on Day 3 after the initial
+   * review request. Only sends ONE follow-up, only to people who haven't
+   * opened OR opened but didn't rate.
+   *
+   * Eligibility window: review SMS was sent on or before 2 ET-calendar-days
+   * ago. Combined with the 10:00 AM ET cron schedule, this lands the followup
+   * on the 3rd ET day after the original (e.g. Mon 8 AM or Mon 8 PM initial
+   * → Wed 10 AM followup, regardless of original time of day).
    *
    * Per-customer dedup: a customer with multiple recent review_requests (e.g.
    * back-to-back services) only gets a single follow-up SMS. Sibling rows are
@@ -489,11 +495,13 @@ const ReviewService = {
    * subsequent cron runs.
    */
   async processFollowups() {
-    const cutoff = new Date(Date.now() - 48 * 3600000); // 48 hours ago
+    // ET midnight at the start of "yesterday in ET" — anything sent before
+    // this fell on (today - 2 ET days) or earlier in the ET calendar.
+    const cutoff = parseETDateTime(`${etDateString(addETDays(new Date(), -1))}T00:00`);
     const recentFollowupCutoff = new Date(Date.now() - 14 * 24 * 3600000); // 14 days
     const eligible = await db('review_requests')
       .whereIn('status', ['sent', 'opened'])
-      .where('sms_sent_at', '<=', cutoff)
+      .where('sms_sent_at', '<', cutoff)
       .where({ followup_sent: false })
       .whereNull('rated_at')
       .orderBy('sms_sent_at', 'asc')

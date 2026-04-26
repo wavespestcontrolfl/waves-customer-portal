@@ -808,10 +808,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6:30PM — Review follow-up reminders (48hr non-responders)
-  // Evening golden window: people are done with dinner, scrolling phones
+  // DAILY 10:00AM — Review follow-up reminders (Day 3 after initial request)
+  // Lands the followup on the 3rd ET-calendar-day after the original review
+  // SMS was sent. Eligibility logic is in processFollowups().
   // =========================================================================
-  cron.schedule('30 18 * * *', async () => {
+  cron.schedule('0 10 * * *', async () => {
     logger.info('Running: review follow-up reminders');
     try {
       const ReviewService = require('./review-request');
