@@ -361,7 +361,7 @@ router.post('/', async (req, res) => {
     try {
       const smsTemplatesRouter = require('./admin-sms-templates');
       const templateKey = 'lead_auto_reply_biz';
-      const fallback = `Hello ${firstName}! Thanks for reaching out to Waves! What are you interested in — Pest Control, Lawn Care, or a One-Time Service? Reply and we'll get you a quote right away.`;
+      const fallback = `Hello ${firstName}! Thanks for reaching out to Waves!\n\nWhat are you interested in — Pest Control, Lawn Care, or a One-Time Service?\n\nReply and we'll get you a quote right away.`;
       let replyMsg = fallback;
       try {
         if (typeof smsTemplatesRouter.getTemplate === 'function') {
