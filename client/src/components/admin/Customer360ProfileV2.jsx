@@ -19,6 +19,31 @@
  *     payments, at_risk/churned stage, health score < 40
  *   - Tier collapses to neutral Badge (no purple/gold/teal)
  *   - HealthCircle/RadarChart recolored to zinc; alert tier only when low
+ *
+ * Audit focus:
+ * - Six tabs each fetch their own data on mount/switch — confirm we
+ *   don't re-fetch on every re-render (useEffect deps), and that
+ *   switching tabs back doesn't re-flicker if data is already cached
+ *   in component state.
+ * - Slide-out lifecycle: ESC handler should detach on unmount, clicks
+ *   on the overlay should close cleanly, focus should return to the
+ *   row that opened the panel.
+ * - SMS reply submit (POST /communications/send-sms): must be
+ *   debounced or single-flight so a double-click doesn't double-send.
+ *   Also: empty / whitespace-only message should not submit.
+ * - Refund / charge-now (POST /:id/refund, /:id/charge-now): these
+ *   are real money operations. Confirm they require explicit
+ *   confirmation before fire and that error states surface clearly
+ *   (e.g. Stripe declined → not silently swallowed).
+ * - alert-fg coverage: the spec reserves red for overdue balance,
+ *   expiring card, refund/failed payments, at_risk/churned stage,
+ *   health < 40. Verify nothing else in the V2 paint accidentally
+ *   uses alert-fg as decoration.
+ * - Mobile sticky CustomerActionBar: when an action sheet opens
+ *   (call, SMS, follow-up), confirm the ActionBar doesn't double-
+ *   stack with the underlying sheet's own buttons.
+ * - Timeline filter: SMS / calls / notes filter on the timeline tab.
+ *   Switching filter should clear stale rows / not mix categories.
  */
 
 import { useState, useEffect, useRef } from 'react';
