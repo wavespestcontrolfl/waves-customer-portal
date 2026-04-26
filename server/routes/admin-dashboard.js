@@ -877,4 +877,24 @@ router.get('/channel-mix', async (req, res, next) => {
   }
 });
 
+// GET /api/admin/dashboard/alerts — operational alerts (state-of-the-world).
+//
+// Same data the notification bell merges in. Kept as a discrete endpoint
+// so Intelligence Bar tools / debugging / future surfaces can pull the
+// list without hitting the bell-shaped /admin/notifications response.
+// See server/services/dashboard-alerts.js for the alert definitions.
+router.get('/alerts', async (req, res, next) => {
+  try {
+    const { computeDashboardAlerts } = require('../services/dashboard-alerts');
+    const result = await computeDashboardAlerts();
+    res.json({
+      ...result,
+      hasCritical: result.alerts.some((a) => a.severity === 'critical'),
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /alerts failed: ${err.message}`);
+    next(err);
+  }
+});
+
 module.exports = router;
