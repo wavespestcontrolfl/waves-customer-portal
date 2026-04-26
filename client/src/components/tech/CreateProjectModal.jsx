@@ -14,6 +14,24 @@ import { adminFetch } from '../../lib/adminFetch';
  *   defaultCustomerId          pre-fill customer (e.g. from a scheduled service)
  *   defaultServiceRecordId     link back to the visit being documented
  *   defaultScheduledServiceId  link back to the scheduled visit
+ *
+ * Audit focus:
+ * - Photo upload pipeline: photos are attached client-side before save.
+ *   Confirm "save as draft" only succeeds AFTER all photos are uploaded
+ *   and registered against the project — silent photo failure here
+ *   loses field data the tech can't easily re-capture.
+ * - Submit while photos are uploading: the submit button must be
+ *   disabled / queued until the upload promise(s) resolve, otherwise
+ *   we save a project with broken photo references.
+ * - Type-specific findings: each project type has its own field set.
+ *   Confirm switching type mid-flow doesn't leak findings from the
+ *   previous type into the saved payload.
+ * - defaultServiceRecordId / defaultScheduledServiceId linking:
+ *   verify these get persisted on the server side so the project can
+ *   later be tied back to the originating visit.
+ * - Theme prop: the dual dark/light theme uses a PALETTES dispatch.
+ *   Confirm an unknown theme value falls back gracefully (don't crash
+ *   on a typo).
  */
 
 const PALETTES = {
