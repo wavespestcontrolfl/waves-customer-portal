@@ -1,3 +1,21 @@
+// client/src/pages/PayPage.jsx
+//
+// V1 customer-facing pay page. Same payment flow as PayPageV2 (Stripe
+// Payment Element + 3% surcharge + save-card consent + receipt
+// redirect) — kept for any tokenized invoice URLs already in the wild
+// that may have been generated against V1 markup. The same server-
+// side concerns from PayPageV2's audit-focus block apply here.
+//
+// Endpoints: same as V2 — see PayPageV2.jsx header.
+//
+// Audit focus:
+// - V1 styling (raw inline-style, B/Button) preserved for back-compat;
+//   don't flag as drift.
+// - Confirm V1 and V2 hit the SAME server-side intent/charge endpoint
+//   so the surcharge math + idempotency are uniform across both.
+// - If V1 ever gets retired, audit any outbound message templates
+//   (SMS/email pay link) for hard-coded /pay/ URLs that might still
+//   route here.
 import Icon from '../components/Icon';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';

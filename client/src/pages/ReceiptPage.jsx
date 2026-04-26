@@ -1,3 +1,37 @@
+// client/src/pages/ReceiptPage.jsx
+//
+// Customer-facing post-payment receipt view. Reached via redirect
+// from PayPage(V2) on successful Stripe Payment Intent confirmation.
+// Renders success badge, invoice details, payment summary, and a
+// "download PDF" link that proxies to server/services/pdf/
+// invoice-pdf.js.
+//
+// Endpoints:
+//   GET  /api/billing/v2/invoice/:token        (re-fetch by public
+//                                               token to render
+//                                               final state)
+//   GET  /api/billing/v2/invoice/:token/pdf    (PDF stream)
+//
+// Customer-facing styling (CLAUDE.md): warm tone — no admin monochrome.
+//
+// Audit focus:
+// - "Still confirming" race: a 3DS-required charge can take a few
+//   seconds to clear after PI.confirm returns. If the receipt loads
+//   before the webhook updates the invoice to paid, we may render
+//   "still confirming" or even the unpaid view. Confirm there's a
+//   short retry / polling path, or that the success state is
+//   render-able from the PI's intent status (not just the invoice
+//   row).
+// - Token reuse: GET /:token is the same public token used by
+//   PayPage. After payment, the token still works (operator may
+//   need to re-share). Confirm there's no path where loading the
+//   receipt mutates payment state.
+// - PDF stream: large invoices may take time. Verify there's a
+//   reasonable timeout + a non-PDF fallback (download fails →
+//   plain-HTML view).
+// - Email forwarding: if the customer forwards the receipt URL,
+//   does the recipient see the same invoice? That's intended (it's
+//   a receipt) but should NOT expose card details.
 import { FONTS } from '../theme-brand';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';

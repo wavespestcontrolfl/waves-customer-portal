@@ -1,3 +1,48 @@
+// client/src/components/billing/AutopayCard.jsx
+//
+// Customer-facing autopay control card. Surfaces autopay state
+// (enabled / disabled / paused), saved card on file, billing day,
+// and a pause-until date picker. Lets the customer toggle autopay,
+// pause/resume, change saved card, or set a different monthly
+// billing day. Used inside the customer portal billing tab.
+//
+// Endpoints:
+//   GET  /api/customer/autopay              (state)
+//   PUT  /api/customer/autopay              (enable/disable/pause/billing-day)
+//
+// Server orchestrators (Codex follows via api.put):
+//   server/routes/customer-autopay.js       (rate-limited 6 ops/min
+//                                             per customer)
+//   server/services/billing-cron.js         (the cron that respects
+//                                             whatever this card sets)
+//
+// Customer-facing styling (CLAUDE.md): warm tone — no admin monochrome.
+//
+// Audit focus:
+// - Optimistic toggle vs server confirm: the autopay switch should
+//   roll back on PUT failure (auth expired, rate-limit hit, network
+//   drop). Otherwise the customer sees autopay "on" while the server
+//   has it off — they get billed nothing next month and don't know
+//   why.
+// - Pause-until date picker: dates must be ET-anchored
+//   (etDateString / addETDays). A UTC date here means a customer in
+//   FL who picks "pause through Friday" might resume on Thursday
+//   night ET if the cron uses UTC midnight.
+// - Billing-day change: changing from day 5 to day 25 mid-month —
+//   confirm we don't fire BOTH days. The cron should track the LAST
+//   billed cycle, not just "is today the billing day".
+// - Card-on-file change: must invalidate the prior card's autopay
+//   intent. A leftover intent on an old card = silent failed retries
+//   the customer doesn't see.
+// - SaveCardConsent linkage: confirm autopay enable cannot succeed
+//   without a recorded consent row in payment_method_consents (legal
+//   requirement for stored-card auto-billing).
+// - Customer can only modify their own autopay: GET/PUT must filter
+//   by the authenticated session's customer_id, not accept a
+//   customer_id in the body.
+// - Rate limit (6 ops/min) — confirm the limit returns a clean error
+//   the UI can surface ("too many changes, try again in a minute"),
+//   not a generic 429 that looks like a network failure.
 import React, { useEffect, useRef, useState } from 'react';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import api from '../../utils/api';
