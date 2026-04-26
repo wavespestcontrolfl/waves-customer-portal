@@ -488,8 +488,8 @@ async function getRevenueBreakdown(input) {
     const rows = await db('service_records')
       .whereBetween('service_date', [from, to])
       .where('status', 'completed')
-      .select('service_type', db.raw('COUNT(*) as count'), db.raw('SUM(COALESCE(price, 0)) as revenue'))
-      .groupBy('service_type').orderByRaw('SUM(COALESCE(price, 0)) DESC');
+      .select('service_type', db.raw('COUNT(*) as count'), db.raw('SUM(COALESCE(revenue, 0)) as revenue'))
+      .groupBy('service_type').orderByRaw('SUM(COALESCE(revenue, 0)) DESC');
     return { group_by, period: { from, to }, rows: rows.map(r => ({ service_type: r.service_type, count: parseInt(r.count), revenue: parseFloat(r.revenue || 0) })) };
   }
 
@@ -651,7 +651,7 @@ async function getServiceMix(input) {
     .select(
       db.raw("CASE WHEN service_type ILIKE '%pest%' THEN 'Pest Control' WHEN service_type ILIKE '%lawn%' THEN 'Lawn Care' WHEN service_type ILIKE '%mosquito%' THEN 'Mosquito' WHEN service_type ILIKE '%termite%' THEN 'Termite' WHEN service_type ILIKE '%tree%' OR service_type ILIKE '%shrub%' THEN 'Tree & Shrub' WHEN service_type ILIKE '%rodent%' THEN 'Rodent' ELSE 'Other' END as category"),
       db.raw('COUNT(*) as service_count'),
-      db.raw('SUM(COALESCE(price, 0)) as revenue'),
+      db.raw('SUM(COALESCE(revenue, 0)) as revenue'),
       db.raw('COUNT(DISTINCT customer_id) as unique_customers'),
     )
     .groupByRaw("CASE WHEN service_type ILIKE '%pest%' THEN 'Pest Control' WHEN service_type ILIKE '%lawn%' THEN 'Lawn Care' WHEN service_type ILIKE '%mosquito%' THEN 'Mosquito' WHEN service_type ILIKE '%termite%' THEN 'Termite' WHEN service_type ILIKE '%tree%' OR service_type ILIKE '%shrub%' THEN 'Tree & Shrub' WHEN service_type ILIKE '%rodent%' THEN 'Rodent' ELSE 'Other' END")
