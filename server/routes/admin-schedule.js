@@ -5,6 +5,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const trackTransitions = require('../services/track-transitions');
 const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
   isNewCustomer, safeDate,
@@ -888,42 +889,16 @@ router.put('/:id/status', async (req, res, next) => {
     if (status === 'confirmed') {
       updates.customer_confirmed = true;
     } else if (status === 'en_route') {
-      // En route is optional — SMS + ETA are best-effort
+      // Customer-visible track_state + en-route SMS (with track link) are
+      // owned by services/track-transitions. Same helper admin-dispatch
+      // calls — keeps the state machine canonical and the SMS idempotent
+      // via track_sms_sent_at.
       try {
-        let etaMinutes = 15;
-        try {
-          if (svc.distance_from_previous_miles) etaMinutes = Math.round(svc.distance_from_previous_miles * 2);
-          const BouncieService = require('../services/bouncie');
-          if (BouncieService.configured !== false) {
-            const custLat = parseFloat(svc.cust_lat || svc.lat || 0);
-            const custLng = parseFloat(svc.cust_lng || svc.lng || 0);
-            if (custLat && custLng) {
-              const eta = await BouncieService.calculateETA(custLat, custLng);
-              if (eta?.etaMinutes && eta.source !== 'default') {
-                etaMinutes = eta.etaMinutes;
-                logger.info(`[en-route] ETA via ${eta.source}: ${etaMinutes} min`);
-              }
-            }
-          }
-        } catch (e) { logger.warn(`[en-route] ETA calc failed: ${e.message}`); }
-
-        if (svc.cust_phone) {
-          const custFirstName = svc.first_name || 'there';
-          let body = null;
-          try {
-            const tpl = require('./admin-sms-templates');
-            body = await tpl.getTemplate('tech_en_route', {
-              first_name: custFirstName, eta_minutes: String(etaMinutes),
-            });
-          } catch { /* fall through */ }
-          if (!body) {
-            body = `Hello ${custFirstName}! Your Waves technician is on the way. ETA: ~${etaMinutes} minutes.`;
-          }
-          await TwilioService.sendSMS(svc.cust_phone, body,
-            { customerId: svc.customer_id, messageType: 'en_route' }
-          );
-        }
-      } catch (e) { logger.error(`[en-route] Failed: ${e.message}`); }
+        await trackTransitions.markEnRoute(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[en-route] markEnRoute failed: ${e.message}`); }
 
       // In-app notification: technician en route
       try {
