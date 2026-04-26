@@ -120,9 +120,19 @@ async function buildCustomerPayload(trx, jobId, toStatus) {
  *
  * @param {object} args
  * @param {string} args.jobId           required, scheduled_services.id
- * @param {string|null} args.fromStatus required for the atomic guard
- *                                       (use null only for legacy rows
- *                                       with no prior status)
+ * @param {string} args.fromStatus      required for the atomic guard.
+ *                                       Must match the row's current
+ *                                       status; if a racing transition
+ *                                       already advanced past it the
+ *                                       UPDATE affects 0 rows and this
+ *                                       function throws. Null is NOT
+ *                                       accepted — scheduled_services.status
+ *                                       is NOT NULL DEFAULT 'pending', so
+ *                                       no live row legitimately has
+ *                                       null as a prior state. Allowing
+ *                                       null would skip the guard and
+ *                                       let racing writers clobber each
+ *                                       other (Codex P1 on #290).
  * @param {string} args.toStatus        required, must be in the
  *                                       scheduled_services_status_check
  *                                       value set
@@ -137,8 +147,10 @@ async function buildCustomerPayload(trx, jobId, toStatus) {
  *                             (or will be, on commit) broadcast
  */
 async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, trx }) {
-  if (!jobId || !toStatus) {
-    throw new Error('transitionJobStatus: jobId and toStatus are required');
+  if (!jobId || !toStatus || fromStatus == null) {
+    throw new Error(
+      'transitionJobStatus: jobId, fromStatus, and toStatus are required'
+    );
   }
 
   async function doWrites(t) {
@@ -147,11 +159,8 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // (or fromStatus is wrong). Either way, we abort — the audit log
     // would otherwise record a transition that didn't happen on the
     // source table.
-    const guard = fromStatus == null
-      ? { id: jobId }
-      : { id: jobId, status: fromStatus };
     const updated = await t('scheduled_services')
-      .where(guard)
+      .where({ id: jobId, status: fromStatus })
       .update({ status: toStatus, updated_at: t.fn.now() });
     if (updated === 0) {
       throw new Error(

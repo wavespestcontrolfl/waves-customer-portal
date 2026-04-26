@@ -41,14 +41,19 @@ router.use(devOnly, adminAuthenticate, requireAdmin);
 router.post('/job-status', async (req, res) => {
   const { jobId, fromStatus, toStatus } = req.body || {};
 
-  if (!jobId || !toStatus) {
-    return res.status(400).json({ error: 'jobId and toStatus are required' });
+  // fromStatus is mandatory. Without it, transitionJobStatus's atomic
+  // guard would have nothing to gate on and racing transitions could
+  // overwrite each other silently (Codex P1 on #290).
+  if (!jobId || !fromStatus || !toStatus) {
+    return res.status(400).json({
+      error: 'jobId, fromStatus, and toStatus are required',
+    });
   }
 
   try {
     const payload = await transitionJobStatus({
       jobId,
-      fromStatus: fromStatus ?? null,
+      fromStatus,
       toStatus,
       transitionedBy: req.technicianId,
     });
