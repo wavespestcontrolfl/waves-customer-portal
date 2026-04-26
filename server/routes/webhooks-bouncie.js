@@ -6,11 +6,15 @@
  * public /track/:token map. Two webhooks on purpose — mileage and
  * tracking have different failure modes and shouldn't cascade.
  *
- * Verification: Bouncie's public docs are sparse on how the secret is
- * transmitted (header vs body, header name). Receiver accepts both
- * `x-webhook-key` header and `webhookKey` body field, logs which was
- * used on the first successful verify. If the first real event shows
- * a different mechanism we can tighten the check later.
+ * Verification is non-strict, mirroring /api/bouncie/webhook. Bouncie
+ * has no formal signing contract and several account-level mismatches
+ * in our setup history caused the first deploy of this endpoint to
+ * 401 every event — Bouncie auto-deactivates a webhook after enough
+ * non-2xx responses. We log mismatches and accept the event; downstream
+ * authorization is the IMEI → technician lookup (unknown IMEI = no-op).
+ * Receiver still inspects header `x-webhook-key`, body `webhookKey`,
+ * and query `?key=` so we know which transport Bouncie chose for the
+ * first event with a matching secret.
  *
  * Event model:
  *   - trip-start / trip-data / trip-end / trip-metrics / connect / disconnect
@@ -26,18 +30,19 @@ const logger = require('../services/logger');
 
 // ---------- verification ----------
 
-function verifyKey(req) {
+// Non-strict: returns { matched, from } describing which transport (if any)
+// produced a key that matches BOUNCIE_WEBHOOK_SECRET. Caller logs but does
+// not reject — see header comment.
+function inspectKey(req) {
   const expected = process.env.BOUNCIE_WEBHOOK_SECRET;
-  if (!expected) {
-    return { ok: false, reason: 'no-secret-configured', from: null };
-  }
+  if (!expected) return { matched: false, from: null, reason: 'no-secret-configured' };
   const headerKey = req.get('x-webhook-key');
-  if (headerKey && headerKey === expected) return { ok: true, from: 'header' };
+  if (headerKey && headerKey === expected) return { matched: true, from: 'header' };
   const bodyKey = req.body && (req.body.webhookKey || req.body.webhook_key);
-  if (bodyKey && bodyKey === expected) return { ok: true, from: 'body' };
+  if (bodyKey && bodyKey === expected) return { matched: true, from: 'body' };
   const queryKey = req.query && req.query.key;
-  if (queryKey && queryKey === expected) return { ok: true, from: 'query' };
-  return { ok: false, reason: 'mismatch', from: null };
+  if (queryKey && queryKey === expected) return { matched: true, from: 'query' };
+  return { matched: false, from: null, reason: 'mismatch' };
 }
 
 // ---------- normalization ----------
@@ -220,10 +225,9 @@ router.get('/ping', (req, res) => {
 
 // POST /api/webhooks/bouncie
 router.post('/', async (req, res) => {
-  const verify = verifyKey(req);
-  if (!verify.ok) {
-    logger.warn(`[webhooks-bouncie] rejected event: ${verify.reason}`);
-    return res.status(401).json({ ok: false });
+  const verify = inspectKey(req);
+  if (!verify.matched) {
+    logger.warn(`[webhooks-bouncie] secret ${verify.reason} — accepted anyway (non-strict)`);
   }
 
   const payload = req.body || {};
@@ -251,7 +255,7 @@ router.post('/', async (req, res) => {
   }
 
   logger.info(
-    `[webhooks-bouncie] accepted ${eventType} imei=${imei || '(missing)'} key=${verify.from}`
+    `[webhooks-bouncie] accepted ${eventType} imei=${imei || '(missing)'} key=${verify.from || 'none'}`
   );
 
   // Answer fast; process in the background so Bouncie never sees a slow 2xx.

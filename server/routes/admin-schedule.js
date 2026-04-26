@@ -5,6 +5,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const trackTransitions = require('../services/track-transitions');
 const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
   isNewCustomer, safeDate,
@@ -888,48 +889,12 @@ router.put('/:id/status', async (req, res, next) => {
     if (status === 'confirmed') {
       updates.customer_confirmed = true;
     } else if (status === 'en_route') {
-      // En route is optional — SMS + ETA are best-effort
-      try {
-        let etaMinutes = 15;
-        try {
-          if (svc.distance_from_previous_miles) etaMinutes = Math.round(svc.distance_from_previous_miles * 2);
-          const BouncieService = require('../services/bouncie');
-          if (BouncieService.configured !== false) {
-            const custLat = parseFloat(svc.cust_lat || svc.lat || 0);
-            const custLng = parseFloat(svc.cust_lng || svc.lng || 0);
-            if (custLat && custLng) {
-              const eta = await BouncieService.calculateETA(custLat, custLng);
-              if (eta?.etaMinutes && eta.source !== 'default') {
-                etaMinutes = eta.etaMinutes;
-                logger.info(`[en-route] ETA via ${eta.source}: ${etaMinutes} min`);
-              }
-            }
-          }
-        } catch (e) { logger.warn(`[en-route] ETA calc failed: ${e.message}`); }
-
-        if (svc.cust_phone) {
-          const custFirstName = svc.first_name || 'there';
-          let body = null;
-          try {
-            const tpl = require('./admin-sms-templates');
-            body = await tpl.getTemplate('tech_en_route', {
-              first_name: custFirstName, eta_minutes: String(etaMinutes),
-            });
-          } catch { /* fall through */ }
-          if (!body) {
-            body = `Hello ${custFirstName}! Your Waves technician is on the way. ETA: ~${etaMinutes} minutes.`;
-          }
-          await TwilioService.sendSMS(svc.cust_phone, body,
-            { customerId: svc.customer_id, messageType: 'en_route' }
-          );
-        }
-      } catch (e) { logger.error(`[en-route] Failed: ${e.message}`); }
-
-      // In-app notification: technician en route
-      try {
-        const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
-      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
+      // Side effects (track_state flip, customer SMS with track link,
+      // in-app notification) are deferred until *after* the status
+      // persist succeeds — see below. Running them inline here would
+      // commit them even when the later scheduled_services update
+      // fails and the route returns 500, leaving customer tracking
+      // showing en-route while admin status didn't save.
     } else if (status === 'on_site') {
       updates.check_in_time = db.fn.now();
     } else if (status === 'completed') {
@@ -1104,6 +1069,26 @@ router.put('/:id/status', async (req, res, next) => {
     } catch (updateErr) {
       logger.warn(`[schedule] Full update failed, falling back to status-only: ${updateErr.message}`);
       await db('scheduled_services').where({ id: req.params.id }).update({ status });
+    }
+
+    // En-route side effects run *after* status persists. If the writes
+    // above threw, control already left via next(err) and we never get
+    // here — so the customer-facing track_state flip and SMS can't
+    // commit on a failed admin status save. markEnRoute is internally
+    // idempotent (atomic guard on track_state='scheduled', SMS guard
+    // on track_sms_sent_at) so a retry from any path is safe.
+    if (status === 'en_route') {
+      try {
+        await trackTransitions.markEnRoute(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[en-route] markEnRoute failed: ${e.message}`); }
+
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
+      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
     }
 
     // Log status change — table may not exist
