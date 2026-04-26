@@ -868,7 +868,10 @@ export default function EstimateToolViewV2({
       const when = new Date(form.scheduledAt);
       if (isNaN(when.getTime())) { alert('Invalid send time.'); return; }
       if (when <= new Date()) { alert('Send time must be in the future.'); return; }
-      scheduled = form.scheduledAt;
+      // datetime-local has no timezone; serialize the instant the user picked
+      // (browser-local) to an unambiguous ISO string so the server doesn't
+      // re-parse "2026-04-26T03:48" as UTC and reject it as already past.
+      scheduled = when.toISOString();
     }
     setSending(true);
     try {
