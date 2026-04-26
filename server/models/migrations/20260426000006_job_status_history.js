@@ -36,18 +36,18 @@
  * set above. job_status_history runs after ...004, so the mirror
  * matches the live constraint, not the historical one.
  *
- * Known mismatch: server/services/work-order-status.js defines an
- * aspirational lifecycle (scheduled, in_progress, invoiced, paid)
- * that does NOT match this CHECK or scheduled_services_status_check.
- * That file is orphaned at merge time (zero callers) and would
- * itself crash a CHECK on scheduled_services.status the moment any
- * caller invoked transition() with one of its non-canonical values.
- * Resolution tracked in:
- *   https://github.com/wavespestcontrolfl/waves-customer-portal/issues/281
- * If work-order-status.js is activated before that issue is resolved,
- * BOTH this CHECK and scheduled_services_status_check need extending
- * in lockstep — never widen one without the other or the audit
- * table can record states the source-of-truth column rejects.
+ * Historical note: an earlier sketch (`server/services/work-order-status.js`)
+ * defined an aspirational 9-value lifecycle that diverged from this
+ * CHECK and from scheduled_services_status_check. Codex flagged it
+ * during #280 review; investigation confirmed it had zero callers
+ * and was already broken against the live schema. Resolved in #281
+ * by deleting the file — service delivery and billing lifecycles
+ * stay separate (payment states belong on invoice/payment records,
+ * not on scheduled_services.status). If a future PR reintroduces a
+ * canonical-state-machine helper, BOTH this CHECK and
+ * scheduled_services_status_check need extending in lockstep —
+ * never widen one without the other or the audit table can record
+ * states the source-of-truth column rejects.
  */
 exports.up = async function (knex) {
   await knex.schema.createTable('job_status_history', (t) => {
