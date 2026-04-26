@@ -23,7 +23,7 @@ const path = require('path');
 const config = require('./config');
 const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
-const { initScheduledJobs } = require('./services/scheduler');
+const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 
 // Route imports
 const authRoutes = require('./routes/auth');
@@ -505,6 +505,10 @@ httpServer.listen(PORT, () => {
 
     if (config.nodeEnv !== 'test') {
       initScheduledJobs();
+      // Banking sync runs ungated (passive Stripe→DB mirror, no customer
+      // side effects) so payout backfill keeps working when GATE_CRON_JOBS
+      // is off. See scheduler.js for the full rationale.
+      initBankingSync();
     }
 
     // Terminal Tap to Pay: surface missing/short TERMINAL_HANDOFF_SECRET in
@@ -532,18 +536,10 @@ httpServer.listen(PORT, () => {
       logger.warn(`[pricing-engine] Initial DB sync skipped: ${err.message}`);
     }
 
-    // Sync Stripe payouts every 15 minutes
-    setInterval(async () => {
-      try {
-        const StripeBanking = require('./services/stripe-banking');
-        const result = await StripeBanking.syncPayouts(20);
-        if (result.synced > 0) {
-          logger.info(`[stripe-banking] Synced ${result.synced} new payouts`);
-        }
-      } catch (err) {
-        logger.error(`[stripe-banking] Sync failed: ${err.message}`);
-      }
-    }, 15 * 60 * 1000);
+    // Stripe payout sync runs twice daily at 8 AM and 8 PM ET via
+    // initBankingSync() — registered above outside the cron-gate so the
+    // catch-up still runs in prod when GATE_CRON_JOBS is off. Real-time
+    // updates arrive via the payout.* webhook in stripe-webhook.js.
 
     // Process unprocessed call recordings every 10 minutes (safety net)
     setInterval(async () => {

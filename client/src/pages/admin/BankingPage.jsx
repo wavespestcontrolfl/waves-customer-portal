@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { etDateString } from '../../lib/timezone';
 
@@ -35,7 +35,24 @@ function Badge({ children, color }) {
 
 function TabBtn({ active, label, onClick }) {
   return (
-    <button onClick={onClick} style={{ background: active ? D.card : 'transparent', border: active ? `1px solid ${D.border}` : '1px solid transparent', borderRadius: 8, padding: '8px 14px', color: active ? D.heading : D.muted, fontSize: 12, cursor: 'pointer', fontWeight: active ? 600 : 400, transition: 'all 0.15s', whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44 }}>
+    <button
+      onClick={onClick}
+      style={{
+        background: 'transparent',
+        border: 'none',
+        borderBottom: active ? `2px solid ${D.heading}` : '2px solid transparent',
+        borderRadius: 0,
+        padding: '12px 4px',
+        marginRight: 24,
+        color: active ? D.heading : D.muted,
+        fontSize: 14,
+        cursor: 'pointer',
+        fontWeight: active ? 500 : 400,
+        transition: 'color 0.15s, border-color 0.15s',
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
+      }}
+    >
       {label}
     </button>
   );
@@ -591,15 +608,12 @@ export default function BankingPage() {
   const [tab, setTab] = useState('payouts');
   const [balance, setBalance] = useState(null);
   const [stats, setStats] = useState(null);
-  const [syncing, setSyncing] = useState(false);
-  const [lastSync, setLastSync] = useState(null);
   const [showPayoutModal, setShowPayoutModal] = useState(false);
 
   const loadBalance = useCallback(async () => {
     try {
       const d = await adminFetch('/admin/banking/balance');
       setBalance(d);
-      if (d.last_sync) setLastSync(d.last_sync);
     } catch (e) { /* no-op */ }
   }, []);
 
@@ -612,34 +626,11 @@ export default function BankingPage() {
 
   useEffect(() => { loadBalance(); loadStats(); }, [loadBalance, loadStats]);
 
-  const handleSync = async () => {
-    setSyncing(true);
-    try {
-      const d = await adminFetch('/admin/banking/sync', { method: 'POST' });
-      setLastSync(d.synced_at || new Date().toISOString());
-      await loadBalance();
-      await loadStats();
-    } catch (e) {
-      alert('Sync failed: ' + e.message);
-    }
-    setSyncing(false);
-  };
+  // Server-side cron syncs Stripe at 8 AM and 8 PM ET (see scheduler.js).
+  // Webhooks handle real-time payout updates. No manual sync button needed.
 
-  const didAutoSync = useRef(false);
-  useEffect(() => {
-    if (didAutoSync.current) return;
-    didAutoSync.current = true;
-    (async () => {
-      setSyncing(true);
-      try {
-        const d = await adminFetch('/admin/banking/sync', { method: 'POST' });
-        setLastSync(d.synced_at || new Date().toISOString());
-        await loadBalance();
-        await loadStats();
-      } catch (e) { /* silent on auto-sync */ }
-      setSyncing(false);
-    })();
-  }, [loadBalance, loadStats]);
+  const available = balance?.total_available ?? 0;
+  const pending = balance?.total_pending ?? 0;
 
   const handlePayoutSuccess = () => {
     setShowPayoutModal(false);
@@ -650,58 +641,72 @@ export default function BankingPage() {
   return (
     <div style={{ maxWidth: 1300, margin: '0 auto' }}>
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Banking & Cash Flow</h1>
+      <h1 style={{ fontSize: 32, fontWeight: 700, color: D.heading, margin: '0 0 28px', letterSpacing: '-0.02em' }}>
+        Banking
+      </h1>
+
+      {/* Hero balance — Stripe account label, big balance, instant-payout pill */}
+      <div style={{ marginBottom: 32 }}>
+        <a
+          href="https://dashboard.stripe.com/payouts"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 13, color: D.muted, textDecoration: 'none', marginBottom: 12 }}
+        >
+          Stripe payouts <span aria-hidden style={{ fontSize: 14, lineHeight: 1 }}>›</span>
+        </a>
+        <div style={{ fontSize: isMobile ? 40 : 48, fontWeight: 700, color: D.heading, letterSpacing: '-0.03em', lineHeight: 1.1 }}>
+          {fmtM(available)}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {lastSync && (
-            <span style={{ fontSize: 11, color: D.muted }}>
-              Last sync: {new Date(lastSync).toLocaleString()}
-            </span>
-          )}
-          <button onClick={handleSync} disabled={syncing} style={{ background: D.teal, border: 'none', borderRadius: 8, padding: '8px 18px', color: '#fff', fontSize: 13, fontWeight: 600, cursor: syncing ? 'not-allowed' : 'pointer', opacity: syncing ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>
-            {syncing ? 'Syncing...' : 'Sync Stripe'}
+        <div style={{ fontSize: 14, color: D.muted, marginTop: 6 }}>
+          Available balance · Waves Pest Control
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, marginTop: 20, flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setShowPayoutModal(true)}
+            disabled={!available || available <= 0}
+            style={{
+              background: D.heading,
+              border: 'none',
+              borderRadius: 9999,
+              padding: '12px 28px',
+              color: D.white,
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: !available || available <= 0 ? 'not-allowed' : 'pointer',
+              opacity: !available || available <= 0 ? 0.4 : 1,
+              minHeight: 44,
+            }}
+          >
+            Instant Payout
           </button>
         </div>
       </div>
 
-      {/* Balance Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginBottom: 20 }}>
-        {/* Available */}
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px' }}>
-          <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Available</div>
-          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.green }}>{fmtM(balance?.available)}</div>
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 4, marginBottom: 8 }}>Ready to pay out</div>
-          <button onClick={() => setShowPayoutModal(true)} disabled={!balance?.available || balance.available <= 0} style={{ background: `${D.green}22`, border: `1px solid ${D.green}44`, borderRadius: 6, padding: '4px 10px', color: D.green, fontSize: 10, fontWeight: 600, cursor: !balance?.available || balance.available <= 0 ? 'not-allowed' : 'pointer', opacity: !balance?.available || balance.available <= 0 ? 0.4 : 1 }}>
-            Instant Payout
-          </button>
-        </div>
-
-        {/* Pending */}
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px' }}>
+      {/* Secondary metrics */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: 10, marginBottom: 28 }}>
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '14px 12px' : '16px 20px' }}>
           <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Pending</div>
-          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.amber }}>{fmtM(balance?.pending)}</div>
+          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.amber }}>{fmtM(pending)}</div>
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Processing</div>
         </div>
 
-        {/* Next Payout */}
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px' }}>
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '14px 12px' : '16px 20px' }}>
           <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Next Payout</div>
-          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.teal }}>{fmtM(balance?.next_payout?.amount)}</div>
+          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.heading }}>{fmtM(balance?.next_payout?.amount)}</div>
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{balance?.next_payout?.arrival_date ? fmtD(balance.next_payout.arrival_date) : 'No payout scheduled'}</div>
         </div>
 
-        {/* MTD Deposited */}
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '12px 10px' : '16px 20px' }}>
+        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: isMobile ? '14px 12px' : '16px 20px' }}>
           <div style={{ color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>MTD Deposited</div>
-          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.purple }}>{fmtM(stats?.mtd_deposited)}</div>
+          <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: D.heading }}>{fmtM(stats?.mtd_deposited)}</div>
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>{stats?.payout_count ?? 0} payout{(stats?.payout_count ?? 0) !== 1 ? 's' : ''} this month</div>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 16, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
+      {/* Recent activity / underline tabs */}
+      <div style={{ borderBottom: `1px solid ${D.border}`, marginBottom: 20, display: 'flex', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
         <TabBtn active={tab === 'payouts'} label="Payouts" onClick={() => setTab('payouts')} />
         <TabBtn active={tab === 'cashflow'} label="Cash Flow" onClick={() => setTab('cashflow')} />
         <TabBtn active={tab === 'reconciliation'} label="Reconciliation" onClick={() => setTab('reconciliation')} />
@@ -716,7 +721,7 @@ export default function BankingPage() {
       {/* Instant Payout Modal */}
       {showPayoutModal && (
         <InstantPayoutModal
-          available={balance?.available || 0}
+          available={available}
           onClose={() => setShowPayoutModal(false)}
           onSuccess={handlePayoutSuccess}
         />
