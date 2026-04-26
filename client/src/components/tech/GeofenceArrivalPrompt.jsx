@@ -8,6 +8,24 @@
  *
  * Mount once inside TechLayout / TechHomePage — it renders a fixed-position
  * container so the parent layout doesn't need to reserve space.
+ *
+ * Audit focus:
+ * - Polling cleanup: confirm the 10s interval is cleared on unmount and
+ *   doesn't leak across navigations / fast remounts.
+ * - Network failure: a request that fails should not halt subsequent
+ *   polls; verify the error path swallows quietly and resumes.
+ * - Notification dedupe: if the same notification id arrives twice
+ *   (server retry, late ack), do we render two cards?
+ * - Auto-dismiss timers (REMINDER_AUTODISMISS_MS, STOP_TOAST_MS): if
+ *   the user confirms / dismisses manually before the timer fires,
+ *   confirm we clear the pending timeout to avoid a late-firing
+ *   dismiss racing with a fresh notification.
+ * - Backgrounded tab behavior: when the tech's phone backgrounds the
+ *   tab, polls pause. On resume, do we catch up correctly? Skipped
+ *   notifications during the gap should still render once.
+ * - Bouncie-mileage tie-in (if any): some installs have geofence
+ *   timer events also drive mileage. Confirm a stop here doesn't
+ *   double-write the mileage record.
  */
 import { useEffect, useState, useRef, useCallback } from 'react';
 

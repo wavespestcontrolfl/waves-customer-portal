@@ -1,3 +1,44 @@
+// client/src/pages/tech/TechHomePage.jsx
+//
+// Tech portal home page (/tech). Mobile-first; the dashboard a tech
+// sees when they open the app on their phone in the field. Renders
+// the day's route, quick actions (start service, complete service,
+// mark en-route, geofence prompt acknowledge), and the
+// TechIntelligenceBar (read-only Claude-powered Q&A scoped to
+// tech-tools).
+//
+// Endpoints:
+//   GET   /api/tech/services?date=…           (today's route)
+//   PATCH /api/tech/services/:id/start        (begin service)
+//   PATCH /api/tech/services/:id/complete     (finish service)
+//   PATCH /api/tech/services/:id/skip         (skip with reason)
+//   POST  /api/tech/services/:id/en-route     (begin drive)
+//   GET   /api/tech/notifications             (geofence prompts;
+//                                              polled every 10s by
+//                                              GeofenceArrivalPrompt)
+//   POST  /api/tech/notifications/:id/ack
+//   POST  /api/tech/projects                  (CreateProjectModal save)
+//
+// Lifecycle a tech moves an appointment through:
+//   pending -> en_route -> on_site -> completed
+//                                \--> skipped (with reason)
+//
+// Mobile rule (CLAUDE.md): tech portal stays Montserrat headings +
+// dark palette ('#0f1923' bg, '#1e293b' card). DO NOT apply admin
+// monochrome or customer-facing warm-tone rules to this surface.
+//
+// Audit focus:
+// - State transitions: confirm a tech can't accidentally skip an
+//   appointment they're already on-site for, and can't complete one
+//   that hasn't been started.
+// - GeofenceArrivalPrompt polling: 10s interval. What happens on
+//   network loss / backgrounded tab? Does it stack toasts?
+// - CreateProjectModal save: photo uploads + draft save. Verify the
+//   photos make it to the server before "save as draft" returns
+//   success — silent photo failure here loses field data.
+// - Route refresh: when a service status changes, does the rest of
+//   the day's route re-fetch / re-render correctly? Stale rows are
+//   common here.
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
