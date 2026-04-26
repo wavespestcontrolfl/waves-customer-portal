@@ -7,6 +7,23 @@
 // the invoice id + total to MobilePaymentSheet, which picks the payment
 // method. Added services + discounts are sent as extraLineItems in the
 // request body (negative amounts for discounts).
+//
+// Audit focus:
+// - Discount math — TIER_DISCOUNT values are duplicated client-side from
+//   the server's WaveGuard tier table. Worth confirming this stays in
+//   sync with server/services/pricing-engine/constants.js (or refactor
+//   to fetch from the server).
+// - Charge → invoice → payment handoff: the invoice id + total are
+//   passed to MobilePaymentSheet via parent state. Confirm the parent
+//   doesn't allow re-clicking "Charge" before the first invoice POST
+//   resolves (would create duplicate invoices).
+// - extraLineItems shape: discounts go in as negative amounts. Server
+//   should validate sign + cap; verify there's no client path that
+//   could submit an unbounded negative discount.
+// - Mobile sheet stack: this sheet opens MobileServicePickerSheet and
+//   MobileItemDiscountPickerSheet as child sheets. Dismiss / re-open /
+//   ESC behavior should restore the parent's scroll position and not
+//   leak focus.
 
 import { X, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
