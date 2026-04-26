@@ -5,6 +5,47 @@ const logger = require('./logger');
 
 const WAVES_LOGO_URL = 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png';
 
+// Owner-SMS kill switch.
+//
+// 25+ places in the codebase send SMS to the operator's personal phone
+// — new-lead alerts, billing crons, BI briefings, SEO digests, missed
+// appointments, etc. — and most of them have hardcoded phone fallbacks
+// like '+19413187612' / '+19415993489' so simply unsetting env vars
+// doesn't silence them. When OWNER_SMS_DISABLED='true', sendSMS()
+// suppresses any send whose recipient matches a known owner phone.
+// Push notifications + bell entries continue normally.
+//
+// Toggleable via env var so the kill switch is reversible without a
+// deploy: set OWNER_SMS_DISABLED=true on Railway → silence; unset
+// or set to anything else → restore.
+const HARDCODED_OWNER_FALLBACKS = ['+19413187612', '+19415993489'];
+
+function normalizePhone(p) {
+  if (!p || typeof p !== 'string') return '';
+  // Strip everything except digits and a leading +. SMS recipient
+  // strings in this codebase arrive in mixed formats — env-var literals,
+  // user input, JS string concat — so canonicalize before set lookup.
+  const s = p.trim();
+  return s.startsWith('+') ? '+' + s.slice(1).replace(/\D/g, '') : s.replace(/\D/g, '');
+}
+
+function getOwnerPhoneSet() {
+  const candidates = [
+    process.env.OWNER_PHONE,
+    process.env.ADAM_PHONE,
+    process.env.ADAM_CELL,
+    process.env.WAVES_OFFICE_PHONE,
+    process.env.WAVES_ADMIN_PHONE,
+    ...HARDCODED_OWNER_FALLBACKS,
+  ];
+  return new Set(candidates.map(normalizePhone).filter(Boolean));
+}
+
+function isOwnerSmsSilenced(to) {
+  if (process.env.OWNER_SMS_DISABLED !== 'true') return false;
+  return getOwnerPhoneSet().has(normalizePhone(to));
+}
+
 // Lazy-initialize Twilio client — don't crash if creds are missing
 let _client;
 function getClient() {
@@ -72,6 +113,15 @@ const TwilioService = {
    */
   async sendSMS(to, body, options = {}) {
     try {
+      // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
+      // every send addressed to one of the operator's known phones.
+      // Push and bell still fire normally — only Twilio is silenced.
+      // See HARDCODED_OWNER_FALLBACKS / getOwnerPhoneSet above.
+      if (isOwnerSmsSilenced(to)) {
+        logger.info(`[OWNER_SMS_DISABLED] suppressed SMS to ${to}: "${body.substring(0, 60)}..." (messageType=${options.messageType || 'n/a'})`);
+        return { success: true, sid: 'owner-sms-disabled', suppressed: true };
+      }
+
       const { isEnabled } = require('../config/feature-gates');
       if (!isEnabled('twilioSms')) {
         logger.info(`[GATE BLOCKED] SMS to ${to}: "${body.substring(0, 60)}..." (gate: twilioSms)`);
