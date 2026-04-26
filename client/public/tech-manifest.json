@@ -2,7 +2,7 @@
   "name": "Waves Tech",
   "short_name": "Waves Tech",
   "description": "Waves Pest Control field portal — route, protocols, on-site estimating.",
-  "start_url": "/tech",
+  "start_url": "/tech/",
   "scope": "/tech/",
   "display": "standalone",
   "background_color": "#0f1923",

@@ -2,7 +2,7 @@
   "name": "Waves Admin",
   "short_name": "Waves Admin",
   "description": "Waves Pest Control admin portal — dispatch, customers, billing, reports.",
-  "start_url": "/admin",
+  "start_url": "/admin/",
   "scope": "/admin/",
   "display": "standalone",
   "background_color": "#FAFAFA",
