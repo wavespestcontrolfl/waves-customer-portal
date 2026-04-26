@@ -1,3 +1,37 @@
+// client/src/pages/admin/CommunicationsPage.jsx
+//
+// V1 Communications page (rendered when comms-v2 = false). Also the
+// canonical home for several reusable named exports consumed by the
+// V2 components:
+//   - ALL_NUMBERS               (the four Twilio business numbers)
+//   - NUMBER_LABEL_MAP          (number → "Bradenton" / "Sarasota" etc)
+//   - call disposition constants
+//
+// Endpoints (same as V2 — strict parity):
+//   GET   /admin/communications/log
+//   GET   /admin/communications/stats
+//   POST  /admin/communications/sms
+//   GET/POST /admin/communications/ai-auto-reply{,-status}
+//   POST  /admin/communications/ai-draft
+//   GET   /admin/communications/blocked-numbers, POST/DELETE
+//   POST  /admin/communications/schedule-sms, GET, DELETE
+//   POST  /admin/communications/attach (multipart)
+//
+// Audit focus:
+// - V1-only styling preserved for flag-off users — don't flag drift.
+// - Reusable exports: any change here also affects V2. ALL_NUMBERS /
+//   NUMBER_LABEL_MAP / disposition constants are the public API
+//   surface; touching them is a coordinated change.
+// - V1 inline-tab orchestration: all 5 tabs are inline in one big
+//   page. Confirm tab-switch doesn't re-fetch unnecessarily.
+// - Blocked-number list management: POST/DELETE need explicit
+//   confirmation gates (un-blocking spam = customer harm if wrong).
+// - SMS scheduling queue: a scheduled SMS that fires after the
+//   customer has texted STOP — is the scheduled send cancelled, or
+//   does it ship anyway and create a compliance issue?
+// - Attach endpoint (POST /attach): multipart upload then sms POST.
+//   Confirm partial upload failure cancels the send (no half-sent
+//   MMS with broken media URL).
 import { useState, useEffect, useCallback, useMemo } from 'react';
 
 import CallRecordingsPanel from './CallRecordingsPanel';
