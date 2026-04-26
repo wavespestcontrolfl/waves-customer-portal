@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodexReviewReport",
+  "description": "Structured output for Codex pre-push reviews of the Waves Customer Portal. The reviewer must return a JSON object matching this schema — nothing else.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "One-paragraph plain-English summary of the diff and the overall verdict. Must mention whether any P0 issues were found.",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "findings": {
+      "type": "array",
+      "description": "Zero or more issues identified in the diff. Empty array means no issues found at any priority.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["priority", "file", "line", "title", "description"],
+        "properties": {
+          "priority": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2"],
+            "description": "P0 = must-fix before push (security, money, data loss). P1 = should-fix soon (correctness, footgun). P2 = nit / suggestion."
+          },
+          "file": {
+            "type": "string",
+            "description": "Path relative to repo root, e.g. server/routes/pay-v2.js.",
+            "minLength": 1
+          },
+          "line": {
+            "type": ["integer", "null"],
+            "description": "1-indexed line number in the file. Null if the finding is file-wide or applies to a deletion.",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string",
+            "description": "Short headline for the finding (≤ 100 chars).",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "description": {
+            "type": "string",
+            "description": "What is wrong, why it matters, and what to change. Reference the AGENTS.md rule when applicable.",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

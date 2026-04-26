@@ -26,7 +26,9 @@
     "models:check": "node scripts/check-models.js",
     "seed:pricing": "node scripts/seed-local-pricing.js",
     "verify:blog-schema": "node packages/blog-schema/scripts/verify-vendor.js",
-    "sync:blog-schema": "node packages/blog-schema/scripts/sync-from-astro.js"
+    "sync:blog-schema": "node packages/blog-schema/scripts/sync-from-astro.js",
+    "prepare": "git config core.hooksPath scripts/hooks 2>/dev/null || true",
+    "hooks:install": "git config core.hooksPath scripts/hooks"
   },
   "engines": {
     "node": ">=20"

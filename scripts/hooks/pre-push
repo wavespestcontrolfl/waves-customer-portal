@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# Codex pre-push auditor for waves-customer-portal.
+#
+# This file is tracked in the repo. `npm install` runs the `prepare` script
+# in package.json, which points `core.hooksPath` at scripts/hooks/, so this
+# hook is what git actually executes. To wire it manually:
+#
+#   git config core.hooksPath scripts/hooks
+#
+# Reads the per-ref tuples git pipes on stdin
+# ("<local_ref> <local_sha> <remote_ref> <remote_sha>"), audits each
+# pushed local_sha against CODEX_REVIEW_BASE, parses structured findings,
+# and blocks the push if any ref produces a P0 issue. P1 issues print a
+# warning but allow the push. Multi-ref pushes are aggregated; identical
+# SHAs are deduped so the same diff isn't audited twice.
+#
+# Escape hatches:
+#   SKIP_CODEX_REVIEW=1 git push       — bypass entirely
+#   CODEX_REVIEW_BASE=origin/foo       — review against a non-default base
+#
+# Failure policy: if Codex itself errors, the network is down, or jq is
+# missing, the hook prints a warning and exits 0. We do NOT want infra
+# flakiness to block pushes — this auditor is advisory backup, not a gate.
+
+set -u
+
+# ── Escape hatch ─────────────────────────────────────────────────────────
+if [ "${SKIP_CODEX_REVIEW:-0}" = "1" ]; then
+  echo "[codex-review] SKIP_CODEX_REVIEW=1 set — skipping audit." >&2
+  exit 0
+fi
+
+# ── Parse stdin ref tuples ───────────────────────────────────────────────
+# Git pipes one line per ref to stdin: "<local_ref> <local_sha> <remote_ref> <remote_sha>".
+# Capture every tuple up front so we can decide what to audit.
+ZERO_SHA="0000000000000000000000000000000000000000"
+ANY_REFS=0
+HAS_NON_DELETE=0
+# Parallel arrays: REF_LABELS[i] is human-readable, REF_SHAS[i] is what we audit.
+REF_LABELS=()
+REF_SHAS=()
+SEEN_SHAS=" "
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  ANY_REFS=1
+  if [ -z "${local_sha:-}" ] || [ "$local_sha" = "$ZERO_SHA" ]; then
+    continue
+  fi
+  HAS_NON_DELETE=1
+  # Dedupe by SHA — multiple refs can point at the same commit.
+  case "$SEEN_SHAS" in
+    *" $local_sha "*) continue ;;
+  esac
+  SEEN_SHAS="$SEEN_SHAS$local_sha "
+  REF_LABELS+=("${local_ref:-?}")
+  REF_SHAS+=("$local_sha")
+done
+
+if [ "$ANY_REFS" = "1" ] && [ "$HAS_NON_DELETE" = "0" ]; then
+  echo "[codex-review] delete-only push — skipping audit." >&2
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$REPO_ROOT" ]; then
+  echo "[codex-review] not in a git repo — skipping." >&2
+  exit 0
+fi
+cd "$REPO_ROOT"
+
+# Fallback: nothing piped on stdin (some tooling invokes hooks this way).
+# Audit HEAD as a best-effort approximation.
+if [ "${#REF_SHAS[@]}" -eq 0 ]; then
+  HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "$HEAD_SHA" ]; then
+    echo "[codex-review] no refs on stdin and no HEAD — skipping." >&2
+    exit 0
+  fi
+  REF_LABELS+=("HEAD")
+  REF_SHAS+=("$HEAD_SHA")
+fi
+
+BASE="${CODEX_REVIEW_BASE:-origin/main}"
+SCHEMA=".github/codex-review-schema.json"
+AGENTS_MD="AGENTS.md"
+
+# ── Preflight: required tools / files ────────────────────────────────────
+warn_and_pass() {
+  echo "[codex-review] $1" >&2
+  echo "[codex-review] push allowed (advisory check skipped)." >&2
+  exit 0
+}
+
+command -v codex >/dev/null 2>&1 || warn_and_pass "codex CLI not found on PATH — install with: npm i -g @openai/codex"
+command -v jq    >/dev/null 2>&1 || warn_and_pass "jq not found on PATH — install with: brew install jq"
+[ -f "$SCHEMA" ]    || warn_and_pass "missing $SCHEMA"
+[ -f "$AGENTS_MD" ] || warn_and_pass "missing $AGENTS_MD"
+
+# ── Resolve base ref ─────────────────────────────────────────────────────
+if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+  warn_and_pass "base ref '$BASE' not found locally — try: git fetch origin"
+fi
+
+# ── Per-ref audit ────────────────────────────────────────────────────────
+TMPDIR_RUN="$(mktemp -d -t codex-review.XXXXXX)"
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+
+P0_TOTAL=0
+P1_TOTAL=0
+AUDITED=0
+
+for i in "${!REF_SHAS[@]}"; do
+  AUDIT_SHA="${REF_SHAS[$i]}"
+  AUDIT_LABEL="${REF_LABELS[$i]}"
+  SHORT_SHA="${AUDIT_SHA:0:10}"
+
+  # Verify the SHA is locally reachable. If not (rare — would mean git is
+  # pushing something we don't have an object for), skip rather than crash.
+  if ! git cat-file -e "$AUDIT_SHA" 2>/dev/null; then
+    echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): SHA not locally reachable — skipping this ref." >&2
+    continue
+  fi
+
+  DIFF="$(git diff --no-color "$BASE...$AUDIT_SHA" 2>/dev/null)"
+  if [ -z "$DIFF" ]; then
+    echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): no changes vs $BASE — skipping." >&2
+    continue
+  fi
+
+  CHANGED_FILES="$(git diff --name-only "$BASE...$AUDIT_SHA" 2>/dev/null)"
+  DIFF_BYTES="$(printf '%s' "$DIFF" | wc -c | tr -d ' ')"
+  FILE_COUNT="$(printf '%s\n' "$CHANGED_FILES" | wc -l | tr -d ' ')"
+
+  OUT_FILE="$TMPDIR_RUN/findings-$i.json"
+  PROMPT_FILE="$TMPDIR_RUN/prompt-$i.txt"
+
+  {
+    echo "You are a senior engineer reviewing a pre-push diff for the waves-customer-portal monorepo."
+    echo "Repo guidelines and Waves-specific P0/P1 rules live in AGENTS.md at the repo root — read it before reviewing."
+    echo "CLAUDE.md also has tech-stack context if you need it."
+    echo ""
+    echo "Your job: audit the diff below for correctness, security, and Waves-specific footguns."
+    echo "Focus areas (non-exhaustive — see AGENTS.md for the full list):"
+    echo "  • Stripe webhook signature verification + idempotency"
+    echo "  • Payment surcharge / fee math (cents-integer, no float drift)"
+    echo "  • Terminal handoff token mint/burn semantics (jti must be single-use)"
+    echo "  • America/New_York timezone handling — no naive Date math on Railway (UTC server)"
+    echo "  • Knex parameterization — no string-interpolated SQL via db.raw"
+    echo "  • PII in logs (phone, email, address, full card numbers)"
+    echo "  • Auth middleware on /api/admin/* and /api/internal/* routes"
+    echo "  • Hardcoded Anthropic model IDs (must use FLAGSHIP/WORKHORSE/FAST from server/config/models.js)"
+    echo "  • References to retired tools: Square, Zapier, Make, Elementor, NitroPack, RankMath"
+    echo ""
+    echo "Output: JSON matching the provided schema. Cite file:line for every finding."
+    echo "Priorities:"
+    echo "  P0 = must fix before push (security, money correctness, data loss, auth bypass)"
+    echo "  P1 = should fix soon (correctness bug, footgun, missing guardrail)"
+    echo "  P2 = nit / suggestion (skip unless meaningful)"
+    echo ""
+    echo "Be terse. No P2 spam. If the diff is clean, return findings: []."
+    echo ""
+    echo "── Pushed ref ─────────────────────────────────────────────────────"
+    echo "$AUDIT_LABEL → $AUDIT_SHA"
+    echo ""
+    echo "── Changed files ──────────────────────────────────────────────────"
+    printf '%s\n' "$CHANGED_FILES"
+    echo ""
+    echo "── Diff ($AUDIT_LABEL @ $SHORT_SHA vs $BASE, $DIFF_BYTES bytes) ────"
+    printf '%s\n' "$DIFF"
+  } > "$PROMPT_FILE"
+
+  echo "[codex-review] auditing $AUDIT_LABEL ($SHORT_SHA): $FILE_COUNT file(s) vs ${BASE}…" >&2
+
+  if ! codex exec \
+        --sandbox read-only \
+        --skip-git-repo-check \
+        --output-schema "$SCHEMA" \
+        --output-last-message "$OUT_FILE" \
+        - \
+        < "$PROMPT_FILE" >"$TMPDIR_RUN/codex-$i.stdout" 2>"$TMPDIR_RUN/codex-$i.stderr"; then
+    echo "[codex-review] codex exec failed for $AUDIT_LABEL:" >&2
+    sed -n '1,40p' "$TMPDIR_RUN/codex-$i.stderr" >&2
+    warn_and_pass "codex infra failure — push allowed."
+  fi
+
+  if [ ! -s "$OUT_FILE" ]; then
+    warn_and_pass "codex produced no output for $AUDIT_LABEL — push allowed."
+  fi
+
+  if ! jq empty "$OUT_FILE" >/dev/null 2>&1; then
+    echo "[codex-review] codex output for $AUDIT_LABEL is not valid JSON:" >&2
+    sed -n '1,20p' "$OUT_FILE" >&2
+    warn_and_pass "unparseable output — push allowed."
+  fi
+
+  AUDITED=$((AUDITED + 1))
+  SUMMARY="$(jq -r '.summary // "(no summary)"' "$OUT_FILE")"
+  P0_COUNT="$(jq '[.findings[]? | select(.priority=="P0")] | length' "$OUT_FILE")"
+  P1_COUNT="$(jq '[.findings[]? | select(.priority=="P1")] | length' "$OUT_FILE")"
+  P0_TOTAL=$((P0_TOTAL + P0_COUNT))
+  P1_TOTAL=$((P1_TOTAL + P1_COUNT))
+
+  echo "" >&2
+  echo "──────── Codex Review · $AUDIT_LABEL ($SHORT_SHA) ──────────────────" >&2
+  echo "$SUMMARY" >&2
+  echo "" >&2
+  echo "P0: $P0_COUNT  ·  P1: $P1_COUNT" >&2
+  echo "───────────────────────────────────────────────────────────────────" >&2
+
+  if [ "$P0_COUNT" -gt 0 ]; then
+    echo "" >&2
+    echo "P0 findings:" >&2
+    jq -r '.findings[] | select(.priority=="P0") |
+      "  • \(.file)\(if .line then ":" + (.line|tostring) else "" end) — \(.title)\n      \(.description)"' \
+      "$OUT_FILE" >&2
+  fi
+
+  if [ "$P1_COUNT" -gt 0 ]; then
+    echo "" >&2
+    echo "P1 findings:" >&2
+    jq -r '.findings[] | select(.priority=="P1") |
+      "  • \(.file)\(if .line then ":" + (.line|tostring) else "" end) — \(.title)\n      \(.description)"' \
+      "$OUT_FILE" >&2
+  fi
+done
+
+# ── Aggregate verdict ────────────────────────────────────────────────────
+echo "" >&2
+if [ "$AUDITED" -eq 0 ]; then
+  echo "[codex-review] no auditable refs — push allowed." >&2
+  exit 0
+fi
+
+echo "──────── Aggregate ($AUDITED ref(s) audited) ──────────────────────" >&2
+echo "P0 total: $P0_TOTAL  ·  P1 total: $P1_TOTAL" >&2
+echo "───────────────────────────────────────────────────────────────────" >&2
+
+if [ "$P0_TOTAL" -gt 0 ]; then
+  echo "" >&2
+  echo "[codex-review] blocking push — fix the P0 issues above, or bypass with SKIP_CODEX_REVIEW=1 git push." >&2
+  exit 1
+fi
+
+if [ "$P1_TOTAL" -gt 0 ]; then
+  echo "[codex-review] push allowed with P1 warnings." >&2
+else
+  echo "[codex-review] clean — push allowed." >&2
+fi
+exit 0
