@@ -449,63 +449,30 @@ const httpServer = http.createServer(app);
 const { attachSockets } = require('./sockets');
 const io = attachSockets(httpServer);
 
-// Start listening FIRST (so Railway health check passes), then run migrations
+// Migrations are NOT run from this process. They run as Railway's
+// release command (railway.toml: releaseCommand = "npm run db:migrate")
+// — once per deploy, fail-fast: if migrate:latest exits non-zero,
+// Railway rejects the deploy and the previous version stays live.
+// Per-boot in-process migration was the old pattern (issue #286);
+// it ran every container start, raced concurrent boots, and the
+// retry loop's swallow list (`already exists`, `duplicate key`,
+// `current transaction is aborted`) could mask real schema drift
+// without anyone noticing. If you're seeing migration failures, look
+// at the Railway deploy log, not the boot log.
+//
+// Local dev: root package.json has `predev = npm run db:migrate`,
+// so `npm run dev` still auto-migrates against the local DB. Run
+// `npm run db:migrate` manually if you want to migrate without
+// starting the dev server.
 httpServer.listen(PORT, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
 
-  // Run migrations in the background after the server is accepting requests
   const dbUrl = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL || process.env.POSTGRES_URL;
   logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET'}`);
 
   (async () => {
-    try {
-      const knex = require('./models/db');
-      logger.info('Running database migrations...');
-      const migConfig = { directory: path.join(__dirname, 'models', 'migrations') };
-
-      // Wrap migrations in a timeout so they don't block startup forever
-      const migrationPromise = (async () => {
-        let migrationAttempts = 0;
-        const maxSkips = 15;
-        while (migrationAttempts < maxSkips) {
-          try {
-            await knex.migrate.latest(migConfig);
-            logger.info('Migrations complete');
-            return;
-          } catch (migErr) {
-            migrationAttempts++;
-            const msg = migErr.message || '';
-            if (msg.includes('already exists') || msg.includes('duplicate key') || msg.includes('current transaction is aborted')) {
-              logger.warn(`Migration ${migrationAttempts} skip: ${msg.substring(0, 100)}`);
-              try {
-                const [, pending] = await knex.migrate.list(migConfig);
-                if (!pending.length) { logger.info('No more pending migrations'); return; }
-                const f = pending[0]; const migName = typeof f === 'string' ? f : (f.file || f.name);
-                await knex('knex_migrations').insert({
-                  name: migName,
-                  batch: ((await knex('knex_migrations').max('batch as b').first())?.b || 0) + 1,
-                  migration_time: new Date(),
-                }).catch(() => {});
-              } catch (e) { logger.error(`Skip failed: ${e.message?.substring(0, 80)}`); return; }
-            } else {
-              logger.error(`Migration failed: ${msg.substring(0, 150)}`);
-              return;
-            }
-          }
-        }
-      })();
-
-      // Don't let migrations block startup for more than 30s
-      await Promise.race([
-        migrationPromise,
-        new Promise(resolve => setTimeout(() => { logger.warn('Migration timeout (30s) — continuing startup'); resolve(); }, 30000)),
-      ]);
-    } catch (err) {
-      logger.error(`Migration setup failed: ${err.message}`);
-    }
-
     if (config.nodeEnv !== 'test') {
       initScheduledJobs();
       // Banking sync runs ungated (passive Stripe→DB mirror, no customer
