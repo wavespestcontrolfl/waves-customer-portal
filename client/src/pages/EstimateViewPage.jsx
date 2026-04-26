@@ -19,6 +19,20 @@
  *   paymentPreference    — 'deposit_now' | 'pay_at_visit' | null
  *   countdownSeconds     — derived from reservation.expiresAt
  *
+ * Recent integration notes (post #254):
+ * - First-visit fees stack: pricing.firstVisitFees (array) replaced the
+ *   single-slot pricing.setupFee. Renders one card per fee; the
+ *   "Waived when you prepay the year upfront" caption only shows on
+ *   entries with waivedWithPrepay=true. The legacy setupFee field is
+ *   kept populated server-side for back-compat with cached older
+ *   client builds (~line 552 fallback).
+ * - PaymentPreferenceButtons still receives `setupFee` (the singular)
+ *   for the prepay-savings badge — the third "Pay the year upfront"
+ *   button only renders when a waivable fee is present.
+ * - Customer-facing brand styling here (warm tone, gold pill, mascot,
+ *   Luckiest Guy / Baloo 2) per CLAUDE.md design brief — do NOT
+ *   apply admin monochrome rules to this surface.
+ *
  * Matches PayPage / TrackPage convention: inline styles + W palette,
  * mobile-first stacked layout, two-column desktop via grid.
  */
