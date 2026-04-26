@@ -121,17 +121,20 @@ const PEST = {
   // tier their initial fees by home size). German is materially harder than
   // palmetto — heavier product rotation, longer visit, requires follow-up
   // visits to break the breeding cycle — so it carries a higher scale.
-  // Brackets are upper bounds: < first sqft → first price, < second sqft →
-  // second price, else third.
+  // Brackets are EXCLUSIVE upper bounds with the bracket finder using
+  // `footprint < sqft`. Mid-tier upper is 2501 (not 2500) so an
+  // exactly-2,500 sf footprint lands in the mid tier — the docstring above
+  // says "1,500 – 2,500" is inclusive on both ends. Keep this in mind if
+  // you re-tune via the admin Pricing Logic panel.
   pestInitialRoach: {
     regular: [
       { sqft: 1500, price: r(119) },
-      { sqft: 2500, price: r(139) },
+      { sqft: 2501, price: r(139) },
       { sqft: Infinity, price: r(169) },
     ],
     german: [
       { sqft: 1500, price: r(169) },
-      { sqft: 2500, price: r(199) },
+      { sqft: 2501, price: r(199) },
       { sqft: Infinity, price: r(249) },
     ],
   },
@@ -545,6 +548,13 @@ const WAVEGUARD = {
     // it here stops the orchestrator discount loop from applying the 15% rc
     // perk a second time on the already-discounted $85.
     german_roach_initial: true,
+    // pest_initial_roach is a non-waivable first-visit cost-recovery charge
+    // (auto-fired when recurring pest is booked with a non-none roachType).
+    // The whole point is to recover the heavier visit-1 product + labor
+    // regardless of churn, so the recurring-customer 15% perk must NOT
+    // apply — otherwise the fee is silently discounted in exactly the case
+    // where we need full capture.
+    pest_initial_roach: true,
   },
   // One-time service perk for recurring customers. Flat 15% off one-time
   // services only. Does NOT stack with WaveGuard tier discount (recurring
