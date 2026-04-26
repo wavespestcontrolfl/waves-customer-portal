@@ -889,22 +889,12 @@ router.put('/:id/status', async (req, res, next) => {
     if (status === 'confirmed') {
       updates.customer_confirmed = true;
     } else if (status === 'en_route') {
-      // Customer-visible track_state + en-route SMS (with track link) are
-      // owned by services/track-transitions. Same helper admin-dispatch
-      // calls — keeps the state machine canonical and the SMS idempotent
-      // via track_sms_sent_at.
-      try {
-        await trackTransitions.markEnRoute(svc.id, {
-          actorType: 'admin',
-          actorId: req.technicianId,
-        });
-      } catch (e) { logger.error(`[en-route] markEnRoute failed: ${e.message}`); }
-
-      // In-app notification: technician en route
-      try {
-        const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
-      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
+      // Side effects (track_state flip, customer SMS with track link,
+      // in-app notification) are deferred until *after* the status
+      // persist succeeds — see below. Running them inline here would
+      // commit them even when the later scheduled_services update
+      // fails and the route returns 500, leaving customer tracking
+      // showing en-route while admin status didn't save.
     } else if (status === 'on_site') {
       updates.check_in_time = db.fn.now();
     } else if (status === 'completed') {
@@ -1079,6 +1069,26 @@ router.put('/:id/status', async (req, res, next) => {
     } catch (updateErr) {
       logger.warn(`[schedule] Full update failed, falling back to status-only: ${updateErr.message}`);
       await db('scheduled_services').where({ id: req.params.id }).update({ status });
+    }
+
+    // En-route side effects run *after* status persists. If the writes
+    // above threw, control already left via next(err) and we never get
+    // here — so the customer-facing track_state flip and SMS can't
+    // commit on a failed admin status save. markEnRoute is internally
+    // idempotent (atomic guard on track_state='scheduled', SMS guard
+    // on track_sms_sent_at) so a retry from any path is safe.
+    if (status === 'en_route') {
+      try {
+        await trackTransitions.markEnRoute(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[en-route] markEnRoute failed: ${e.message}`); }
+
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
+      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
     }
 
     // Log status change — table may not exist
