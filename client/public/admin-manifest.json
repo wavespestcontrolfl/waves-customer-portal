@@ -1,0 +1,21 @@
+{
+  "name": "Waves Admin",
+  "short_name": "Waves Admin",
+  "description": "Waves Pest Control admin portal — dispatch, customers, billing, reports.",
+  "start_url": "/admin/",
+  "scope": "/admin/",
+  "display": "standalone",
+  "background_color": "#FAFAFA",
+  "theme_color": "#18181B",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "/waves-logo.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/waves-logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "categories": ["business", "productivity"],
+  "shortcuts": [
+    { "name": "Dashboard", "url": "/admin/dashboard", "description": "Today's KPIs and alerts" },
+    { "name": "Schedule", "url": "/admin/schedule", "description": "Daily dispatch board" },
+    { "name": "Customers", "url": "/admin/customers", "description": "Customer directory" }
+  ]
+}

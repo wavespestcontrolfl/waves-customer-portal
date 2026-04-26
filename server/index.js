@@ -336,6 +336,50 @@ app.get('/api/health', (req, res) => {
 
 if (config.nodeEnv === 'production') {
   const clientBuild = path.join(__dirname, '..', 'client', 'dist');
+  const fs = require('fs');
+
+  // Per-section PWA shape. /admin and /tech each install as their own
+  // home-screen icon with their own name/manifest/start_url, instead of
+  // every install path inheriting the customer-portal label. iOS reads
+  // <link rel="manifest"> + <title> + apple-mobile-web-app-title at
+  // install time, so swapping all three based on URL prefix is enough.
+  //
+  // Add new sections here if a future surface needs its own PWA.
+  const SECTIONS = [
+    {
+      prefix: '/admin',
+      manifest: '/admin-manifest.json',
+      title: 'Waves Admin',
+      appleTitle: 'Waves Admin',
+      themeColor: '#18181B',
+    },
+    {
+      prefix: '/tech',
+      manifest: '/tech-manifest.json',
+      title: 'Waves Tech',
+      appleTitle: 'Waves Tech',
+      themeColor: '#0ea5e9',
+    },
+  ];
+  function pickSection(reqPath) {
+    return SECTIONS.find((s) => reqPath === s.prefix || reqPath.startsWith(s.prefix + '/')) || null;
+  }
+  function renderHTML(reqPath) {
+    // Read fresh each call — index.html is small (~3KB) and the
+    // surrounding handlers are already no-cache, so fresh reads keep
+    // deploys snappy without a stale-cache footgun.
+    let html = fs.readFileSync(path.join(clientBuild, 'index.html'), 'utf8');
+    const section = pickSection(reqPath);
+    if (!section) return html;
+    html = html
+      .replace(/href="\/manifest\.json"/, `href="${section.manifest}"`)
+      .replace(/<title>[^<]*<\/title>/, `<title>${section.title}</title>`)
+      .replace(/<meta name="apple-mobile-web-app-title" content="[^"]*"/,
+               `<meta name="apple-mobile-web-app-title" content="${section.appleTitle}"`)
+      .replace(/<meta name="theme-color" content="[^"]*"/,
+               `<meta name="theme-color" content="${section.themeColor}"`);
+    return html;
+  }
 
   // Never cache sw.js or index.html — ensures deploys are picked up immediately
   app.get('/sw.js', (req, res) => {
@@ -346,7 +390,8 @@ if (config.nodeEnv === 'production') {
   app.get('/', (req, res, next) => {
     if (req.accepts('html')) {
       res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-      return res.sendFile(path.join(clientBuild, 'index.html'));
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      return res.send(renderHTML(req.path));
     }
     next();
   });
@@ -362,11 +407,14 @@ if (config.nodeEnv === 'production') {
     },
   }));
 
-  // SPA fallback — serve index.html for all non-API routes
+  // SPA fallback — serve index.html for all non-API routes, with the
+  // per-section title/manifest swap so /admin and /tech install as
+  // their own PWAs.
   app.get('*', (req, res) => {
     if (!req.path.startsWith('/api')) {
       res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.sendFile(path.join(clientBuild, 'index.html'));
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderHTML(req.path));
     }
   });
 }

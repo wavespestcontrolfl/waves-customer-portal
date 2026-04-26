@@ -1,0 +1,20 @@
+{
+  "name": "Waves Tech",
+  "short_name": "Waves Tech",
+  "description": "Waves Pest Control field portal — route, protocols, on-site estimating.",
+  "start_url": "/tech/",
+  "scope": "/tech/",
+  "display": "standalone",
+  "background_color": "#0f1923",
+  "theme_color": "#0ea5e9",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "/waves-logo.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/waves-logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "categories": ["business", "utilities"],
+  "shortcuts": [
+    { "name": "Today's Route", "url": "/tech", "description": "Today's stops" },
+    { "name": "Field Estimator", "url": "/tech/estimate", "description": "Quick on-site estimates" }
+  ]
+}
