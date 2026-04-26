@@ -139,6 +139,55 @@ function pricePestControl(property, options = {}) {
 }
 
 // ============================================================
+// PEST — INITIAL ROACH KNOCKDOWN (one-time)
+// ============================================================
+// Auto-added by estimate-engine when recurring pest is booked with a
+// non-none roach type. Covers the heavier visit-1 treatment cost
+// regardless of whether the customer keeps the recurring program —
+// closes the adverse-selection gap left by the old multiplicative
+// roachModifier (which only paid back after ~3 visits).
+//
+// Sliding scale by footprint and species — German is materially harder
+// than palmetto (longer visit, more product, multi-visit follow-up).
+// The dedicated `priceGermanRoach` ($450+ multi-visit cleanout) is
+// still available for severe colonies; this is the auto-fire for the
+// everyday "I saw one or two" case.
+function pricePestInitialRoach(property, options = {}) {
+  const { roachType = 'none' } = options;
+  if (roachType === 'none') return null;
+
+  const scale = PEST.pestInitialRoach?.[roachType];
+  if (!Array.isArray(scale) || scale.length === 0) return null;
+  const footprint = property?.footprint || 0;
+  const bracket = scale.find((b) => footprint < b.sqft) || scale[scale.length - 1];
+  const price = bracket.price;
+
+  // Cost detail mirrors pricePestControl's costing block so the margin
+  // panel can reason about the fee. Visit-1 burden estimate: heavier
+  // chemical rotation + extra on-site labor at GLOBAL.LABOR_RATE.
+  const extraMaterial = roachType === 'german' ? 25 : 20;
+  const extraOnSiteMin = roachType === 'german' ? 25 : 15;
+  const extraLabor = GLOBAL.LABOR_RATE * extraOnSiteMin / 60;
+  const incrementalCost = extraMaterial + extraLabor;
+  const margin = price > 0 ? (price - incrementalCost) / price : 0;
+
+  return {
+    service: 'pest_initial_roach',
+    label: roachType === 'german' ? 'Initial German Roach Knockdown' : 'Initial Palmetto Knockdown',
+    price,
+    roachType,
+    oneTime: true,
+    footprintBracket: bracket.sqft === Infinity ? '2500+' : `<${bracket.sqft}`,
+    costs: {
+      extraMaterial,
+      extraLaborMin: extraOnSiteMin,
+      incrementalCost: Math.round(incrementalCost * 100) / 100,
+    },
+    margin: Math.round(margin * 1000) / 1000,
+  };
+}
+
+// ============================================================
 // LAWN CARE
 // ============================================================
 function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
@@ -1156,7 +1205,7 @@ function calculateRodentGuaranteeCombo(config = {}) {
 }
 
 module.exports = {
-  pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,

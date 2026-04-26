@@ -109,11 +109,35 @@ const PEST = {
     nearWater: r(5),            // Was 2.5.
     largeDriveway: r(5),        // Was 2.5.
   },
-  // Session 11a Step 2b-3 byte-parity: v1 flattened from 0.25/0.10 to 0.15/0.15
-  // to match v2's currently-live rate (pricing-engine-v2.js:742-744). Customer-
-  // impact scan showed zero live estimates priced with roach modifier when this
-  // landed, so no existing customer pricing shifted.
-  roachModifier: { german: 0.15, regular: 0.15, none: 0 },
+  // Multiplicative roach modifier zeroed out (was 0.15 across the board) —
+  // we now charge a one-time `pestInitialRoach` line item on visit 1 instead,
+  // so we recover the heavier-knockdown product + labor cost regardless of
+  // whether the customer churns after the first visit. Keys stay in place so
+  // any caller passing roachType doesn't break.
+  roachModifier: { german: 0, regular: 0, none: 0 },
+  // One-time "Initial Knockdown" treatments auto-added when recurring pest is
+  // booked with a non-none roach type. Sliding scale by footprint matches
+  // industry-standard pricing patterns (Terminix / Orkin / Truly Nolen all
+  // tier their initial fees by home size). German is materially harder than
+  // palmetto — heavier product rotation, longer visit, requires follow-up
+  // visits to break the breeding cycle — so it carries a higher scale.
+  // Brackets are EXCLUSIVE upper bounds with the bracket finder using
+  // `footprint < sqft`. Mid-tier upper is 2501 (not 2500) so an
+  // exactly-2,500 sf footprint lands in the mid tier — the docstring above
+  // says "1,500 – 2,500" is inclusive on both ends. Keep this in mind if
+  // you re-tune via the admin Pricing Logic panel.
+  pestInitialRoach: {
+    regular: [
+      { sqft: 1500, price: r(119) },
+      { sqft: 2501, price: r(139) },
+      { sqft: Infinity, price: r(169) },
+    ],
+    german: [
+      { sqft: 1500, price: r(169) },
+      { sqft: 2501, price: r(199) },
+      { sqft: Infinity, price: r(249) },
+    ],
+  },
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
     // Session 11a byte-parity: v1 lowered from 0.92/0.85 to 0.85/0.70 to match
@@ -524,6 +548,13 @@ const WAVEGUARD = {
     // it here stops the orchestrator discount loop from applying the 15% rc
     // perk a second time on the already-discounted $85.
     german_roach_initial: true,
+    // pest_initial_roach is a non-waivable first-visit cost-recovery charge
+    // (auto-fired when recurring pest is booked with a non-none roachType).
+    // The whole point is to recover the heavier visit-1 product + labor
+    // regardless of churn, so the recurring-customer 15% perk must NOT
+    // apply — otherwise the fee is silently discounted in exactly the case
+    // where we need full capture.
+    pest_initial_roach: true,
   },
   // One-time service perk for recurring customers. Flat 15% off one-time
   // services only. Does NOT stack with WaveGuard tier discount (recurring

@@ -22,6 +22,9 @@ const ONE_TIME_SERVICES = new Set([
   // Session 11a Step 2b-3: auto-fire from recurring pest roachModifier='GERMAN'.
   // Mirrors v2-legacy-mapper treating oneTime.germanRoachInitial as a one-time item.
   'german_roach_initial',
+  // Auto-fired by estimate-engine when recurring pest carries roachType !== 'none'.
+  // Surfaces in the customer-facing estimate's first-visit-fees stack.
+  'pest_initial_roach',
 ]);
 
 const CAP = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -43,6 +46,7 @@ const SERVICE_LABEL = {
   flea: 'Flea Treatment',
   german_roach: 'German Roach',
   german_roach_initial: 'German Roach Initial (3-Visit)',
+  pest_initial_roach: 'Initial Roach Knockdown',
   stinging: 'Stinging Insect',
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
@@ -189,11 +193,19 @@ function mapV1ToLegacyShape(v1Result) {
   const v1SpecItems = [];
   lineItems.forEach(li => {
     if (RECURRING_SERVICES.has(li.service)) return;
-    const name = labelFor(li.service);
+    // Prefer the engine's own label when present (e.g. pest_initial_roach
+    // emits 'Initial Palmetto Knockdown' vs 'Initial German Roach Knockdown'
+    // — SERVICE_LABEL flattens both to a generic name and would drop the
+    // species distinction). Fall back to the SERVICE_LABEL map for legacy
+    // services that don't set a label themselves.
+    const name = li.label || labelFor(li.service);
     const price = li.price || 0;
     const detail = li.detail || '';
     if (ONE_TIME_SERVICES.has(li.service)) {
-      const item = { name, price, detail };
+      // Preserve `service` on the mapped item so consumers can match by
+      // canonical key (e.g. estimate-public's findInitialRoachItem) without
+      // depending on display labels that may be re-translated downstream.
+      const item = { service: li.service, name, price, detail };
       if (li.spacing !== undefined) item.spacing = li.spacing;
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;
@@ -201,7 +213,7 @@ function mapV1ToLegacyShape(v1Result) {
       if (li.service === 'trenching') R.trench = true;
     } else {
       v1SpecItems.push({
-        name, price, det: detail,
+        service: li.service, name, price, det: detail,
         onProg: !!li.includedOnProgram,
       });
     }

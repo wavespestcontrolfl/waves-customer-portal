@@ -7,7 +7,7 @@ const { GLOBAL, WAVEGUARD, ZONES, URGENCY, SPECIALTY } = require('./constants');
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes, zoneMultiplier } = require('./modifiers');
 const {
-  pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
@@ -111,6 +111,16 @@ function generateEstimate(input) {
     }
     lineItems.push(result);
     activeServiceKeys.push('pest_control');
+
+    // Auto-add the one-time Initial Roach Knockdown when recurring pest is
+    // booked with a non-none roach type. Recovers the heavier visit-1 cost
+    // upfront — replaces the old multiplicative roachModifier (now zeroed)
+    // which only paid back if the customer stayed past visit ~3.
+    const roachTypeRaw = (services.pest.roachType || 'none').toLowerCase();
+    if (roachTypeRaw !== 'none') {
+      const initialRoach = pricePestInitialRoach(property, { roachType: roachTypeRaw });
+      if (initialRoach) lineItems.push(initialRoach);
+    }
   }
 
   // Lawn Care
