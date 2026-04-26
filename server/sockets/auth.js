@@ -40,9 +40,10 @@
  *   window because admin-auth.js does the DB lookup per request;
  *   Socket.io must do the same at the gate or the channel leaks.
  *
- *   Customer tokens still skip the DB lookup. Customer rooms aren't
- *   in this PR — the symmetric customer freshness check lands when
- *   customer:job_update introduces customer-room scoping.
+ *   Customer rooms (customer:<id>) arrived alongside customer:job_update.
+ *   The customer path now does its own DB lookup against the customers
+ *   table for the active flag, mirroring the staff freshness check.
+ *   Same closed-fail posture on DB error.
  *
  * Role downgrade is checked too: if the JWT claims role='admin' but
  * the DB row says role='technician' (demoted), we reject. The JWT's
@@ -137,9 +138,28 @@ async function socketAuth(socket, next) {
   }
 
   if (decoded.customerId) {
-    // No DB lookup yet — customer rooms don't exist in this PR. When
-    // customer:job_update introduces customer-room scoping, mirror the
-    // staff freshness check here against the customers table.
+    // Symmetric freshness check with the staff path. Customer rooms
+    // arrive in this PR (customer:<id>); without a DB lookup, a
+    // deactivated customer's still-valid JWT can stay subscribed to
+    // their customer:<id> room and continue receiving job updates.
+    // HTTP middleware (server/middleware/auth.js) already does this
+    // lookup per request — Socket.io must do the same at the gate.
+    let customer;
+    try {
+      customer = await db('customers')
+        .where({ id: decoded.customerId })
+        .first('id', 'active');
+    } catch (err) {
+      logger.error(`[socket-auth] customers lookup failed: ${err.message}`);
+      // Closed-fail, same posture as the staff path.
+      return next(rejectionError('Authentication backend unavailable', 'AUTH_FAILED'));
+    }
+
+    if (!customer || !customer.active) {
+      logger.warn(`[socket-auth] rejecting customer token: customer_id=${decoded.customerId} active=${customer?.active}`);
+      return next(rejectionError('Identity revoked', 'IDENTITY_REVOKED'));
+    }
+
     socket.userType = 'customer';
     socket.userId = decoded.customerId;
     return next();

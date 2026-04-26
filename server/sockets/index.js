@@ -13,9 +13,16 @@
  * adapter before any room write.
  *
  * Current rooms (one per event channel):
- *   dispatch:admins  — staff (admin + technician). Receives
- *                      dispatch:tech_status broadcasts on every
- *                      tech_status row upsert. Customers do not join.
+ *   dispatch:admins      — staff (admin + technician). Receives
+ *                          dispatch:tech_status broadcasts on every
+ *                          tech_status row upsert. Customers do not join.
+ *   customer:<id>        — exactly one room per customer. The customer
+ *                          joins their own room only (matched against
+ *                          socket.userId). Receives customer:job_update
+ *                          broadcasts on every job status transition for
+ *                          a job belonging to that customer. Staff do
+ *                          NOT join customer rooms — they get the same
+ *                          data via dispatch:job_update (separate PR).
  *
  * CORS origins read from server/config/cors-origins.js — same source
  * the Express CORS middleware uses. Don't redefine the list here.
@@ -56,10 +63,15 @@ function attachSockets(httpServer) {
   _io.use(socketAuth);
 
   _io.on('connection', (socket) => {
-    // Room join lives here, not in the auth middleware. See header
+    // Room joins live here, not in the auth middleware. See header
     // comment for why.
     if (socket.userType === 'admin' || socket.userType === 'technician') {
       socket.join('dispatch:admins');
+    } else if (socket.userType === 'customer') {
+      // Customer joins exactly one room: their own. socket.userId
+      // came from socket auth's verified DB lookup, so a forged
+      // customer_id can't be used to join someone else's room.
+      socket.join(`customer:${socket.userId}`);
     }
 
     logger.info(
