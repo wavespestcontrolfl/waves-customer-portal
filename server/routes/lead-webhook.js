@@ -51,8 +51,15 @@ router.post('/', async (req, res) => {
     // the URL or UTM data.
     const attr = (body.attribution && typeof body.attribution === 'object') ? body.attribution : {};
     const attrUtm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
-    const pageUrl = body.page_url || body['Page Url'] || body.referrer || attr.referrer || '';
-    const landingUrl = body.landing_url || body['Landing Url'] || attr.landing_url || '';
+    // Synthesized fallback from attribution.domain — when the spoke posts with
+    // no landing_url/page_url/referrer (e.g., direct apex visit), we still know
+    // the spoke domain. Synthesizing a base URL here lets determineLeadSource()
+    // match it via its domain table at L555+.
+    const synthesizedFromDomain = (!body.page_url && !body['Page Url'] && !body.referrer && !body.landing_url && !body['Landing Url'] && !attr.referrer && !attr.landing_url && attr.domain)
+      ? `https://www.${attr.domain}/`
+      : '';
+    const pageUrl = body.page_url || body['Page Url'] || body.referrer || attr.referrer || synthesizedFromDomain || '';
+    const landingUrl = body.landing_url || body['Landing Url'] || attr.landing_url || synthesizedFromDomain || '';
     const utmSource = body.utm_source || body['Utm Source'] || attrUtm.source || '';
     const utmMedium = body.utm_medium || body['Utm Medium'] || attrUtm.medium || '';
     const utmCampaign = body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '';
@@ -516,7 +523,7 @@ router.post('/', async (req, res) => {
         lead_date: etDateString(),
         lead_source: leadSource.source,
         lead_source_detail: leadSource.detail,
-        gclid: body.gclid || body['Gclid'] || null,
+        gclid: gclid || null,
         utm_campaign: utmCampaign,
         utm_term: utmTerm,
         funnel_stage: 'lead',
