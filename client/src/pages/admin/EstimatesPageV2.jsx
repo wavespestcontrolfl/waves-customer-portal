@@ -1256,11 +1256,7 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           const ok = window.confirm(`Delete ${estimate.status} estimate for ${customerName}?\n\nThis is permanent. Any pay link sent to the customer will stop working.`);
           if (!ok) return;
           try {
-            const r = await adminFetch(`/admin/estimates/${estimate.id}`, { method: 'DELETE' });
-            if (!r.ok) {
-              const err = await r.json().catch(() => ({}));
-              throw new Error(err.error || `HTTP ${r.status}`);
-            }
+            await adminFetch(`/admin/estimates/${estimate.id}`, { method: 'DELETE' });
             onDeleted?.(estimate.id);
           } catch (err) {
             alert('Delete failed: ' + err.message);
