@@ -126,13 +126,9 @@ app.use((req, res, next) => {
 });
 
 // CORS — allow frontend dev server and production domain
+const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
-  origin: [
-    config.clientUrl,
-    'https://portal.wavespestcontrol.com',
-    'https://wavespestcontrol.com',
-    'https://www.wavespestcontrol.com',
-  ],
+  origin: allowedOrigins,
   credentials: true,
 }));
 
@@ -440,8 +436,18 @@ app.use(errorHandler);
 
 const PORT = config.port;
 
+// Wrap Express in an http.Server so Socket.io can attach to the same
+// listener. Express's app.listen() returns an http.Server too, but
+// constructing it explicitly makes the io attach point obvious and
+// gives us a handle for graceful shutdown.
+const http = require('http');
+const httpServer = http.createServer(app);
+
+const { attachSockets } = require('./sockets');
+const io = attachSockets(httpServer);
+
 // Start listening FIRST (so Railway health check passes), then run migrations
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
@@ -570,5 +576,28 @@ app.listen(PORT, () => {
     }, 7 * 24 * 60 * 60 * 1000); // 7 days
   })();
 });
+
+// Graceful shutdown — Railway sends SIGTERM ~30s before forced kill on
+// deploy. Drain Socket.io connections first (clients see a clean
+// disconnect with reason='server shutting down' rather than a transport
+// error), then close the HTTP listener so in-flight requests finish.
+function shutdown(signal) {
+  logger.info(`[shutdown] ${signal} received, draining sockets + closing server`);
+  io.close(() => {
+    logger.info('[shutdown] Socket.io closed');
+    httpServer.close(() => {
+      logger.info('[shutdown] HTTP server closed, exiting');
+      process.exit(0);
+    });
+  });
+  // Hard exit safety net if close() hangs (Railway will kill us at 30s
+  // anyway; this just makes the exit reason cleaner).
+  setTimeout(() => {
+    logger.warn('[shutdown] forced exit after 25s');
+    process.exit(1);
+  }, 25000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 module.exports = app;
