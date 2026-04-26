@@ -166,6 +166,22 @@ const TRIGGER_REGISTRY = {
       link: '/admin/seo?tab=advisor',
     }),
   },
+  // Fired by server/services/dashboard-alerts-cron.js when an
+  // operational alert NEWLY appears or escalates (count grows). The
+  // cron computes alerts via dashboard-alerts.js and diffs against
+  // dashboard_alert_state. Payload echoes the alert shape so the bell,
+  // push banner, and SMS all carry the same label.
+  dashboard_alert: {
+    label: 'Dashboard alert',
+    category: 'alert',
+    priority: 'urgent',
+    group: 'Alerts',
+    build: (p) => ({
+      title: p.title || 'Dashboard alert',
+      body: p.body || null,
+      link: p.link || '/admin/dashboard',
+    }),
+  },
 };
 
 const PRIORITY_VIBRATE = {

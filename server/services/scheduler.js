@@ -320,6 +320,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Dashboard alerts — every 5 minutes, detect transitions in operational
+  // alerts and fan out Web Push (always) + SMS to owner (critical only).
+  // See server/services/dashboard-alerts-cron.js for the diff logic.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { runDashboardAlertsCheck } = require('./dashboard-alerts-cron');
+      const result = await runDashboardAlertsCheck();
+      if (result.fired > 0 || result.cleared > 0) {
+        logger.info(`[dashboard-alerts] fired=${result.fired} cleared=${result.cleared} active=${result.current}`);
+      }
+    } catch (err) {
+      logger.error(`Dashboard alerts cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 8AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {
