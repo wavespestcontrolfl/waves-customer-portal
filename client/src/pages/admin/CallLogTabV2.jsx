@@ -3,6 +3,24 @@
 //   GET  /ai/admin/calls[?search=...][?days=365&limit=200]
 //   POST /admin/communications/call
 // alert-fg reserved for Missed stat / missed-call row accent only.
+//
+// Audit focus:
+// - Outbound call: POST /admin/communications/call rings the
+//   operator's phone first, then bridges to the customer when the
+//   operator presses 1. Confirm single-flight on the "Call" button so
+//   double-click doesn't initiate two simultaneous bridge calls.
+// - Search debounce: /ai/admin/calls?search= on a fast typer should
+//   abort prior inflight requests so results render in order.
+// - Missed-call alert tone: spec reserves alert-fg for the Missed
+//   stat + missed-call row accent ONLY. Watch for decorative misuse.
+// - Caller-ID enrichment: inbound calls run through Twilio Lookup;
+//   confirm the row gracefully renders when enrichment returns null
+//   (rural / unlisted numbers).
+// - Day window: default ?days=365&limit=200 — at scale the list may
+//   need pagination. Confirm there's a "Load more" path, not a
+//   silent truncation that hides recent calls.
+// - Disposition gap: missed calls that lack an operator-set
+//   disposition should surface in a clear "needs review" state.
 import { useState, useEffect, useRef } from 'react';
 import { Badge, Button, Card, CardBody, Input, Select, cn } from '../../components/ui';
 import {
