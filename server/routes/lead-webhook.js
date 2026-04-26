@@ -37,16 +37,37 @@ router.post('/', async (req, res) => {
     const rawPhone = body.phone || body['Got A Number We Can Call Or Text'] || findField(body, /number|phone|call|text/i) || '';
     const address = body.address || body['And Whats Your Address'] || findField(body, /address/i) || '';
 
-    const pageUrl = body.page_url || body['Page Url'] || body.referrer || '';
-    const landingUrl = body.landing_url || body['Landing Url'] || '';
-    const utmSource = body.utm_source || body['Utm Source'] || '';
-    const utmMedium = body.utm_medium || body['Utm Medium'] || '';
-    const utmCampaign = body.utm_campaign || body['Utm Campaign'] || '';
-    const utmContent = body.utm_content || body['Utm Content'] || '';
-    const utmTerm = body.utm_term || body['Utm Term'] || '';
+    // Attribution can arrive in two shapes:
+    //   1. Flat top-level fields (legacy callers, GHL forms, etc.):
+    //        body.utm_source, body.gclid, body.landing_url, body.referrer
+    //   2. Nested under body.attribution (wavespestcontrol-astro- spoke forms,
+    //      shipped 2026-04-25 in wavespestcontrol-astro- PR #23):
+    //        body.attribution.utm.source, body.attribution.gclid,
+    //        body.attribution.landing_url, body.attribution.referrer,
+    //        body.attribution.domain
+    // Read flat first (preserves legacy behavior), fall back to nested. Without
+    // this fallback, every form submission from the spoke fleet collapses into
+    // lead_source='website' / detail='' because determineLeadSource() can't see
+    // the URL or UTM data.
+    const attr = (body.attribution && typeof body.attribution === 'object') ? body.attribution : {};
+    const attrUtm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
+    // Synthesized fallback from attribution.domain — when the spoke posts with
+    // no landing_url/page_url/referrer (e.g., direct apex visit), we still know
+    // the spoke domain. Synthesizing a base URL here lets determineLeadSource()
+    // match it via its domain table at L555+.
+    const synthesizedFromDomain = (!body.page_url && !body['Page Url'] && !body.referrer && !body.landing_url && !body['Landing Url'] && !attr.referrer && !attr.landing_url && attr.domain)
+      ? `https://www.${attr.domain}/`
+      : '';
+    const pageUrl = body.page_url || body['Page Url'] || body.referrer || attr.referrer || synthesizedFromDomain || '';
+    const landingUrl = body.landing_url || body['Landing Url'] || attr.landing_url || synthesizedFromDomain || '';
+    const utmSource = body.utm_source || body['Utm Source'] || attrUtm.source || '';
+    const utmMedium = body.utm_medium || body['Utm Medium'] || attrUtm.medium || '';
+    const utmCampaign = body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '';
+    const utmContent = body.utm_content || body['Utm Content'] || attrUtm.content || '';
+    const utmTerm = body.utm_term || body['Utm Term'] || attrUtm.term || '';
     const formId = body.form_id || body['Form Id'] || '';
-    const formName = body.form_name || body['Form Name'] || '';
-    const gclid = body.gclid || body['Gclid'] || body.GCLID || '';
+    const formName = body.form_name || body['Form Name'] || body.source || '';
+    const gclid = body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '';
 
     // Parse name
     const nameParts = rawName.trim().split(/\s+/);
@@ -502,7 +523,7 @@ router.post('/', async (req, res) => {
         lead_date: etDateString(),
         lead_source: leadSource.source,
         lead_source_detail: leadSource.detail,
-        gclid: body.gclid || body['Gclid'] || null,
+        gclid: gclid || null,
         utm_campaign: utmCampaign,
         utm_term: utmTerm,
         funnel_stage: 'lead',
@@ -543,13 +564,28 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   if (utmSource === 'facebook' || utmSource === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: utmMedium === 'cpc' ? 'paid' : 'organic' };
   if (utmSource === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
 
-  // Domain-based attribution
+  // Domain-based attribution. Must mirror the spoke fleet in
+  // wavespestcontrol-astro-/src/data/domains.json — each spoke domain that
+  // serves form-capture pages needs a row here so determineLeadSource() can
+  // attribute its inbound leads. Missing domains fall through to generic
+  // 'website' source (the bug PR #264 originally tried to fix on the
+  // exterminator/pestcontrol fleet — same fix needs the lawn + brand spokes).
   const domains = {
+    // Pest spokes (city)
     'bradentonflexterminator.com': { area: 'Bradenton' }, 'bradentonflpestcontrol.com': { area: 'Bradenton' },
     'palmettoexterminator.com': { area: 'Palmetto' }, 'palmettoflpestcontrol.com': { area: 'Palmetto' },
     'parrishexterminator.com': { area: 'Parrish' }, 'parrishpestcontrol.com': { area: 'Parrish' },
     'sarasotaflexterminator.com': { area: 'Sarasota' }, 'sarasotaflpestcontrol.com': { area: 'Sarasota' },
     'veniceexterminator.com': { area: 'Venice' }, 'veniceflpestcontrol.com': { area: 'Venice' },
+    // Pest spokes (newer)
+    'northportflpestcontrol.com': { area: 'North Port' },
+    // Lawn spokes (city)
+    'bradentonfllawncare.com': { area: 'Bradenton' },
+    'parrishfllawncare.com': { area: 'Parrish' },
+    'sarasotafllawncare.com': { area: 'Sarasota' },
+    'venicelawncare.com': { area: 'Venice' },
+    // Lawn brand-wide (no single city)
+    'waveslawncare.com': { area: 'SW Florida' },
   };
 
   for (const [domain, info] of Object.entries(domains)) {
