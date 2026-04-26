@@ -2099,10 +2099,14 @@ const V1_LABEL_TO_LADDER = {
   'Monthly':    { key: 'monthly',    label: 'Monthly' },
 };
 
-// Pull the auto-fired Initial Roach Knockdown line item (`service:
-// 'pest_initial_roach'`) out of the saved estimate data so the public
-// estimate view can surface it as a first-visit fee separate from the
-// general one-time bucket. Returns null if not present.
+// Pull the auto-fired Initial Roach Knockdown line item out of the saved
+// estimate data so the public estimate view can surface it as a first-visit
+// fee separate from the general one-time bucket. Matches by canonical service
+// key first; falls back to a name regex for older cached payloads written
+// before v1-legacy-mapper started preserving `service` on its output items.
+// Returns null if not present.
+const ROACH_NAME_RX = /initial.*(palmetto|german|roach).*knockdown/i;
+
 function findInitialRoachItem(_pestTiers, estData) {
   const result = estData?.result || {};
   const buckets = [
@@ -2113,11 +2117,16 @@ function findInitialRoachItem(_pestTiers, estData) {
   ];
   for (const list of buckets) {
     if (!Array.isArray(list)) continue;
-    const hit = list.find((it) => it?.service === 'pest_initial_roach');
+    const hit = list.find((it) => {
+      if (!it) return false;
+      if (it.service === 'pest_initial_roach') return true;
+      const name = it.name || it.label || '';
+      return ROACH_NAME_RX.test(name);
+    });
     if (hit && hit.price) {
       return {
         price: Number(hit.price) || 0,
-        label: hit.label || 'Initial Roach Knockdown',
+        label: hit.label || hit.name || 'Initial Roach Knockdown',
       };
     }
   }
