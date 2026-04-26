@@ -771,6 +771,12 @@ function EstimatePipelineViewV2() {
                   {e.lastViewedAt && e.viewCount > 1 && (
                     <div>Last viewed {timeAgo(e.lastViewedAt)}</div>
                   )}
+                  {e.clickCount > 0 && (
+                    <div>
+                      Clicked {timeAgo(e.lastClickedAt)}
+                      {e.clickCount > 1 && ` · ${e.clickCount}×`}
+                    </div>
+                  )}
                   {e.acceptedAt && <div>Accepted {timeAgo(e.acceptedAt)}</div>}
                   {e.declinedAt && <div>Declined {timeAgo(e.declinedAt)}</div>}
                   {e.followUpCount > 0 && (

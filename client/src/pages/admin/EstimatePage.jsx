@@ -2114,6 +2114,12 @@ function EstimatePipelineView() {
                   {e.lastViewedAt && e.viewCount > 1 && (
                     <div style={{ fontSize: 10, color: C.amber }}>Last viewed {timeAgo(e.lastViewedAt)}</div>
                   )}
+                  {e.clickCount > 0 && (
+                    <div style={{ fontSize: 10, color: C.teal }}>
+                      Clicked {timeAgo(e.lastClickedAt)}
+                      {e.clickCount > 1 && ` · ${e.clickCount}×`}
+                    </div>
+                  )}
                   {e.acceptedAt && <div style={{ fontSize: 10, color: C.green }}>Accepted {timeAgo(e.acceptedAt)}</div>}
                   {e.declinedAt && <div style={{ fontSize: 10, color: C.red }}>Declined {timeAgo(e.declinedAt)}</div>}
                   {e.followUpCount > 0 && <div style={{ fontSize: 10, color: C.gray }}>Follow-ups: {e.followUpCount}</div>}

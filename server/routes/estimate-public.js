@@ -23,13 +23,14 @@ const WAVES_OFFICE_PHONE = '+19413187612';
 // office." Two filters, applied to BOTH the view_count increment and the
 // per-open estimate_views insert:
 //   1. UA allowlist: drop anything whose user-agent matches a known bot /
-//      preview / scanner / CLI client.
+//      preview / scanner / CLI client (shared with public-shortlinks via
+//      utils/bot-ua so the shortlink click counter applies the same rules).
 //   2. Admin marker cookie: a long-lived signed JWT set by /api/admin/auth
 //      on every login + /me. Per-device, per-browser; survives network
 //      changes. Replaces the old WAVES_ADMIN_IPS env-var allowlist.
 // First-view side-effects (status flip, office SMS, admin notification)
 // have their own gating downstream and are unaffected.
-const BOT_UA_RE = /bot\b|crawler|spider|crawling|facebookexternalhit|slackbot|twitterbot|linkedinbot|whatsapp|telegram|discordbot|preview|prerender|headlesschrome|curl\/|wget\/|python-requests|axios\/|node-fetch|pingdom|uptimerobot|statuscake|monitoring|http-client/i;
+const { isBotUserAgent } = require('../utils/bot-ua');
 
 function clientIp(req) {
   return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
@@ -60,8 +61,7 @@ function hasAdminMarker(req) {
 }
 
 function shouldCountView(req) {
-  const ua = req.get('user-agent') || '';
-  if (BOT_UA_RE.test(ua)) return false;
+  if (isBotUserAgent(req.get('user-agent'))) return false;
   if (hasAdminMarker(req)) return false;
   return true;
 }
