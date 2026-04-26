@@ -24,6 +24,19 @@
  * scheduled_services_status_check (post 20260426000004) so the two
  * tables can't drift. from_status is nullable — first transition on
  * a freshly-created scheduled_services row has no prior state.
+ *
+ * Known mismatch: server/services/work-order-status.js defines an
+ * aspirational lifecycle (scheduled, in_progress, invoiced, paid)
+ * that does NOT match this CHECK or scheduled_services_status_check.
+ * That file is orphaned at merge time (zero callers) and would
+ * itself crash a CHECK on scheduled_services.status the moment any
+ * caller invoked transition() with one of its non-canonical values.
+ * Resolution tracked in:
+ *   https://github.com/wavespestcontrolfl/waves-customer-portal/issues/281
+ * If work-order-status.js is activated before that issue is resolved,
+ * BOTH this CHECK and scheduled_services_status_check need extending
+ * in lockstep — never widen one without the other or the audit
+ * table can record states the source-of-truth column rejects.
  */
 exports.up = async function (knex) {
   await knex.schema.createTable('job_status_history', (t) => {
