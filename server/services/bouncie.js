@@ -321,9 +321,19 @@ class BouncieService {
           const data = await res.json();
           const element = data.rows?.[0]?.elements?.[0];
           if (element?.status === 'OK') {
-            const durationMin = Math.round((element.duration?.value || 900) / 60);
-            const distanceMi = element.distance?.value ? Math.round(element.distance.value / 1609.34 * 10) / 10 : null;
-            return { etaMinutes: durationMin, distanceMiles: distanceMi, source: 'google' };
+            // Nullish-only fallback: a valid duration/distance of 0
+            // (tech effectively at the destination right before the
+            // en_route → on_property flip) must surface as ~0, not as
+            // the 15-min default. Fall through to haversine only when
+            // the API genuinely omits the value.
+            const durationSec = element.duration?.value;
+            const distanceMeters = element.distance?.value;
+            if (durationSec != null) {
+              const distanceMi = distanceMeters != null
+                ? Math.round(distanceMeters / 1609.34 * 10) / 10
+                : null;
+              return { etaMinutes: Math.round(durationSec / 60), distanceMiles: distanceMi, source: 'google' };
+            }
           }
         }
       } catch { /* fall through to haversine */ }
