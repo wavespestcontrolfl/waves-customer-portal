@@ -646,7 +646,6 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
         'technicians.name as technician_name',
         'technicians.phone as technician_phone',
         'technicians.fl_applicator_license as technician_license',
-        'technicians.photo_url as technician_photo',
       )
       .first();
 
@@ -804,7 +803,6 @@ router.get('/shared/:token', async (req, res, next) => {
           'technicians.name as technician_name',
           'technicians.phone as technician_phone',
           'technicians.fl_applicator_license as technician_license',
-          'technicians.photo_url as technician_photo',
         )
         .first();
       if (!service) return res.status(404).json({ error: 'Document not found' });
