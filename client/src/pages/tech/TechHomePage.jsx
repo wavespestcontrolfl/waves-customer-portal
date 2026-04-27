@@ -107,6 +107,16 @@ export default function TechHomePage() {
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
   const firstName = techName.split(' ')[0];
+  // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
+  // Use it to scope `schedule` to this tech's own jobs — /api/admin/schedule
+  // returns the whole route board (not tech-filtered), so without this
+  // guard nextStop could land on another tech's job and the En Route
+  // POST would 403 server-side (tech-track.js ownership guard).
+  let currentTechId = null;
+  try {
+    const u = JSON.parse(localStorage.getItem('waves_admin_user') || 'null');
+    currentTechId = u?.id || null;
+  } catch { /* ignore */ }
 
   const fetchSchedule = useCallback(async () => {
     try {
@@ -207,8 +217,14 @@ export default function TechHomePage() {
     };
   }, [fetchSchedule]);
 
-  const completed = schedule.filter((s) => s.status === 'completed').length;
-  const total = schedule.length;
+  // Scope to this tech's own jobs. /api/admin/schedule returns the
+  // entire dispatch board, so nextStop, counts, and the Today's
+  // Services list all need filtering before they're consumed.
+  const myServices = currentTechId
+    ? schedule.filter((s) => s.technician_id === currentTechId)
+    : schedule;
+  const completed = myServices.filter((s) => s.status === 'completed').length;
+  const total = myServices.length;
   // "Next Stop" = first non-terminal service in the day's route.
   // Skipping past completed/skipped/cancelled means a tech with an
   // earlier skipped job sees the actual upcoming pending one, not
@@ -216,7 +232,7 @@ export default function TechHomePage() {
   // current focus, the En Route CTA is disabled there because the
   // server's PRE_EN_ROUTE gate rejects those.
   const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled']);
-  const nextStop = schedule.find((s) => !TERMINAL_STATUSES.has(s.status));
+  const nextStop = myServices.find((s) => !TERMINAL_STATUSES.has(s.status));
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
@@ -361,14 +377,14 @@ export default function TechHomePage() {
           otherwise; the modal surfaces that inline). Visible for all
           statuses so techs can review/manage photos on any of their
           day's stops, not just the next one. */}
-      {!loading && schedule.length > 0 && (
+      {!loading && myServices.length > 0 && (
         <>
           <h2 style={{
             fontSize: 14, fontWeight: 700, color: DARK.muted, margin: '20px 0 10px',
             fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1,
           }}>Today's Services</h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {schedule.map((s) => (
+            {myServices.map((s) => (
               <ServiceRow
                 key={s.id}
                 service={s}
