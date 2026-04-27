@@ -76,16 +76,29 @@ export default function JobDrawer({ jobId, onClose }) {
   const [error, setError] = useState(null);
   const [busyAction, setBusyAction] = useState(null);
 
-  // Race guard: tracks the currently-selected jobId. If the dispatcher
-  // closes one drawer and quickly opens another (or just clicks pin A
-  // → pin B), an in-flight A response could land after B's selection
-  // and overwrite the B drawer with stale A data. Worse, the action
-  // buttons would target the wrong service. Guard at every state-
-  // applying boundary by checking the ref before setJob/setError.
-  // Codex P1 on PR #303.
+  // Two refs, two purposes:
+  //
+  //   currentIdRef — tracks the currently-selected jobId. Used by the
+  //   action handler (handleStatus) to decide whether the post-PUT
+  //   refetch + error-set should apply: "is the user still on the job
+  //   we acted on?" Id comparison is correct here because a same-job
+  //   reopen IS desired for refetch.
+  //
+  //   fetchSeqRef — monotonic per-request token for fetchJob. Each
+  //   fetch increments + captures its own seq; only the request whose
+  //   seq still matches the ref commits state. Catches both
+  //   cross-job (A → B reopen) AND same-job (A → close → A reopen)
+  //   races. Codex P2 on PR #315 caught this pattern in the (then-
+  //   id-only) TechDrawer; this PR brings JobDrawer to parity.
+  //
+  // Both are needed: currentIdRef is for the id-question, fetchSeqRef
+  // is for the staleness-question. Collapsing them would lose the
+  // ability to refetch on same-job reopen.
   const currentIdRef = useRef(null);
+  const fetchSeqRef = useRef(0);
 
   const fetchJob = useCallback(async (id) => {
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -94,23 +107,27 @@ export default function JobDrawer({ jobId, onClose }) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      // Selection changed while we were fetching — drop this response.
-      if (currentIdRef.current !== id) return;
+      // Newer fetch already in flight (or completed) — drop this one.
+      if (fetchSeqRef.current !== seq) return;
       setJob(data);
     } catch (err) {
-      if (currentIdRef.current !== id) return;
+      if (fetchSeqRef.current !== seq) return;
       setError(err.message || 'Failed to load job');
     } finally {
-      // Only clear the loading flag if we're still on the same job —
-      // a stale loading=false would briefly flash empty before the
+      // Only clear the loading flag if we're still the latest request
+      // — a stale loading=false would briefly flash empty before the
       // newer fetch completes.
-      if (currentIdRef.current === id) setLoading(false);
+      if (fetchSeqRef.current === seq) setLoading(false);
     }
   }, []);
 
   // Re-fetch on every open or jobId change. A drawer that was open
   // and then re-opened on the same job should still show fresh data
   // — the pin click might've happened minutes after a status change.
+  //
+  // Bumping fetchSeqRef invalidates any in-flight fetch IMMEDIATELY,
+  // even when the new jobId equals the old one (same-job reopen);
+  // the next fetchJob call bumps it again to claim the latest seq.
   //
   // Clear `job` AND `error` synchronously on selection change so the
   // drawer doesn't render the previous job's data + action buttons
@@ -122,6 +139,7 @@ export default function JobDrawer({ jobId, onClose }) {
   // the footer (`{job && (canMarkEnRoute || canMarkOnSite) && ...}`)
   // doesn't render at all — no stale buttons exist to click.
   useEffect(() => {
+    fetchSeqRef.current += 1;
     currentIdRef.current = jobId;
     setJob(null);
     setError(null);
