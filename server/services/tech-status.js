@@ -92,4 +92,83 @@ async function upsertTechStatus(payload) {
   return row;
 }
 
-module.exports = { upsertTechStatus, ROOM, EVENT };
+/**
+ * GPS-source ping. Called from the Bouncie webhook on every trip-data
+ * sample (and trip-start / trip-end / connect / disconnect events).
+ *
+ * Two reasons this is a separate function from upsertTechStatus:
+ *
+ *   1. Status priority. tech_status.status has 6 values, but only
+ *      three of them are GPS-derivable: `driving`, `idle`, `break`
+ *      (we treat ignition-off-for-a-while as `break` later if needed;
+ *      for v1 it's just `driving` vs `idle`). The other three —
+ *      `en_route`, `on_site`, `wrapping_up` — are SEMANTIC states
+ *      owned by track-transitions (admin clicks "en route") or by a
+ *      future tech-mobile heartbeat. Bouncie pings every ~minute, so
+ *      if it overwrote status unconditionally, an admin's en_route
+ *      flip would get clobbered on the next ping.
+ *
+ *      ON CONFLICT, we preserve the existing status when it's one of
+ *      the semantic three; otherwise we accept the GPS-derived status.
+ *
+ *   2. Bouncie doesn't know about jobs. current_job_id is set by
+ *      track-transitions or future tech-mobile heartbeats — the
+ *      Bouncie path never touches it. The CASE here updates lat / lng
+ *      / updated_at unconditionally, leaves current_job_id alone.
+ *
+ * After commit we still emit dispatch:tech_status with the full row
+ * (including the preserved current_job_id) so the dispatch board's
+ * client-side address-lookup logic still works.
+ *
+ * @param {object} args
+ * @param {string} args.tech_id          required
+ * @param {number} args.lat              required
+ * @param {number} args.lng              required
+ * @param {boolean|null} [args.ignition] optional, used for status derivation
+ * @param {number|null}  [args.speed_mph] optional, used for status derivation
+ */
+async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph }) {
+  if (!tech_id || lat == null || lng == null) {
+    throw new Error('pingTechLocation: tech_id, lat, lng are required');
+  }
+
+  const moving = ignition === true && Number(speed_mph || 0) > 5;
+  const derivedStatus = moving ? 'driving' : 'idle';
+
+  let row;
+  await db.transaction(async (trx) => {
+    // Single-statement upsert. Status uses CASE WHEN to preserve
+    // semantic states when the row already exists with one set —
+    // see header comment for why.
+    const [committed] = await trx.raw(
+      `
+      INSERT INTO tech_status (tech_id, status, lat, lng, updated_at)
+      VALUES (?, ?, ?, ?, NOW())
+      ON CONFLICT (tech_id) DO UPDATE SET
+        lat = EXCLUDED.lat,
+        lng = EXCLUDED.lng,
+        updated_at = NOW(),
+        status = CASE
+          WHEN tech_status.status IN ('en_route','on_site','wrapping_up')
+            THEN tech_status.status
+          ELSE EXCLUDED.status
+        END
+      RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at
+      `,
+      [tech_id, derivedStatus, lat, lng]
+    ).then((r) => r.rows);
+    row = committed;
+  });
+  // trx committed by here.
+
+  const io = getIo();
+  if (io) {
+    io.to(ROOM).emit(EVENT, row);
+  } else {
+    logger.warn('[tech-status] io not initialized; skipping ping broadcast');
+  }
+
+  return row;
+}
+
+module.exports = { upsertTechStatus, pingTechLocation, ROOM, EVENT };
