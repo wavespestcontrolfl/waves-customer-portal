@@ -1090,32 +1090,59 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
 
     const fromTechId = job.technician_id || null;
 
-    // Trx scope: status update + auto-resolve (if applicable). The
-    // dispatch-alerts helper's emit chains on trx.executionPromise, so
-    // alert_resolved broadcasts fire post-commit and are suppressed on
-    // rollback.
+    // Trx scope: status-guarded update + auto-resolve (if applicable).
+    // The UPDATE re-applies the terminal-status filter as a transactional
+    // predicate to close the TOCTOU race that the pre-trx check leaves
+    // open: a concurrent PUT /:serviceId/status transitioning the job
+    // to completed/cancelled/skipped between our SELECT and our UPDATE
+    // would otherwise let the reassignment land on a terminal row.
+    // Codex P1 on PR #320. 0-rowcount means the status flipped (or, very
+    // rarely, the row was deleted) — we throw and the catch arm below
+    // converts to 409.
+    //
+    // The dispatch-alerts helper's emit chains on trx.executionPromise,
+    // so alert_resolved broadcasts fire post-commit and are suppressed
+    // on rollback.
+    const TERMINAL_RACE = 'TERMINAL_STATUS_RACE';
     let updatedRow;
-    await db.transaction(async (trx) => {
-      [updatedRow] = await trx('scheduled_services')
-        .where({ id: req.params.id })
-        .update({ technician_id: newTechId, updated_at: trx.fn.now() })
-        .returning('*');
-
-      // null → tech: the unassigned_overdue alert is moot. We don't
-      // touch tech_late here — the late condition is on the JOB's
-      // window, not the tech, so reassigning between techs leaves
-      // tech_late open until the job actually lands on_site.
-      if (!fromTechId && newTechId) {
-        const { resolveAlert } = require('../services/dispatch-alerts');
-        const openAlerts = await trx('dispatch_alerts')
-          .where({ type: 'unassigned_overdue', job_id: req.params.id })
-          .whereNull('resolved_at')
-          .select('id');
-        for (const { id } of openAlerts) {
-          await resolveAlert({ id, resolvedBy: req.technicianId, trx });
+    try {
+      await db.transaction(async (trx) => {
+        const rows = await trx('scheduled_services')
+          .where({ id: req.params.id })
+          .whereNotIn('status', ['completed', 'cancelled', 'skipped'])
+          .update({ technician_id: newTechId, updated_at: trx.fn.now() })
+          .returning('*');
+        if (rows.length === 0) {
+          // Status flipped to terminal between the pre-trx SELECT and
+          // this UPDATE. Throwing rolls back the trx and skips the
+          // auto-resolve + commit; the catch arm returns 409.
+          throw Object.assign(new Error('terminal status race'), { code: TERMINAL_RACE });
         }
+        updatedRow = rows[0];
+
+        // null → tech: the unassigned_overdue alert is moot. We don't
+        // touch tech_late here — the late condition is on the JOB's
+        // window, not the tech, so reassigning between techs leaves
+        // tech_late open until the job actually lands on_site.
+        if (!fromTechId && newTechId) {
+          const { resolveAlert } = require('../services/dispatch-alerts');
+          const openAlerts = await trx('dispatch_alerts')
+            .where({ type: 'unassigned_overdue', job_id: req.params.id })
+            .whereNull('resolved_at')
+            .select('id');
+          for (const { id } of openAlerts) {
+            await resolveAlert({ id, resolvedBy: req.technicianId, trx });
+          }
+        }
+      });
+    } catch (err) {
+      if (err && err.code === TERMINAL_RACE) {
+        return res.status(409).json({
+          error: 'Cannot reassign — job transitioned to a terminal state concurrently',
+        });
       }
-    });
+      throw err;
+    }
 
     // Best-effort dispatch:job_update broadcast. Mirror's transitionJobStatus's
     // adminPayload shape so future client listeners can treat both the
