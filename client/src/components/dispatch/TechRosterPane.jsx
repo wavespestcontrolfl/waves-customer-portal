@@ -16,7 +16,7 @@ import TechCard from './TechCard';
 export default function TechRosterPane({ techs, jobsById, selectedTechId, onSelect, draggingJobId }) {
   const dragActive = !!draggingJobId;
   return (
-    <aside className="w-60 flex-shrink-0 bg-white border-r border-hairline border-zinc-200 p-3 overflow-y-auto">
+    <aside className="w-full md:w-60 md:flex-shrink-0 bg-white md:border-r border-hairline border-zinc-200 p-3 overflow-y-auto">
       <h2 className="text-12 uppercase tracking-label font-medium text-ink-secondary mb-3 px-1">
         Tech Roster
       </h2>
