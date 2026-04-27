@@ -26,7 +26,7 @@ class PageErrorBoundary extends Component {
     return this.props.children;
   }
 }
-import LoginGate from './pages/LoginGate';
+import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
 import OnboardingPage from './pages/OnboardingPage';
 import AdminLoginPage from './pages/AdminLoginPage';
@@ -95,8 +95,8 @@ const AdminLawnAssessmentPage = lazyWithRetry(() => import('./pages/admin/LawnAs
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/KnowledgeBasePage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
-const PayGate = lazyWithRetry(() => import('./pages/PayGate'));
-const ReceiptGate = lazyWithRetry(() => import('./pages/ReceiptGate'));
+const PayPage = lazyWithRetry(() => import('./pages/PayPageV2'));
+const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
 const ReviewPage = lazyWithRetry(() => import('./pages/ReviewPage'));
@@ -161,13 +161,13 @@ export default function App() {
       <BrowserRouter>
         <InstallPrompt />
         <Routes>
-          <Route path="/login" element={<LoginGate />} />
+          <Route path="/login" element={<LoginPage />} />
           <Route path="/onboard/:token" element={<OnboardingPage />} />
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/project/:token" element={<ProjectReportViewPage />} />
           <Route path="/report/:token" element={<ReportViewPage />} />
-          <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayGate /></Suspense>} />
-          <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptGate /></Suspense>} />
+          <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
+          <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><EstimateViewPage /></Suspense>} />
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
