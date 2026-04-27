@@ -9,6 +9,7 @@
     "packages/*"
   ],
   "scripts": {
+    "predev": "npm run db:migrate",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
@@ -16,7 +17,7 @@
     "build": "cd client && npm run build",
     "check:portal-brand": "node scripts/check-portal-brand.js",
     "prestart": "npm run verify:blog-schema",
-    "start": "cd server && (npx knex migrate:latest || echo '[start] CLI migrate failed — falling through to internal retry') && cd .. && node server/index.js",
+    "start": "node server/index.js",
     "db:migrate": "cd server && npx knex migrate:latest",
     "db:rollback": "cd server && npx knex migrate:rollback",
     "db:seed": "cd server && npx knex seed:run",

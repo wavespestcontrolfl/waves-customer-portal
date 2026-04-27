@@ -5,6 +5,18 @@ builder = "nixpacks"
 buildCmd = "npm run build"
 
 [deploy]
+# Migrations run as the pre-deploy command — once per deploy, between
+# build and the new instance(s) taking traffic. Fail-fast: if
+# migrate:latest exits non-zero, Railway rejects the deploy and the
+# previous version stays live (correct failure mode for schema
+# changes). See issue #286 for the rationale (was: in-process per-boot
+# retry loop in server/index.js that swallowed three error patterns
+# and could mask real drift).
+#
+# Key is `preDeployCommand` (array of strings) — Railway's actual
+# config-as-code schema. Initial draft of this PR used `releaseCommand`
+# which Railway silently ignores; Codex caught it on PR #294 review.
+preDeployCommand = ["npm run db:migrate"]
 startCommand = "npm start"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 120
