@@ -80,13 +80,16 @@ function getGreeting() {
   return 'Good evening';
 }
 
+// /tech/messages was a dead-end placeholder — there's no underlying
+// messaging surface. Dropped from QUICK_ACTIONS until that feature
+// actually exists. Quick Invoice still routes to /tech (no-op) but
+// stays as a known stub the team has discussed building.
 const QUICK_ACTIONS = [
   { icon: '📅', label: "Today's Route", path: '/tech' },
   { icon: '📋', label: 'Field Estimator', path: '/tech/estimate' },
   { icon: '🧾', label: 'Quick Invoice', path: '/tech' },
   { icon: '📖', label: 'Protocols & SOPs', path: '/tech/protocols' },
   { icon: '🗂️', label: 'Project Report', action: 'create-project' },
-  { icon: '💬', label: 'Messages', path: '/tech/messages' },
 ];
 
 export default function TechHomePage() {
