@@ -6,6 +6,7 @@ import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import BrandFooter from '../components/BrandFooter';
+import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
 
@@ -4674,6 +4675,20 @@ function LearnTab({ customer }) {
               display: 'block', margin: '8px auto 0',
             }}>Show less</button>
           )}
+          <div style={{
+            marginTop: 14,
+            padding: '16px 14px',
+            background: B.sand,
+            border: `1px solid ${B.grayLight}`,
+            borderRadius: 12,
+          }}>
+            <NewsletterSignup
+              variant="light"
+              source="portal_learn"
+              heading="Get the next issue in your inbox"
+              blurb="Local SWFL events, seasonal pest tips, and the occasional deal — straight from the truck."
+            />
+          </div>
         </div>
       )}
 
