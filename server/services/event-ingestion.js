@@ -1,21 +1,26 @@
 /**
- * Newsletter event ingestion (P3a). Pulls RSS feeds listed in the
- * event_sources table, normalizes the items into events_raw, and
- * upserts on (source_id, external_id) so re-running is idempotent
- * and edited events get refreshed.
+ * Newsletter event ingestion. Pulls feeds listed in the event_sources
+ * table, normalizes the items into events_raw, and upserts on
+ * (source_id, external_id) so re-running is idempotent and edited
+ * events get refreshed.
  *
- * Only RSS is implemented in P3a — the iCal handler + Playwright
- * scrape handler land in P3b. event_sources.feed_type guards this:
- * non-rss rows are skipped (with a warn-level log) so the cron can
- * pre-seed iCal/scrape sources without failing.
+ * Handlers by feed_type:
+ *   - 'rss'   → pullRssSource (P3a, rss-parser)
+ *   - 'ical'  → pullIcalSource (P3b, node-ical)
+ *   - 'scrape' / 'json' → not implemented yet; sources with these
+ *     feed_types are skipped with a warn-level log so the cron can
+ *     pre-seed them without failing.
  *
  * Each pull is bounded by:
  *   - 15s HTTP timeout
- *   - 200 items per feed (most local-news RSS caps at ~20-50; this is
- *     a safety margin against runaway feeds)
+ *   - 200 items per feed (most local-news RSS caps at ~20-50; iCal
+ *     feeds can be larger but the 90-day forward window prunes most
+ *     of the tail)
  *   - 90 days forward window — events with start_at > now+90d are
  *     dropped on insert (we don't write the customer about an event
  *     three months out)
+ *   - 24h post-event recap drop — events with start_at < now-24h are
+ *     dropped (some feeds publish recaps after the fact)
  *
  * Per-source failure tracking:
  *   - On success: last_pull_status='success', consecutive_failures=0
@@ -32,6 +37,13 @@ try {
   Parser = require('rss-parser');
 } catch {
   Parser = null;
+}
+
+let ical;
+try {
+  ical = require('node-ical');
+} catch {
+  ical = null;
 }
 
 const HTTP_TIMEOUT_MS = 15000;
@@ -175,16 +187,125 @@ async function pullRssSource(source) {
   return { upserted, dropped, total: items.length };
 }
 
+// node-ical's `vevent` records use unconventional shapes:
+//   - .uid is the dedup key (RFC 5545 UID)
+//   - .start / .end are JS Date objects already (when present)
+//   - .summary is the title
+//   - .description is the body (may contain HTML or plain text)
+//   - .location is a free-form venue/address string
+//   - .url is the event URL (when present)
+//   - Recurring events expose .rrule with an .options.rrule string;
+//     we don't expand recurrences in this PR — only the base event
+//     is ingested. P3b can layer on rrule expansion if needed.
+async function pullIcalSource(source) {
+  if (!ical) {
+    throw new Error('node-ical not installed');
+  }
+
+  // node-ical exposes a fromURL helper that handles the fetch +
+  // parse in one shot. The default 5s timeout is too tight for some
+  // CivicPlus / GrowthZone feeds that serve large calendars; bump
+  // to match the RSS timeout (15s).
+  const events = await new Promise((resolve, reject) => {
+    ical.async.fromURL(
+      source.feed_url,
+      {
+        timeout: HTTP_TIMEOUT_MS,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
+        },
+      },
+      (err, data) => {
+        if (err) reject(err);
+        else resolve(data || {});
+      },
+    );
+  });
+
+  // node-ical returns an object keyed by UID with mixed types
+  // (vevent, vcalendar, vtimezone, etc). Filter to vevent only.
+  const vevents = Object.values(events)
+    .filter((e) => e && e.type === 'VEVENT')
+    .slice(0, MAX_ITEMS_PER_FEED);
+
+  const cutoffMs = Date.now() + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  let upserted = 0;
+  let dropped = 0;
+
+  for (const ev of vevents) {
+    const start = parseDateOrNull(ev.start);
+    const end = parseDateOrNull(ev.end);
+
+    if (start && start.getTime() > cutoffMs) { dropped += 1; continue; }
+    if (start && start.getTime() < now - 24 * 60 * 60 * 1000) { dropped += 1; continue; }
+
+    // UID is the standard iCal dedup key (RFC 5545). Always present
+    // on real feeds; synthesize from title+start as a fallback for
+    // malformed feeds that omit it.
+    const externalId = String(ev.uid || `${(ev.summary || '').slice(0, 100)}|${ev.start || ''}`).slice(0, 256);
+    const title = (ev.summary || '(untitled)').toString().slice(0, 512);
+    const description = ev.description ? String(ev.description) : null;
+    const eventUrl = safeHttpUrl(ev.url);
+    const venueName = ev.location ? String(ev.location).slice(0, 256) : null;
+
+    // Best-effort city from title/description/location; falls back to
+    // source.coverage_geo[0] just like the RSS handler.
+    const city = extractCity(title)
+      || extractCity(description)
+      || extractCity(venueName)
+      || (source.coverage_geo?.[0] || null);
+
+    await db('events_raw')
+      .insert({
+        source_id: source.id,
+        external_id: externalId,
+        title,
+        description,
+        start_at: start,
+        end_at: end,
+        venue_name: venueName,
+        venue_address: null,
+        city,
+        event_url: eventUrl,
+        image_url: null, // iCal spec doesn't carry images
+        categories: null,
+      })
+      .onConflict(['source_id', 'external_id'])
+      .merge({
+        title,
+        description,
+        start_at: start,
+        end_at: end,
+        venue_name: venueName,
+        city,
+        event_url: eventUrl,
+        pulled_at: db.fn.now(),
+        updated_at: db.fn.now(),
+      });
+
+    upserted += 1;
+  }
+
+  return { upserted, dropped, total: vevents.length };
+}
+
 async function ingestSource(source) {
   const startedAt = Date.now();
   try {
-    if (source.feed_type !== 'rss') {
-      // P3a only handles RSS. iCal + scrape land in P3b.
-      logger.warn(`[event-ingestion] Skipping ${source.name} — feed_type=${source.feed_type} not implemented in P3a`);
+    let result;
+    if (source.feed_type === 'rss') {
+      result = await pullRssSource(source);
+    } else if (source.feed_type === 'ical') {
+      result = await pullIcalSource(source);
+    } else {
+      // 'scrape' / 'json' not implemented yet — skip gracefully so the
+      // cron can pre-seed sources without failing. Don't increment
+      // consecutive_failures (those are for real failures).
+      logger.warn(`[event-ingestion] Skipping ${source.name} — feed_type=${source.feed_type} not implemented yet`);
       return { source: source.name, skipped: true };
     }
-
-    const result = await pullRssSource(source);
 
     await db('event_sources').where({ id: source.id }).update({
       last_pulled_at: db.fn.now(),
