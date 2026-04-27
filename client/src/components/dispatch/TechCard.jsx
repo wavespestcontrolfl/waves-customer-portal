@@ -50,7 +50,7 @@ function streetOnly(fullAddress) {
   return idx === -1 ? fullAddress : fullAddress.slice(0, idx);
 }
 
-function TechCardImpl({ tech, jobs, selected, onSelect }) {
+function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
   const currentJob = tech.current_job_id ? jobs.get(tech.current_job_id) : null;
   const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
   const dotColor = STATUS_DOT[tech.status] || STATUS_DOT.idle;
@@ -67,16 +67,28 @@ function TechCardImpl({ tech, jobs, selected, onSelect }) {
     <button
       type="button"
       onClick={() => onSelect(tech.id)}
+      // data-tech-card-id is the drop-target hook for drag-to-reassign.
+      // <DispatchMap>'s onJobDragEnd hit-tests document.elementFromPoint
+      // and walks up to find an ancestor with this attribute. The id
+      // value is the technicians.id passed to PUT /jobs/:id/assign.
+      data-tech-card-id={tech.id}
       className={cn(
         'block w-full text-left mb-2 u-focus-ring rounded-md',
         'transition-shadow',
-        selected && 'ring-2 ring-zinc-900 ring-offset-1'
+        selected && 'ring-2 ring-zinc-900 ring-offset-1',
+        // Drop-zone affordance while a job is being dragged from the map.
+        // CSS-only hover highlight via the parent's data attribute would
+        // be cleaner, but a prop keeps the contract explicit + makes
+        // the affordance testable. The dashed border signals "you can
+        // drop here" without competing with the selected ring.
+        isDropTarget && 'ring-2 ring-dashed ring-waves-blue ring-offset-1'
       )}
     >
       <Card
         className={cn(
           'cursor-pointer hover:bg-zinc-50',
-          selected && 'border-zinc-900'
+          selected && 'border-zinc-900',
+          isDropTarget && 'bg-zinc-50'
         )}
       >
         <div className="flex items-center gap-3 px-3 pt-3">
@@ -127,8 +139,8 @@ function TechCardImpl({ tech, jobs, selected, onSelect }) {
 
 // React.memo with a custom equality fn. The triple [id, updated_at,
 // current_job_id] is the dirty key. If any external prop other than
-// `tech` changes (selected, jobs reference, onSelect), we re-render
-// regardless via the secondary checks below.
+// `tech` changes (selected, jobs reference, onSelect, isDropTarget),
+// we re-render regardless via the secondary checks below.
 export default React.memo(TechCardImpl, (prev, next) => {
   if (prev.tech.id !== next.tech.id) return false;
   if (prev.tech.updated_at !== next.tech.updated_at) return false;
@@ -136,5 +148,6 @@ export default React.memo(TechCardImpl, (prev, next) => {
   if (prev.selected !== next.selected) return false;
   if (prev.jobs !== next.jobs) return false;
   if (prev.onSelect !== next.onSelect) return false;
+  if (prev.isDropTarget !== next.isDropTarget) return false;
   return true;
 });
