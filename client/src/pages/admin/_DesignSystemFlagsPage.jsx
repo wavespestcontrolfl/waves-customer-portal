@@ -35,7 +35,9 @@ function adminFetch(path, init) {
 }
 
 const KNOWN_FLAGS = [
-  'dispatch-v2',
+  // dispatch-v2 retired — V1 SchedulePage default + DispatchGate gone,
+  // /admin/dispatch and /admin/schedule both resolve to V2 (Board tab
+  // + DispatchPageV2 under AdminDispatchPage).
   'newsletter-v1',
   'ff_invoice_send_receipt',
 ];
