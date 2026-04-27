@@ -1,8 +1,9 @@
 /**
  * useDispatchBoard — single owner of dispatch board data + socket
  * subscription. Hydrates from GET /api/admin/dispatch/board on mount,
- * then subscribes to dispatch:tech_status broadcasts and patches the
- * tech list in place.
+ * then subscribes to:
+ *   - dispatch:tech_status → patches techs map (status/lat/lng/job)
+ *   - dispatch:job_update  → patches jobs array (status/tech/window)
  *
  * Internal state for techs is a Map keyed by tech.id so updates are
  * O(1) and don't recreate the array. The exposed `techs` value is a
@@ -10,9 +11,24 @@
  * on <TechCard> can rely on per-tech reference identity (only the
  * tech that actually changed gets a new object).
  *
+ * Jobs is an array (DispatchMap iterates over it for pin rendering).
+ * On dispatch:job_update we replace the matching slot in place; the
+ * map re-renders only the affected pin because Marker keys on
+ * job.id and the per-pin color recomputes from the new tech_id.
+ *
+ * dispatch:job_update merge rules:
+ *   - Match by id; if the job isn't in today's board, skip (the
+ *     broadcast carries no address / lat / lng — we can't materialize
+ *     a renderable pin from it, and the row likely isn't for today).
+ *   - Update fields the broadcast carries: technician_id, status,
+ *     service_type, scheduled_date, window_start, window_end.
+ *   - Preserve fields the broadcast does NOT carry: customer_name,
+ *     address, lat, lng. Those don't change with a status flip or
+ *     reassignment.
+ *
  * Cleanup contract: the useEffect that wires the socket MUST return
- * a function that calls socket.off('dispatch:tech_status', handler)
- * AND socket.disconnect(). Forgetting either causes a memory leak on
+ * a function that calls socket.off for BOTH events AND
+ * socket.disconnect(). Forgetting either causes a memory leak on
  * every navigation away from the dispatch board, plus potential
  * duplicate broadcasts if the board is re-mounted while the prior
  * socket is still alive. Verify on every edit.
@@ -159,9 +175,54 @@ export function useDispatchBoard() {
 
     socket.on('dispatch:tech_status', handleTechStatus);
 
-    // Cleanup: remove handler AND disconnect. Either alone leaks.
+    function handleJobUpdate(payload) {
+      if (!payload || !payload.job_id) return;
+      // Skip jobs not in today's board. The broadcast doesn't carry
+      // the geocoded address (`address` / `lat` / `lng` / `customer_name`)
+      // that the board needs to render a pin, so we can't synthesize a
+      // valid stub from it. Worst case: a job created mid-session
+      // doesn't appear until the next /board fetch on remount.
+      setJobs((prev) => {
+        const idx = prev.findIndex((j) => j.id === payload.job_id);
+        if (idx === -1) return prev;
+        const next = prev.slice();
+        // Property-presence merge for nullable fields. `??` would drop
+        // an explicit `null` from the broadcast (e.g., a window
+        // intentionally cleared to "anytime") and keep the stale
+        // value — the in-check distinguishes "field absent" from
+        // "field present and null." Codex P2 on PR #322. The
+        // broadcast emitters in services/job-status.js and the
+        // assign route always include these keys, so the in-check is
+        // mostly a forward-compat guard, but it's the correct
+        // semantic.
+        function pick(field) {
+          return field in payload ? payload[field] : prev[idx][field];
+        }
+        next[idx] = {
+          ...prev[idx],
+          // tech_id (broadcast) → technician_id (board row shape).
+          // Always present in the broadcast; coerce undefined-as-null
+          // for safety even though it shouldn't happen.
+          technician_id: 'tech_id' in payload ? (payload.tech_id || null) : prev[idx].technician_id,
+          status: pick('status'),
+          service_type: pick('service_type'),
+          scheduled_date: pick('scheduled_date'),
+          window_start: pick('window_start'),
+          window_end: pick('window_end'),
+          // Preserved from prev: customer_name, address, lat, lng,
+          // customer_id, id. The broadcast doesn't carry them; they
+          // don't change on a status/assign flip.
+        };
+        return next;
+      });
+    }
+
+    socket.on('dispatch:job_update', handleJobUpdate);
+
+    // Cleanup: remove BOTH handlers AND disconnect. Any one missing leaks.
     return () => {
       socket.off('dispatch:tech_status', handleTechStatus);
+      socket.off('dispatch:job_update', handleJobUpdate);
       socket.disconnect();
     };
   }, []);
