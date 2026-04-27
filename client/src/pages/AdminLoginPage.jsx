@@ -30,8 +30,8 @@ export default function AdminLoginPage() {
       // Flag cache is keyed by user_id on the server and session-cached in
       // memory on the client. If this tab previously loaded flags (as a
       // different user, or token-less → fail-closed {}), that stale cache
-      // will decide the V1/V2 shell on the next render. Invalidate + refetch
-      // with the new token before we navigate so AdminLayoutGate sees truth.
+      // will decide gated surfaces on the next render. Invalidate + refetch
+      // with the new token before we navigate so flag reads see truth.
       await refetchFlags();
       navigate('/admin', { replace: true });
     } catch (e) { setError(e.message); }
