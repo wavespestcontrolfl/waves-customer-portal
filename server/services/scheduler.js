@@ -1121,6 +1121,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — Tech-late detector (first dispatch alert generator)
+  //
+  // Reads scheduled_services for jobs whose ET window_start has passed
+  // by ≥ 15 min while the tech hasn't moved to on_site / completed /
+  // cancelled / skipped, and inserts a tech_late dispatch_alert via
+  // createAlert (which fans out the dispatch:alert socket broadcast
+  // post-commit so the Action Queue right pane updates in real time).
+  //
+  // Idempotent: skips jobs that already have an unresolved tech_late
+  // alert. After the dispatcher resolves a warn, the next tick fires
+  // a fresh critical if the job is still late — natural escalation
+  // without in-place row mutation.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { runTechLateCheck } = require('./tech-late-detector');
+      await runTechLateCheck();
+    } catch (err) {
+      logger.error(`[tech-late-detector] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
