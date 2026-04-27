@@ -19,13 +19,8 @@ function capitalizeName(name) {
 //
 // Twilio hits this when a call comes in to any Waves number.
 // We answer, enable recording, and log the call.
-//
-// /voice-ring-first is a backward-compat alias: the retired voice-agent
-// rollout (PR #233) configured every Twilio number to that path. Until each
-// number's webhook URL is migrated to /voice in the Twilio Console, this
-// alias keeps inbound calls working.
 // =========================================================================
-router.post(['/voice', '/voice-ring-first'], async (req, res) => {
+router.post('/voice', async (req, res) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
