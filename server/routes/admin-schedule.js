@@ -871,10 +871,45 @@ router.post('/:id/invoice', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PUT /api/admin/schedule/:id/status — change status with automations
+// PUT /api/admin/schedule/:id/status — change status with automations.
+//
+// Second call site to migrate to services/job-status.js#transitionJobStatus
+// (after PR #328's dispatch route). Same pattern: trx wraps the audit
+// row + lifecycle column updates + transitionJobStatus's atomic guard
+// + job_status_history insert + overdue-alert auto-resolve. Broadcasts
+// (customer:job_update + dispatch:job_update + dispatch:alert_resolved)
+// fire post-commit and are suppressed on rollback.
+//
+// Also fixes a phantom-side-effect bug from the legacy structure:
+// the post-completion automation chain (review SMS, in-app notif,
+// compliance records, customer health, time tracking, upsell, recurring
+// auto-extend, WaveGuard conversion check) AND the cancellation handler
+// previously fired BEFORE the UPDATE. If the UPDATE failed, those side
+// effects had already committed against a status that didn't change.
+// Migration moves all of them AFTER the trx commits successfully.
+//
+// Behavior changes vs. the prior direct-UPDATE flow:
+//   1. Atomic guard via WHERE status = fromStatus → 409 on race.
+//      Was: last-write-wins with a try/catch fallback to status-only.
+//   2. job_status_history INSERT (was: never written by this route).
+//   3. Auto-resolve of overdue-family alerts atomically with the flip.
+//   4. customer:job_update + dispatch:job_update broadcast on every
+//      status change (was: not emitted from here at all).
+//   5. service_status_log + lifecycle columns (check_in_time /
+//      check_out_time / actual_duration_minutes / customer_confirmed)
+//      now write inside the same trx; rollback on race avoids phantom
+//      audit rows + half-set lifecycle timestamps.
+//   6. Post-completion automation chain only fires on success.
+//      Cancellation handler likewise.
+//
+// Note on column names: this route uses check_in_time / check_out_time /
+// actual_duration_minutes (different from the dispatch route's
+// actual_start_time / actual_end_time / service_time_minutes). Both
+// sets exist on scheduled_services for legacy reasons; this PR doesn't
+// consolidate them.
 router.put('/:id/status', async (req, res, next) => {
   try {
-    const { status, notes, requestReview } = req.body;
+    const { status: toStatus, notes, requestReview } = req.body;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -884,25 +919,98 @@ router.put('/:id/status', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    const updates = { status };
+    const fromStatus = svc.status;
+    const { transitionJobStatus } = require('../services/job-status');
 
-    if (status === 'confirmed') {
-      updates.customer_confirmed = true;
-    } else if (status === 'en_route') {
-      // Side effects (track_state flip, customer SMS with track link,
-      // in-app notification) are deferred until *after* the status
-      // persist succeeds — see below. Running them inline here would
-      // commit them even when the later scheduled_services update
-      // fails and the route returns 500, leaving customer tracking
-      // showing en-route while admin status didn't save.
-    } else if (status === 'on_site') {
-      updates.check_in_time = db.fn.now();
-    } else if (status === 'completed') {
-      updates.check_out_time = db.fn.now();
-      if (svc.check_in_time) {
-        updates.actual_duration_minutes = Math.round((Date.now() - new Date(svc.check_in_time)) / 60000);
+    try {
+      await db.transaction(async (trx) => {
+        // Legacy audit row INSIDE the trx so a race rejection rolls
+        // it back too. Was: written AFTER the UPDATE outside any trx
+        // (PR #328 caught the same issue on the dispatch route's
+        // pre-trx INSERT).
+        await trx('service_status_log').insert({
+          scheduled_service_id: svc.id, status: toStatus,
+          changed_by: req.technicianId || null, notes: notes || null,
+        });
+
+        // Lifecycle / metadata columns the route owns. Same trx as
+        // transitionJobStatus's status flip so a race rollback also
+        // rolls back these timestamps + flags.
+        const lifecycleUpdates = {};
+        if (toStatus === 'confirmed') {
+          lifecycleUpdates.customer_confirmed = true;
+        } else if (toStatus === 'on_site') {
+          lifecycleUpdates.check_in_time = trx.fn.now();
+        } else if (toStatus === 'completed') {
+          lifecycleUpdates.check_out_time = trx.fn.now();
+          if (svc.check_in_time) {
+            lifecycleUpdates.actual_duration_minutes = Math.round(
+              (Date.now() - new Date(svc.check_in_time)) / 60000
+            );
+          }
+        }
+        if (Object.keys(lifecycleUpdates).length > 0) {
+          await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
+        }
+
+        await transitionJobStatus({
+          jobId: svc.id,
+          fromStatus,
+          toStatus,
+          transitionedBy: req.technicianId,
+          trx,
+        });
+      });
+    } catch (err) {
+      if (err && err.message && err.message.includes('not in state')) {
+        return res.status(409).json({
+          error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+        });
       }
+      throw err;
+    }
 
+    // ===== Post-success side effects =====
+    // Everything below runs AFTER the trx commits. If the trx threw,
+    // none of these fired (the early return + outer try/next(err)
+    // handles both 409 and 5xx). Each block is internally
+    // best-effort with try/catch + log + continue; a failure in one
+    // doesn't block the others.
+
+    // Cancellation: notify via appointment reminders. Was: ran
+    // BEFORE the UPDATE — phantom notification on UPDATE failure.
+    if (toStatus === 'cancelled') {
+      try {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        await AppointmentReminders.handleCancellation(req.params.id);
+      } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
+    }
+
+    // En-route: track-transitions flip (which fires the customer SMS
+    // with track link) + in-app notification. markEnRoute is
+    // internally idempotent (atomic guard on track_state='scheduled',
+    // SMS guard on track_sms_sent_at), so a retry from any path is safe.
+    if (toStatus === 'en_route') {
+      try {
+        await trackTransitions.markEnRoute(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[en-route] markEnRoute failed: ${e.message}`); }
+
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
+      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
+    }
+
+    // Completed: review SMS schedule + in-app notification + the full
+    // post-service automation chain (compliance records, customer
+    // health score, time tracking close, upsell trigger, recurring
+    // plan auto-extend / end-of-plan flag, WaveGuard conversion
+    // opportunity check). All fire-and-forget against the freshly
+    // committed status flip.
+    if (toStatus === 'completed') {
       // Schedule a review request SMS for 2 hours after completion.
       // Honor the "Send review request" toggle if the caller passed it.
       // Default to true so older callers (that don't send the flag) keep
@@ -1053,51 +1161,6 @@ router.put('/:id/status', async (req, res, next) => {
           }
         }).catch(err => logger.error(`[post-service] WaveGuard check failed: ${err.message}`));
       } catch (e) { logger.error(`[post-service] WaveGuard check require failed: ${e.message}`); }
-    }
-
-    // Handle cancellation — notify via appointment reminders
-    if (status === 'cancelled') {
-      try {
-        const AppointmentReminders = require('../services/appointment-reminders');
-        await AppointmentReminders.handleCancellation(req.params.id);
-      } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
-    }
-
-    // Update the service — try with all fields, fall back to just status
-    try {
-      await db('scheduled_services').where({ id: req.params.id }).update(updates);
-    } catch (updateErr) {
-      logger.warn(`[schedule] Full update failed, falling back to status-only: ${updateErr.message}`);
-      await db('scheduled_services').where({ id: req.params.id }).update({ status });
-    }
-
-    // En-route side effects run *after* status persists. If the writes
-    // above threw, control already left via next(err) and we never get
-    // here — so the customer-facing track_state flip and SMS can't
-    // commit on a failed admin status save. markEnRoute is internally
-    // idempotent (atomic guard on track_state='scheduled', SMS guard
-    // on track_sms_sent_at) so a retry from any path is safe.
-    if (status === 'en_route') {
-      try {
-        await trackTransitions.markEnRoute(svc.id, {
-          actorType: 'admin',
-          actorId: req.technicianId,
-        });
-      } catch (e) { logger.error(`[en-route] markEnRoute failed: ${e.message}`); }
-
-      try {
-        const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
-      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
-    }
-
-    // Log status change — table may not exist
-    try {
-      await db('service_status_log').insert({
-        scheduled_service_id: svc.id, status, changed_by: req.technicianId || null, notes: notes || null,
-      });
-    } catch (logErr) {
-      logger.warn(`[schedule] Status log failed: ${logErr.message}`);
     }
 
     res.json({ success: true });
