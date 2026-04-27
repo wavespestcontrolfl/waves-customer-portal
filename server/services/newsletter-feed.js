@@ -44,10 +44,12 @@ async function getPublishedPosts({ limit = 6 } = {}) {
 
   return rows.map((s) => ({
     title: s.subject || '',
-    // Beehiiv-imported rows carry external_web_url; in-house sends
-    // don't have a public archive page yet, so the link is empty.
-    // The client renders non-linked cards as preview-only.
-    link: s.external_web_url || '',
+    // Beehiiv-imported rows link to the original Beehiiv archive URL;
+    // in-house sends fall back to the in-portal archive page (which
+    // renders html_body in a sandboxed iframe). Both keep the post
+    // clickable, which the Learn-tab ContentCard requires (it filters
+    // out posts whose `link` doesn't parse to an http(s) URL).
+    link: s.external_web_url || `/newsletter/archive/${s.id}`,
     pubDate: s.sent_at ? new Date(s.sent_at).toUTCString() : '',
     description: s.preview_text || stripHtml(s.html_body || '').slice(0, 200),
     image: null,

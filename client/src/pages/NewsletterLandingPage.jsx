@@ -186,8 +186,9 @@ function PastIssue({ post }) {
     color: 'inherit',
     transition: 'border-color 150ms ease-out',
   };
-  // Beehiiv-imported rows have a public web URL; in-house sends don't
-  // (no archive page yet) — render those as preview-only cards.
+  // Beehiiv-imported rows link to the original Beehiiv archive URL;
+  // in-house sends link to /newsletter/archive/:id. The link-less
+  // branch below is a defensive fallback for any malformed row.
   const inner = (
     <>
       <div
