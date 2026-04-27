@@ -27,6 +27,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { pingTechLocation } = require('../services/tech-status');
 
 // ---------- verification ----------
 
@@ -184,6 +185,27 @@ async function processTrackingEvent({ logId, eventType, payload }) {
 
     if (point) {
       await upsertLocation(tech.bouncie_imei, point);
+
+      // Also keep tech_status fresh so the dispatch board's left-pane
+      // roster + map markers update in real-time. pingTechLocation
+      // preserves semantic statuses (en_route / on_site / wrapping_up)
+      // so an admin's flip won't get clobbered by the next Bouncie
+      // ping a minute later — see services/tech-status.js header.
+      // Wrapped in catch so a tech_status failure doesn't kill the
+      // log-mark-processed update below; the GPS history in
+      // vehicle_locations is already committed at this point and is
+      // the system of record for the customer-facing track map.
+      try {
+        await pingTechLocation({
+          tech_id: tech.id,
+          lat: point.lat,
+          lng: point.lng,
+          ignition: point.ignition,
+          speed_mph: point.speed_mph,
+        });
+      } catch (err) {
+        logger.error(`[webhooks-bouncie] pingTechLocation failed: ${err.message}`);
+      }
     }
 
     if (logId) {
