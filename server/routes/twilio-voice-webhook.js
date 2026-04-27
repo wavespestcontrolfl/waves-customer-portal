@@ -392,20 +392,28 @@ router.post('/call-status', async (req, res) => {
         return;
       }
 
-      // Studio Flow bypassed /voice — insert from status-callback fields.
-      const numberConfig = TWILIO_NUMBERS.findByNumber(To);
+      // Outbound calls always insert via admin-communications.js's originator —
+      // its parent-leg `To` is the admin phone (Adam), not the customer, so
+      // synthesizing a row from those fields would key the call to the wrong
+      // contact. If the row is missing here, the originator's insert failed
+      // upstream; log and skip rather than pollute communications history.
       const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
-      // Outbound: From is our Twilio number, To is the customer.
-      // Inbound: From is the customer, To is our Twilio number.
-      const contactPhone = isOutbound ? To : From;
-      const ourEndpoint = isOutbound ? From : To;
-      const customer = contactPhone
-        ? await trx('customers').where({ phone: contactPhone }).first()
+      if (isOutbound) {
+        logger.warn(
+          `Outbound status_callback with no call_log row CallSid=${CallSid} — originator did not insert; skipping fallback insert`
+        );
+        return;
+      }
+
+      // Inbound fallback: Studio Flow bypassed /voice — insert from status-callback fields.
+      const numberConfig = TWILIO_NUMBERS.findByNumber(To);
+      const customer = From
+        ? await trx('customers').where({ phone: From }).first()
         : null;
 
       await trx('call_log').insert({
         customer_id: customer?.id || null,
-        direction: isOutbound ? 'outbound' : 'inbound',
+        direction: 'inbound',
         from_phone: From,
         to_phone: To,
         twilio_call_sid: CallSid,
@@ -425,10 +433,10 @@ router.post('/call-status', async (req, res) => {
       void require('../services/conversations').recordTouchpoint({
         customerId: customer?.id,
         channel: 'voice',
-        ourEndpointId: ourEndpoint,
-        contactPhone: customer ? null : contactPhone,
-        direction: isOutbound ? 'outbound' : 'inbound',
-        authorType: isOutbound ? 'admin' : 'customer',
+        ourEndpointId: To,
+        contactPhone: customer ? null : From,
+        direction: 'inbound',
+        authorType: 'customer',
         twilioSid: CallSid,
         metadata: {
           location: numberConfig?.label || 'unknown',
