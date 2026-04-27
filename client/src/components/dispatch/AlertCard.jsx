@@ -88,6 +88,27 @@ function TechLateBody({ alert }) {
   );
 }
 
+function UnassignedOverdueBody({ alert }) {
+  const delay = alert.payload && alert.payload.delay_minutes;
+  return (
+    <div className="text-14 text-ink-primary">
+      <span className="font-medium">Unassigned job</span>{' '}
+      {delay != null ? (
+        <>
+          overdue by <span className="font-medium">{delay} min</span>
+        </>
+      ) : (
+        'past its window'
+      )}
+      {customerLine(alert) && (
+        <>
+          {' '}— <span className="font-medium">{customerLine(alert)}</span>
+        </>
+      )}
+    </div>
+  );
+}
+
 function MissedPhotoBody({ alert }) {
   return (
     <div className="text-14 text-ink-primary">
@@ -157,6 +178,7 @@ function GenericBody({ alert }) {
 
 const TYPE_RENDERERS = {
   tech_late: TechLateBody,
+  unassigned_overdue: UnassignedOverdueBody,
   missed_photo: MissedPhotoBody,
   moa_violation: MoaViolationBody,
 };

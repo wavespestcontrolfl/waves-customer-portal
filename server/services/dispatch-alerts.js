@@ -211,29 +211,39 @@ function emitResolved(row) {
   });
 }
 
-// Statuses where any open tech_late alert for the job becomes
-// meaningless and should be auto-cleared:
+// Statuses where any open OVERDUE-FAMILY alert (tech_late OR
+// unassigned_overdue) for the job becomes meaningless and should
+// be auto-cleared:
 //   - on_site:   tech actually arrived; "running behind" is moot
 //   - completed: job finished (with or without a prior on_site step)
 //   - cancelled: job is off the route entirely
 //   - skipped:   tech intentionally bypassed; not "late" anymore
 //
 // Excluded:
-//   - rescheduled: ambiguous — the row may pick up a new window where
-//     a fresh tech_late would fire; auto-clearing the old one risks
-//     hiding a still-valid signal. Dispatchers can resolve manually.
+//   - rescheduled: ambiguous — the row may pick up a new window
+//     where a fresh overdue-family alert would fire; auto-clearing
+//     the old one risks hiding a still-valid signal. Dispatchers
+//     can resolve manually.
 //   - en_route:   tech started driving but hasn't arrived; still
-//     "late" until on_site.
-const TECH_LATE_AUTO_RESOLVE_STATUSES = new Set([
+//     "late" until on_site. (Doesn't apply to unassigned_overdue
+//     since en_route requires a tech, but keeping the semantic
+//     consistent across the family.)
+const OVERDUE_ALERT_AUTO_RESOLVE_STATUSES = new Set([
   'on_site',
   'completed',
   'cancelled',
   'skipped',
 ]);
 
+// Alert types in the "overdue family" — both fire on a slipping
+// window, just from different scopes (assigned vs unassigned).
+// Same terminal-status set clears both.
+const OVERDUE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
+
 /**
- * Resolve every open tech_late alert for a job when the job's new
- * status makes the "running late" signal obsolete. Used by:
+ * Resolve every open overdue-family alert (tech_late +
+ * unassigned_overdue) for a job when the job's new status makes
+ * the "running late" signal obsolete. Used by:
  *   1. services/job-status.js#transitionJobStatus — the new
  *      sole-writer pattern (uses caller's trx for atomic resolve).
  *   2. routes/admin-dispatch.js PUT /:serviceId/status — the legacy
@@ -246,18 +256,19 @@ const TECH_LATE_AUTO_RESOLVE_STATUSES = new Set([
  * if a trx is passed, inline otherwise) and the partial-unique-index
  * 23505 race protection.
  *
- * No-op for any toStatus not in TECH_LATE_AUTO_RESOLVE_STATUSES,
+ * No-op for any toStatus not in OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,
  * which makes it safe to call unconditionally on every status write.
  *
  * @returns {Promise<{resolved: number}>}
  */
-async function autoResolveTechLateForJob({ jobId, resolvedBy, trx, toStatus } = {}) {
-  if (!jobId || !TECH_LATE_AUTO_RESOLVE_STATUSES.has(toStatus)) {
+async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus } = {}) {
+  if (!jobId || !OVERDUE_ALERT_AUTO_RESOLVE_STATUSES.has(toStatus)) {
     return { resolved: 0 };
   }
   const t = trx || db;
   const openAlerts = await t('dispatch_alerts')
-    .where({ type: 'tech_late', job_id: jobId })
+    .whereIn('type', OVERDUE_ALERT_TYPES)
+    .where({ job_id: jobId })
     .whereNull('resolved_at')
     .select('id');
   let resolved = 0;
@@ -271,8 +282,9 @@ async function autoResolveTechLateForJob({ jobId, resolvedBy, trx, toStatus } = 
 module.exports = {
   createAlert,
   resolveAlert,
-  autoResolveTechLateForJob,
-  TECH_LATE_AUTO_RESOLVE_STATUSES,
+  autoResolveOverdueAlertsForJob,
+  OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,
+  OVERDUE_ALERT_TYPES,
   EVENT,
   EVENT_RESOLVED,
   ROOM,
