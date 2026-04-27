@@ -39,6 +39,7 @@ const { getIo } = require('../sockets');
 const logger = require('./logger');
 
 const EVENT = 'dispatch:alert';
+const EVENT_RESOLVED = 'dispatch:alert_resolved';
 const ROOM = 'dispatch:admins';
 
 const VALID_SEVERITIES = ['info', 'warn', 'critical'];
@@ -127,9 +128,94 @@ function emitAlert(row) {
   io.to(ROOM).emit(EVENT, row);
 }
 
+/**
+ * Mark an alert resolved and broadcast dispatch:alert_resolved.
+ *
+ * Idempotent at the DB layer: the UPDATE has `WHERE resolved_at IS NULL`,
+ * so a second concurrent resolve from a different dispatcher is a no-op
+ * — the second caller gets `null` back and no second broadcast fires.
+ * Caller's route layer treats null as "not found OR already resolved"
+ * and disambiguates with a follow-up SELECT (see admin-dispatch.js).
+ *
+ * Same trx-or-not + post-commit emit pattern as createAlert. Future
+ * auto-resolve paths (e.g., transitionJobStatus to on_site clearing
+ * tech_late alerts for that job) can pass their own trx; this module
+ * doesn't emit until the outer trx commits.
+ *
+ * @param {object} args
+ * @param {string} args.id           required, dispatch_alerts.id
+ * @param {string} [args.resolvedBy] optional, technicians.id of the
+ *                                   actor who resolved. Stored on the
+ *                                   row for audit; not in the broadcast
+ *                                   payload (other dispatchers don't
+ *                                   need it for the cache eviction).
+ * @param {object} [args.trx]        optional Knex transaction.
+ * @returns {Promise<object|null>}   the resolved row, or null if no
+ *                                   row matched (already resolved or
+ *                                   id doesn't exist).
+ */
+async function resolveAlert({ id, resolvedBy, trx } = {}) {
+  if (!id) {
+    throw new Error('resolveAlert: id is required');
+  }
+
+  async function doWrite(t) {
+    const rows = await t('dispatch_alerts')
+      .where({ id })
+      .whereNull('resolved_at')
+      .update({
+        resolved_at: t.fn.now(),
+        resolved_by: resolvedBy || null,
+      })
+      .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+    return rows[0] || null;
+  }
+
+  if (trx) {
+    const row = await doWrite(trx);
+    if (!row) return null;
+    if (trx.executionPromise) {
+      trx.executionPromise.then(() => emitResolved(row)).catch(() => {
+        // Outer rollback. Suppress emit so cards don't disappear from
+        // dispatcher screens on a write that didn't actually commit.
+      });
+    } else {
+      logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
+      emitResolved(row);
+    }
+    return row;
+  }
+
+  let captured;
+  await db.transaction(async (innerTrx) => {
+    captured = await doWrite(innerTrx);
+  });
+  if (!captured) return null;
+  emitResolved(captured);
+  return captured;
+}
+
+// Resolved broadcast payload is intentionally narrow: just the id and
+// the audit fields. Cards have already been hydrated with full data
+// on the open broadcast — receivers only need to know "drop this id."
+function emitResolved(row) {
+  const io = getIo();
+  if (!io) {
+    logger.warn('[dispatch-alerts] io not initialized; skipping resolve broadcast');
+    return;
+  }
+  io.to(ROOM).emit(EVENT_RESOLVED, {
+    id: row.id,
+    resolved_at: row.resolved_at,
+    resolved_by: row.resolved_by,
+  });
+}
+
 module.exports = {
   createAlert,
+  resolveAlert,
   EVENT,
+  EVENT_RESOLVED,
   ROOM,
   VALID_SEVERITIES,
 };

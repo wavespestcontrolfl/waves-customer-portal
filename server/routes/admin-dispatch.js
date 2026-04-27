@@ -870,4 +870,36 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
   }
 });
 
+// PATCH /api/admin/dispatch/alerts/:id/resolve — close an action queue card.
+//
+// Sets resolved_at + resolved_by on the row and broadcasts
+// dispatch:alert_resolved to dispatch:admins so every connected
+// dispatcher's right pane drops the card without a hydration round
+// trip. The local PATCH caller also drops it client-side on success
+// (their broadcast arrival becomes a no-op via the same id filter).
+//
+// Idempotent: the underlying UPDATE matches `WHERE resolved_at IS NULL`,
+// so a second concurrent resolve from another dispatcher returns null
+// from resolveAlert. We follow up with a SELECT to disambiguate:
+//   - row exists and is resolved → 200 with the existing row, no
+//     second broadcast (cards on other clients already removed)
+//   - row missing                → 404
+router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
+  try {
+    const { resolveAlert } = require('../services/dispatch-alerts');
+    const row = await resolveAlert({
+      id: req.params.id,
+      resolvedBy: req.technicianId,
+    });
+    if (row) return res.json({ alert: row });
+
+    const existing = await db('dispatch_alerts').where({ id: req.params.id }).first();
+    if (!existing) return res.status(404).json({ error: 'alert not found' });
+    return res.json({ alert: existing });
+  } catch (err) {
+    logger.error(`[dispatch/alerts/resolve] failed for ${req.params.id}: ${err.message}`);
+    next(err);
+  }
+});
+
 module.exports = router;

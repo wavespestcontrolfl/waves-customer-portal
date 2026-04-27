@@ -9,13 +9,20 @@
  *   warn     → waves-gold (action needed soon)
  *   critical → alert-fg red (immediate attention)
  *
- * Tier 1 V2 styling: Card / Badge primitives, light surface, zinc
- * ramp, fontWeight 400/500 only.
+ * Tier 1 V2 styling: Card / Badge / Button primitives, light surface,
+ * zinc ramp, fontWeight 400/500 only.
  *
- * Resolve action lives in a future PR — this card is read-only.
+ * Resolve flow: when the dispatcher clicks Resolve, the card calls
+ * `onResolve(alert.id)` (passed in from <ActionQueuePane> via
+ * useDispatchAlerts). The hook PATCHes the resolve endpoint, drops
+ * the row optimistically on success, and the dispatch:alert_resolved
+ * broadcast removes it from every other connected dispatcher's pane.
+ * While the PATCH is in flight the button is disabled + shows
+ * "Resolving…". On failure the button re-enables for retry. If no
+ * `onResolve` prop is passed, the button is omitted (read-only mode).
  */
-import React from 'react';
-import { Card, Badge, cn } from '../ui';
+import React, { useState } from 'react';
+import { Card, Button, cn } from '../ui';
 
 const SEVERITY_TONE = {
   info: 'neutral',
@@ -154,9 +161,25 @@ const TYPE_RENDERERS = {
   moa_violation: MoaViolationBody,
 };
 
-export default function AlertCard({ alert }) {
+export default function AlertCard({ alert, onResolve }) {
   const Body = TYPE_RENDERERS[alert.type] || GenericBody;
-  const tone = SEVERITY_TONE[alert.severity] || 'neutral';
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState(null);
+
+  async function handleResolve() {
+    if (!onResolve || resolving) return;
+    setResolving(true);
+    setResolveError(null);
+    try {
+      await onResolve(alert.id);
+      // On success the hook drops this card from state, so this
+      // component unmounts before any state-setter would re-render.
+      // No need to flip `resolving` back.
+    } catch (err) {
+      setResolving(false);
+      setResolveError(err?.message || 'Resolve failed');
+    }
+  }
 
   return (
     <Card
@@ -184,6 +207,21 @@ export default function AlertCard({ alert }) {
         </span>
       </div>
       <Body alert={alert} />
+      {onResolve && (
+        <div className="mt-2 flex items-center justify-end gap-2">
+          {resolveError && (
+            <span className="text-11 text-alert-fg">{resolveError}</span>
+          )}
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleResolve}
+            disabled={resolving}
+          >
+            {resolving ? 'Resolving…' : 'Resolve'}
+          </Button>
+        </div>
+      )}
     </Card>
   );
 }
