@@ -145,8 +145,9 @@ finding and warns on P1. Reviewers must return JSON matching
   `EstimatePage.jsx`, and `CommunicationsPage.jsx` are retained as
   shared-utility modules after the V1→V2 migration. Their named exports
   (`CompletionPanel` / `RescheduleModal` / `EditServiceModal` /
-  `ProtocolPanel` / `MONTH_NAMES` / `STAGES` / `STAGE_MAP` /
-  `KANBAN_STAGES` / `LEAD_SOURCES` / `CustomerMap` /
+  `ProtocolPanel` / `MONTH_NAMES` / `PRODUCT_DESCRIPTIONS` /
+  `TRACK_SAFETY_RULES` / `stripLegacyBoilerplate` / `STAGES` /
+  `STAGE_MAP` / `KANBAN_STAGES` / `LEAD_SOURCES` / `CustomerMap` /
   `CustomerIntelligenceTab` / `STATUS_CONFIG` / `PIPELINE_FILTERS` /
   `DECLINE_REASONS` / `classifyEstimate` / `getUrgencyIndicator` /
   `detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP`) are imported
