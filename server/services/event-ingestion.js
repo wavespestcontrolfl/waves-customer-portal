@@ -476,8 +476,13 @@ Rules:
     const startKey = start ? start.toISOString() : '';
     const urlKey = eventUrl || '';
     const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
+    // Clamp to varchar(128) — events_raw.city per migration
+    // 20260427000003. Claude can return long location strings; without
+    // the slice the INSERT throws "value too long for type character
+    // varying(128)" and bubbles out of the loop, failing the whole
+    // source pull and dropping remaining events.
     const city = (typeof ev.city === 'string' && ev.city.trim())
-      ? ev.city.trim().toLowerCase()
+      ? ev.city.trim().toLowerCase().slice(0, 128)
       : (source.coverage_geo?.[0] || null);
 
     await db('events_raw')
