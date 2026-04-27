@@ -6,9 +6,9 @@
  * trail); PATCH + POST write an activity_log row via the existing table so
  * the admin UI can show "last updated by X on Y".
  *
- * No feature-flag gate at the route level — the flag controls whether the
- * client-side UI is visible. Routes are always reachable so a flag flip
- * doesn't require a server restart.
+ * The credentials_v1 client-side rollout flag was retired when the module
+ * went general-availability; the standard admin auth applied below
+ * (adminAuthenticate + requireAdmin) is the only gate now.
  */
 const express = require('express');
 const router = express.Router();

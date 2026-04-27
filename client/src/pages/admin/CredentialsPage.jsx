@@ -1,9 +1,8 @@
 // client/src/pages/admin/CredentialsPage.jsx
 //
 // Virginia's admin surface for the business_credentials single source of
-// truth (spec §2). Gated behind the `credentials_v1` feature flag; when the
-// flag is off we render a "Not available" placeholder so early access stays
-// limited to the Waves account during rollout.
+// truth (spec §2). The credentials_v1 feature flag was retired when the
+// module was rolled out — credentials is always-on for admins now.
 //
 // Design language follows the monochrome-professional Tier-1 V2 pattern:
 // components/ui primitives + Tailwind zinc ramp + hairline borders.
@@ -11,7 +10,6 @@
 // and expiration within 60 days.
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, Input, Textarea, Select, Checkbox, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -189,7 +187,6 @@ function CredentialForm({ initial, onSave, onCancel, saving }) {
 }
 
 export default function CredentialsPage() {
-  const flag = useFeatureFlag('credentials_v1');
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -209,23 +206,7 @@ export default function CredentialsPage() {
     }
   }, []);
 
-  useEffect(() => { if (flag) load(); }, [flag, load]);
-
-  if (!flag) {
-    return (
-      <div>
-        <h1 className="text-28 font-normal tracking-h1 text-ink-primary mb-5">Credentials</h1>
-        <Card>
-          <CardBody>
-            <div className="text-14 text-ink-primary mb-1">Not available</div>
-            <div className="text-13 text-ink-tertiary">
-              The credentials module is in limited rollout. Contact the admin to enable the <code>credentials_v1</code> flag for your account.
-            </div>
-          </CardBody>
-        </Card>
-      </div>
-    );
-  }
+  useEffect(() => { load(); }, [load]);
 
   const onSave = async (payload) => {
     setSaving(true);
