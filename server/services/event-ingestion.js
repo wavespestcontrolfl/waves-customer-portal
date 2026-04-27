@@ -7,9 +7,12 @@
  * Handlers by feed_type:
  *   - 'rss'   → pullRssSource (P3a, rss-parser)
  *   - 'ical'  → pullIcalSource (P3b, node-ical)
- *   - 'scrape' / 'json' → not implemented yet; sources with these
- *     feed_types are skipped with a warn-level log so the cron can
- *     pre-seed them without failing.
+ *   - 'scrape' → pullScrapeSource (P3b leg 2, Playwright + Claude
+ *     extraction). For SPA event aggregators that don't expose
+ *     RSS or iCal.
+ *   - 'json'  → not implemented yet; sources with this feed_type are
+ *     skipped with a warn-level log so the cron can pre-seed them
+ *     without failing.
  *
  * Each pull is bounded by:
  *   - 15s HTTP timeout
@@ -45,6 +48,26 @@ try {
 } catch {
   ical = null;
 }
+
+// Playwright + Anthropic SDK for the scrape handler. Both are already
+// in workspace deps (Playwright via root package.json, Anthropic via
+// other server services). Wrap the require() in try/catch so a fresh
+// install missing them doesn't crash the whole ingestion service.
+let chromium;
+try {
+  ({ chromium } = require('playwright'));
+} catch {
+  chromium = null;
+}
+
+let Anthropic;
+try {
+  Anthropic = require('@anthropic-ai/sdk');
+} catch {
+  Anthropic = null;
+}
+
+const MODELS = require('../config/models');
 
 const HTTP_TIMEOUT_MS = 15000;
 const MAX_ITEMS_PER_FEED = 200;
@@ -291,6 +314,173 @@ async function pullIcalSource(source) {
   return { upserted, dropped, total: vevents.length };
 }
 
+// Playwright + Claude scrape handler. For SPA event aggregators that
+// don't expose RSS or iCal (Visit Sarasota, Visit Tampa Bay, Patch.com,
+// chamber-of-commerce calendar pages, etc.). Flow:
+//
+//   1. Playwright launches headless Chromium, navigates to feed_url,
+//      waits for network-idle so the SPA hydrates.
+//   2. Optionally selects the listing container (per
+//      source.scrape_config.contentSelector — defaults to <body>).
+//      Falls back to body if the selector isn't found.
+//   3. Strips scripts/styles, takes the inner HTML, truncates to
+//      ~25k chars (more than enough for ~30 event tiles, well under
+//      Claude's input cap with margin).
+//   4. Sends to Claude (WORKHORSE) with a strict-JSON-output prompt
+//      asking for {events: [{title, startAt, venueName, city, description, eventUrl}]}.
+//   5. Validates each event, applies the same forward-window +
+//      recap-drop filters as RSS/iCal, upserts into events_raw.
+//
+// Per-source flexibility lives in event_sources.scrape_config (jsonb):
+//   - contentSelector?: CSS selector for the listing container
+//   - waitForSelector?: optional selector to await before extraction
+//   - maxEvents?:        cap on events Claude is asked to extract (default 15)
+//
+// Cost: ~$0.05/scrape with WORKHORSE on a 25k-char SPA. At a daily
+// cron with 5-10 scrape sources, that's ~$0.25-0.50/day.
+//
+// Browser lifecycle: caller (ingestSource) opens one browser per
+// scrape pull. For high-volume scraping we'd reuse a browser across
+// multiple sources in one ingest run — current volume doesn't justify
+// the bookkeeping; revisit if scrape source count grows past ~10.
+async function pullScrapeSource(source) {
+  if (!chromium) throw new Error('playwright not installed');
+  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+    throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
+  }
+
+  const cfg = source.scrape_config || {};
+  const contentSelector = cfg.contentSelector || 'body';
+  const waitForSelector = cfg.waitForSelector || null;
+  const maxEvents = Math.max(3, Math.min(30, Number(cfg.maxEvents) || 15));
+
+  const browser = await chromium.launch({ headless: true });
+  let html;
+  try {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
+      viewport: { width: 1280, height: 1024 },
+    });
+    const page = await context.newPage();
+    await page.goto(source.feed_url, { timeout: HTTP_TIMEOUT_MS, waitUntil: 'networkidle' });
+    if (waitForSelector) {
+      await page.waitForSelector(waitForSelector, { timeout: HTTP_TIMEOUT_MS }).catch(() => {});
+    }
+    // Pull the listing container (or body), strip scripts/styles in-page
+    // before extracting innerHTML so we don't send useless markup to
+    // Claude. Falls back to body if the selector misses.
+    html = await page.evaluate((sel) => {
+      const root = document.querySelector(sel) || document.body;
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll('script, style, noscript, svg').forEach((n) => n.remove());
+      return clone.innerHTML || '';
+    }, contentSelector);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+
+  // Truncate. Cheap insurance against runaway pages.
+  const TRUNC = 25000;
+  const truncated = html.length > TRUNC ? html.slice(0, TRUNC) : html;
+
+  // Ask Claude to extract structured events. Strict JSON schema; we
+  // parse + validate per-item before insert so a model hallucination
+  // can't poison the table.
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const systemPrompt = `You extract upcoming public events from raw HTML scraped from a Southwest Florida event-listing page.
+
+Today's date: ${todayIso}. Source: ${source.name} (${source.url}).
+
+Output STRICT JSON only, no prose, with this shape:
+{
+  "events": [
+    {
+      "title": "string, the event name",
+      "startAt": "ISO 8601 datetime in America/New_York timezone, or null if no specific date is given",
+      "venueName": "string or null",
+      "city": "lowercase city slug — sarasota | bradenton | venice | tampa | st-petersburg | clearwater | gulfport | punta-gorda | port-charlotte | englewood | north-port | lakewood-ranch | parrish | palmetto | anna-maria | siesta-key | longboat-key | etc — or null if not determinable",
+      "description": "string, 1-2 short sentences describing why someone would go. May be null if no description is on the page.",
+      "eventUrl": "absolute http(s) URL to the event detail page, or null"
+    }
+  ]
+}
+
+Rules:
+- Skip events with no title.
+- Skip events that already happened (date < today).
+- Skip events more than 90 days out.
+- Skip recurring/series rows that don't have a specific upcoming instance.
+- Skip "View all events" or navigation links.
+- Cap output at ${maxEvents} events.
+- If you can't find events, return {"events": []}.
+- Return JSON only — no code fence, no commentary.`;
+
+  const response = await anthropic.messages.create({
+    model: MODELS.WORKHORSE,
+    max_tokens: 2000,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: `<html>\n${truncated}\n</html>` }],
+  });
+  const text = response.content?.[0]?.text || '';
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('Claude did not return JSON for scrape extraction');
+  const parsed = JSON.parse(jsonMatch[0]);
+  const claudeEvents = Array.isArray(parsed.events) ? parsed.events.slice(0, maxEvents) : [];
+
+  const cutoffMs = Date.now() + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  let upserted = 0;
+  let dropped = 0;
+
+  for (const ev of claudeEvents) {
+    const title = (ev.title || '').toString().trim().slice(0, 512);
+    if (!title) { dropped += 1; continue; }
+
+    const start = parseDateOrNull(ev.startAt);
+    if (start && start.getTime() > cutoffMs) { dropped += 1; continue; }
+    if (start && start.getTime() < now - 24 * 60 * 60 * 1000) { dropped += 1; continue; }
+
+    // Synthesize a stable dedup key from title+date+url. Scraped
+    // sources don't have a UID/guid, so we hash the natural fields.
+    const externalId = `${title.slice(0, 80)}|${ev.startAt || ''}|${ev.eventUrl || ''}`.slice(0, 256);
+    const description = ev.description ? String(ev.description).slice(0, 2000) : null;
+    const venueName = ev.venueName ? String(ev.venueName).slice(0, 256) : null;
+    const eventUrl = safeHttpUrl(ev.eventUrl);
+    const city = (typeof ev.city === 'string' && ev.city.trim())
+      ? ev.city.trim().toLowerCase()
+      : (source.coverage_geo?.[0] || null);
+
+    await db('events_raw')
+      .insert({
+        source_id: source.id,
+        external_id: externalId,
+        title,
+        description,
+        start_at: start,
+        venue_name: venueName,
+        city,
+        event_url: eventUrl,
+      })
+      .onConflict(['source_id', 'external_id'])
+      .merge({
+        title,
+        description,
+        start_at: start,
+        venue_name: venueName,
+        city,
+        event_url: eventUrl,
+        pulled_at: db.fn.now(),
+        updated_at: db.fn.now(),
+      });
+
+    upserted += 1;
+  }
+
+  return { upserted, dropped, total: claudeEvents.length };
+}
+
 async function ingestSource(source) {
   const startedAt = Date.now();
   try {
@@ -299,9 +489,11 @@ async function ingestSource(source) {
       result = await pullRssSource(source);
     } else if (source.feed_type === 'ical') {
       result = await pullIcalSource(source);
+    } else if (source.feed_type === 'scrape') {
+      result = await pullScrapeSource(source);
     } else {
-      // 'scrape' / 'json' not implemented yet — skip gracefully so the
-      // cron can pre-seed sources without failing. Don't increment
+      // 'json' not implemented yet — skip gracefully so the cron can
+      // pre-seed sources without failing. Don't increment
       // consecutive_failures (those are for real failures).
       logger.warn(`[event-ingestion] Skipping ${source.name} — feed_type=${source.feed_type} not implemented yet`);
       return { source: source.name, skipped: true };
