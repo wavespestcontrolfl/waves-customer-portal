@@ -24,37 +24,9 @@
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
-const config = require('../config');
 const logger = require('../services/logger');
-
-// S3 client for presigning technicians.photo_s3_key at response
-// time. 15 min TTL is plenty for a single page load — the browser
-// caches image bytes after the first hit. The customer's track_view_token
-// gates this whole route, so the presigned URL is only handed to a
-// client that already proved it knows the token.
-const s3 = new S3Client({
-  region: config.s3?.region,
-  credentials: config.s3?.accessKeyId
-    ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
-    : undefined,
-});
-
-async function resolveTechPhotoUrl(s3Key, fallbackUrl) {
-  if (!s3Key) return fallbackUrl || null;
-  if (!config.s3?.bucket) return fallbackUrl || null;
-  try {
-    return await getSignedUrl(s3, new GetObjectCommand({
-      Bucket: config.s3.bucket,
-      Key: s3Key,
-    }), { expiresIn: 15 * 60 });
-  } catch (err) {
-    logger.warn(`[track-public] presign failed for tech photo ${s3Key}: ${err.message}`);
-    return fallbackUrl || null;
-  }
-}
+const { resolveTechPhotoUrl } = require('../services/tech-photo');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;

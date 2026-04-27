@@ -8,6 +8,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
+const { resolveTechPhotoUrl } = require('../services/tech-photo');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -785,6 +786,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         t.id,
         t.name,
         t.avatar_url,
+        t.photo_s3_key,
         t.role,
         ts.status,
         ts.lat,
@@ -841,10 +843,17 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       [today]
     );
 
-    const techs = (techRows.rows || []).map((r) => ({
+    // Avatar URL: presign the canonical photo_s3_key (set by
+    // POST /api/admin/timetracking/technicians/:id/photo) at response
+    // time inside this admin-only route. Falls back to the row's
+    // avatar_url for techs whose avatar lives at an external host.
+    // Same pattern as track-public.js — see services/tech-photo.js.
+    // Admin auth is the trusted-context boundary that keeps the
+    // presigned URL out of unauth hands.
+    const techs = await Promise.all((techRows.rows || []).map(async (r) => ({
       id: r.id,
       name: r.name,
-      avatar_url: r.avatar_url || null,
+      avatar_url: await resolveTechPhotoUrl(r.photo_s3_key, r.avatar_url),
       role: r.role,
       status: r.status,
       lat: r.lat == null ? null : Number(r.lat),
@@ -853,7 +862,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       updated_at: r.updated_at,
       today_total: parseInt(r.today_total, 10) || 0,
       today_completed: parseInt(r.today_completed, 10) || 0,
-    }));
+    })));
 
     const jobs = (jobRows.rows || []).map((r) => {
       // Address normalization at the API boundary. Clients render this
