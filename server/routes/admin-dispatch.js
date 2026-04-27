@@ -767,4 +767,107 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
   }
 });
 
+// GET /api/admin/dispatch/alerts — action queue read endpoint.
+//
+// Returns dispatch_alerts rows enriched with tech_name + customer
+// context + address so the right-pane can render cards without
+// follow-up fetches per alert. Filtered by ?unresolved=true (default
+// true; pass ?unresolved=false to include resolved alerts in audit
+// views).
+//
+// Default ORDER BY created_at DESC (newest first) — that's the
+// dispatch board's primary read pattern. ?limit caps the result;
+// default 50, max 200 to keep payloads bounded if the table grows.
+//
+// Distinct from the dispatch:alert socket broadcast (PR #293):
+// broadcast carries the bare row at insert time (cheap, narrow);
+// this GET returns enriched rows (tech name, customer, address) for
+// the right-pane's hydration. The action queue UI degrades
+// gracefully when broadcast-only rows are missing the enriched
+// fields.
+//
+// Admin-only (matches /board and /jobs/:id).
+router.get('/alerts', requireAdmin, async (req, res, next) => {
+  try {
+    const unresolved = req.query.unresolved !== 'false';
+    const requestedLimit = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(Math.max(requestedLimit, 1), 200)
+      : 50;
+
+    const q = db('dispatch_alerts as a')
+      .leftJoin('technicians as t', 'a.tech_id', 't.id')
+      .leftJoin('scheduled_services as s', 'a.job_id', 's.id')
+      .leftJoin('customers as c', 's.customer_id', 'c.id')
+      .select(
+        'a.id',
+        'a.type',
+        'a.severity',
+        'a.tech_id',
+        'a.job_id',
+        'a.payload',
+        'a.created_at',
+        'a.resolved_at',
+        'a.resolved_by',
+        't.name as tech_name',
+        'c.first_name as customer_first_name',
+        'c.last_name as customer_last_name',
+        'c.address_line1',
+        'c.address_line2',
+        'c.city',
+        'c.state',
+        'c.zip',
+        's.service_type',
+        's.scheduled_date',
+        's.window_start',
+        's.window_end'
+      )
+      .orderBy('a.created_at', 'desc')
+      .limit(limit);
+
+    if (unresolved) q.whereNull('a.resolved_at');
+
+    const rows = await q;
+
+    const alerts = rows.map((r) => {
+      // Address normalization, same shape as /board and /jobs/:id.
+      // Null-safe — alerts can be tech-scoped or job-scoped or neither,
+      // so customer/job fields may all be null.
+      let address = null;
+      if (r.address_line1) {
+        const line2 = r.address_line2 ? ` ${r.address_line2}` : '';
+        const cityState = r.city ? `, ${r.city}` : '';
+        const stateZip = r.state ? `, ${r.state}${r.zip ? ` ${r.zip}` : ''}` : '';
+        address = `${r.address_line1}${line2}${cityState}${stateZip}`.trim();
+      }
+
+      return {
+        id: r.id,
+        type: r.type,
+        severity: r.severity,
+        tech_id: r.tech_id,
+        tech_name: r.tech_name || null,
+        job_id: r.job_id,
+        customer_first_name: r.customer_first_name || null,
+        customer_last_name: r.customer_last_name || null,
+        address,
+        service_type: r.service_type || null,
+        scheduled_date: r.scheduled_date || null,
+        window_start: r.window_start || null,
+        window_end: r.window_end || null,
+        // payload is JSONB — pg returns it as object directly.
+        payload: r.payload || null,
+        created_at: r.created_at,
+        resolved_at: r.resolved_at,
+        resolved_by: r.resolved_by,
+      };
+    });
+
+    res.json({ alerts });
+  } catch (err) {
+    logger.error(`[dispatch/alerts] hydration failed: ${err.message}`);
+    next(err);
+  }
+});
+
 module.exports = router;
