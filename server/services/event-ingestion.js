@@ -34,6 +34,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 let Parser;
 try {
@@ -398,7 +399,11 @@ async function pullScrapeSource(source) {
   // parse + validate per-item before insert so a model hallucination
   // can't poison the table.
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const todayIso = new Date().toISOString().slice(0, 10);
+  // Anchor "today" in America/New_York, not UTC. The cron runs at 4am ET
+  // which is in the UTC-day-overlap region; without ET anchoring the
+  // prompt could tell Claude the wrong day and a same-evening event
+  // gets filtered as already past, or the 90-day cutoff shifts by ±1d.
+  const todayIso = etDateString(new Date());
   const systemPrompt = `You extract upcoming public events from raw HTML scraped from a Southwest Florida event-listing page.
 
 Today's date: ${todayIso}. Source: ${source.name} (${source.url}).
