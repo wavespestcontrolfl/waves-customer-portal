@@ -3,14 +3,10 @@
  *
  * Reads dispatch_alerts via useDispatchAlerts (hydration via
  * GET /api/admin/dispatch/alerts?unresolved=true, then live updates
- * via dispatch:alert socket broadcasts). Renders one <AlertCard> per
- * unresolved alert, newest first.
- *
- * Read-only in v1 — resolve / snooze / acknowledge actions land in
- * a follow-up PR. Generators (cron + inline detectors) also land
- * separately. This PR closes the dispatch:alert loop on the read
- * side: PR #293 shipped channel + storage; this surfaces the data
- * to the dispatcher.
+ * via dispatch:alert + dispatch:alert_resolved socket broadcasts).
+ * Renders one <AlertCard> per unresolved alert, newest first, and
+ * passes the hook's resolveAlert callback through so each card can
+ * close itself.
  *
  * Tier 1 V2 styling.
  */
@@ -19,7 +15,7 @@ import { useDispatchAlerts } from '../../hooks/useDispatchAlerts';
 import AlertCard from './AlertCard';
 
 export default function ActionQueuePane() {
-  const { alerts, loading, error } = useDispatchAlerts();
+  const { alerts, loading, error, resolveAlert } = useDispatchAlerts();
 
   return (
     <aside className="w-80 flex-shrink-0 bg-white border-l border-hairline border-zinc-200 flex flex-col">
@@ -45,7 +41,9 @@ export default function ActionQueuePane() {
             No active alerts.
           </div>
         ) : (
-          alerts.map((a) => <AlertCard key={a.id} alert={a} />)
+          alerts.map((a) => (
+            <AlertCard key={a.id} alert={a} onResolve={resolveAlert} />
+          ))
         )}
       </div>
     </aside>
