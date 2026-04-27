@@ -214,15 +214,6 @@ async function processTrackingEvent({ logId, eventType, payload }) {
         .update({ processed: true })
         .catch(() => {});
     }
-
-    await db('tool_executions')
-      .insert({
-        tool_name: 'bouncie_tracking_webhook',
-        args: JSON.stringify({ eventType, imei, technician_id: tech.id }),
-        result: JSON.stringify({ updated: !!point }),
-        executed_at: new Date(),
-      })
-      .catch(() => {});
   } catch (err) {
     logger.error(`[webhooks-bouncie] processing error: ${err.message}`);
     if (logId) {
