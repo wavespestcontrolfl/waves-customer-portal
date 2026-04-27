@@ -221,14 +221,11 @@ function QuickActions({ onSelectTab }) {
 }
 
 function PostStatusBadge({ status }) {
-  const map = {
-    draft: { tone: 'neutral', label: 'Draft' },
-    scheduled: { tone: 'strong', label: 'Scheduled' },
-    published: { tone: 'strong', label: 'Published' },
-    failed: { tone: 'alert', label: 'Failed' },
-  };
-  const cfg = map[status] || map.draft;
-  return <Badge tone={cfg.tone}>{cfg.label}</Badge>;
+  if (status === 'sent') return <Badge tone="strong">Sent</Badge>;
+  if (status === 'sending') return <Badge tone="neutral">Sending…</Badge>;
+  if (status === 'scheduled') return <Badge tone="neutral">Scheduled</Badge>;
+  if (status === 'failed') return <Badge tone="alert">Failed</Badge>;
+  return <Badge tone="muted">Draft</Badge>;
 }
 
 function RecentPosts({ posts, loading }) {
@@ -249,22 +246,25 @@ function RecentPosts({ posts, loading }) {
   }
   return (
     <div className="flex flex-col gap-2">
-      {posts.map((p) => (
-        <div
-          key={p.id}
-          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2.5 flex items-center gap-3"
-        >
-          <div className="flex-1 min-w-0">
-            <div className="text-13 font-medium text-ink-primary truncate">{p.subject || p.title || '(untitled)'}</div>
-            <div className="text-11 text-ink-tertiary mt-0.5 u-nums flex items-center gap-2 flex-wrap">
-              {p.sentAt && <span>Sent {new Date(p.sentAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
-              {p.openRate != null && <span>· {(p.openRate * 100).toFixed(0)}% open</span>}
-              {p.subscriberCount != null && <span>· {p.subscriberCount} recipients</span>}
+      {posts.map((p) => {
+        const openRate = p.delivered_count > 0 ? p.opened_count / p.delivered_count : null;
+        return (
+          <div
+            key={p.id}
+            className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2.5 flex items-center gap-3"
+          >
+            <div className="flex-1 min-w-0">
+              <div className="text-13 font-medium text-ink-primary truncate">{p.subject || '(untitled)'}</div>
+              <div className="text-11 text-ink-tertiary mt-0.5 u-nums flex items-center gap-2 flex-wrap">
+                {p.sent_at && <span>Sent {new Date(p.sent_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
+                {openRate != null && <span>· {(openRate * 100).toFixed(0)}% open</span>}
+                {p.recipient_count != null && p.recipient_count > 0 && <span>· {p.recipient_count.toLocaleString()} recipients</span>}
+              </div>
             </div>
+            <PostStatusBadge status={p.status || 'draft'} />
           </div>
-          <PostStatusBadge status={p.status || 'draft'} />
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -279,10 +279,22 @@ function DashboardView({ onSelectTab, onDraftFromEvent }) {
   useEffect(() => {
     let ignore = false;
     adminFetch('/admin/newsletter/subscribers?limit=1')
-      .then((d) => { if (!ignore) setStats((s) => ({ ...s, subscribers: d.total ?? d.counts?.active ?? null })); })
+      .then((d) => { if (!ignore) setStats((s) => ({ ...s, subscribers: d.counts?.active ?? null })); })
       .catch(() => {});
-    adminFetch('/admin/newsletter/posts?limit=5')
-      .then((d) => { if (!ignore) { setRecentPosts(d.posts || []); setLoadingPosts(false); } })
+    // /sends is the campaign list; we derive Recent posts (top 5),
+    // Last open rate (most recent sent row), and Scheduled count
+    // (rows with status=scheduled) from the same response.
+    adminFetch('/admin/newsletter/sends')
+      .then((d) => {
+        if (ignore) return;
+        const sends = d.sends || [];
+        setRecentPosts(sends.slice(0, 5));
+        const lastSent = sends.find((s) => s.status === 'sent' && s.delivered_count > 0);
+        const lastOpenRate = lastSent ? lastSent.opened_count / lastSent.delivered_count : null;
+        const scheduledCount = sends.filter((s) => s.status === 'scheduled').length;
+        setStats((s) => ({ ...s, lastOpenRate, scheduledCount }));
+        setLoadingPosts(false);
+      })
       .catch(() => { if (!ignore) setLoadingPosts(false); });
     adminFetch('/admin/newsletter/events?days=14&limit=12')
       .then((d) => { if (!ignore) { setEvents(d.events || []); setLoadingEvents(false); } })
