@@ -80,20 +80,18 @@ function getGreeting() {
   return 'Good evening';
 }
 
-// /tech/messages was a dead-end placeholder — there's no underlying
-// messaging surface. Dropped from QUICK_ACTIONS until that feature
-// actually exists. Quick Invoice still routes to /tech (no-op) but
-// stays as a known stub the team has discussed building.
 // Mirrors server-side PRE_EN_ROUTE in tech-track.js. Tapping outside
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 
+// /tech/messages and /tech/quick-invoice are both dead — neither has
+// an underlying feature. Dropped from QUICK_ACTIONS until those
+// surfaces actually exist (matches the /tech/messages drop in #355).
 const QUICK_ACTIONS = [
   { icon: '📅', label: "Today's Route", path: '/tech' },
   { icon: '📋', label: 'Field Estimator', path: '/tech/estimate' },
-  { icon: '🧾', label: 'Quick Invoice', path: '/tech' },
   { icon: '📖', label: 'Protocols & SOPs', path: '/tech/protocols' },
   { icon: '🗂️', label: 'Project Report', action: 'create-project' },
 ];
