@@ -30,16 +30,16 @@ import LoginGate from './pages/LoginGate';
 import PortalPage from './pages/PortalPage';
 import OnboardingPage from './pages/OnboardingPage';
 import AdminLoginPage from './pages/AdminLoginPage';
-import AdminLayout from './components/AdminLayoutGate';
+import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
-import AdminDashboardGate from './pages/admin/DashboardGate';
+import AdminDashboardPage from './pages/admin/DashboardPageV2';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
-import AdminDispatchGate from './pages/admin/DispatchGate';
+import AdminDispatchPage from './pages/admin/DispatchPageV2';
 import AdminInventoryPage from './pages/admin/InventoryPage';
 import AdminRevenuePage from './pages/admin/RevenuePage';
-import AdminCommunicationsPage from './pages/admin/CommunicationsGate';
-import AdminCustomersPage from './pages/admin/CustomersGate';
+import AdminCommunicationsPage from './pages/admin/CommunicationsPageV2';
+import AdminCustomersPage from './pages/admin/CustomersPageV2';
 import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';
 import ProjectReportViewPage from './pages/ProjectReportViewPage';
@@ -78,7 +78,7 @@ function lazyWithRetry(factory) {
     }
   });
 }
-const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesGate'));
+const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
@@ -183,10 +183,10 @@ export default function App() {
           </Route>
           <Route path="/admin" element={<PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
-            <Route path="dashboard" element={<AdminDashboardGate />} />
+            <Route path="dashboard" element={<AdminDashboardPage />} />
             <Route path="customers" element={<AdminCustomersPage />} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
-            <Route path="schedule" element={<AdminDispatchGate />} />
+            <Route path="schedule" element={<AdminDispatchPage />} />
             <Route path="dispatch" element={<Navigate to="/admin/schedule" replace />} />
             <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
             <Route path="communications" element={<AdminCommunicationsPage />} />
