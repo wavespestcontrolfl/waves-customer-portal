@@ -15,6 +15,20 @@ import { COLORS as B, FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Belt-and-suspenders URL guard for past-issue cards. Server-side
+// already filters external_web_url to a host allowlist before emitting
+// it as `link`, but never trust input rendered into an href — a stale
+// or hostile row should fail closed here too. Returns the parsed URL
+// when it's http(s), otherwise null (PastIssue then renders an
+// unclickable card).
+function safeRenderLink(href) {
+  if (typeof href !== 'string' || !href) return null;
+  try {
+    const u = new URL(href, window.location.origin);
+    return (u.protocol === 'http:' || u.protocol === 'https:') ? u.toString() : null;
+  } catch { return null; }
+}
+
 const VALUE_PROPS = [
   { emoji: '📅', label: "Local SWFL events", body: "Bradenton, Sarasota, Lakewood Ranch, Venice — what's worth your weekend." },
   { emoji: '🦟', label: "Seasonal pest alerts", body: 'When mosquito season ramps, when termites swarm, when palmetto bugs come indoors.' },
@@ -187,8 +201,10 @@ function PastIssue({ post }) {
     transition: 'border-color 150ms ease-out',
   };
   // Beehiiv-imported rows link to the original Beehiiv archive URL;
-  // in-house sends link to /newsletter/archive/:id. The link-less
-  // branch below is a defensive fallback for any malformed row.
+  // in-house sends link to /newsletter/archive/:id. Server emits both
+  // through a host-allowlist guard, but we re-validate here so a stale
+  // or hostile value fails closed at the render boundary.
+  const safeHref = safeRenderLink(post.link);
   const inner = (
     <>
       <div
@@ -236,10 +252,10 @@ function PastIssue({ post }) {
     </>
   );
 
-  if (post.link) {
+  if (safeHref) {
     return (
       <a
-        href={post.link}
+        href={safeHref}
         target="_blank"
         rel="noopener noreferrer"
         style={cardStyle}
