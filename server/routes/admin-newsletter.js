@@ -15,6 +15,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
+const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 
 let Anthropic;
@@ -234,7 +235,13 @@ router.post('/sends/:id/test', async (req, res) => {
     // Demo unsubscribe URL — won't resolve to a real subscriber but the link
     // renders correctly and Gmail/Apple Mail will show the native unsub UI.
     const demoUrl = sendgrid.unsubscribeUrl('test-' + send.id);
-    const html = sendgrid.injectUnsubscribeFooter(send.html_body || '', { realUrl: demoUrl });
+    // Same wrapper the real send uses (newsletter-sender.js) so the
+    // operator's preview matches what subscribers will receive.
+    const html = wrapNewsletter({
+      body: send.html_body || '',
+      unsubscribeUrl: demoUrl,
+      preheader: send.preview_text || undefined,
+    });
 
     const result = await sendgrid.sendOne({
       to: testEmail,

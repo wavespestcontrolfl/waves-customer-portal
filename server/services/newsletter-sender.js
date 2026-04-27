@@ -12,6 +12,7 @@
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { wrapNewsletter } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
 
 function stripHtml(html) {
@@ -71,7 +72,14 @@ async function sendCampaign(sendId) {
     await db('newsletter_send_deliveries').insert(deliveryRows).onConflict(['send_id', 'subscriber_id']).ignore();
   }
 
-  const htmlWithFooter = sendgrid.injectUnsubscribeFooter(send.html_body || '');
+  // Wrap the operator-written body in branded chrome (header + footer
+  // + Waves logo). The unsubscribe URL is the SendGrid substitution
+  // token — sendBatch injects a real per-recipient URL in its place.
+  const htmlWithFooter = wrapNewsletter({
+    body: send.html_body || '',
+    unsubscribeUrl: '{{unsubscribe_url}}',
+    preheader: send.preview_text || undefined,
+  });
 
   let delivered = 0, failed = 0;
 
