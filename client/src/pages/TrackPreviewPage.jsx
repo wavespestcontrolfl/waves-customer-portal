@@ -173,7 +173,7 @@ function StatusPill({ label, color }) {
   return (
     <div style={{
       display: 'inline-block',
-      fontSize: 11,
+      fontSize: 12,
       fontWeight: 700,
       letterSpacing: '0.1em',
       textTransform: 'uppercase',
@@ -227,7 +227,7 @@ function EtaHero({ minutes, techFirst, source }) {
         ) : null}
       </div>
       {source === 'haversine' ? (
-        <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 6 }}>
+        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 6 }}>
           Estimated based on distance
         </div>
       ) : null}
@@ -499,7 +499,7 @@ function EnRouteCard({ data }) {
             <TrackerMap tech={techCoords} property={property} />
             {lastUpdated ? (
               <div style={{
-                fontSize: 13, color: COLORS.textCaption,
+                fontSize: 14, color: COLORS.textCaption,
                 marginTop: 10, textAlign: 'right',
               }}>
                 {lastUpdated}{v?.stale ? ' · GPS reconnecting' : ''}
@@ -600,7 +600,7 @@ function StateSwitcher({ value, onChange }) {
       border: `1px solid ${COLORS.slate200}`,
     }}>
       <div style={{
-        fontSize: 11, fontWeight: 700, letterSpacing: '0.08em',
+        fontSize: 12, fontWeight: 700, letterSpacing: '0.08em',
         textTransform: 'uppercase', color: COLORS.textCaption,
         width: '100%', marginBottom: 4,
       }}>
@@ -613,7 +613,7 @@ function StateSwitcher({ value, onChange }) {
           style={{
             padding: '6px 12px',
             borderRadius: 9999,
-            fontSize: 13,
+            fontSize: 14,
             fontWeight: 600,
             fontFamily: FONTS.body,
             border: `1.5px solid ${value === s ? COLORS.blueDeeper : COLORS.slate200}`,

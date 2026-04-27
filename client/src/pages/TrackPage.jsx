@@ -141,7 +141,7 @@ function StatusPill({ label, color }) {
   return (
     <div style={{
       display: 'inline-block',
-      fontSize: 11, fontWeight: 700,
+      fontSize: 12, fontWeight: 700,
       letterSpacing: '0.1em', textTransform: 'uppercase',
       color, background: `${color}1A`,
       padding: '6px 12px', borderRadius: 9999,
@@ -180,7 +180,7 @@ function EtaHero({ minutes, techFirst, source }) {
         ) : null}
       </div>
       {source === 'haversine' ? (
-        <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 6 }}>
+        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 6 }}>
           Estimated based on distance
         </div>
       ) : null}
@@ -426,7 +426,7 @@ function EnRouteCard({ data }) {
             <TrackerMap tech={techCoords} property={property} />
             {lastUpdated ? (
               <div style={{
-                fontSize: 13, color: COLORS.textCaption,
+                fontSize: 14, color: COLORS.textCaption,
                 marginTop: 10, textAlign: 'right',
               }}>
                 {lastUpdated}{v?.stale ? ' · GPS reconnecting' : ''}
