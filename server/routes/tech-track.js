@@ -55,27 +55,55 @@ router.post('/:id/en-route', async (req, res, next) => {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
+    // Source-status gate: transitionJobStatus is permissive (it
+    // accepts any from→to pair as long as the atomic guard matches),
+    // so without a route-level check a tech could hit /en-route on a
+    // completed/cancelled/skipped job and regress status backwards.
+    // Codex P1 on PR #335.
+    //
+    // Allowed sources for going en_route:
+    //   - pending / confirmed / rescheduled : a real forward flip
+    //   - en_route                          : idempotent re-tap; we
+    //                                         skip the trx entirely
+    //                                         and let markEnRoute's
+    //                                         own idempotency handle
+    //                                         it (avoids a noisy
+    //                                         same-status row in
+    //                                         job_status_history)
+    // Not allowed: on_site, completed, cancelled, skipped — all 409.
+    const fromStatus = svc.status;
+    const PRE_EN_ROUTE = new Set(['pending', 'confirmed', 'rescheduled']);
+    if (!PRE_EN_ROUTE.has(fromStatus) && fromStatus !== 'en_route') {
+      return res.status(409).json({
+        error: `Cannot mark en-route from status '${fromStatus}'`,
+      });
+    }
+
     // 1. Admin-side status flip via transitionJobStatus. Same
     // migration pattern as PRs #328 / #329 / #330. The trx + atomic
     // guard rejects on a concurrent transition; we surface as 409.
-    const fromStatus = svc.status;
-    try {
-      await db.transaction(async (trx) => {
-        await transitionJobStatus({
-          jobId: svc.id,
-          fromStatus,
-          toStatus: 'en_route',
-          transitionedBy: req.technicianId,
-          trx,
+    // Skipped on the en_route → en_route idempotent path so we don't
+    // write a same-status job_status_history row + re-fire broadcasts
+    // for a no-op tap.
+    if (fromStatus !== 'en_route') {
+      try {
+        await db.transaction(async (trx) => {
+          await transitionJobStatus({
+            jobId: svc.id,
+            fromStatus,
+            toStatus: 'en_route',
+            transitionedBy: req.technicianId,
+            trx,
+          });
         });
-      });
-    } catch (err) {
-      if (err && err.message && err.message.includes('not in state')) {
-        return res.status(409).json({
-          error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
-        });
+      } catch (err) {
+        if (err && err.message && err.message.includes('not in state')) {
+          return res.status(409).json({
+            error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+          });
+        }
+        throw err;
       }
-      throw err;
     }
 
     // 2. Customer-facing track_state flip + SMS. Post-trx,
