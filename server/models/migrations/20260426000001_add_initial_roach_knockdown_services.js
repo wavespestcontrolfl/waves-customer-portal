@@ -15,16 +15,18 @@
  *
  * New services added:
  *   PEST CONTROL
- *     - pest_initial_palmetto_knockdown   (one-time, palmetto / american)
+ *     - pest_initial_palmetto_knockdown   (one-time, native SWFL species:
+ *                                          American / palmetto, smoky brown,
+ *                                          Australian, Florida woods)
  *     - pest_initial_german_knockdown     (one-time, german)
  */
 exports.up = async function (knex) {
   const services = [
     {
       service_key: 'pest_initial_palmetto_knockdown',
-      name: 'Initial Palmetto Knockdown',
-      short_name: 'Palmetto Initial',
-      description: 'Heavier visit-1 treatment for new recurring pest customers reporting palmetto / American cockroaches. Includes interior void treatment, crack-and-crevice in kitchen / bath / utility, perimeter granular, and bait gel placement at hot spots. Auto-added by the pest engine when recurring pest is booked with roachType=regular; pricing slides by footprint ($119 under 1,500 sf, $139 mid, $169 over 2,500 sf).',
+      name: 'Initial Native Roach Knockdown',
+      short_name: 'Native Roach Initial',
+      description: 'Heavier visit-1 treatment for new recurring pest customers reporting any of the native SWFL cockroaches (American / palmetto, smoky brown, Australian, Florida woods). Includes interior spray, crack-and-crevice in kitchen / bath / utility, perimeter granular, and bait gel placement at hot spots. Auto-added by the pest engine when recurring pest is booked with roachType=regular; pricing slides by footprint ($119 under 1,500 sf, $139 mid, $169 over 2,500 sf).',
       category: 'pest_control',
       billing_type: 'one_time',
       default_duration_minutes: 35,
@@ -48,7 +50,7 @@ exports.up = async function (knex) {
       service_key: 'pest_initial_german_knockdown',
       name: 'Initial German Roach Knockdown',
       short_name: 'German Initial',
-      description: 'Heavier visit-1 treatment for new recurring pest customers reporting German cockroaches. Indoor breeding cycle requires longer visit, heavier product rotation, and IGR-driven follow-up. NOT a substitute for the dedicated 3-visit German Roach Cleanout program for severe infestations — this is the auto-add for the everyday "I saw one or two" case. Auto-added by the pest engine when recurring pest is booked with roachType=german; pricing slides by footprint ($169 under 1,500 sf, $199 mid, $249 over 2,500 sf).',
+      description: 'Heavier visit-1 treatment for new recurring pest customers reporting German cockroaches (small indoor / kitchen species). Includes interior spray, gel bait placement at hot spots, and an insect growth regulator to break the breeding cycle. Indoor breeding biology requires longer visit, heavier product rotation, and IGR-driven follow-up. NOT a substitute for the dedicated 3-visit German Roach Cleanout program for severe infestations — this is the auto-add for the everyday "I saw one or two" case. Auto-added by the pest engine when recurring pest is booked with roachType=german; pricing slides by footprint ($169 under 1,500 sf, $199 mid, $249 over 2,500 sf).',
       category: 'pest_control',
       billing_type: 'one_time',
       default_duration_minutes: 50,

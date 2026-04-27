@@ -171,9 +171,13 @@ function pricePestInitialRoach(property, options = {}) {
   const incrementalCost = extraMaterial + extraLabor;
   const margin = price > 0 ? (price - incrementalCost) / price : 0;
 
+  const isGerman = roachType === 'german';
   return {
     service: 'pest_initial_roach',
-    label: roachType === 'german' ? 'Initial German Roach Knockdown' : 'Initial Palmetto Knockdown',
+    label: isGerman ? 'Initial German Roach Knockdown' : 'Initial Native Roach Knockdown',
+    detail: isGerman
+      ? 'Heavier first visit for German roaches (the small indoor / kitchen kind) — interior spray, gel bait at hot spots, and a growth regulator to break the breeding cycle.'
+      : 'Heavier first visit for SWFL native roaches (American / palmetto, smoky brown, Australian, Florida woods) — interior spray, bait at hot spots, and perimeter granular.',
     price,
     roachType,
     oneTime: true,
