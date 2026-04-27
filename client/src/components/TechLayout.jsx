@@ -10,11 +10,13 @@ const DARK = {
   muted: '#94a3b8',
 };
 
+// Messages tab dropped — /tech/messages had no underlying feature and
+// the bottom-nav button dead-ended. Will return when the messaging
+// surface actually exists.
 const NAV_ITEMS = [
   { path: '/tech', icon: '📅', label: 'Route', exact: true },
   { path: '/tech/estimate', icon: '📋', label: 'Estimate' },
   { path: '/tech/protocols', icon: '📖', label: 'Protocols' },
-  { path: '/tech/messages', icon: '💬', label: 'Messages' },
 ];
 
 export default function TechLayout() {
