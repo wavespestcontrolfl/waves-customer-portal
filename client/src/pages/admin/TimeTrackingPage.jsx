@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -930,6 +930,48 @@ function TeamTab({ showToast }) {
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({ name: '', phone: '', email: '' });
   const [saving, setSaving] = useState(false);
+  // Photo upload state. fileInputRef is shared across rows because
+  // mounting one <input type=file> per tech is needless DOM. Uploads
+  // are serialized: while uploadingId is non-null, every row's Photo
+  // button is disabled so photoTargetId can't be clobbered mid-flight.
+  const fileInputRef = useRef(null);
+  const [photoTargetId, setPhotoTargetId] = useState(null);
+  const [uploadingId, setUploadingId] = useState(null);
+
+  const handlePhotoClick = (techId) => {
+    if (uploadingId !== null) return;
+    setPhotoTargetId(techId);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''; // re-pick same file would be silent otherwise
+      fileInputRef.current.click();
+    }
+  };
+
+  const handlePhotoSelected = async (e) => {
+    const file = e.target.files?.[0];
+    const techId = photoTargetId;
+    if (!file || !techId || uploadingId !== null) return;
+    setUploadingId(techId);
+    try {
+      // adminFetch (file-local) hardcodes JSON content-type, so use
+      // a direct fetch with the same Authorization header for the
+      // multipart upload. Same shape as the curl example.
+      const fd = new FormData();
+      fd.append('photo', file);
+      const res = await fetch(`${API_BASE}/admin/timetracking/technicians/${techId}/photo`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+        body: fd,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      showToast('Photo uploaded');
+      load();
+    } catch (err) {
+      showToast('Photo upload failed: ' + err.message);
+    }
+    setUploadingId(null);
+    setPhotoTargetId(null);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -1029,12 +1071,22 @@ function TeamTab({ showToast }) {
         </div>
       )}
 
+      {/* Hidden file input shared across all photo-upload buttons.
+          Triggered via fileInputRef + photoTargetId state. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={handlePhotoSelected}
+      />
+
       {/* Tech list */}
       <div style={sCard}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr>
-              {['Name', 'Phone', 'Email', 'Status', 'Actions'].map(h => (
+              {['Photo', 'Name', 'Phone', 'Email', 'Status', 'Actions'].map(h => (
                 <th key={h} style={{ textAlign: 'left', padding: '8px 12px', borderBottom: `1px solid ${D.border}`, fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
               ))}
             </tr>
@@ -1042,6 +1094,32 @@ function TeamTab({ showToast }) {
           <tbody>
             {techs.map(t => (
               <tr key={t.id} style={{ opacity: t.active ? 1 : 0.5 }}>
+                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}` }}>
+                  {t.avatar_url ? (
+                    <img
+                      src={t.avatar_url}
+                      alt={t.name}
+                      style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', display: 'block' }}
+                    />
+                  ) : (
+                    <div
+                      aria-hidden
+                      style={{
+                        width: 32, height: 32, borderRadius: '50%',
+                        background: D.border, color: D.muted, display: 'flex',
+                        alignItems: 'center', justifyContent: 'center',
+                        fontSize: 11, fontWeight: 600,
+                      }}
+                    >
+                      {(t.name || '?')
+                        .split(/\s+/)
+                        .filter(Boolean)
+                        .slice(0, 2)
+                        .map((n) => n.charAt(0).toUpperCase())
+                        .join('')}
+                    </div>
+                  )}
+                </td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.heading, fontWeight: 600 }}>{t.name}</td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontFamily: MONO, fontSize: 12 }}>{t.phone || '\u2014'}</td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 12 }}>{t.email || '\u2014'}</td>
@@ -1049,8 +1127,15 @@ function TeamTab({ showToast }) {
                   <span style={sBadge(t.active ? D.green + '22' : D.red + '22', t.active ? D.green : D.red)}>{t.active ? 'Active' : 'Inactive'}</span>
                 </td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}` }}>
-                  <div style={{ display: 'flex', gap: 6 }}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     <button onClick={() => startEdit(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 11, cursor: 'pointer' }}>Edit</button>
+                    <button
+                      onClick={() => handlePhotoClick(t.id)}
+                      disabled={uploadingId !== null}
+                      style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 11, cursor: uploadingId !== null ? 'wait' : 'pointer', opacity: uploadingId !== null && uploadingId !== t.id ? 0.4 : (uploadingId === t.id ? 0.6 : 1) }}
+                    >
+                      {uploadingId === t.id ? 'Uploading…' : 'Photo'}
+                    </button>
                     <button onClick={() => handleToggleActive(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: t.active ? D.amber : D.green, fontSize: 11, cursor: 'pointer' }}>
                       {t.active ? 'Deactivate' : 'Activate'}
                     </button>
@@ -1060,7 +1145,7 @@ function TeamTab({ showToast }) {
               </tr>
             ))}
             {techs.length === 0 && (
-              <tr><td colSpan={5} style={{ padding: 20, textAlign: 'center', color: D.muted }}>No technicians found. Add your first one above.</td></tr>
+              <tr><td colSpan={6} style={{ padding: 20, textAlign: 'center', color: D.muted }}>No technicians found. Add your first one above.</td></tr>
             )}
           </tbody>
         </table>
