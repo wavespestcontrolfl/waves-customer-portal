@@ -261,6 +261,77 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // MOA-rotation violation detector (third dispatch alert generator).
+    // checkLimits looks at property_application_history for past
+    // applications, so the just-completed service_products we wrote
+    // above are NOT yet in scope (this route doesn't update history;
+    // that's admin-schedule's complete path). The check therefore
+    // tells us: "Given history BEFORE this completion, has the
+    // consecutive-MOA count already reached the per-customer max?"
+    // If yes, the application we just recorded is the violation.
+    //
+    // Best-effort: completion is already committed by the time we
+    // reach this block (or will be — the scheduled_services UPDATE
+    // is below). A failed alert insert shouldn't fail the request.
+    // Wrapped in try/catch to keep that contract.
+    //
+    // Dedupe within one completion: a tech could log multiple products
+    // in the same MOA group; we only fire one alert per MOA group per
+    // job. Without this guard a 3-product completion in the same
+    // violating group would create 3 identical cards.
+    if (products?.length) {
+      try {
+        const LimitChecker = require('../services/application-limits');
+        const { createAlert } = require('../services/dispatch-alerts');
+        const alertedMoa = new Set();
+        for (const p of products) {
+          if (!p.productId) continue;
+          const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, svc.scheduled_date);
+          // checkLimits returns blocks (hard_block severity) and
+          // warnings (warn/info severity). We surface BOTH for MOA
+          // violations — operationally the difference is that hard
+          // blocks suggest "this should not have been applied," and
+          // warnings suggest "this is right at the edge." Severity
+          // on the alert mirrors the source.
+          const violations = [
+            ...(result.blocks || []).map((v) => ({ ...v, _src: 'block' })),
+            ...(result.warnings || []).map((v) => ({ ...v, _src: 'warn' })),
+          ];
+          for (const v of violations) {
+            // Only the MOA-rotation family of limit violations
+            // produces moa_violation alerts. Other limit types
+            // (annual_max_apps, seasonal_blackout, etc.) are
+            // operationally distinct and would belong to other
+            // alert kinds.
+            if (v.type !== 'moa_rotation_max' && v.type !== 'consecutive_use_max') continue;
+            const productCatalog = await db('products_catalog').where({ id: p.productId }).first();
+            const moaGroup = productCatalog?.moa_group;
+            if (!moaGroup || alertedMoa.has(moaGroup)) continue;
+            alertedMoa.add(moaGroup);
+            try {
+              await createAlert({
+                type: 'moa_violation',
+                severity: v._src === 'block' ? 'critical' : 'warn',
+                techId: svc.technician_id,
+                jobId: svc.id,
+                payload: {
+                  moa_group: moaGroup,
+                  product_name: productCatalog?.name || p.name || null,
+                  consecutive: v.current,
+                  max: v.max,
+                  message: v.message,
+                },
+              });
+            } catch (alertErr) {
+              logger.error(`[dispatch] moa_violation createAlert failed: ${alertErr.message}`);
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(`[dispatch] MOA violation check failed (non-blocking): ${err.message}`);
+      }
+    }
+
     // Update scheduled_service
     await db('scheduled_services').where({ id: svc.id }).update({
       status: 'completed', actual_end_time: db.fn.now(),
