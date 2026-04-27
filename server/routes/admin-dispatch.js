@@ -177,17 +177,26 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    // Log status change to legacy audit table outside the trx (compat —
-    // service_status_log is consumed by the tech portal + reporting;
-    // not migrating its schema here).
-    await db('service_status_log').insert({
-      scheduled_service_id: svc.id, status: toStatus, changed_by: req.technicianId, lat, lng, notes,
-    });
-
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
     try {
       await db.transaction(async (trx) => {
+        // Legacy audit row INSIDE the trx so a race rejection (or
+        // any other transitionJobStatus throw) rolls it back too.
+        // Otherwise a 409 would leave a phantom service_status_log
+        // row mismatching scheduled_services.status and
+        // job_status_history. Codex P1 on PR #328.
+        //
+        // service_status_log itself isn't migrated in this PR — it's
+        // still consumed by the tech portal + reporting under its
+        // legacy schema (lat / lng / notes columns). Wrapping it in
+        // the trx makes the audit consistent without changing the
+        // table.
+        await trx('service_status_log').insert({
+          scheduled_service_id: svc.id, status: toStatus,
+          changed_by: req.technicianId, lat, lng, notes,
+        });
+
         // Lifecycle timestamps live on the same row as status; flip
         // them inside the same trx so a rollback also rolls back the
         // timestamp change. transitionJobStatus owns the status +
