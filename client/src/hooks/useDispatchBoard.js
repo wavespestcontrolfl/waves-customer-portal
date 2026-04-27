@@ -35,6 +35,26 @@ function adminAuthHeaders() {
     : { 'Content-Type': 'application/json' };
 }
 
+// Derive the socket origin from API_BASE. Three cases:
+//   - API_BASE is a relative path (e.g. '/api') → undefined → io()
+//     defaults to same-origin, which works in production where the
+//     SPA and the API are served from one host. In local Vite dev,
+//     vite.config.js proxies /socket.io with ws:true so this also
+//     works without a different VITE_API_URL.
+//   - API_BASE is a full URL (e.g. 'https://api.example.com/api') →
+//     return the origin ('https://api.example.com') so the socket
+//     handshake hits the same backend the HTTP fetches do, not the
+//     SPA's own origin (Codex P2 on PR #296).
+//   - Anything unparseable → fall back to undefined (same-origin).
+function socketOrigin() {
+  if (!API_BASE || API_BASE.startsWith('/')) return undefined;
+  try {
+    return new URL(API_BASE).origin;
+  } catch {
+    return undefined;
+  }
+}
+
 export function useDispatchBoard() {
   const [techsMap, setTechsMap] = useState(() => new Map());
   const [jobs, setJobs] = useState([]);
@@ -79,13 +99,21 @@ export function useDispatchBoard() {
     const token = localStorage.getItem('waves_admin_token');
     if (!token) return undefined;
 
-    const socket = io({
-      // Same-origin connect. Server-side socketAuth verifies the token
-      // and joins dispatch:admins on success.
-      auth: { token },
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-    });
+    const origin = socketOrigin();
+    const socket = origin
+      ? io(origin, {
+          auth: { token },
+          transports: ['websocket', 'polling'],
+          reconnection: true,
+        })
+      : io({
+          // Same-origin (production + Vite dev with /socket.io proxy).
+          // Server-side socketAuth verifies the token and joins
+          // dispatch:admins on success.
+          auth: { token },
+          transports: ['websocket', 'polling'],
+          reconnection: true,
+        });
 
     function handleTechStatus(payload) {
       if (!payload || !payload.tech_id) return;
