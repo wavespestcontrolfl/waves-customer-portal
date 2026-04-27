@@ -368,9 +368,20 @@ async function pullScrapeSource(source) {
     }
     // Pull the listing container (or body), strip scripts/styles in-page
     // before extracting innerHTML so we don't send useless markup to
-    // Claude. Falls back to body if the selector misses.
+    // Claude. Falls back to body if the selector misses OR if the
+    // selector itself is invalid CSS (operator typo in scrape_config
+    // would otherwise throw a SyntaxError that fails the whole pull
+    // every run until edited).
     html = await page.evaluate((sel) => {
-      const root = document.querySelector(sel) || document.body;
+      let root = document.body;
+      if (sel && sel !== 'body') {
+        try {
+          const found = document.querySelector(sel);
+          if (found) root = found;
+        } catch {
+          // Invalid CSS selector — degrade to body.
+        }
+      }
       const clone = root.cloneNode(true);
       clone.querySelectorAll('script, style, noscript, svg').forEach((n) => n.remove());
       return clone.innerHTML || '';
@@ -442,12 +453,24 @@ Rules:
     if (start && start.getTime() > cutoffMs) { dropped += 1; continue; }
     if (start && start.getTime() < now - 24 * 60 * 60 * 1000) { dropped += 1; continue; }
 
-    // Synthesize a stable dedup key from title+date+url. Scraped
-    // sources don't have a UID/guid, so we hash the natural fields.
-    const externalId = `${title.slice(0, 80)}|${ev.startAt || ''}|${ev.eventUrl || ''}`.slice(0, 256);
+    // Compute canonicalized fields BEFORE the dedup key so the key is
+    // stable across pulls. Claude's raw startAt/eventUrl strings can
+    // drift between runs (different timezone formatting, trailing
+    // slashes, etc) — the parsed Date's toISOString() and the
+    // safeHttpUrl() canonical form don't.
     const description = ev.description ? String(ev.description).slice(0, 2000) : null;
     const venueName = ev.venueName ? String(ev.venueName).slice(0, 256) : null;
     const eventUrl = safeHttpUrl(ev.eventUrl);
+
+    // Synthesize a stable dedup key from canonical title+date+url.
+    // Scraped sources don't have a UID/guid, so we key on the
+    // post-normalization fields. Title is lowercased so casing drift
+    // from Claude (e.g. "Boat Parade" vs "BOAT PARADE") doesn't
+    // create duplicates either.
+    const titleKey = title.toLowerCase().slice(0, 80);
+    const startKey = start ? start.toISOString() : '';
+    const urlKey = eventUrl || '';
+    const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
     const city = (typeof ev.city === 'string' && ev.city.trim())
       ? ev.city.trim().toLowerCase()
       : (source.coverage_geo?.[0] || null);
