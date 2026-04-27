@@ -12,9 +12,11 @@
 //   GET  /admin/customers?search=...
 //
 // Scope: Full V2 redesign of all tabs. CallLogTabV2, SmsTemplatesTabV2,
-// CSRCoachTabV2, EmailAutomationsPanelV2, and PushSettingsV2 each render
-// behind the comms-v2 flag. V1 CommunicationsPage still uses the V1 inline
-// tabs and V1 separate panels.
+// CSRCoachTabV2, EmailAutomationsPanelV2, and PushSettingsV2 each
+// render here. The comms-v2 flag and V1 CommunicationsPage default
+// export were retired in the V1→V2 migration; CommunicationsPage.jsx
+// is retained only as a shared-utility module (ALL_NUMBERS,
+// NUMBER_LABEL_MAP) consumed here and by CallLogTabV2.
 //
 // Daily driver: Virginia (CSR) — 8 hrs/day. SMS thread view + outbound
 // composer + AI-draft suggestion is the primary workflow. Unread tracking

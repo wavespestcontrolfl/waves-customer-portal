@@ -1,13 +1,15 @@
 // client/src/pages/admin/CommunicationsPage.jsx
 //
-// V1 Communications page (rendered when comms-v2 = false). Also the
-// canonical home for several reusable named exports consumed by the
-// V2 components:
+// Shared-utility module for the V2 admin Communications surface. The V1
+// page component was deleted in the V1→V2 migration; this file is
+// retained only for named exports consumed by CommunicationsPageV2 and
+// CallLogTabV2:
 //   - ALL_NUMBERS               (the four Twilio business numbers)
 //   - NUMBER_LABEL_MAP          (number → "Bradenton" / "Sarasota" etc)
-//   - call disposition constants
+//   - call disposition constants (legacy named exports, kept for any
+//                                  future consumer)
 //
-// Endpoints (same as V2 — strict parity):
+// Endpoints these helpers are wired against (kept in sync with V2):
 //   GET   /admin/communications/log
 //   GET   /admin/communications/stats
 //   POST  /admin/communications/sms
@@ -18,12 +20,9 @@
 //   POST  /admin/communications/attach (multipart)
 //
 // Audit focus:
-// - V1-only styling preserved for flag-off users — don't flag drift.
 // - Reusable exports: any change here also affects V2. ALL_NUMBERS /
 //   NUMBER_LABEL_MAP / disposition constants are the public API
 //   surface; touching them is a coordinated change.
-// - V1 inline-tab orchestration: all 5 tabs are inline in one big
-//   page. Confirm tab-switch doesn't re-fetch unnecessarily.
 // - Blocked-number list management: POST/DELETE need explicit
 //   confirmation gates (un-blocking spam = customer harm if wrong).
 // - SMS scheduling queue: a scheduled SMS that fires after the
