@@ -931,14 +931,15 @@ function TeamTab({ showToast }) {
   const [form, setForm] = useState({ name: '', phone: '', email: '' });
   const [saving, setSaving] = useState(false);
   // Photo upload state. fileInputRef is shared across rows because
-  // mounting one <input type=file> per tech is needless DOM. We
-  // stash the targeted tech id when triggering, then read it back
-  // in the change handler.
+  // mounting one <input type=file> per tech is needless DOM. Uploads
+  // are serialized: while uploadingId is non-null, every row's Photo
+  // button is disabled so photoTargetId can't be clobbered mid-flight.
   const fileInputRef = useRef(null);
   const [photoTargetId, setPhotoTargetId] = useState(null);
   const [uploadingId, setUploadingId] = useState(null);
 
   const handlePhotoClick = (techId) => {
+    if (uploadingId !== null) return;
     setPhotoTargetId(techId);
     if (fileInputRef.current) {
       fileInputRef.current.value = ''; // re-pick same file would be silent otherwise
@@ -949,7 +950,7 @@ function TeamTab({ showToast }) {
   const handlePhotoSelected = async (e) => {
     const file = e.target.files?.[0];
     const techId = photoTargetId;
-    if (!file || !techId) return;
+    if (!file || !techId || uploadingId !== null) return;
     setUploadingId(techId);
     try {
       // adminFetch (file-local) hardcodes JSON content-type, so use
@@ -1130,8 +1131,8 @@ function TeamTab({ showToast }) {
                     <button onClick={() => startEdit(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 11, cursor: 'pointer' }}>Edit</button>
                     <button
                       onClick={() => handlePhotoClick(t.id)}
-                      disabled={uploadingId === t.id}
-                      style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 11, cursor: uploadingId === t.id ? 'wait' : 'pointer', opacity: uploadingId === t.id ? 0.6 : 1 }}
+                      disabled={uploadingId !== null}
+                      style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 11, cursor: uploadingId !== null ? 'wait' : 'pointer', opacity: uploadingId !== null && uploadingId !== t.id ? 0.4 : (uploadingId === t.id ? 0.6 : 1) }}
                     >
                       {uploadingId === t.id ? 'Uploading…' : 'Photo'}
                     </button>
