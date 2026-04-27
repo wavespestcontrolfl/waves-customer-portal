@@ -202,16 +202,14 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
-    // Find the service_record for this scheduled_service. The
-    // completion route writes one with (customer_id, technician_id,
-    // service_date) matching the source row; we look up the most
-    // recent match. If none, the tech hasn't completed yet.
+    // Find the service_record for this scheduled_service via the
+    // direct FK (migration 20260427000007). The completion route
+    // (POST /:serviceId/complete, PR #330) populates
+    // scheduled_service_id on the new row so this lookup is
+    // unambiguous — no collisions when a single tech has two
+    // visits for the same customer on the same day.
     const serviceRecord = await db('service_records')
-      .where({
-        customer_id: svc.customer_id,
-        technician_id: svc.technician_id,
-        service_date: svc.scheduled_date,
-      })
+      .where({ scheduled_service_id: svc.id })
       .orderBy('created_at', 'desc')
       .first('id');
 
@@ -264,12 +262,9 @@ router.get('/:id/photos', async (req, res, next) => {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
+    // Direct FK lookup, same shape as POST. Migration 20260427000007.
     const serviceRecord = await db('service_records')
-      .where({
-        customer_id: svc.customer_id,
-        technician_id: svc.technician_id,
-        service_date: svc.scheduled_date,
-      })
+      .where({ scheduled_service_id: svc.id })
       .orderBy('created_at', 'desc')
       .first('id');
     if (!serviceRecord) return res.json({ photos: [] });

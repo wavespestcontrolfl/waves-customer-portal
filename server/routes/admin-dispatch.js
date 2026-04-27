@@ -318,7 +318,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     try {
       await db.transaction(async (trx) => {
         // 1. service_record — the canonical "completion happened" audit.
+        // scheduled_service_id is the FK back to the source row so
+        // downstream code (e.g., tech-track's photo upload) can resolve
+        // record-from-service unambiguously. Codex P1 on PR #340 — the
+        // old (customer_id, technician_id, service_date) soft-join
+        // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert({
+          scheduled_service_id: svc.id,
           customer_id: svc.customer_id, technician_id: svc.technician_id,
           service_date: svc.scheduled_date, service_type: svc.service_type, status: 'completed',
           technician_notes: technicianNotes || '',
