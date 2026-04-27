@@ -1,8 +1,9 @@
 /**
  * useDispatchBoard — single owner of dispatch board data + socket
  * subscription. Hydrates from GET /api/admin/dispatch/board on mount,
- * then subscribes to dispatch:tech_status broadcasts and patches the
- * tech list in place.
+ * then subscribes to:
+ *   - dispatch:tech_status → patches techs map (status/lat/lng/job)
+ *   - dispatch:job_update  → patches jobs array (status/tech/window)
  *
  * Internal state for techs is a Map keyed by tech.id so updates are
  * O(1) and don't recreate the array. The exposed `techs` value is a
@@ -10,9 +11,24 @@
  * on <TechCard> can rely on per-tech reference identity (only the
  * tech that actually changed gets a new object).
  *
+ * Jobs is an array (DispatchMap iterates over it for pin rendering).
+ * On dispatch:job_update we replace the matching slot in place; the
+ * map re-renders only the affected pin because Marker keys on
+ * job.id and the per-pin color recomputes from the new tech_id.
+ *
+ * dispatch:job_update merge rules:
+ *   - Match by id; if the job isn't in today's board, skip (the
+ *     broadcast carries no address / lat / lng — we can't materialize
+ *     a renderable pin from it, and the row likely isn't for today).
+ *   - Update fields the broadcast carries: technician_id, status,
+ *     service_type, scheduled_date, window_start, window_end.
+ *   - Preserve fields the broadcast does NOT carry: customer_name,
+ *     address, lat, lng. Those don't change with a status flip or
+ *     reassignment.
+ *
  * Cleanup contract: the useEffect that wires the socket MUST return
- * a function that calls socket.off('dispatch:tech_status', handler)
- * AND socket.disconnect(). Forgetting either causes a memory leak on
+ * a function that calls socket.off for BOTH events AND
+ * socket.disconnect(). Forgetting either causes a memory leak on
  * every navigation away from the dispatch board, plus potential
  * duplicate broadcasts if the board is re-mounted while the prior
  * socket is still alive. Verify on every edit.
@@ -159,9 +175,41 @@ export function useDispatchBoard() {
 
     socket.on('dispatch:tech_status', handleTechStatus);
 
-    // Cleanup: remove handler AND disconnect. Either alone leaks.
+    function handleJobUpdate(payload) {
+      if (!payload || !payload.job_id) return;
+      // Skip jobs not in today's board. The broadcast doesn't carry
+      // the geocoded address (`address` / `lat` / `lng` / `customer_name`)
+      // that the board needs to render a pin, so we can't synthesize a
+      // valid stub from it. Worst case: a job created mid-session
+      // doesn't appear until the next /board fetch on remount.
+      setJobs((prev) => {
+        const idx = prev.findIndex((j) => j.id === payload.job_id);
+        if (idx === -1) return prev;
+        const next = prev.slice();
+        next[idx] = {
+          ...prev[idx],
+          // Fields the broadcast can change. tech_id is stored as
+          // technician_id on the board row to match the /board shape.
+          technician_id: payload.tech_id || null,
+          status: payload.status,
+          service_type: payload.service_type ?? prev[idx].service_type,
+          scheduled_date: payload.scheduled_date ?? prev[idx].scheduled_date,
+          window_start: payload.window_start ?? prev[idx].window_start,
+          window_end: payload.window_end ?? prev[idx].window_end,
+          // Preserve the rest: customer_name, address, lat, lng,
+          // customer_id. The broadcast doesn't carry them; they don't
+          // change on a status/assign flip.
+        };
+        return next;
+      });
+    }
+
+    socket.on('dispatch:job_update', handleJobUpdate);
+
+    // Cleanup: remove BOTH handlers AND disconnect. Any one missing leaks.
     return () => {
       socket.off('dispatch:tech_status', handleTechStatus);
+      socket.off('dispatch:job_update', handleJobUpdate);
       socket.disconnect();
     };
   }, []);
