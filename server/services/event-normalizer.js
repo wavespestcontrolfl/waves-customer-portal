@@ -81,9 +81,12 @@ ${description || '(none)'}`;
 }
 
 async function normalizeRow(row) {
-  // Skip threshold — no content for Claude to work with. Mark
-  // normalized so we don't retry every cron.
-  if (!row.description && !row.venue_name) {
+  // Skip threshold — no content at all to work with. Has to consider
+  // venue_address too: a row with venue_address set but no description
+  // and no venue_name is still a valid candidate for Stage 2 geocoding.
+  // Without this check, scrape-extracted "address-only" rows would be
+  // marked normalized without ever being geocoded.
+  if (!row.description && !row.venue_name && !row.venue_address) {
     await db('events_raw').where({ id: row.id }).update({
       normalized_at: db.fn.now(),
       updated_at: db.fn.now(),
