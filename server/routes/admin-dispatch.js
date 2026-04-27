@@ -290,45 +290,108 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    // Create service_record
-    const [record] = await db('service_records').insert({
-      customer_id: svc.customer_id, technician_id: svc.technician_id,
-      service_date: svc.scheduled_date, service_type: svc.service_type, status: 'completed',
-      technician_notes: technicianNotes || '',
-      soil_temp: soilTemp || null, thatch_measurement: thatchMeasurement || null,
-      soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
-    }).returning('*');
+    // Status flip + completion artifacts + audit row + lifecycle
+    // timestamps, all in one trx. Migrated to
+    // services/job-status.js#transitionJobStatus (third call site,
+    // after PRs #328 / #329). Atomic guard rejects on fromStatus
+    // race (409). Auto-resolve of overdue-family alerts +
+    // customer:job_update + dispatch:job_update broadcasts come for
+    // free post-commit.
+    //
+    // service_records + service_products are INSIDE this trx (Codex
+    // P1 on #330): the prior version inserted them before the trx,
+    // so a race rejection left orphan completion artifacts for a
+    // job whose status flip didn't actually happen. Wrapping them
+    // in the same trx makes the whole completion atomic — either
+    // the row gets all of {service_record, service_products,
+    // service_status_log, lifecycle UPDATE, status flip,
+    // job_status_history} or none of them.
+    //
+    // The MOA-violation detector runs AFTER the trx commits — it
+    // reads property_application_history (not the just-inserted
+    // service_products), so its semantics don't change with the
+    // timing move, but it now only fires alerts on a successful
+    // completion. Race rejection → no completion → no MOA alert.
+    const fromStatus = svc.status;
+    const { transitionJobStatus } = require('../services/job-status');
+    let record;
+    try {
+      await db.transaction(async (trx) => {
+        // 1. service_record — the canonical "completion happened" audit.
+        [record] = await trx('service_records').insert({
+          customer_id: svc.customer_id, technician_id: svc.technician_id,
+          service_date: svc.scheduled_date, service_type: svc.service_type, status: 'completed',
+          technician_notes: technicianNotes || '',
+          soil_temp: soilTemp || null, thatch_measurement: thatchMeasurement || null,
+          soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
+        }).returning('*');
 
-    // Create service_products
-    if (products?.length) {
-      for (const p of products) {
-        const product = p.productId ? await db('products_catalog').where({ id: p.productId }).first() : null;
-        await db('service_products').insert({
-          service_record_id: record.id,
-          product_name: product?.name || p.name || 'Unknown',
-          product_category: product?.category || p.category || null,
-          active_ingredient: product?.active_ingredient || null,
-          moa_group: product?.moa_group || null,
-          application_rate: p.rate ? parseFloat(p.rate) : null,
-          rate_unit: p.rateUnit || null,
-          total_amount: p.totalAmount ? parseFloat(p.totalAmount) : null,
-          amount_unit: p.amountUnit || null,
+        // 2. service_products — children of the service_record.
+        if (products?.length) {
+          for (const p of products) {
+            const product = p.productId ? await trx('products_catalog').where({ id: p.productId }).first() : null;
+            await trx('service_products').insert({
+              service_record_id: record.id,
+              product_name: product?.name || p.name || 'Unknown',
+              product_category: product?.category || p.category || null,
+              active_ingredient: product?.active_ingredient || null,
+              moa_group: product?.moa_group || null,
+              application_rate: p.rate ? parseFloat(p.rate) : null,
+              rate_unit: p.rateUnit || null,
+              total_amount: p.totalAmount ? parseFloat(p.totalAmount) : null,
+              amount_unit: p.amountUnit || null,
+            });
+          }
+        }
+
+        // 3. Legacy audit row INSIDE the trx — race rejection rolls it
+        // back too (PR #328 / #329 pattern; phantom rows on 409
+        // would otherwise mismatch scheduled_services.status and
+        // job_status_history).
+        await trx('service_status_log').insert({
+          scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId,
+        });
+
+        // 4. Lifecycle timestamps the route owns. transitionJobStatus
+        // owns status + updated_at; we own actual_end_time +
+        // service_time_minutes. No constraint conflict — separate
+        // columns on the same row.
+        const lifecycleUpdates = {
+          actual_end_time: trx.fn.now(),
+          service_time_minutes: svc.actual_start_time
+            ? Math.round((Date.now() - new Date(svc.actual_start_time)) / 60000)
+            : null,
+        };
+        await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
+
+        // 5. Status flip via the canonical sole-writer.
+        await transitionJobStatus({
+          jobId: svc.id,
+          fromStatus,
+          toStatus: 'completed',
+          transitionedBy: req.technicianId,
+          trx,
+        });
+      });
+    } catch (err) {
+      if (err && err.message && err.message.includes('not in state')) {
+        return res.status(409).json({
+          error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
         });
       }
+      throw err;
     }
 
     // MOA-rotation violation detector (third dispatch alert generator).
     // checkLimits looks at property_application_history for past
-    // applications, so the just-completed service_products we wrote
-    // above are NOT yet in scope (this route doesn't update history;
-    // that's admin-schedule's complete path). The check therefore
-    // tells us: "Given history BEFORE this completion, has the
-    // consecutive-MOA count already reached the per-customer max?"
-    // If yes, the application we just recorded is the violation.
+    // applications — its inputs aren't from the just-inserted
+    // service_products, so the timing move from pre-trx to post-trx
+    // doesn't change the alert decisions. What it does change: the
+    // detector now only fires on a SUCCESSFUL completion. A race
+    // rejection (409) returned above and the detector was skipped,
+    // avoiding spurious alerts against a non-completion.
     //
-    // Best-effort: completion is already committed by the time we
-    // reach this block (or will be — the scheduled_services UPDATE
-    // is below). A failed alert insert shouldn't fail the request.
+    // Best-effort: a failed alert insert shouldn't fail the request.
     // Wrapped in try/catch to keep that contract.
     //
     // Dedupe within one completion: a tech could log multiple products
@@ -399,14 +462,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         logger.error(`[dispatch] MOA violation check failed (non-blocking): ${err.message}`);
       }
     }
-
-    // Update scheduled_service
-    await db('scheduled_services').where({ id: svc.id }).update({
-      status: 'completed', actual_end_time: db.fn.now(),
-      service_time_minutes: svc.actual_start_time ? Math.round((Date.now() - new Date(svc.actual_start_time)) / 60000) : null,
-    });
-
-    await db('service_status_log').insert({ scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId });
 
     // Customer-visible track_state → 'complete' so /track/:token renders the
     // summary card. track_state is owned by services/track-transitions.js.
